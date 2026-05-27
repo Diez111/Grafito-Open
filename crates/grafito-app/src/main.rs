@@ -38,7 +38,9 @@ struct GrafitoApp {
     show_grid: bool,
     snap_to_grid: bool,
     exam_mode: bool,
+    #[allow(dead_code)]
     spatial_index: SpatialIndex,
+    #[allow(dead_code)]
     constraint_graph: ConstraintGraph,
     pending_points: Vec<Point2>,
     pending_points_3d: Vec<Point3D>,
