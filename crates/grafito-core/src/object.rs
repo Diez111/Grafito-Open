@@ -12,6 +12,7 @@ pub enum GeoObject {
     Polygon(PolygonObj),
     Function(FunctionObj),
     Text(TextObj),
+    Ellipse(EllipseObj),
     // 3D
     Point3D(Point3DObj),
     Segment3D(Segment3DObj),
@@ -20,6 +21,7 @@ pub enum GeoObject {
     Pyramid3D(Pyramid3DObj),
     Cone3D(Cone3DObj),
     Cylinder3D(Cylinder3DObj),
+    Surface3D(Surface3DObj),
 }
 
 impl GeoObject {
@@ -31,6 +33,7 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.id,
             GeoObject::Function(o) => o.id,
             GeoObject::Text(o) => o.id,
+            GeoObject::Ellipse(o) => o.id,
             GeoObject::Point3D(o) => o.id,
             GeoObject::Segment3D(o) => o.id,
             GeoObject::Sphere3D(o) => o.id,
@@ -38,6 +41,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.id,
             GeoObject::Cone3D(o) => o.id,
             GeoObject::Cylinder3D(o) => o.id,
+            GeoObject::Surface3D(o) => o.id,
         }
     }
 
@@ -49,6 +53,7 @@ impl GeoObject {
             GeoObject::Polygon(o) => &o.label,
             GeoObject::Function(o) => &o.label,
             GeoObject::Text(o) => &o.label,
+            GeoObject::Ellipse(o) => &o.label,
             GeoObject::Point3D(o) => &o.label,
             GeoObject::Segment3D(o) => &o.label,
             GeoObject::Sphere3D(o) => &o.label,
@@ -56,6 +61,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => &o.label,
             GeoObject::Cone3D(o) => &o.label,
             GeoObject::Cylinder3D(o) => &o.label,
+            GeoObject::Surface3D(o) => &o.label,
         }
     }
 
@@ -67,6 +73,7 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.color,
             GeoObject::Function(o) => o.color,
             GeoObject::Text(o) => o.color,
+            GeoObject::Ellipse(o) => o.color,
             GeoObject::Point3D(o) => o.color,
             GeoObject::Segment3D(o) => o.color,
             GeoObject::Sphere3D(o) => o.color,
@@ -74,6 +81,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.color,
             GeoObject::Cone3D(o) => o.color,
             GeoObject::Cylinder3D(o) => o.color,
+            GeoObject::Surface3D(o) => o.color,
         }
     }
 
@@ -85,6 +93,7 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.color = color,
             GeoObject::Function(o) => o.color = color,
             GeoObject::Text(o) => o.color = color,
+            GeoObject::Ellipse(o) => o.color = color,
             GeoObject::Point3D(o) => o.color = color,
             GeoObject::Segment3D(o) => o.color = color,
             GeoObject::Sphere3D(o) => o.color = color,
@@ -92,6 +101,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.color = color,
             GeoObject::Cone3D(o) => o.color = color,
             GeoObject::Cylinder3D(o) => o.color = color,
+            GeoObject::Surface3D(o) => o.color = color,
         }
     }
 
@@ -103,6 +113,7 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.visible,
             GeoObject::Function(o) => o.visible,
             GeoObject::Text(o) => o.visible,
+            GeoObject::Ellipse(o) => o.visible,
             GeoObject::Point3D(o) => o.visible,
             GeoObject::Segment3D(o) => o.visible,
             GeoObject::Sphere3D(o) => o.visible,
@@ -110,6 +121,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(o) => o.visible,
             GeoObject::Cone3D(o) => o.visible,
             GeoObject::Cylinder3D(o) => o.visible,
+            GeoObject::Surface3D(o) => o.visible,
         }
     }
 
@@ -121,6 +133,7 @@ impl GeoObject {
             GeoObject::Polygon(_) => "Polygon",
             GeoObject::Function(_) => "Function",
             GeoObject::Text(_) => "Text",
+            GeoObject::Ellipse(_) => "Ellipse",
             GeoObject::Point3D(_) => "Point3D",
             GeoObject::Segment3D(_) => "Segment3D",
             GeoObject::Sphere3D(_) => "Sphere3D",
@@ -128,6 +141,7 @@ impl GeoObject {
             GeoObject::Pyramid3D(_) => "Pyramid3D",
             GeoObject::Cone3D(_) => "Cone3D",
             GeoObject::Cylinder3D(_) => "Cylinder3D",
+            GeoObject::Surface3D(_) => "Surface3D",
         }
     }
 }
@@ -399,6 +413,35 @@ pub struct Cylinder3DObj {
 impl Cylinder3DObj {
     pub fn new(base_center: Point3D, top_center: Point3D, radius: f64) -> Self {
         Self { id: ObjectId::new(), label: String::new(), base_center, top_center, radius, color: Color::BLACK, visible: true, width: 1.5, fill_color: None }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+// ── 3D Parametric Surface ──
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Surface3DObj {
+    pub id: ObjectId, pub label: String, pub expr: String,
+    pub x_min: f64, pub x_max: f64, pub y_min: f64, pub y_max: f64,
+    pub color: Color, pub visible: bool, pub width: f32,
+}
+impl Surface3DObj {
+    pub fn new(expr: impl Into<String>, xr: (f64, f64), yr: (f64, f64)) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), expr: expr.into(),
+               x_min: xr.0, x_max: xr.1, y_min: yr.0, y_max: yr.1,
+               color: Color::BLUE, visible: true, width: 1.0 }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EllipseObj {
+    pub id: ObjectId, pub label: String, pub center: Point2,
+    pub rx: f64, pub ry: f64, pub angle: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl EllipseObj {
+    pub fn new(center: Point2, rx: f64, ry: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), center, rx, ry, angle: 0.0,
+               color: Color::BLACK, visible: true, width: 2.0, fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)) }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 }

@@ -1,13 +1,14 @@
 use grafito_core::{Document, GeoObject, ObjectId,
-    PointObj, LineObj, CircleObj, PolygonObj, FunctionObj,
+    PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, EllipseObj,
     Point3DObj, Segment3DObj, Sphere3DObj, Cube3DObj,
-    Pyramid3DObj,
+    Pyramid3DObj, Surface3DObj,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
-use grafito_geometry::expr::eval_function_with_vars;
+use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::{Vec2 as GlamVec2, Vec3};
+use std::collections::HashMap;
 use std::fs;
 
 const MAX_UNDO: usize = 50;
@@ -65,6 +66,7 @@ impl GrafitoApp {
         // 3D demo
         document.add_object(GeoObject::Cube3D(Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("C1")));
         document.add_object(GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(2.0, 1.0, 0.0), 1.0).with_label("S1")));
+        document.add_object(GeoObject::Ellipse(EllipseObj::new(Point2::new(-1.0, -2.0), 2.0, 1.0).with_label("E1")));
 
         Self {
             document,
@@ -202,9 +204,9 @@ impl GrafitoApp {
                         self.document.add_object(GeoObject::Circle(CircleObj::new(center, radius)));
                             self.pending_points.clear();
                         }
-                    }
-                    _ => {}
                 }
+                _ => {}
+            }
             }
 
             if response.dragged() {
@@ -414,6 +416,30 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Text(_) => {}
+                GeoObject::Ellipse(el) => {
+                    let stroke = Stroke::new(el.width, to_color32(el.color));
+                    let n = 64;
+                    let mut pts = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                        let x = el.center.x + el.rx * t.cos() * el.angle.cos() - el.ry * t.sin() * el.angle.sin();
+                        let y = el.center.y + el.rx * t.cos() * el.angle.sin() + el.ry * t.sin() * el.angle.cos();
+                        let s = view.world_to_screen(Point2::new(x, y));
+                        pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                    }
+                    if let Some(fill) = el.fill_color {
+                        painter.add(Shape::convex_polygon(pts.clone(), to_color32(fill), Stroke::NONE));
+                    }
+                    for i in 0..n {
+                        let j = (i + 1) % n;
+                        painter.line_segment([pts[i], pts[j]], stroke);
+                    }
+                    if !el.label.is_empty() {
+                        let s = view.world_to_screen(el.center);
+                        painter.text(canvas_rect.min + Vec2::new(s.x, s.y + el.ry as f32 * view.scale + 14.0),
+                            egui::Align2::CENTER_TOP, &el.label, egui::FontId::proportional(12.0), Color32::BLACK);
+                    }
+                }
                 _ => {}  // 3D objects handled in 3D view
             }
         }
@@ -647,6 +673,35 @@ impl GrafitoApp {
                         }
                     }
                 }
+                GeoObject::Surface3D(surf) => {
+                    let stroke = Stroke::new(surf.width, to_color32(surf.color));
+                    let steps = 20;
+                    let xs = surf.x_min; let xe = surf.x_max;
+                    let ys = surf.y_min; let ye = surf.y_max;
+                    let x_step = (xe - xs) / steps as f64;
+                    let y_step = (ye - ys) / steps as f64;
+                    for i in 0..=steps {
+                        let y = ys + i as f64 * y_step;
+                        let mut prev: Option<(f32, f32)> = None;
+                        for j in 0..=steps {
+                            let x = xs + j as f64 * x_step;
+                            let mut vars = HashMap::new();
+                            vars.insert("x".to_string(), x);
+                            vars.insert("y".to_string(), y);
+                            if let Ok(z) = evaluate(&surf.expr, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()) {
+                                if z.is_finite() && z.abs() < 100.0 {
+                                    if let Some(pt) = self.camera.project(&Point3D::new(x, z, y), w, h) {
+                                        if let Some(pp) = prev {
+                                            painter.line_segment([origin + Vec2::new(pp.0, pp.1), origin + Vec2::new(pt.0, pt.1)], stroke);
+                                        }
+                                        prev = Some(pt); continue;
+                                    }
+                                }
+                            }
+                            prev = None;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -695,6 +750,17 @@ impl eframe::App for GrafitoApp {
                         {
                             let svg = export_svg(&self.document);
                             let _ = fs::write(path, svg);
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Export TikZ...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("LaTeX TikZ", &["tex", "tikz"])
+                            .set_file_name("grafito.tex")
+                            .save_file()
+                        {
+                            let tikz = export_tikz(&self.document);
+                            let _ = fs::write(path, tikz);
                         }
                         ui.close_menu();
                     }
@@ -903,8 +969,86 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
     }
     let mut result: Option<String> = None;
 
-    // CAS commands: Derivative[expr], Derivative[expr, n], Integral[expr, a, b], Solve[expr, a, b], Limit[expr, x]
+    // CAS commands
     if let Some(cmd) = parse_cas_command(text) {
+        match cmd.command.as_str() {
+            "Ellipse" if cmd.args.len() >= 3 => {
+                let center_str = cmd.args[0].trim();
+                let rest = center_str.trim_start_matches('(').trim_end_matches(')');
+                let parts: Vec<f64> = rest.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                if parts.len() >= 2 {
+                    let rx = cmd.args[1].trim().parse().unwrap_or(1.0);
+                    let ry = cmd.args[2].trim().parse().unwrap_or(1.0);
+                    document.add_object(GeoObject::Ellipse(EllipseObj::new(Point2::new(parts[0], parts[1]), rx, ry)));
+                    input_text.clear();
+                    return None;
+                }
+            }
+            "RegularPolygon" if cmd.args.len() >= 3 => {
+                let center_str = cmd.args[0].trim();
+                let rest = center_str.trim_start_matches('(').trim_end_matches(')');
+                let parts: Vec<f64> = rest.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                if parts.len() >= 2 {
+                    let n = cmd.args[1].trim().parse::<usize>().unwrap_or(4).max(3).min(64);
+                    let r = cmd.args[2].trim().parse::<f64>().unwrap_or(1.0);
+                    let cx = parts[0]; let cy = parts[1];
+                    let verts: Vec<Point2> = (0..n).map(|i| {
+                        let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                        Point2::new(cx + r * a.cos(), cy + r * a.sin())
+                    }).collect();
+                    document.add_object(GeoObject::Polygon(PolygonObj::new(verts)));
+                    input_text.clear();
+                    return None;
+                }
+            }
+            "Translate" if cmd.args.len() == 2 => {
+                if let (Some(id), Ok((dx, dy))) = (find_object_by_label(document, &cmd.args[0]), parse_point_str(&cmd.args[1])) {
+                    if let Some(obj) = document.get_object(id) {
+                        match obj {
+                            GeoObject::Point(p) => {
+                                let new_pos = Point2::new(p.position.x + dx, p.position.y + dy);
+                                document.add_object(GeoObject::Point(PointObj::new(new_pos).with_label(format!("{}'", p.label))));
+                            }
+                            _ => { result = Some("Translate only supports Points".into()); }
+                        }
+                    }
+                } else { result = Some("Usage: Translate[Object, (dx,dy)]".into()); }
+                input_text.clear();
+                return result;
+            }
+            "Rotate" if cmd.args.len() == 2 => {
+                if let (Some(id), Ok(angle)) = (find_object_by_label(document, &cmd.args[0]), cmd.args[1].trim().parse::<f64>()) {
+                    if let Some(obj) = document.get_object(id) {
+                        match obj {
+                            GeoObject::Point(p) => {
+                                let c = angle.to_radians();
+                                let nx = p.position.x * c.cos() - p.position.y * c.sin();
+                                let ny = p.position.x * c.sin() + p.position.y * c.cos();
+                                document.add_object(GeoObject::Point(PointObj::new(Point2::new(nx, ny)).with_label(format!("{}'", p.label))));
+                            }
+                            _ => { result = Some("Rotate only supports Points".into()); }
+                        }
+                    }
+                } else { result = Some("Usage: Rotate[Object, angle_degrees]".into()); }
+                input_text.clear();
+                return result;
+            }
+            "Surface3D" if cmd.args.len() >= 5 => {
+                let expr = cmd.args[0].trim();
+                if let (Ok(x_min), Ok(x_max), Ok(y_min), Ok(y_max)) = (
+                    cmd.args[1].trim().parse::<f64>(),
+                    cmd.args[2].trim().parse::<f64>(),
+                    cmd.args[3].trim().parse::<f64>(),
+                    cmd.args[4].trim().parse::<f64>(),
+                ) {
+                    let obj = GeoObject::Surface3D(Surface3DObj::new(expr, (x_min, x_max), (y_min, y_max)));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return None;
+                }
+            }
+            _ => {}
+        }
         result = execute_cas_command(document, &cmd);
         input_text.clear();
         return result;
@@ -1102,6 +1246,20 @@ fn contains_var(text: &str, var: char) -> bool {
     false
 }
 
+fn find_object_by_label(document: &Document, label: &str) -> Option<ObjectId> {
+    document.objects_iter().find(|(_, obj)| obj.label() == label.trim()).map(|(id, _)| *id)
+}
+
+fn parse_point_str(s: &str) -> Result<(f64, f64), String> {
+    let s = s.trim().trim_start_matches('(').trim_end_matches(')');
+    let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+    if parts.len() == 2 {
+        Ok((parts[0].parse().map_err(|_| "bad x")?, parts[1].parse().map_err(|_| "bad y")?))
+    } else {
+        Err("expected (x, y)".into())
+    }
+}
+
 fn next_function_label(document: &Document) -> String {
     let used: std::collections::HashSet<String> = document.objects_iter()
         .filter_map(|(_, obj)| {
@@ -1119,6 +1277,45 @@ fn next_function_label(document: &Document) -> String {
         }
     }
     format!("f{}(x)", document.object_count())
+}
+
+fn export_tikz(document: &Document) -> String {
+    let view = document.view();
+    let mut out = String::from("% Grafito TikZ Export\n\\begin{tikzpicture}[scale=1]\n");
+    for (_, obj) in document.objects_iter() {
+        if !obj.is_visible() { continue; }
+        match obj {
+            GeoObject::Point(p) => {
+                let s = view.world_to_screen(p.position);
+                out.push_str(&format!("  \\fill[black] ({:.2},{:.2}) circle (2pt);\n", s.x, s.y));
+                if !p.label.is_empty() { out.push_str(&format!("  \\node[above right] at ({:.2},{:.2}) {{{}}};\n", s.x, s.y, p.label)); }
+            }
+            GeoObject::Line(l) => {
+                let a = view.world_to_screen(l.start); let b = view.world_to_screen(l.end);
+                out.push_str(&format!("  \\draw ({:.2},{:.2}) -- ({:.2},{:.2});\n", a.x, a.y, b.x, b.y));
+                if !l.label.is_empty() { out.push_str(&format!("  \\node[above] at ({:.2},{:.2}) {{{}}};\n", (a.x+b.x)/2., (a.y+b.y)/2., l.label)); }
+            }
+            GeoObject::Circle(c) => {
+                let cen = view.world_to_screen(c.center);
+                let r = c.radius as f32 * view.scale;
+                out.push_str(&format!("  \\draw ({:.2},{:.2}) circle ({:.2});\n", cen.x, cen.y, r));
+            }
+            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                let pts: Vec<String> = poly.vertices.iter().map(|v| {
+                    let s = view.world_to_screen(*v); format!("({:.2},{:.2})", s.x, s.y)
+                }).collect();
+                out.push_str(&format!("  \\draw {} -- cycle;\n", pts.join(" -- ")));
+            }
+            GeoObject::Ellipse(el) => {
+                let cen = view.world_to_screen(el.center);
+                out.push_str(&format!("  \\draw ({:.2},{:.2}) ellipse ({:.2} and {:.2});\n",
+                    cen.x, cen.y, el.rx as f32 * view.scale, el.ry as f32 * view.scale));
+            }
+            _ => {}
+        }
+    }
+    out.push_str("\\end{tikzpicture}\n");
+    out
 }
 
 fn svg_color(c: Color) -> String {

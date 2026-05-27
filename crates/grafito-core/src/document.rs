@@ -35,6 +35,7 @@ impl Document {
                 GeoObject::Polygon(o) => o.label = label,
                 GeoObject::Function(o) => o.label = label,
                 GeoObject::Text(o) => o.label = label,
+                GeoObject::Ellipse(o) => o.label = label,
                 GeoObject::Point3D(o) => o.label = label,
                 GeoObject::Segment3D(o) => o.label = label,
                 GeoObject::Sphere3D(o) => o.label = label,
@@ -42,6 +43,7 @@ impl Document {
                 GeoObject::Pyramid3D(o) => o.label = label,
                 GeoObject::Cone3D(o) => o.label = label,
                 GeoObject::Cylinder3D(o) => o.label = label,
+                GeoObject::Surface3D(o) => o.label = label,
             }
             obj
         } else {
