@@ -6,6 +6,7 @@ use grafito_core::{Document, GeoObject, ObjectId,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
+use grafito_geometry::symbolic;
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::{Vec2 as GlamVec2, Vec3};
@@ -34,6 +35,7 @@ struct GrafitoApp {
     animation_running: bool,
     show_grid: bool,
     snap_to_grid: bool,
+    exam_mode: bool,
     pending_points: Vec<Point2>,
     pending_points_3d: Vec<Point3D>,
     last_mouse_pos: Option<Pos2>,
@@ -78,6 +80,7 @@ impl GrafitoApp {
             animation_running: false,
             show_grid: true,
             snap_to_grid: false,
+            exam_mode: false,
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
@@ -816,6 +819,7 @@ impl eframe::App for GrafitoApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if self.exam_mode { ui.label("Disabled in Exam Mode"); return; }
                     if ui.button("Open...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Grafito Document", &["grafito", "json", "toml"])
@@ -931,6 +935,9 @@ impl eframe::App for GrafitoApp {
                 if ui.button("⛶ Fit").clicked() { self.zoom_to_fit(); }
                 ui.checkbox(&mut self.show_grid, "Grid");
                 ui.checkbox(&mut self.snap_to_grid, "Snap");
+                if ui.checkbox(&mut self.exam_mode, "Exam").changed() && self.exam_mode {
+                    self.cas_result = "EXAM MODE: CAS disabled".into();
+                }
             });
         });
 
@@ -1002,6 +1009,10 @@ impl eframe::App for GrafitoApp {
 
         // Bottom: Input Bar
         egui::TopBottomPanel::bottom("input_bar").default_height(40.0).show(ctx, |ui| {
+            if self.exam_mode {
+                ui.label("EXAM MODE — input disabled");
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.label("Input:");
                 let response = ui.text_edit_singleline(&mut self.input_text);
@@ -1576,7 +1587,7 @@ fn parse_cas_command(text: &str) -> Option<CasCmd> {
         if command.is_empty() || args.is_empty() { return None; }
         // Only allow known CAS commands
         match command.as_str() {
-            "Derivative" | "Integral" | "Solve" | "Limit" | "NSolve" => {}
+            "Derivative" | "Integral" | "Solve" | "Limit" | "NSolve" | "Factor" | "Expand" | "Simplify" => {}
             _ => return None,
         }
         Some(CasCmd { command, args })
@@ -1636,10 +1647,31 @@ fn execute_cas_command(document: &Document, cmd: &CasCmd) -> Option<String> {
             let expr = cmd.args.get(0)?;
             let x0: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
             let f = move |x: f64| {
-                grafito_geometry::expr::eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
+                eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
             };
             let result = grafito_geometry::cas::limit(f, x0);
             Some(format!("lim[x→{:.1}] {} ≈ {:.6}", x0, expr, result))
+        }
+        "Factor" => {
+            let expr = cmd.args.get(0)?;
+            match symbolic::symbolic_factor(expr) {
+                Ok(factors) => Some(format!("{} = {}", expr, factors)),
+                Err(e) => Some(format!("Factor error: {}", e)),
+            }
+        }
+        "Expand" => {
+            let expr = cmd.args.get(0)?;
+            match symbolic::symbolic_expand(expr) {
+                Ok(expanded) => Some(format!("{} = {}", expr, expanded)),
+                Err(e) => Some(format!("Expand error: {}", e)),
+            }
+        }
+        "Simplify" => {
+            let expr = cmd.args.get(0)?;
+            match symbolic::symbolic_simplify(expr) {
+                Ok(simplified) => Some(format!("{} = {}", expr, simplified)),
+                Err(e) => Some(format!("Simplify error: {}", e)),
+            }
         }
         _ => None,
     }
