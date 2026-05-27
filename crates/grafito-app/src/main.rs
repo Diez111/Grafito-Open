@@ -1,5 +1,6 @@
 use grafito_core::{Document, GeoObject, ObjectId,
     PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, EllipseObj,
+    ParabolaObj, HyperbolaObj,
     Point3DObj, Segment3DObj, Sphere3DObj, Cube3DObj,
     Pyramid3DObj, Surface3DObj,
 };
@@ -440,7 +441,97 @@ impl GrafitoApp {
                             egui::Align2::CENTER_TOP, &el.label, egui::FontId::proportional(12.0), Color32::BLACK);
                     }
                 }
-                _ => {}  // 3D objects handled in 3D view
+                GeoObject::Parabola(pb) => {
+                    let _v = view.world_to_screen(pb.vertex);
+                    let stroke = Stroke::new(pb.width, to_color32(pb.color));
+                    let steps = 64;
+                    let x_range = 10.0 / view.scale as f64;
+                    let mut prev: Option<Pos2> = None;
+                    for i in 0..=steps {
+                        let t = -x_range + 2.0 * x_range * i as f64 / steps as f64;
+                        let _x = pb.vertex.x + t;
+                        let _y = if pb.vertical {
+                            pb.vertex.y + t * t / (4.0 * pb.p.max(0.001))
+                        } else {
+                            // Actually, let me swap: y = vertex.y + t, x = vertex.x + t^2/4p
+                            pb.vertex.y + t
+                        };
+                        // Simpler: x = vertex.x + t*cos - t^2/4p*sin, y = vertex.y + t*sin + t^2/4p*cos
+                        // For vertical: x = vx + t, y = vy + t^2/(4p)
+                        let (sx, sy) = if pb.vertical {
+                            (pb.vertex.x + t, pb.vertex.y + t*t / (4.0 * pb.p.max(0.001)))
+                        } else {
+                            (pb.vertex.x + t*t / (4.0 * pb.p.max(0.001)), pb.vertex.y + t)
+                        };
+                        let s = view.world_to_screen(Point2::new(sx, sy));
+                        let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                        if let Some(prev_p) = prev {
+                            if (p.x - prev_p.x).abs() < 300.0 {
+                                painter.line_segment([prev_p, p], stroke);
+                            }
+                        }
+                        prev = Some(p);
+                    }
+                    if !pb.label.is_empty() {
+                        let s = view.world_to_screen(Point2::new(pb.vertex.x, pb.vertex.y - 1.0));
+                        painter.text(canvas_rect.min + Vec2::new(s.x, s.y - 8.0),
+                            egui::Align2::CENTER_BOTTOM, &pb.label, egui::FontId::proportional(12.0), Color32::BLACK);
+                    }
+                }
+                GeoObject::Hyperbola(hb) => {
+                    let stroke = Stroke::new(hb.width, to_color32(hb.color));
+                    let range = 8.0 / view.scale as f64;
+                    let n = 64;
+                    // Right branch
+                    let mut prev: Option<Pos2> = None;
+                    for i in 0..=n {
+                        let x = hb.center.x + hb.a + range * i as f64 / n as f64;
+                        let dx = x - hb.center.x;
+                        if dx > hb.a {
+                            let y_off = hb.b * ((dx/hb.a).powi(2) - 1.0).sqrt();
+                            for &sign in &[1.0f64, -1.0] {
+                                let y = hb.center.y + sign * y_off;
+                                let s = view.world_to_screen(Point2::new(x, y));
+                                let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                                if let Some(prev_p) = prev {
+                                    if (p.x - prev_p.x).abs() < 300.0 {
+                                        painter.line_segment([prev_p, p], stroke);
+                                    }
+                                }
+                                prev = Some(p);
+                            }
+                        }
+                    }
+                    // Left branch
+                    prev = None;
+                    for i in 0..=n {
+                        let x = hb.center.x - hb.a - range * i as f64 / n as f64;
+                        let dx = (x - hb.center.x).abs();
+                        if dx > hb.a {
+                            let y_off = hb.b * ((dx/hb.a).powi(2) - 1.0).sqrt();
+                            for &sign in &[1.0f64, -1.0] {
+                                let y = hb.center.y + sign * y_off;
+                                let s = view.world_to_screen(Point2::new(x, y));
+                                let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                                if let Some(prev_p) = prev {
+                                    if (p.x - prev_p.x).abs() < 300.0 { painter.line_segment([prev_p, p], stroke); }
+                                }
+                                prev = Some(p);
+                            }
+                        }
+                    }
+                    if !hb.label.is_empty() {
+                        let s = view.world_to_screen(Point2::new(hb.center.x, hb.center.y + hb.b + 0.5));
+                        painter.text(canvas_rect.min + Vec2::new(s.x, s.y), egui::Align2::CENTER_BOTTOM, &hb.label, egui::FontId::proportional(12.0), Color32::BLACK);
+                    }
+                }
+                GeoObject::Text(txt) => {
+                    let s = view.world_to_screen(txt.position);
+                    painter.text(canvas_rect.min + Vec2::new(s.x, s.y),
+                        egui::Align2::LEFT_CENTER, &txt.content,
+                        egui::FontId::proportional(txt.font_size.max(8.0)), to_color32(txt.color));
+                }
+                _ => {}  // 3D + other objects handled in respective views
             }
         }
     }
@@ -1123,6 +1214,103 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                 }
                 input_text.clear(); return None;
             }
+            "Parabola" if cmd.args.len() >= 2 => {
+                if let (Ok((vx, vy)), Ok(p)) = (parse_point_str(&cmd.args[0]), cmd.args[1].trim().parse::<f64>()) {
+                    document.add_object(GeoObject::Parabola(ParabolaObj::new(Point2::new(vx, vy), p)));
+                }
+                input_text.clear(); return None;
+            }
+            "Hyperbola" if cmd.args.len() >= 3 => {
+                if let (Ok((cx, cy)), Ok(a), Ok(b)) = (parse_point_str(&cmd.args[0]), cmd.args[1].trim().parse::<f64>(), cmd.args[2].trim().parse::<f64>()) {
+                    document.add_object(GeoObject::Hyperbola(HyperbolaObj::new(Point2::new(cx, cy), a, b)));
+                }
+                input_text.clear(); return None;
+            }
+            "Dilate" if cmd.args.len() == 3 => {
+                // Dilate[point_label, factor, (cx,cy)] or Dilate[(x,y), factor, (cx,cy)]
+                if let (Ok((px, py)), Ok(factor), Ok((cx, cy))) = (
+                    parse_point_str(&cmd.args[0]),
+                    cmd.args[1].trim().parse::<f64>(),
+                    parse_point_str(&cmd.args[2]),
+                ) {
+                    let nx = cx + (px - cx) * factor;
+                    let ny = cy + (py - cy) * factor;
+                    document.add_object(GeoObject::Point(PointObj::new(Point2::new(nx, ny)).with_label("D'")));
+                }
+                input_text.clear(); return None;
+            }
+            "Reflect" if cmd.args.len() == 3 => {
+                // Reflect[point, line_ax, line_ay, line_bx, line_by] or Reflect[(x,y), (ax,ay), (bx,by)]
+                if let (Ok((px, py)), Ok((ax, ay)), Ok((bx, by))) = (
+                    parse_point_str(&cmd.args[0]),
+                    parse_point_str(&cmd.args[1]),
+                    parse_point_str(&cmd.args[2]),
+                ) {
+                    let dx = bx - ax; let dy = by - ay;
+                    let len2 = dx*dx + dy*dy;
+                    if len2 > 0.0 {
+                        let t = ((px-ax)*dx + (py-ay)*dy) / len2;
+                        let cx = ax + t * dx;
+                        let cy = ay + t * dy;
+                        let rx = 2.0 * cx - px;
+                        let ry = 2.0 * cy - py;
+                        document.add_object(GeoObject::Point(PointObj::new(Point2::new(rx, ry)).with_label("R'")));
+                    }
+                }
+                input_text.clear(); return None;
+            }
+            "Locus" if cmd.args.len() == 2 => {
+                // Locus[function_expr, x_range] traces a function's path
+                let expr = cmd.args[0].trim();
+                if let Ok(range) = cmd.args[1].trim().parse::<f64>() {
+                    let steps = 200;
+                    let mut vertices = Vec::new();
+                    for i in 0..=steps {
+                        let x = -range + 2.0 * range * i as f64 / steps as f64;
+                        let mut vars = HashMap::new();
+                        vars.insert("x".to_string(), x);
+                        if let Ok(y) = grafito_geometry::expr::evaluate(expr, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()) {
+                            if y.is_finite() && y.abs() < 1e6 {
+                                vertices.push(Point2::new(x, y));
+                            }
+                        }
+                    }
+                    if vertices.len() >= 2 {
+                        let mut poly = PolygonObj::new(vertices);
+                        poly.label = "L".to_string();
+                        document.add_object(GeoObject::Polygon(poly));
+                    }
+                }
+                input_text.clear(); return None;
+            }
+            "FunctionInspector" if cmd.args.len() == 1 => {
+                let expr = cmd.args[0].trim();
+                let v = document.variables.clone();
+                let f = |x: f64| {
+                    let mut vars: Vec<(String, f64)> = v.iter().map(|(k,val)| (k.clone(), *val)).collect();
+                    vars.push(("x".to_string(), x));
+                    grafito_geometry::expr::evaluate(expr, &vars).unwrap_or(f64::NAN)
+                };
+                let mins = find_extrema(&f, -10.0, 10.0, false);
+                let maxs = find_extrema(&f, -10.0, 10.0, true);
+                let mut res = String::new();
+                if let Some((mx, my)) = root_10(&f) {
+                    res.push_str(&format!("Root ≈ ({}: {:.4})", mx, my));
+                }
+                for (mx, my) in &mins { res.push_str(&format!(" Min@({:.2},{:.2})", mx, my)); }
+                for (mx, my) in &maxs { res.push_str(&format!(" Max@({:.2},{:.2})", mx, my)); }
+                result = Some(if res.is_empty() { "No extrema found in [-10,10]".into() } else { res });
+                input_text.clear(); return result;
+            }
+            "Normal" if cmd.args.len() == 2 => {
+                // Normal[mean, stddev] - add a normal distribution curve
+                let mu: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let sigma: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let expr = format!("exp(-(x-{})^2/(2*{}^2))/({}*sqrt(2*pi))", mu, sigma, sigma);
+                document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(format!("N({},{})", mu, sigma))));
+                result = Some(format!("Normal distribution N({},{}) added", mu, sigma));
+                input_text.clear(); return result;
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
@@ -1353,6 +1541,41 @@ fn next_function_label(document: &Document) -> String {
         }
     }
     format!("f{}(x)", document.object_count())
+}
+
+fn find_extrema<F: Fn(f64) -> f64>(f: &F, a: f64, b: f64, find_max: bool) -> Vec<(f64, f64)> {
+    let mut pts = Vec::new();
+    let steps = 200;
+    let step = (b - a) / steps as f64;
+    let mut prev = f(a);
+    for i in 1..steps {
+        let x = a + i as f64 * step;
+        let curr = f(x);
+        let next = f(x + step);
+        if find_max {
+            if curr > prev && curr > next && curr.is_finite() {
+                pts.push((x, curr));
+            }
+        } else {
+            if curr < prev && curr < next && curr.is_finite() {
+                pts.push((x, curr));
+            }
+        }
+        prev = curr;
+    }
+    pts
+}
+
+fn root_10<F: Fn(f64) -> f64>(f: &F) -> Option<(f64, f64)> {
+    for x0 in -10..=10 {
+        if let Ok(r) = grafito_geometry::cas::newton_root_auto(f, x0 as f64) {
+            if r >= -10.0 && r <= 10.0 {
+                let fx = f(r);
+                if fx.abs() < 0.1 { return Some((r, fx)); }
+            }
+        }
+    }
+    None
 }
 
 fn export_tikz(document: &Document) -> String {

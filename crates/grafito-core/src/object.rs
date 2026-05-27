@@ -13,6 +13,8 @@ pub enum GeoObject {
     Function(FunctionObj),
     Text(TextObj),
     Ellipse(EllipseObj),
+    Parabola(ParabolaObj),
+    Hyperbola(HyperbolaObj),
     // 3D
     Point3D(Point3DObj),
     Segment3D(Segment3DObj),
@@ -34,6 +36,8 @@ impl GeoObject {
             GeoObject::Function(o) => o.id,
             GeoObject::Text(o) => o.id,
             GeoObject::Ellipse(o) => o.id,
+            GeoObject::Parabola(o) => o.id,
+            GeoObject::Hyperbola(o) => o.id,
             GeoObject::Point3D(o) => o.id,
             GeoObject::Segment3D(o) => o.id,
             GeoObject::Sphere3D(o) => o.id,
@@ -54,6 +58,8 @@ impl GeoObject {
             GeoObject::Function(o) => &o.label,
             GeoObject::Text(o) => &o.label,
             GeoObject::Ellipse(o) => &o.label,
+            GeoObject::Parabola(o) => &o.label,
+            GeoObject::Hyperbola(o) => &o.label,
             GeoObject::Point3D(o) => &o.label,
             GeoObject::Segment3D(o) => &o.label,
             GeoObject::Sphere3D(o) => &o.label,
@@ -74,6 +80,8 @@ impl GeoObject {
             GeoObject::Function(o) => o.color,
             GeoObject::Text(o) => o.color,
             GeoObject::Ellipse(o) => o.color,
+            GeoObject::Parabola(o) => o.color,
+            GeoObject::Hyperbola(o) => o.color,
             GeoObject::Point3D(o) => o.color,
             GeoObject::Segment3D(o) => o.color,
             GeoObject::Sphere3D(o) => o.color,
@@ -94,6 +102,8 @@ impl GeoObject {
             GeoObject::Function(o) => o.color = color,
             GeoObject::Text(o) => o.color = color,
             GeoObject::Ellipse(o) => o.color = color,
+            GeoObject::Parabola(o) => o.color = color,
+            GeoObject::Hyperbola(o) => o.color = color,
             GeoObject::Point3D(o) => o.color = color,
             GeoObject::Segment3D(o) => o.color = color,
             GeoObject::Sphere3D(o) => o.color = color,
@@ -114,6 +124,8 @@ impl GeoObject {
             GeoObject::Function(o) => o.visible,
             GeoObject::Text(o) => o.visible,
             GeoObject::Ellipse(o) => o.visible,
+            GeoObject::Parabola(o) => o.visible,
+            GeoObject::Hyperbola(o) => o.visible,
             GeoObject::Point3D(o) => o.visible,
             GeoObject::Segment3D(o) => o.visible,
             GeoObject::Sphere3D(o) => o.visible,
@@ -134,6 +146,8 @@ impl GeoObject {
             GeoObject::Function(_) => "Function",
             GeoObject::Text(_) => "Text",
             GeoObject::Ellipse(_) => "Ellipse",
+            GeoObject::Parabola(_) => "Parabola",
+            GeoObject::Hyperbola(_) => "Hyperbola",
             GeoObject::Point3D(_) => "Point3D",
             GeoObject::Segment3D(_) => "Segment3D",
             GeoObject::Sphere3D(_) => "Sphere3D",
@@ -442,6 +456,33 @@ impl EllipseObj {
     pub fn new(center: Point2, rx: f64, ry: f64) -> Self {
         Self { id: ObjectId::new(), label: String::new(), center, rx, ry, angle: 0.0,
                color: Color::BLACK, visible: true, width: 2.0, fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)) }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParabolaObj {
+    pub id: ObjectId, pub label: String, pub vertex: Point2, pub p: f64, pub vertical: bool,
+    pub color: Color, pub visible: bool, pub width: f32,
+}
+impl ParabolaObj {
+    pub fn new(vertex: Point2, p: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), vertex, p, vertical: true,
+               color: Color::RED, visible: true, width: 2.0 }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HyperbolaObj {
+    pub id: ObjectId, pub label: String, pub center: Point2,
+    pub a: f64, pub b: f64, pub horizontal: bool,
+    pub color: Color, pub visible: bool, pub width: f32,
+}
+impl HyperbolaObj {
+    pub fn new(center: Point2, a: f64, b: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), center, a, b, horizontal: true,
+               color: Color::RED, visible: true, width: 2.0 }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 }

@@ -36,6 +36,8 @@ impl Document {
                 GeoObject::Function(o) => o.label = label,
                 GeoObject::Text(o) => o.label = label,
                 GeoObject::Ellipse(o) => o.label = label,
+                GeoObject::Parabola(o) => o.label = label,
+                GeoObject::Hyperbola(o) => o.label = label,
                 GeoObject::Point3D(o) => o.label = label,
                 GeoObject::Segment3D(o) => o.label = label,
                 GeoObject::Sphere3D(o) => o.label = label,
