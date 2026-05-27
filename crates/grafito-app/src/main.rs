@@ -30,6 +30,8 @@ struct GrafitoApp {
     current_view: ViewMode,
     camera: Camera3D,
     animation_running: bool,
+    show_grid: bool,
+    snap_to_grid: bool,
     pending_points: Vec<Point2>,
     pending_points_3d: Vec<Point3D>,
     last_mouse_pos: Option<Pos2>,
@@ -37,6 +39,7 @@ struct GrafitoApp {
     hovered_object: Option<ObjectId>,
     selected_object: Option<ObjectId>,
     input_text: String,
+    cas_result: String,
     undo_stack: Vec<Document>,
     redo_stack: Vec<Document>,
 }
@@ -69,12 +72,15 @@ impl GrafitoApp {
             current_view: ViewMode::D2,
             camera: Camera3D::new(1280.0 / 720.0),
             animation_running: false,
+            show_grid: true,
+            snap_to_grid: false,
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
             hovered_object: None,
             selected_object: None,
             input_text: String::new(),
+            cas_result: String::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -109,6 +115,47 @@ impl GrafitoApp {
             self.save_state();
             self.document.remove_object(id);
             self.selected_object = None;
+        }
+    }
+
+    fn zoom_to_fit(&mut self) {
+        let mut bounds: Option<(Point2, Point2)> = None;
+        for (_, obj) in self.document.objects_iter() {
+            if !obj.is_visible() { continue; }
+            let pts = match obj {
+                GeoObject::Point(p) => vec![p.position],
+                GeoObject::Line(l) => vec![l.start, l.end],
+                GeoObject::Circle(c) => vec![
+                    Point2::new(c.center.x - c.radius, c.center.y - c.radius),
+                    Point2::new(c.center.x + c.radius, c.center.y + c.radius),
+                ],
+                GeoObject::Polygon(poly) => poly.vertices.clone(),
+                _ => vec![],
+            };
+            for pt in pts {
+                match bounds {
+                    None => bounds = Some((pt, pt)),
+                    Some((ref mut min, ref mut max)) => {
+                        min.x = min.x.min(pt.x); min.y = min.y.min(pt.y);
+                        max.x = max.x.max(pt.x); max.y = max.y.max(pt.y);
+                    }
+                }
+            }
+        }
+        if let Some((min, max)) = bounds {
+            let sw = self.document.view().screen_size.x;
+            let sh = self.document.view().screen_size.y;
+            let margin = 1.2;
+            let w = (max.x - min.x).max(0.1) * margin;
+            let h = (max.y - min.y).max(0.1) * margin;
+            let scale = (sw / w as f32).min(sh / h as f32);
+            let cx = (min.x + max.x) * 0.5;
+            let cy = (min.y + max.y) * 0.5;
+            self.document.view_mut().scale = scale;
+            self.document.view_mut().offset = GlamVec2::new(
+                -cx as f32 * scale,
+                cy as f32 * scale,
+            );
         }
     }
 
@@ -183,6 +230,7 @@ impl GrafitoApp {
     }
 
     fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        if !self.show_grid { return; }
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
@@ -611,6 +659,34 @@ impl eframe::App for GrafitoApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Open...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Grafito Document", &["grafito", "json", "toml"])
+                            .pick_file()
+                        {
+                            if let Ok(content) = fs::read_to_string(&path) {
+                                if let Ok(doc) = serde_json::from_str::<Document>(&content) {
+                                    self.document = doc;
+                                    self.undo_stack.clear();
+                                    self.redo_stack.clear();
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Save").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Grafito Document", &["grafito"])
+                            .set_file_name("grafito.grafito")
+                            .save_file()
+                        {
+                            if let Ok(json) = serde_json::to_string_pretty(&self.document) {
+                                let _ = fs::write(path, json);
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Export SVG...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("SVG Image", &["svg"])
@@ -635,8 +711,12 @@ impl eframe::App for GrafitoApp {
                         }
                         ui.close_menu();
                     }
-                });
             });
+            if !self.cas_result.is_empty() {
+                ui.separator();
+                ui.colored_label(Color32::from_rgb(40, 120, 40), &self.cas_result);
+            }
+        });
         });
 
         // Keyboard shortcuts
@@ -659,6 +739,10 @@ impl eframe::App for GrafitoApp {
                 ui.selectable_value(&mut self.current_view, ViewMode::D3, "3D");
                 ui.separator();
                 toolbar(ui, &mut self.current_tool);
+                ui.separator();
+                if ui.button("⛶ Fit").clicked() { self.zoom_to_fit(); }
+                ui.checkbox(&mut self.show_grid, "Grid");
+                ui.checkbox(&mut self.snap_to_grid, "Snap");
             });
         });
 
@@ -705,11 +789,11 @@ impl eframe::App for GrafitoApp {
                 let response = ui.text_edit_singleline(&mut self.input_text);
                 if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     self.save_state();
-                    process_input(&mut self.document, &mut self.input_text);
+                    self.cas_result = process_input(&mut self.document, &mut self.input_text).unwrap_or_default();
                 }
                 if ui.button("Enter").clicked() {
                     self.save_state();
-                    process_input(&mut self.document, &mut self.input_text);
+                    self.cas_result = process_input(&mut self.document, &mut self.input_text).unwrap_or_default();
                 }
             });
         });
@@ -720,6 +804,32 @@ impl eframe::App for GrafitoApp {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let canvas_rect = ui.available_rect_before_wrap();
                     self.handle_canvas_input(ui, canvas_rect);
+
+                    // Right-click context menu
+                    let response = ui.interact(canvas_rect, ui.id().with("ctx_menu"), Sense::click());
+                    if response.clicked_by(egui::PointerButton::Secondary) {
+                        response.context_menu(|ui| {
+                            if ui.button("Delete selected").clicked() {
+                                self.delete_selected();
+                                ui.close_menu();
+                            }
+                            if ui.button("Zoom to fit").clicked() {
+                                self.zoom_to_fit();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Reset view").clicked() {
+                                let _sw = self.document.view().screen_size.x;
+                                let _sh = self.document.view().screen_size.y;
+                                self.document.view_mut().scale = 1.0;
+                                self.document.view_mut().offset = GlamVec2::ZERO;
+                                ui.close_menu();
+                            }
+                            ui.checkbox(&mut self.show_grid, "Show Grid");
+                            ui.checkbox(&mut self.snap_to_grid, "Snap to Grid");
+                        });
+                    }
+
                     let painter = ui.painter();
                     self.draw_grid(painter, canvas_rect);
                     self.draw_axes(painter, canvas_rect);
@@ -732,6 +842,18 @@ impl eframe::App for GrafitoApp {
                     let w = canvas_rect.width();
                     let h = canvas_rect.height();
                     self.camera.aspect = w / h.max(1.0);
+
+                    // Context menu
+                    let ctx_resp = ui.interact(canvas_rect, ui.id().with("ctx_menu_3d"), Sense::click());
+                    if ctx_resp.clicked_by(egui::PointerButton::Secondary) {
+                        ctx_resp.context_menu(|ui| {
+                            if ui.button("Delete selected").clicked() { self.delete_selected(); ui.close_menu(); }
+                            if ui.button("Reset view").clicked() {
+                                self.camera = Camera3D::new(w / h.max(1.0));
+                                ui.close_menu();
+                            }
+                        });
+                    }
 
                     // Orbit camera controls with right-button drag + scroll
                     let response = ui.interact(canvas_rect, ui.id().with("canvas3d"), Sense::click_and_drag());
@@ -774,11 +896,20 @@ impl eframe::App for GrafitoApp {
     }
 }
 
-fn process_input(document: &mut Document, input_text: &mut String) {
+fn process_input(document: &mut Document, input_text: &mut String) -> Option<String> {
     let text = input_text.trim();
     if text.is_empty() {
-        return;
+        return None;
     }
+    let mut result: Option<String> = None;
+
+    // CAS commands: Derivative[expr], Derivative[expr, n], Integral[expr, a, b], Solve[expr, a, b], Limit[expr, x]
+    if let Some(cmd) = parse_cas_command(text) {
+        result = execute_cas_command(document, &cmd);
+        input_text.clear();
+        return result;
+    }
+
     if let Some((name, rest)) = text.split_once('=') {
         let name = name.trim();
         let rest = rest.trim();
@@ -787,7 +918,7 @@ fn process_input(document: &mut Document, input_text: &mut String) {
             if let Ok(val) = rest.parse::<f64>() {
                 document.set_variable(name.to_string(), val);
                 input_text.clear();
-                return;
+                return None;
             }
         }
         // f(x) = expr or f = expr (function)
@@ -795,7 +926,7 @@ fn process_input(document: &mut Document, input_text: &mut String) {
             let obj = GeoObject::Function(FunctionObj::new(rest).with_label(name));
             document.add_object(obj);
             input_text.clear();
-            return;
+            return None;
         }
         // "A = (1, 2)" point
         if rest.starts_with('(') && rest.ends_with(')') {
@@ -806,7 +937,20 @@ fn process_input(document: &mut Document, input_text: &mut String) {
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(name));
                     document.add_object(obj);
                     input_text.clear();
-                    return;
+                    return None;
+                }
+            }
+        }
+        // 3D point: "A = (1, 2, 3)"
+        if rest.starts_with('(') && rest.ends_with(')') {
+            let inner = &rest[1..rest.len()-1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 3 {
+                if let (Ok(x), Ok(y), Ok(z)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>(), parts[2].parse::<f64>()) {
+                    let obj = GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)).with_label(name));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return None;
                 }
             }
         }
@@ -817,23 +961,119 @@ fn process_input(document: &mut Document, input_text: &mut String) {
             let obj = GeoObject::Function(FunctionObj::new(text).with_label(label));
             document.add_object(obj);
             input_text.clear();
-            return;
+            return None;
         }
         // Point: "(1, 2)"
         if text.starts_with('(') && text.ends_with(')') {
             let inner = &text[1..text.len()-1];
+            // Try 3D first
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 3 {
+                if let (Ok(x), Ok(y), Ok(z)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>(), parts[2].parse::<f64>()) {
+                    let obj = GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return None;
+                }
+            }
+            // 2D
             if parts.len() == 2 {
                 if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)));
                     document.add_object(obj);
                     input_text.clear();
-                    return;
+                    return None;
                 }
             }
         }
     }
     input_text.clear();
+    result
+}
+
+#[derive(Debug)]
+struct CasCmd {
+    command: String,
+    args: Vec<String>,
+}
+
+fn parse_cas_command(text: &str) -> Option<CasCmd> {
+    let text = text.trim();
+    if let Some(open) = text.find('[') {
+        let close = text.rfind(']')?;
+        let command = text[..open].trim().to_string();
+        let inside = &text[open+1..close];
+        let args: Vec<String> = split_args(inside).into_iter().map(|s| s.trim().to_string()).collect();
+        if command.is_empty() || args.is_empty() { return None; }
+        // Only allow known CAS commands
+        match command.as_str() {
+            "Derivative" | "Integral" | "Solve" | "Limit" | "NSolve" => {}
+            _ => return None,
+        }
+        Some(CasCmd { command, args })
+    } else {
+        None
+    }
+}
+
+fn split_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(s[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(s[start..].to_string());
+    args
+}
+
+fn execute_cas_command(document: &Document, cmd: &CasCmd) -> Option<String> {
+    match cmd.command.as_str() {
+        "Derivative" => {
+            let expr = cmd.args.get(0)?;
+            Some(format!("Derivative[{}]: approx (f(x+h)-f(x))/h with f(x)={}", expr, expr))
+        }
+        "Integral" => {
+            let expr = cmd.args.get(0)?;
+            let a: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let b: f64 = cmd.args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            let f = move |x: f64| {
+                grafito_geometry::expr::eval_function_with_vars(expr, x, &document.variables).unwrap_or(0.0)
+            };
+            let result = grafito_geometry::cas::integral_auto(f, a, b);
+            Some(format!("∫[{}..{}] {} dx = {:.6}", a, b, expr, result))
+        }
+        "Solve" | "NSolve" => {
+            let expr = cmd.args.get(0)?;
+            let a: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(-10.0);
+            let b: f64 = cmd.args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
+            let f = move |x: f64| {
+                grafito_geometry::expr::eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
+            };
+            match grafito_geometry::cas::find_root(f, (a, b)) {
+                Some(root) => Some(format!("Root of {} in [{:.1}, {:.1}] ≈ {:.6}", expr, a, b, root)),
+                None => Some(format!("No root found for {} in [{}, {}]", expr, a, b)),
+            }
+        }
+        "Limit" => {
+            let expr = cmd.args.get(0)?;
+            let x0: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let f = move |x: f64| {
+                grafito_geometry::expr::eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
+            };
+            let result = grafito_geometry::cas::limit(f, x0);
+            Some(format!("lim[x→{:.1}] {} ≈ {:.6}", x0, expr, result))
+        }
+        _ => None,
+    }
 }
 
 fn is_function_lhs(name: &str) -> bool {
