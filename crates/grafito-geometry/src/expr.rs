@@ -10,6 +10,7 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
     }
     match eval_with_context(expr, &ctx) {
         Ok(Value::Float(n)) => Ok(n),
+        Ok(Value::Int(n)) => Ok(n as f64),
         Ok(other) => Err(format!("Expression did not evaluate to a number: {:?}", other)),
         Err(e) => Err(format!("Evaluation error: {}", e)),
     }
@@ -35,6 +36,7 @@ pub fn eval_function_with_vars(expr: &str, x: f64, vars: &std::collections::Hash
     }
     match eval_with_context(expr, &ctx) {
         Ok(Value::Float(n)) => Ok(n),
+        Ok(Value::Int(n)) => Ok(n as f64),
         Ok(other) => Err(format!("Expression did not evaluate to a number: {:?}", other)),
         Err(e) => Err(format!("Evaluation error: {}", e)),
     }
