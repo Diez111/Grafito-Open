@@ -25,3 +25,5 @@ glam.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
+rfd.workspace = true
+image.workspace = true
