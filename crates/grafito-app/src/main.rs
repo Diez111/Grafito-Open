@@ -42,6 +42,7 @@ struct GrafitoApp {
     selected_object: Option<ObjectId>,
     input_text: String,
     cas_result: String,
+    recent_files: Vec<String>,
     undo_stack: Vec<Document>,
     redo_stack: Vec<Document>,
 }
@@ -84,6 +85,7 @@ impl GrafitoApp {
             selected_object: None,
             input_text: String::new(),
             cas_result: String::new(),
+            recent_files: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
@@ -192,22 +194,22 @@ impl GrafitoApp {
                     Tool::Line | Tool::Circle | Tool::Polygon => {
                         self.pending_points.push(world);
                         if self.current_tool == Tool::Line && self.pending_points.len() == 2 {
-                        let a = self.pending_points[0];
-                        let b = self.pending_points[1];
-                        self.save_state();
-                        self.document.add_object(GeoObject::Line(LineObj::new(a, b)));
+                            let a = self.pending_points[0];
+                            let b = self.pending_points[1];
+                            self.save_state();
+                            self.document.add_object(GeoObject::Line(LineObj::new(a, b)));
                             self.pending_points.clear();
                         } else if self.current_tool == Tool::Circle && self.pending_points.len() == 2 {
                             let center = self.pending_points[0];
                             let edge = self.pending_points[1];
-                        let radius = center.distance(&edge);
-                        self.save_state();
-                        self.document.add_object(GeoObject::Circle(CircleObj::new(center, radius)));
+                            let radius = center.distance(&edge);
+                            self.save_state();
+                            self.document.add_object(GeoObject::Circle(CircleObj::new(center, radius)));
                             self.pending_points.clear();
                         }
+                    }
+                    Tool::Function => {}
                 }
-                _ => {}
-            }
             }
 
             if response.dragged() {
@@ -824,6 +826,11 @@ impl eframe::App for GrafitoApp {
                                     self.document = doc;
                                     self.undo_stack.clear();
                                     self.redo_stack.clear();
+                                    let p = path.to_string_lossy().to_string();
+                                    if !self.recent_files.contains(&p) {
+                                        self.recent_files.insert(0, p);
+                                        self.recent_files.truncate(8);
+                                    }
                                 }
                             }
                         }
@@ -841,7 +848,22 @@ impl eframe::App for GrafitoApp {
                         }
                         ui.close_menu();
                     }
-                    ui.separator();
+                    if !self.recent_files.is_empty() {
+                        ui.separator();
+                        ui.label("Recent:");
+                        for f in self.recent_files.clone() {
+                            let name = std::path::Path::new(&f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.clone());
+                            if ui.button(&name).clicked() {
+                                if let Ok(content) = fs::read_to_string(&f) {
+                                    if let Ok(doc) = serde_json::from_str::<Document>(&content) {
+                                        self.document = doc;
+                                        self.undo_stack.clear(); self.redo_stack.clear();
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    }
                     if ui.button("Export SVG...").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("SVG Image", &["svg"])
@@ -1430,17 +1452,24 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                 input_text.clear(); return result;
             }
             "Script" if cmd.args.len() >= 1 => {
-                // Script[command1; command2; command3; ...]
+                // ... (already added, simplified code here)
                 let commands: Vec<String> = cmd.args[0].split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                 let mut output = String::new();
                 for c in &commands {
                     let mut temp = c.clone();
-                    if let Some(res) = process_input(document, &mut temp) {
-                        output.push_str(&res);
-                        output.push('\n');
-                    }
+                    if let Some(res) = process_input(document, &mut temp) { output.push_str(&res); output.push('\n'); }
                 }
                 result = if output.is_empty() { Some("Script executed".into()) } else { Some(output) };
+                input_text.clear(); return result;
+            }
+            "Simplify" if cmd.args.len() >= 1 => {
+                let expr = cmd.args[0].trim();
+                // Numeric simplification: evaluate the expression
+                let vars: Vec<(String, f64)> = document.variables.iter().map(|(k,v)| (k.clone(), *v)).collect();
+                match grafito_geometry::expr::evaluate(expr, &vars) {
+                    Ok(val) => result = Some(format!("{} ≈ {}", expr, val)),
+                    Err(e) => result = Some(format!("Simplify error: {}", e)),
+                }
                 input_text.clear(); return result;
             }
             _ => {}
