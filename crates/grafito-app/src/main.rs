@@ -1,5 +1,6 @@
-use grafito_core::{Document, GeoObject, PointObj, LineObj, CircleObj, PolygonObj, ObjectId};
+use grafito_core::{Document, GeoObject, PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, ObjectId};
 use grafito_geometry::{Point2, ViewTransform, Color};
+use grafito_geometry::expr::eval_function;
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::Vec2 as GlamVec2;
@@ -32,13 +33,14 @@ impl GrafitoApp {
         // Demo objects
         document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)).with_label("A")));
         document.add_object(GeoObject::Point(PointObj::new(Point2::new(3.0, 2.0)).with_label("B")));
-        document.add_object(GeoObject::Line(LineObj::new(Point2::new(-2.0, -1.0), Point2::new(4.0, 3.0)).with_label("f")));
+        document.add_object(GeoObject::Line(LineObj::new(Point2::new(-2.0, -1.0), Point2::new(4.0, 3.0)).with_label("l")));
         document.add_object(GeoObject::Circle(CircleObj::new(Point2::new(1.0, 1.0), 2.0).with_label("c")));
         document.add_object(GeoObject::Polygon(PolygonObj::new(vec![
             Point2::new(-3.0, -2.0),
             Point2::new(-1.0, -3.0),
             Point2::new(-2.0, -1.0),
         ])));
+        document.add_object(GeoObject::Function(FunctionObj::new("sin(x)").with_label("f(x)")));
 
         Self {
             document,
@@ -263,7 +265,45 @@ impl GrafitoApp {
                         }
                     }
                 }
-                _ => {}
+                GeoObject::Function(fun) => {
+                    let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                    let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                    let min_x = fun.domain_min.unwrap_or(world_tl.x);
+                    let max_x = fun.domain_max.unwrap_or(world_br.x);
+                    let steps = 500;
+                    let step = (max_x - min_x) / steps as f64;
+                    let mut prev_screen: Option<Pos2> = None;
+                    let stroke = Stroke::new(fun.width, to_color32(fun.color));
+                    for i in 0..=steps {
+                        let x = min_x + i as f64 * step;
+                        if let Ok(y) = eval_function(&fun.expr, x) {
+                            if y.is_finite() && y.abs() < 1e6 {
+                                let s = view.world_to_screen(Point2::new(x, y));
+                                let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                                if let Some(prev) = prev_screen {
+                                    painter.line_segment([prev, p], stroke);
+                                }
+                                prev_screen = Some(p);
+                                continue;
+                            }
+                        }
+                        prev_screen = None;
+                    }
+                    if !fun.label.is_empty() {
+                        let mid_x = (min_x + max_x) * 0.5;
+                        if let Ok(y) = eval_function(&fun.expr, mid_x) {
+                            let s = view.world_to_screen(Point2::new(mid_x, y));
+                            painter.text(
+                                canvas_rect.min + Vec2::new(s.x, s.y + 14.0),
+                                egui::Align2::CENTER_TOP,
+                                &fun.label,
+                                egui::FontId::proportional(12.0),
+                                Color32::BLACK,
+                            );
+                        }
+                    }
+                }
+                GeoObject::Text(_) => {}
             }
         }
     }
@@ -318,10 +358,17 @@ fn process_input(document: &mut Document, input_text: &mut String) {
     if text.is_empty() {
         return;
     }
-    // Simple parsing: "A = (1, 2)"
     if let Some((name, rest)) = text.split_once('=') {
         let name = name.trim();
         let rest = rest.trim();
+        // f(x) = expr or f = expr (function)
+        if is_function_lhs(name) && (contains_var(rest, 'x') || rest.chars().all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))) {
+            let obj = GeoObject::Function(FunctionObj::new(rest).with_label(name));
+            document.add_object(obj);
+            input_text.clear();
+            return;
+        }
+        // "A = (1, 2)" point
         if rest.starts_with('(') && rest.ends_with(')') {
             let inner = &rest[1..rest.len()-1];
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
@@ -329,11 +376,21 @@ fn process_input(document: &mut Document, input_text: &mut String) {
                 if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(name));
                     document.add_object(obj);
+                    input_text.clear();
+                    return;
                 }
             }
         }
     } else {
-        // Try as point directly: "(1, 2)"
+        // Function: expressions containing 'x'
+        if contains_var(text, 'x') {
+            let label = next_function_label(document);
+            let obj = GeoObject::Function(FunctionObj::new(text).with_label(label));
+            document.add_object(obj);
+            input_text.clear();
+            return;
+        }
+        // Point: "(1, 2)"
         if text.starts_with('(') && text.ends_with(')') {
             let inner = &text[1..text.len()-1];
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
@@ -341,11 +398,58 @@ fn process_input(document: &mut Document, input_text: &mut String) {
                 if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)));
                     document.add_object(obj);
+                    input_text.clear();
+                    return;
                 }
             }
         }
     }
     input_text.clear();
+}
+
+fn is_function_lhs(name: &str) -> bool {
+    if let Some((id, args)) = name.split_once('(') {
+        let id = id.trim();
+        let args = args.trim_end_matches(')').trim();
+        id.chars().all(|c| c.is_alphabetic())
+            && args.len() == 1
+            && args.chars().all(|c| c.is_alphabetic())
+    } else {
+        false
+    }
+}
+
+fn contains_var(text: &str, var: char) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len() {
+        if chars[i] == var {
+            let prev = if i > 0 { chars[i-1] } else { ' ' };
+            let next = if i + 1 < chars.len() { chars[i+1] } else { ' ' };
+            if !prev.is_alphabetic() && !next.is_alphabetic() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn next_function_label(document: &Document) -> String {
+    let used: std::collections::HashSet<String> = document.objects_iter()
+        .filter_map(|(_, obj)| {
+            if let GeoObject::Function(f) = obj {
+                Some(f.label.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for c in 'f'..='z' {
+        let label = format!("{}(x)", c);
+        if !used.contains(&label) {
+            return label;
+        }
+    }
+    format!("f{}(x)", document.object_count())
 }
 
 fn main() {

@@ -220,14 +220,19 @@ impl FunctionObj {
     pub fn new(expr: impl Into<String>) -> Self {
         Self {
             id: ObjectId::new(),
-            label: expr.into(),
-            expr: String::new(),
+            label: String::new(),
+            expr: expr.into(),
             color: Color::BLUE,
             visible: true,
             width: 2.0,
             domain_min: None,
             domain_max: None,
         }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
     }
 }
 
