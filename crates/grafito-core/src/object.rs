@@ -1,16 +1,25 @@
-use grafito_geometry::{Color, Point2, Circle as GeomCircle};
+use grafito_geometry::{Color, Point2, Point3D, Circle as GeomCircle};
 use serde::{Deserialize, Serialize};
 use crate::id::ObjectId;
 
-/// A geometric object in the document.
+/// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GeoObject {
+    // 2D
     Point(PointObj),
     Line(LineObj),
     Circle(CircleObj),
     Polygon(PolygonObj),
     Function(FunctionObj),
     Text(TextObj),
+    // 3D
+    Point3D(Point3DObj),
+    Segment3D(Segment3DObj),
+    Sphere3D(Sphere3DObj),
+    Cube3D(Cube3DObj),
+    Pyramid3D(Pyramid3DObj),
+    Cone3D(Cone3DObj),
+    Cylinder3D(Cylinder3DObj),
 }
 
 impl GeoObject {
@@ -22,6 +31,13 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.id,
             GeoObject::Function(o) => o.id,
             GeoObject::Text(o) => o.id,
+            GeoObject::Point3D(o) => o.id,
+            GeoObject::Segment3D(o) => o.id,
+            GeoObject::Sphere3D(o) => o.id,
+            GeoObject::Cube3D(o) => o.id,
+            GeoObject::Pyramid3D(o) => o.id,
+            GeoObject::Cone3D(o) => o.id,
+            GeoObject::Cylinder3D(o) => o.id,
         }
     }
 
@@ -33,6 +49,13 @@ impl GeoObject {
             GeoObject::Polygon(o) => &o.label,
             GeoObject::Function(o) => &o.label,
             GeoObject::Text(o) => &o.label,
+            GeoObject::Point3D(o) => &o.label,
+            GeoObject::Segment3D(o) => &o.label,
+            GeoObject::Sphere3D(o) => &o.label,
+            GeoObject::Cube3D(o) => &o.label,
+            GeoObject::Pyramid3D(o) => &o.label,
+            GeoObject::Cone3D(o) => &o.label,
+            GeoObject::Cylinder3D(o) => &o.label,
         }
     }
 
@@ -44,6 +67,13 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.color,
             GeoObject::Function(o) => o.color,
             GeoObject::Text(o) => o.color,
+            GeoObject::Point3D(o) => o.color,
+            GeoObject::Segment3D(o) => o.color,
+            GeoObject::Sphere3D(o) => o.color,
+            GeoObject::Cube3D(o) => o.color,
+            GeoObject::Pyramid3D(o) => o.color,
+            GeoObject::Cone3D(o) => o.color,
+            GeoObject::Cylinder3D(o) => o.color,
         }
     }
 
@@ -55,6 +85,13 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.color = color,
             GeoObject::Function(o) => o.color = color,
             GeoObject::Text(o) => o.color = color,
+            GeoObject::Point3D(o) => o.color = color,
+            GeoObject::Segment3D(o) => o.color = color,
+            GeoObject::Sphere3D(o) => o.color = color,
+            GeoObject::Cube3D(o) => o.color = color,
+            GeoObject::Pyramid3D(o) => o.color = color,
+            GeoObject::Cone3D(o) => o.color = color,
+            GeoObject::Cylinder3D(o) => o.color = color,
         }
     }
 
@@ -66,6 +103,13 @@ impl GeoObject {
             GeoObject::Polygon(o) => o.visible,
             GeoObject::Function(o) => o.visible,
             GeoObject::Text(o) => o.visible,
+            GeoObject::Point3D(o) => o.visible,
+            GeoObject::Segment3D(o) => o.visible,
+            GeoObject::Sphere3D(o) => o.visible,
+            GeoObject::Cube3D(o) => o.visible,
+            GeoObject::Pyramid3D(o) => o.visible,
+            GeoObject::Cone3D(o) => o.visible,
+            GeoObject::Cylinder3D(o) => o.visible,
         }
     }
 
@@ -77,6 +121,13 @@ impl GeoObject {
             GeoObject::Polygon(_) => "Polygon",
             GeoObject::Function(_) => "Function",
             GeoObject::Text(_) => "Text",
+            GeoObject::Point3D(_) => "Point3D",
+            GeoObject::Segment3D(_) => "Segment3D",
+            GeoObject::Sphere3D(_) => "Sphere3D",
+            GeoObject::Cube3D(_) => "Cube3D",
+            GeoObject::Pyramid3D(_) => "Pyramid3D",
+            GeoObject::Cone3D(_) => "Cone3D",
+            GeoObject::Cylinder3D(_) => "Cylinder3D",
         }
     }
 }
@@ -259,4 +310,95 @@ impl TextObj {
             font_size: 14.0,
         }
     }
+}
+
+// ── 3D Objects ──
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Point3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub position: Point3D,
+    pub color: Color,
+    pub visible: bool,
+    pub size: f32,
+}
+
+impl Point3DObj {
+    pub fn new(position: Point3D) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), position, color: Color::BLUE, visible: true, size: 8.0 }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Segment3DObj {
+    pub id: ObjectId, pub label: String, pub a: Point3D, pub b: Point3D,
+    pub color: Color, pub visible: bool, pub width: f32,
+}
+impl Segment3DObj {
+    pub fn new(a: Point3D, b: Point3D) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), a, b, color: Color::BLACK, visible: true, width: 2.0 }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sphere3DObj {
+    pub id: ObjectId, pub label: String, pub center: Point3D, pub radius: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl Sphere3DObj {
+    pub fn new(center: Point3D, radius: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), center, radius, color: Color::BLACK, visible: true, width: 1.5, fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)) }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cube3DObj {
+    pub id: ObjectId, pub label: String, pub center: Point3D, pub size: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl Cube3DObj {
+    pub fn new(center: Point3D, size: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), center, size, color: Color::BLACK, visible: true, width: 1.5, fill_color: None }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pyramid3DObj {
+    pub id: ObjectId, pub label: String, pub base_center: Point3D, pub apex: Point3D, pub base_size: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl Pyramid3DObj {
+    pub fn new(base_center: Point3D, apex: Point3D, base_size: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), base_center, apex, base_size, color: Color::BLACK, visible: true, width: 1.5, fill_color: None }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cone3DObj {
+    pub id: ObjectId, pub label: String, pub base_center: Point3D, pub apex: Point3D, pub radius: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl Cone3DObj {
+    pub fn new(base_center: Point3D, apex: Point3D, radius: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), base_center, apex, radius, color: Color::BLACK, visible: true, width: 1.5, fill_color: None }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Cylinder3DObj {
+    pub id: ObjectId, pub label: String, pub base_center: Point3D, pub top_center: Point3D, pub radius: f64,
+    pub color: Color, pub visible: bool, pub width: f32, pub fill_color: Option<Color>,
+}
+impl Cylinder3DObj {
+    pub fn new(base_center: Point3D, top_center: Point3D, radius: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), base_center, top_center, radius, color: Color::BLACK, visible: true, width: 1.5, fill_color: None }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 }
