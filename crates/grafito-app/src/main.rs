@@ -6,6 +6,8 @@ use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::Vec2 as GlamVec2;
 use std::fs;
 
+const MAX_UNDO: usize = 50;
+
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_premultiplied(
         (c.r * 255.0) as u8,
@@ -24,6 +26,8 @@ struct GrafitoApp {
     hovered_object: Option<ObjectId>,
     selected_object: Option<ObjectId>,
     input_text: String,
+    undo_stack: Vec<Document>,
+    redo_stack: Vec<Document>,
 }
 
 impl GrafitoApp {
@@ -51,6 +55,40 @@ impl GrafitoApp {
             hovered_object: None,
             selected_object: None,
             input_text: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
+    fn save_state(&mut self) {
+        self.undo_stack.push(self.document.clone());
+        self.redo_stack.clear();
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(self.document.clone());
+            self.document = prev;
+            self.selected_object = None;
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(self.document.clone());
+            self.document = next;
+            self.selected_object = None;
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        if let Some(id) = self.selected_object {
+            self.save_state();
+            self.document.remove_object(id);
+            self.selected_object = None;
         }
     }
 
@@ -78,20 +116,23 @@ impl GrafitoApp {
                         }
                     }
                     Tool::Point => {
+                        self.save_state();
                         self.document.add_object(GeoObject::Point(PointObj::new(world)));
                     }
                     Tool::Line | Tool::Circle | Tool::Polygon => {
                         self.pending_points.push(world);
                         if self.current_tool == Tool::Line && self.pending_points.len() == 2 {
-                            let a = self.pending_points[0];
-                            let b = self.pending_points[1];
-                            self.document.add_object(GeoObject::Line(LineObj::new(a, b)));
+                        let a = self.pending_points[0];
+                        let b = self.pending_points[1];
+                        self.save_state();
+                        self.document.add_object(GeoObject::Line(LineObj::new(a, b)));
                             self.pending_points.clear();
                         } else if self.current_tool == Tool::Circle && self.pending_points.len() == 2 {
                             let center = self.pending_points[0];
                             let edge = self.pending_points[1];
-                            let radius = center.distance(&edge);
-                            self.document.add_object(GeoObject::Circle(CircleObj::new(center, radius)));
+                        let radius = center.distance(&edge);
+                        self.save_state();
+                        self.document.add_object(GeoObject::Circle(CircleObj::new(center, radius)));
                             self.pending_points.clear();
                         }
                     }
@@ -344,6 +385,19 @@ impl eframe::App for GrafitoApp {
             });
         });
 
+        // Keyboard shortcuts
+        if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
+            self.undo();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
+            || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl)
+        {
+            self.redo();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Delete)) {
+            self.delete_selected();
+        }
+
         // Top toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             toolbar(ui, &mut self.current_tool);
@@ -364,9 +418,11 @@ impl eframe::App for GrafitoApp {
                 ui.label("Input:");
                 let response = ui.text_edit_singleline(&mut self.input_text);
                 if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    self.save_state();
                     process_input(&mut self.document, &mut self.input_text);
                 }
                 if ui.button("Enter").clicked() {
+                    self.save_state();
                     process_input(&mut self.document, &mut self.input_text);
                 }
             });
