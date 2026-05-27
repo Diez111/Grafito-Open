@@ -115,21 +115,26 @@ impl ViewTransform {
         }
     }
 
-    /// Transform world point to screen coordinates.
+    /// Transform world point to screen coordinates with f64 intermediate precision.
+    /// Prevents precision loss at extreme zoom levels.
     pub fn world_to_screen(&self, world: Point2) -> Vec2 {
-        let origin = self.screen_size * 0.5 + self.offset;
+        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x as f64;
+        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y as f64;
+        let s = self.scale as f64;
         Vec2::new(
-            origin.x + (world.x as f32) * self.scale,
-            origin.y - (world.y as f32) * self.scale, // Y up in world
+            (ox + world.x * s) as f32,
+            (oy - world.y * s) as f32,
         )
     }
 
-    /// Transform screen point to world coordinates.
+    /// Transform screen point to world coordinates with f64 intermediate precision.
     pub fn screen_to_world(&self, screen: Vec2) -> Point2 {
-        let origin = self.screen_size * 0.5 + self.offset;
+        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x as f64;
+        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y as f64;
+        let inv = 1.0 / self.scale as f64;
         Point2::new(
-            ((screen.x - origin.x) / self.scale) as f64,
-            ((origin.y - screen.y) / self.scale) as f64,
+            (screen.x as f64 - ox) * inv,
+            (oy - screen.y as f64) * inv,
         )
     }
 
@@ -139,9 +144,10 @@ impl ViewTransform {
 
     pub fn zoom(&mut self, factor: f32, anchor_screen: Vec2) {
         let anchor_world = self.screen_to_world(anchor_screen);
-        self.scale = (self.scale * factor).clamp(0.001, 1000.0);
+        self.scale = (self.scale * factor).clamp(0.0001, 50000.0);
         let new_anchor_screen = self.world_to_screen(anchor_world);
-        self.offset += anchor_screen - new_anchor_screen;
+        self.offset.x += anchor_screen.x - new_anchor_screen.x;
+        self.offset.y += anchor_screen.y - new_anchor_screen.y;
     }
 
     pub fn projection_matrix(&self) -> Mat4 {

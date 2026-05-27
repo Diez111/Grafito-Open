@@ -78,9 +78,10 @@ impl GrafitoApp {
             if response.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta);
                 if scroll.y != 0.0 {
-                    let factor = 1.0 + scroll.y * 0.001;
+                    let factor = if scroll.y > 0.0 { 1.0 + scroll.y.abs() * 0.001 }
+                                 else { 1.0 / (1.0 + scroll.y.abs() * 0.001) };
                     self.document.view_mut().zoom(
-                        factor.clamp(0.5, 2.0),
+                        factor.clamp(0.1, 10.0),
                         GlamVec2::new(local.x, local.y),
                     );
                 }
@@ -96,26 +97,47 @@ impl GrafitoApp {
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
 
-        let min_x = world_tl.x.floor() as i32 - 1;
-        let max_x = world_br.x.ceil() as i32 + 1;
-        let min_y = world_br.y.floor() as i32 - 1;
-        let max_y = world_tl.y.ceil() as i32 + 1;
+        // Adaptive grid step based on zoom level
+        let screen_range = canvas_rect.width().max(canvas_rect.height()) as f64;
+        let world_range = (world_br.x - world_tl.x).max(world_tl.y - world_br.y).max(0.001);
+        let pixels_per_unit = screen_range / world_range;
 
-        let color = to_color32(Color::LIGHT_GRAY);
-        let stroke = Stroke::new(1.0, color);
+        let (major_step, minor_step) = if pixels_per_unit > 200.0 { (1.0, 0.2) }
+            else if pixels_per_unit > 80.0 { (1.0, 0.5) }
+            else if pixels_per_unit > 30.0 { (5.0, 1.0) }
+            else if pixels_per_unit > 10.0 { (10.0, 2.0) }
+            else if pixels_per_unit > 3.0 { (25.0, 5.0) }
+            else if pixels_per_unit > 1.0 { (50.0, 10.0) }
+            else { (100.0, 25.0) };
 
-        for x in min_x..=max_x {
-            let a = view.world_to_screen(Point2::new(x as f64, min_y as f64));
-            let b = view.world_to_screen(Point2::new(x as f64, max_y as f64));
+        let min_x = (world_tl.x / minor_step).floor() as i32 - 1;
+        let max_x = (world_br.x / minor_step).ceil() as i32 + 1;
+        let min_y = (world_br.y / minor_step).floor() as i32 - 1;
+        let max_y = (world_tl.y / minor_step).ceil() as i32 + 1;
+
+        let minor_color = to_color32(Color::new(0.88, 0.88, 0.90, 1.0));
+        let major_color = to_color32(Color::new(0.78, 0.78, 0.82, 1.0));
+        let minor_stroke = Stroke::new(0.5, minor_color);
+        let major_stroke = Stroke::new(1.0, major_color);
+
+        for xi in min_x..=max_x {
+            let x = xi as f64 * minor_step;
+            let is_major = (x / major_step).fract().abs() < 0.001 || (x / major_step + 1e-9).fract().abs() < 0.001;
+            let stroke = if is_major { major_stroke } else { minor_stroke };
+            let a = view.world_to_screen(Point2::new(x, min_y as f64 * minor_step));
+            let b = view.world_to_screen(Point2::new(x, max_y as f64 * minor_step));
             painter.line_segment(
                 [canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)],
                 stroke,
             );
         }
 
-        for y in min_y..=max_y {
-            let a = view.world_to_screen(Point2::new(min_x as f64, y as f64));
-            let b = view.world_to_screen(Point2::new(max_x as f64, y as f64));
+        for yi in min_y..=max_y {
+            let y = yi as f64 * minor_step;
+            let is_major = (y / major_step).fract().abs() < 0.001 || (y / major_step + 1e-9).fract().abs() < 0.001;
+            let stroke = if is_major { major_stroke } else { minor_stroke };
+            let a = view.world_to_screen(Point2::new(min_x as f64 * minor_step, y));
+            let b = view.world_to_screen(Point2::new(max_x as f64 * minor_step, y));
             painter.line_segment(
                 [canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)],
                 stroke,
@@ -192,7 +214,8 @@ impl GrafitoApp {
                 }
                 GeoObject::Circle(c) => {
                     let center = view.world_to_screen(c.center);
-                    let radius = (c.radius as f32) * view.scale;
+                    let radius = (c.radius * view.scale as f64) as f32;
+                    let radius = radius.max(0.5).min(50000.0);
                     let pos = canvas_rect.min + Vec2::new(center.x, center.y);
                     let stroke = Stroke::new(c.width, to_color32(c.color));
                     if let Some(fill) = c.fill_color {
@@ -241,8 +264,11 @@ impl GrafitoApp {
                     let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                     let min_x = fun.domain_min.unwrap_or(world_tl.x);
                     let max_x = fun.domain_max.unwrap_or(world_br.x);
-                    let steps = 1000;
-                    let step = (max_x - min_x) / steps as f64;
+                    // Adaptive samples: at least 1 sample per 2 screen pixels
+                    let screen_width = canvas_rect.width() as f64;
+                    let world_width = max_x - min_x;
+                    let steps = ((screen_width * 0.5).max(200.0).min(3000.0)) as usize;
+                    let step = world_width / steps as f64;
                     let variables = &self.document.variables;
 
                     let samples: Vec<(f64, Option<f64>)> = (0..=steps).into_par_iter().map(|i| {
