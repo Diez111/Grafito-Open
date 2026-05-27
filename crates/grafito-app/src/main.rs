@@ -1375,12 +1375,36 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                 input_text.clear(); return result;
             }
             "Normal" if cmd.args.len() == 2 => {
-                // Normal[mean, stddev] - add a normal distribution curve
                 let mu: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
                 let sigma: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
                 let expr = format!("exp(-(x-{})^2/(2*{}^2))/({}*sqrt(2*pi))", mu, sigma, sigma);
                 document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(format!("N({},{})", mu, sigma))));
-                result = Some(format!("Normal distribution N({},{}) added", mu, sigma));
+                result = Some(format!("Normal N({},{}) added", mu, sigma));
+                input_text.clear(); return result;
+            }
+            "Binomial" if cmd.args.len() == 3 => {
+                let n: usize = cmd.args[0].trim().parse().unwrap_or(10);
+                let p: f64 = cmd.args[1].trim().parse().unwrap_or(0.5);
+                let k: usize = cmd.args[2].trim().parse().unwrap_or(1);
+                // P(X=k) = C(n,k) * p^k * (1-p)^(n-k)
+                let comb = |n: usize, k: usize| -> f64 {
+                    if k > n { return 0.0; }
+                    let k = k.min(n - k);
+                    let mut result = 1.0;
+                    for i in 0..k { result = result * (n - i) as f64 / (i + 1) as f64; }
+                    result
+                };
+                let prob = comb(n, k) * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32);
+                result = Some(format!("P(X={}) = {:.6} (Binom({},{}))", k, prob, n, p));
+                input_text.clear(); return result;
+            }
+            "Poisson" if cmd.args.len() == 2 => {
+                let lambda: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let k: usize = cmd.args[1].trim().parse().unwrap_or(1);
+                // P(X=k) = lambda^k * e^(-lambda) / k!
+                let mut prob = (-lambda).exp();
+                for i in 1..=k { prob *= lambda / i as f64; }
+                result = Some(format!("P(X={}) = {:.6} (Poisson({}))", k, prob, lambda));
                 input_text.clear(); return result;
             }
             "Curve3D" if cmd.args.len() >= 4 => {
