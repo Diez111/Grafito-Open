@@ -1047,6 +1047,82 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                     return None;
                 }
             }
+            "Tangent" => {
+                // Tangent[circle_label, point_label] or Tangent[circle, point] 
+                // Simplified: Tangent[ (cx,cy), r, (px,py) ]
+                if cmd.args.len() >= 3 {
+                    if let (Ok((cx, cy)), Ok(r), Ok((px, py))) = (
+                        parse_point_str(&cmd.args[0]),
+                        cmd.args[1].trim().parse::<f64>(),
+                        parse_point_str(&cmd.args[2]),
+                    ) {
+                        let dx = px - cx; let dy = py - cy;
+                        let d = (dx*dx+dy*dy).sqrt();
+                        if d > r {
+                            let a = r*r/d;
+                            let h = (r*r - a*a).sqrt();
+                            let pm = Point2::new(cx + a*dx/d, cy + a*dy/d);
+                            let perp_x = -h*dy/d; let perp_y = h*dx/d;
+                            let t1 = Point2::new(pm.x + perp_x, pm.y + perp_y);
+                            let t2 = Point2::new(pm.x - perp_x, pm.y - perp_y);
+                            document.add_object(GeoObject::Line(LineObj::new(Point2::new(px, py), t1).with_label("T1")));
+                            document.add_object(GeoObject::Line(LineObj::new(Point2::new(px, py), t2).with_label("T2")));
+                        }
+                    }
+                }
+                input_text.clear(); return None;
+            }
+            "PerpendicularBisector" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) = (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1])) {
+                    let mx = (x1 + x2) * 0.5; let my = (y1 + y2) * 0.5;
+                    let dx = x2 - x1; let dy = y2 - y1;
+                    let p1 = Point2::new(mx - dy * 5.0, my + dx * 5.0);
+                    let p2 = Point2::new(mx + dy * 5.0, my - dx * 5.0);
+                    document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("B")));
+                }
+                input_text.clear(); return None;
+            }
+            "AngleBisector" if cmd.args.len() == 3 => {
+                if let (Ok((x1, y1)), Ok((xv, yv)), Ok((x2, y2))) = (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]), parse_point_str(&cmd.args[2])) {
+                    let d1 = ((xv-x1).powi(2) + (yv-y1).powi(2)).sqrt();
+                    let d2 = ((xv-x2).powi(2) + (yv-y2).powi(2)).sqrt();
+                    if d1 > 0.0 && d2 > 0.0 {
+                        let ux = (x1 - xv) / d1; let uy = (y1 - yv) / d1;
+                        let vx = (x2 - xv) / d2; let vy = (y2 - yv) / d2;
+                        let bx = ux + vx; let by = uy + vy;
+                        let b_len = (bx*bx + by*by).sqrt();
+                        if b_len > 0.0 {
+                            let p = Point2::new(xv + bx / b_len * 5.0, yv + by / b_len * 5.0);
+                            document.add_object(GeoObject::Line(LineObj::new(Point2::new(xv, yv), p).with_label("Ab")));
+                        }
+                    }
+                }
+                input_text.clear(); return None;
+            }
+            "Midpoint" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) = (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1])) {
+                    let obj = GeoObject::Point(PointObj::new(Point2::new((x1+x2)*0.5, (y1+y2)*0.5)).with_label("M"));
+                    document.add_object(obj);
+                }
+                input_text.clear(); return None;
+            }
+            "Vector" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) = (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1])) {
+                    // Draw vector as directed line from (x1,y1) to (x2,y2) with arrow
+                    let obj = GeoObject::Line(LineObj::new(Point2::new(x1, y1), Point2::new(x2, y2)).with_label("v"));
+                    document.add_object(obj);
+                }
+                input_text.clear(); return None;
+            }
+            "Ray" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) = (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1])) {
+                    let dx = x2 - x1; let dy = y2 - y1;
+                    let len = (dx*dx+dy*dy).sqrt().max(0.01);
+                    let far = Point2::new(x1 + dx/len * 100.0, y1 + dy/len * 100.0);
+                    document.add_object(GeoObject::Line(LineObj::new(Point2::new(x1, y1), far).with_label("r")));
+                }
+                input_text.clear(); return None;
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
