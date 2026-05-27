@@ -1,5 +1,10 @@
 //! Grafito UI — UI components and panels built with egui.
 
+pub mod theme;
+pub mod animation;
+pub mod toast;
+pub mod command_palette;
+
 use grafito_core::{Document, ObjectId};
 use egui::{Ui, Response};
 

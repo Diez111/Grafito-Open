@@ -1,0 +1,51 @@
+//! Grafito Command Palette — Ctrl+K quick command search.
+
+pub struct PaletteCommand {
+    pub name: &'static str,
+    pub category: &'static str,
+    pub syntax_hint: &'static str,
+}
+
+pub fn all_commands() -> Vec<PaletteCommand> {
+    vec![
+        PaletteCommand { name: "Point Tool", category: "Tools", syntax_hint: "Click on canvas | (x, y)" },
+        PaletteCommand { name: "Line Tool", category: "Tools", syntax_hint: "Click two points | A = (x1,y1), B = (x2,y2)" },
+        PaletteCommand { name: "Circle Tool", category: "Tools", syntax_hint: "Click center + edge | Circle[(x,y), r]" },
+        PaletteCommand { name: "Polygon Tool", category: "Tools", syntax_hint: "Click vertices" },
+        PaletteCommand { name: "Function Tool", category: "Tools", syntax_hint: "f(x) = expr" },
+        PaletteCommand { name: "Ellipse", category: "Create", syntax_hint: "Ellipse[(cx,cy), rx, ry]" },
+        PaletteCommand { name: "Parabola", category: "Create", syntax_hint: "Parabola[(vx,vy), p]" },
+        PaletteCommand { name: "Hyperbola", category: "Create", syntax_hint: "Hyperbola[(cx,cy), a, b]" },
+        PaletteCommand { name: "RegularPolygon", category: "Create", syntax_hint: "RegularPolygon[(cx,cy), n, r]" },
+        PaletteCommand { name: "Translate", category: "Transform", syntax_hint: "Translate[obj, (dx,dy)]" },
+        PaletteCommand { name: "Rotate", category: "Transform", syntax_hint: "Rotate[obj, angle_deg]" },
+        PaletteCommand { name: "Dilate", category: "Transform", syntax_hint: "Dilate[obj, factor, (cx,cy)]" },
+        PaletteCommand { name: "Reflect", category: "Transform", syntax_hint: "Reflect[obj, (ax,ay), (bx,by)]" },
+        PaletteCommand { name: "Tangent", category: "Construct", syntax_hint: "Tangent[(cx,cy), r, (px,py)]" },
+        PaletteCommand { name: "PerpendicularBisector", category: "Construct", syntax_hint: "PerpendicularBisector[(x1,y1), (x2,y2)]" },
+        PaletteCommand { name: "AngleBisector", category: "Construct", syntax_hint: "AngleBisector[p1, vertex, p2]" },
+        PaletteCommand { name: "Midpoint", category: "Construct", syntax_hint: "Midpoint[(x1,y1), (x2,y2)]" },
+        PaletteCommand { name: "Vector", category: "Construct", syntax_hint: "Vector[(x1,y1), (x2,y2)]" },
+        PaletteCommand { name: "Ray", category: "Construct", syntax_hint: "Ray[(x1,y1), (x2,y2)]" },
+        PaletteCommand { name: "Derivative", category: "CAS", syntax_hint: "Derivative[expr]" },
+        PaletteCommand { name: "Integral", category: "CAS", syntax_hint: "Integral[expr, a, b]" },
+        PaletteCommand { name: "Solve", category: "CAS", syntax_hint: "Solve[expr, a, b]" },
+        PaletteCommand { name: "Limit", category: "CAS", syntax_hint: "Limit[expr, x0]" },
+        PaletteCommand { name: "Factor", category: "CAS", syntax_hint: "Factor[expr]" },
+        PaletteCommand { name: "Expand", category: "CAS", syntax_hint: "Expand[expr]" },
+        PaletteCommand { name: "Simplify", category: "CAS", syntax_hint: "Simplify[expr]" },
+        PaletteCommand { name: "Normal", category: "Probability", syntax_hint: "Normal[mu, sigma]" },
+        PaletteCommand { name: "Binomial", category: "Probability", syntax_hint: "Binomial[n, p, k]" },
+        PaletteCommand { name: "Poisson", category: "Probability", syntax_hint: "Poisson[lambda, k]" },
+        PaletteCommand { name: "Curve3D", category: "3D", syntax_hint: "Curve3D[(x(t),y(t),z(t)), t, tmin, tmax]" },
+        PaletteCommand { name: "Surface3D", category: "3D", syntax_hint: "Surface3D[z=f(x,y), xmin, xmax, ymin, ymax]" },
+        PaletteCommand { name: "Extrude", category: "3D", syntax_hint: "Extrude[polygon_label, height]" },
+        PaletteCommand { name: "Save", category: "File", syntax_hint: "Save current document" },
+        PaletteCommand { name: "Export SVG", category: "File", syntax_hint: "Export vector graphics" },
+        PaletteCommand { name: "Export PNG", category: "File", syntax_hint: "Export raster image" },
+        PaletteCommand { name: "Export TikZ", category: "File", syntax_hint: "Export LaTeX TikZ code" },
+        PaletteCommand { name: "Zoom to Fit", category: "View", syntax_hint: "Fit all objects in view" },
+        PaletteCommand { name: "Toggle Grid", category: "View", syntax_hint: "Show/hide coordinate grid" },
+        PaletteCommand { name: "Toggle Dark Mode", category: "View", syntax_hint: "Switch light/dark theme" },
+    ]
+}

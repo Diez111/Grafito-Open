@@ -10,6 +10,9 @@ use grafito_core::{Document, GeoObject, ObjectId,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
+use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
+use grafito_ui::animation::RippleManager;
+use grafito_ui::toast::ToastManager;
 use egui::{Pos2, Color32, Sense, Key};
 use glam::Vec2 as GlamVec2;
 use std::fs;
@@ -36,6 +39,9 @@ pub struct GrafitoApp {
     pub show_grid: bool,
     pub snap_to_grid: bool,
     pub exam_mode: bool,
+    pub dark_mode: bool,
+    pub ripple_manager: RippleManager,
+    pub toast_manager: ToastManager,
     pub pending_points: Vec<Point2>,
     pub pending_points_3d: Vec<Point3D>,
     pub last_mouse_pos: Option<Pos2>,
@@ -65,6 +71,9 @@ impl GrafitoApp {
         document.add_object(GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(2.0, 1.0, 0.0), 1.0).with_label("S1")));
         document.add_object(GeoObject::Ellipse(EllipseObj::new(Point2::new(-1.0, -2.0), 2.0, 1.0).with_label("E1")));
 
+        let dark_mode = true; // dark by default
+        if dark_mode { THEME_DARK.apply(&_cc.egui_ctx); } else { THEME_LIGHT.apply(&_cc.egui_ctx); }
+
         Self {
             document,
             current_tool: Tool::default(),
@@ -74,6 +83,9 @@ impl GrafitoApp {
             show_grid: true,
             snap_to_grid: false,
             exam_mode: false,
+            dark_mode,
+            ripple_manager: RippleManager::default(),
+            toast_manager: ToastManager::default(),
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
@@ -229,18 +241,37 @@ impl eframe::App for GrafitoApp {
             || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl) { self.redo(); }
         if ctx.input(|i| i.key_pressed(Key::Delete)) { self.delete_selected(); }
 
+        // Tool shortcuts (F1-F6)
+        if ctx.input(|i| i.key_pressed(Key::F1)) { self.current_tool = Tool::Select; }
+        if ctx.input(|i| i.key_pressed(Key::F2)) { self.current_tool = Tool::Point; }
+        if ctx.input(|i| i.key_pressed(Key::F3)) { self.current_tool = Tool::Line; }
+        if ctx.input(|i| i.key_pressed(Key::F4)) { self.current_tool = Tool::Circle; }
+        if ctx.input(|i| i.key_pressed(Key::F5)) { self.current_tool = Tool::Polygon; }
+        if ctx.input(|i| i.key_pressed(Key::F6)) { self.current_tool = Tool::Function; }
+        if ctx.input(|i| i.key_pressed(Key::Escape)) { self.current_tool = Tool::Select; }
+
         // Top toolbar with view mode tabs
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("toolbar").frame(
+            egui::Frame::none().fill(if self.dark_mode { Color32::from_rgb(35, 37, 46) } else { Color32::from_rgb(240, 240, 245) }).inner_margin(8.0)
+        ).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.current_view, ViewMode::D2, "2D");
-                ui.selectable_value(&mut self.current_view, ViewMode::D3, "3D");
+                ui.selectable_value(&mut self.current_view, ViewMode::D2, "📐 2D");
+                ui.selectable_value(&mut self.current_view, ViewMode::D3, "🧊 3D");
                 ui.separator();
                 toolbar(ui, &mut self.current_tool);
                 ui.separator();
-                if ui.button("Fit").clicked() { self.zoom_to_fit(); }
-                ui.checkbox(&mut self.show_grid, "Grid");
-                ui.checkbox(&mut self.snap_to_grid, "Snap");
-                if ui.checkbox(&mut self.exam_mode, "Exam").changed() && self.exam_mode { self.cas_result = "EXAM MODE: CAS disabled".into(); }
+                ui.horizontal(|ui| {
+                    if ui.button(if self.dark_mode { "☀" } else { "🌙" }).clicked() {
+                        self.dark_mode = !self.dark_mode;
+                        if self.dark_mode { THEME_DARK.apply(ui.ctx()); }
+                        else { THEME_LIGHT.apply(ui.ctx()); }
+                    }
+                    if ui.button("⛶").on_hover_text("Zoom to Fit").clicked() { self.zoom_to_fit(); }
+                    ui.checkbox(&mut self.show_grid, "Grid");
+                    if ui.checkbox(&mut self.exam_mode, "Exam").changed() && self.exam_mode {
+                        self.cas_result = "EXAM MODE: CAS disabled".into();
+                    }
+                });
             });
         });
 
@@ -391,19 +422,27 @@ impl eframe::App for GrafitoApp {
         }
 
         // Status bar
-        egui::TopBottomPanel::bottom("status").min_height(20.0).show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("status").min_height(20.0).frame(
+            egui::Frame::none().fill(if self.dark_mode { Color32::from_rgb(28, 30, 36) } else { Color32::from_rgb(245, 245, 248) }).inner_margin(6.0)
+        ).show(ctx, |ui| {
+            let tool_hint = match self.current_tool {
+                Tool::Select => "🖱 Select: Click to pick, drag to pan, scroll to zoom",
+                Tool::Point => "⊙ Point: Click to place | (x,y) or A=(x,y) in input bar",
+                Tool::Line => "╱ Line: Click two points | F3",
+                Tool::Circle => "○ Circle: Click center then edge | F4",
+                Tool::Polygon => "⬠ Polygon: Click vertices | F5",
+                Tool::Function => "𝑓 Function: f(x)=expr in input bar | F6",
+            };
             ui.horizontal(|ui| {
-                ui.label(format!("Objects: {} | Vars: {} | View: {} | Scale: {:.1}",
-                    self.document.object_count(), self.document.variables.len(),
-                    if self.current_view == ViewMode::D2 { "2D" } else { "3D" },
-                    if self.current_view == ViewMode::D2 { self.document.view().scale } else { self.camera.distance },
-                ));
-                if !self.cas_result.is_empty() {
-                    ui.separator();
-                    ui.colored_label(Color32::from_rgb(40, 120, 40), &self.cas_result);
-                }
+                ui.label(tool_hint);
+                ui.add_space(20.0);
+                ui.label(format!("Objs: {} | {}", self.document.object_count(),
+                    if self.current_view == ViewMode::D2 { "2D" } else { "3D" }));
             });
         });
+
+        // Ripples and toasts drawn last (on the 2D canvas painter)
+        // They are drawn via the canvas painter in render_2d.
     }
 }
 
