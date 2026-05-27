@@ -41,7 +41,7 @@ grafito/
 
 ```bash
 # Clone the repo
-git clone https://github.com/tu-usuario/grafito.git
+git clone https://github.com/Diez111/Grafito.git
 cd grafito
 
 # Run in dev mode
