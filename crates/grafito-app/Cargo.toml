@@ -1,0 +1,27 @@
+[package]
+name = "grafito-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "grafito"
+path = "src/main.rs"
+
+[dependencies]
+grafito-core.workspace = true
+grafito-geometry.workspace = true
+grafito-ui.workspace = true
+
+eframe.workspace = true
+pollster.workspace = true
+
+egui.workspace = true
+
+glam.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true

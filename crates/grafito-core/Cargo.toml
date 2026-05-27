@@ -1,0 +1,16 @@
+[package]
+name = "grafito-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafito-geometry.workspace = true
+
+serde.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+log.workspace = true

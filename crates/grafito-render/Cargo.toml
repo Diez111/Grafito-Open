@@ -1,0 +1,19 @@
+[package]
+name = "grafito-render"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafito-core.workspace = true
+grafito-geometry.workspace = true
+
+wgpu.workspace = true
+glam.workspace = true
+lyon.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+anyhow.workspace = true
