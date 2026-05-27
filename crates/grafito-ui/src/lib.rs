@@ -80,16 +80,47 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
     }
 }
 
-/// A simple toolbar with tool buttons.
+/// A toolbar with icon buttons and keyboard shortcuts.
 pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool) -> Response {
+    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
     ui.horizontal(|ui| {
-        ui.selectable_value(current_tool, Tool::Select, "Select");
-        ui.selectable_value(current_tool, Tool::Point, "Point");
-        ui.selectable_value(current_tool, Tool::Line, "Line");
-        ui.selectable_value(current_tool, Tool::Circle, "Circle");
-        ui.selectable_value(current_tool, Tool::Polygon, "Polygon");
-        ui.selectable_value(current_tool, Tool::Function, "Function");
+        tool_btn(ui, current_tool, Tool::Select,   "☝", "Select", "F1");
+        tool_btn(ui, current_tool, Tool::Point,    "⊙", "Point", "F2");
+        tool_btn(ui, current_tool, Tool::Line,     "╱", "Line", "F3");
+        tool_btn(ui, current_tool, Tool::Circle,   "○", "Circle", "F4");
+        tool_btn(ui, current_tool, Tool::Polygon,  "⬠", "Polygon", "F5");
+        ui.separator();
+        tool_btn(ui, current_tool, Tool::Function, "f(x)", "Function", "F6");
     }).response
+}
+
+fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, icon: &str, name: &str, _key: &str) -> egui::Response {
+    let selected = *current == tool;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(42.0, 28.0), egui::Sense::click());
+    if response.clicked() { *current = tool; }
+    if response.secondary_clicked() { *current = tool; }
+
+    let visuals = if selected {
+        ui.visuals().widgets.open
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered
+    } else {
+        ui.visuals().widgets.inactive
+    };
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, visuals.rounding, visuals.weak_bg_fill);
+    if selected || response.hovered() {
+        painter.rect_stroke(rect, visuals.rounding, visuals.bg_stroke);
+    }
+
+    let font = egui::FontId::new(15.0, egui::FontFamily::Proportional);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, icon, font, visuals.fg_stroke.color);
+
+    response.on_hover_ui(|ui| {
+        ui.label(egui::RichText::new(name).strong());
+        ui.label(egui::RichText::new(format!("Shortcut: {}", _key)).weak());
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
