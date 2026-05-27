@@ -29,6 +29,7 @@ struct GrafitoApp {
     current_tool: Tool,
     current_view: ViewMode,
     camera: Camera3D,
+    animation_running: bool,
     pending_points: Vec<Point2>,
     pending_points_3d: Vec<Point3D>,
     last_mouse_pos: Option<Pos2>,
@@ -56,12 +57,18 @@ impl GrafitoApp {
             Point2::new(-2.0, -1.0),
         ])));
         document.add_object(GeoObject::Function(FunctionObj::new("sin(x)").with_label("f(x)")));
+        document.set_variable("a".into(), 2.0);
+        document.add_object(GeoObject::Function(FunctionObj::new("a*sin(x)").with_label("g(x)")));
+        // 3D demo
+        document.add_object(GeoObject::Cube3D(Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("C1")));
+        document.add_object(GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(2.0, 1.0, 0.0), 1.0).with_label("S1")));
 
         Self {
             document,
             current_tool: Tool::default(),
             current_view: ViewMode::D2,
             camera: Camera3D::new(1280.0 / 720.0),
+            animation_running: false,
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
@@ -655,12 +662,39 @@ impl eframe::App for GrafitoApp {
             });
         });
 
-        // Left: Algebra View
+        // Left: Algebra View + Variables + Sliders
         egui::SidePanel::left("algebra").default_width(200.0).show(ctx, |ui| {
             algebra_view(ui, &self.document, &mut self.selected_object);
             if let Some(id) = self.selected_object {
                 ui.separator();
                 properties_panel(ui, &mut self.document, id);
+            }
+            // Variables and sliders
+            if !self.document.variables.is_empty() {
+                ui.separator();
+                ui.heading("Variables");
+                ui.checkbox(&mut self.animation_running, "Animation");
+                let vars: Vec<(String, f64)> = self.document.variables.clone().into_iter().collect();
+                for (name, val) in &vars {
+                    let mut v = *val;
+                    let range = -10.0..=10.0;
+                    ui.horizontal(|ui| {
+                        ui.label(name);
+                        if ui.add(egui::Slider::new(&mut v, range).step_by(0.1)).changed() {
+                            self.document.set_variable(name.clone(), v);
+                        }
+                    });
+                }
+                // Auto-increment on animation
+                if self.animation_running {
+                    for (name, _) in &vars {
+                        if let Some(v) = self.document.variables.get(name) {
+                            let new_val = (v + 0.02) % 20.0 - 10.0;
+                            self.document.set_variable(name.clone(), new_val);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
             }
         });
 
