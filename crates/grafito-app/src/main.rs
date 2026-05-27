@@ -3,15 +3,17 @@ use grafito_core::{Document, GeoObject, ObjectId,
     ParabolaObj, HyperbolaObj,
     Point3DObj, Segment3DObj, Sphere3DObj, Cube3DObj,
     Pyramid3DObj, Surface3DObj,
+    SpatialIndex, ConstraintGraph,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
-use grafito_geometry::symbolic;
+use grafito_geometry::{symbolic, interval};
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::{Vec2 as GlamVec2, Vec3};
 use std::collections::HashMap;
 use std::fs;
+use rayon::prelude::*;
 
 const MAX_UNDO: usize = 50;
 
@@ -36,6 +38,8 @@ struct GrafitoApp {
     show_grid: bool,
     snap_to_grid: bool,
     exam_mode: bool,
+    spatial_index: SpatialIndex,
+    constraint_graph: ConstraintGraph,
     pending_points: Vec<Point2>,
     pending_points_3d: Vec<Point3D>,
     last_mouse_pos: Option<Pos2>,
@@ -81,6 +85,8 @@ impl GrafitoApp {
             show_grid: true,
             snap_to_grid: false,
             exam_mode: false,
+            spatial_index: SpatialIndex::new(),
+            constraint_graph: ConstraintGraph::new(),
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
@@ -388,24 +394,48 @@ impl GrafitoApp {
                     let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                     let min_x = fun.domain_min.unwrap_or(world_tl.x);
                     let max_x = fun.domain_max.unwrap_or(world_br.x);
-                    let steps = 500;
+                    let steps = 1000;
                     let step = (max_x - min_x) / steps as f64;
-                    let mut prev_screen: Option<Pos2> = None;
-                    let stroke = Stroke::new(fun.width, to_color32(fun.color));
-                    for i in 0..=steps {
+                    let variables = &self.document.variables;
+
+                    // Parallel evaluation with rayon
+                    let samples: Vec<(f64, Option<f64>)> = (0..=steps).into_par_iter().map(|i| {
                         let x = min_x + i as f64 * step;
-                        if let Ok(y) = eval_function_with_vars(&fun.expr, x, &self.document.variables) {
-                            if y.is_finite() && y.abs() < 1e6 {
-                                let s = view.world_to_screen(Point2::new(x, y));
-                                let p = canvas_rect.min + Vec2::new(s.x, s.y);
-                                if let Some(prev) = prev_screen {
+                        let y = eval_function_with_vars(&fun.expr, x, variables).ok()
+                            .filter(|v| v.is_finite() && v.abs() < 1e6);
+                        (x, y)
+                    }).collect();
+
+                    // Detect asymptotes for safety
+                    let asymptotes = interval::detect_asymptotes(&samples);
+
+                    let stroke = Stroke::new(fun.width, to_color32(fun.color));
+                    let mut prev_screen: Option<Pos2> = None;
+                    for (x, y_opt) in &samples {
+                        if let Some(y) = y_opt {
+                            let s = view.world_to_screen(Point2::new(*x, *y));
+                            let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                            if let Some(prev) = prev_screen {
+                                // Check asymptote gap
+                                let gap = (p.x - prev.x).abs();
+                                if gap < 300.0 {
                                     painter.line_segment([prev, p], stroke);
                                 }
-                                prev_screen = Some(p);
-                                continue;
                             }
+                            prev_screen = Some(p);
+                        } else {
+                            prev_screen = None;
                         }
-                        prev_screen = None;
+                    }
+
+                    // Draw asymptotes as dashed vertical lines
+                    for ax in &asymptotes {
+                        let s = view.world_to_screen(Point2::new(*ax, 0.0));
+                        let dash_stroke = Stroke::new(1.0, Color32::from_rgb(180, 100, 100));
+                        painter.line_segment([
+                            canvas_rect.min + Vec2::new(s.x, 0.0),
+                            canvas_rect.min + Vec2::new(s.x, canvas_rect.height()),
+                        ], dash_stroke);
                     }
                     if !fun.label.is_empty() {
                         let mid_x = (min_x + max_x) * 0.5;
@@ -1678,21 +1708,21 @@ fn execute_cas_command(document: &Document, cmd: &CasCmd) -> Option<String> {
         }
         "Factor" => {
             let expr = cmd.args.get(0)?;
-            match symbolic::symbolic_factor(expr) {
+            match symbolic::factor(expr) {
                 Ok(factors) => Some(format!("{} = {}", expr, factors)),
                 Err(e) => Some(format!("Factor error: {}", e)),
             }
         }
         "Expand" => {
             let expr = cmd.args.get(0)?;
-            match symbolic::symbolic_expand(expr) {
+            match symbolic::expand(expr) {
                 Ok(expanded) => Some(format!("{} = {}", expr, expanded)),
                 Err(e) => Some(format!("Expand error: {}", e)),
             }
         }
         "Simplify" => {
             let expr = cmd.args.get(0)?;
-            match symbolic::symbolic_simplify(expr) {
+            match symbolic::simplify(expr) {
                 Ok(simplified) => Some(format!("{} = {}", expr, simplified)),
                 Err(e) => Some(format!("Simplify error: {}", e)),
             }

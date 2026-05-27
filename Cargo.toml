@@ -40,6 +40,13 @@ bytemuck = "1.16"
 
 # Parsing & Expressions
 evalexpr = "11.3"
+rug = { version = "1.28", features = ["integer", "rational", "float"] }
+
+# Parallelism
+rayon = "1.10"
+
+# Spatial indexing
+rstar = "0.12"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

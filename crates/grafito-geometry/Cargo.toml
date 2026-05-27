@@ -17,3 +17,5 @@ robust.workspace = true
 evalexpr.workspace = true
 serde.workspace = true
 log.workspace = true
+rug.workspace = true
+rayon.workspace = true

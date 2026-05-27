@@ -28,3 +28,4 @@ anyhow.workspace = true
 rfd.workspace = true
 image.workspace = true
 serde_json.workspace = true
+rayon.workspace = true
