@@ -1,6 +1,6 @@
 use grafito_core::{Document, GeoObject, PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, ObjectId};
 use grafito_geometry::{Point2, ViewTransform, Color};
-use grafito_geometry::expr::eval_function;
+use grafito_geometry::expr::eval_function_with_vars;
 use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense, Key};
 use glam::Vec2 as GlamVec2;
@@ -318,7 +318,7 @@ impl GrafitoApp {
                     let stroke = Stroke::new(fun.width, to_color32(fun.color));
                     for i in 0..=steps {
                         let x = min_x + i as f64 * step;
-                        if let Ok(y) = eval_function(&fun.expr, x) {
+                        if let Ok(y) = eval_function_with_vars(&fun.expr, x, &self.document.variables) {
                             if y.is_finite() && y.abs() < 1e6 {
                                 let s = view.world_to_screen(Point2::new(x, y));
                                 let p = canvas_rect.min + Vec2::new(s.x, s.y);
@@ -333,7 +333,7 @@ impl GrafitoApp {
                     }
                     if !fun.label.is_empty() {
                         let mid_x = (min_x + max_x) * 0.5;
-                        if let Ok(y) = eval_function(&fun.expr, mid_x) {
+                        if let Ok(y) = eval_function_with_vars(&fun.expr, mid_x, &self.document.variables) {
                             let s = view.world_to_screen(Point2::new(mid_x, y));
                             painter.text(
                                 canvas_rect.min + Vec2::new(s.x, s.y + 14.0),
@@ -450,6 +450,14 @@ fn process_input(document: &mut Document, input_text: &mut String) {
     if let Some((name, rest)) = text.split_once('=') {
         let name = name.trim();
         let rest = rest.trim();
+        // Variable assignment: "a = 5"
+        if name.chars().all(|c| c.is_alphabetic()) && name.len() == 1 {
+            if let Ok(val) = rest.parse::<f64>() {
+                document.set_variable(name.to_string(), val);
+                input_text.clear();
+                return;
+            }
+        }
         // f(x) = expr or f = expr (function)
         if is_function_lhs(name) && (contains_var(rest, 'x') || rest.chars().all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))) {
             let obj = GeoObject::Function(FunctionObj::new(rest).with_label(name));
@@ -644,7 +652,7 @@ fn export_svg(document: &Document) -> String {
                 let mut points = Vec::new();
                 for i in 0..=steps {
                     let x = min_x + i as f64 * step;
-                    if let Ok(y) = eval_function(&fun.expr, x) {
+                    if let Ok(y) = eval_function_with_vars(&fun.expr, x, &document.variables) {
                         if y.is_finite() && y.abs() < 1e6 {
                             let s = view.world_to_screen(Point2::new(x, y));
                             points.push(format!("{:.1},{:.1}", s.x, s.y));
@@ -661,7 +669,7 @@ fn export_svg(document: &Document) -> String {
                 }
                 if !fun.label.is_empty() {
                     let mid_x = (min_x + max_x) * 0.5;
-                    if let Ok(y) = eval_function(&fun.expr, mid_x) {
+                    if let Ok(y) = eval_function_with_vars(&fun.expr, mid_x, &document.variables) {
                         let s = view.world_to_screen(Point2::new(mid_x, y));
                         let _ = writeln!(svg, r#"<text x="{:.1}" y="{:.1}" font-family="sans-serif" font-size="12" fill="black">{}</text>"#, s.x, s.y + 14.0, fun.label);
                     }
@@ -853,7 +861,7 @@ fn export_png(document: &Document, width: u32, height: u32) -> image::RgbaImage 
                 let mut prev: Option<(i32, i32)> = None;
                 for i in 0..=steps {
                     let x = min_x + i as f64 * step;
-                    if let Ok(y) = eval_function(&fun.expr, x) {
+                    if let Ok(y) = eval_function_with_vars(&fun.expr, x, &document.variables) {
                         if y.is_finite() && y.abs() < 1e6 {
                             let s = view.world_to_screen(Point2::new(x, y));
                             let curr = (s.x as i32, s.y as i32);

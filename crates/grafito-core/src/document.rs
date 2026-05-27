@@ -11,6 +11,7 @@ pub struct Document {
     #[serde(skip)]
     selection: Vec<ObjectId>,
     next_label_number: HashMap<String, usize>,
+    pub variables: HashMap<String, f64>,
 }
 
 impl Document {
@@ -131,6 +132,19 @@ impl Document {
         self.objects.clear();
         self.selection.clear();
         self.next_label_number.clear();
+        self.variables.clear();
+    }
+
+    pub fn set_variable(&mut self, name: String, value: f64) {
+        self.variables.insert(name, value);
+    }
+
+    pub fn get_variable(&self, name: &str) -> Option<f64> {
+        self.variables.get(name).copied()
+    }
+
+    pub fn variables(&self) -> &HashMap<String, f64> {
+        &self.variables
     }
 
     pub fn object_count(&self) -> usize {
