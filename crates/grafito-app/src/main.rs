@@ -1402,6 +1402,47 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                 }
                 input_text.clear(); return None;
             }
+            "Extrude" if cmd.args.len() >= 2 => {
+                let height: f64 = cmd.args.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
+                let id_opt = find_object_by_label(document, &cmd.args[0]);
+                let vertices = id_opt.and_then(|id| document.get_object(id).and_then(|obj| {
+                    if let GeoObject::Polygon(poly) = obj {
+                        if poly.vertices.len() >= 3 { Some(poly.vertices.clone()) }
+                        else { None }
+                    } else { None }
+                }));
+                if let Some(verts) = vertices {
+                    let base_y = 0.0; let top_y = height;
+                    for i in 0..verts.len() {
+                        let v = verts[i];
+                        let vn = verts[(i+1) % verts.len()];
+                        let b = Point3D::new(v.x, base_y, v.y);
+                        let t = Point3D::new(v.x, top_y, v.y);
+                        let bn = Point3D::new(vn.x, base_y, vn.y);
+                        let tn = Point3D::new(vn.x, top_y, vn.y);
+                        document.add_object(GeoObject::Segment3D(Segment3DObj::new(b, t).with_label("E")));
+                        document.add_object(GeoObject::Segment3D(Segment3DObj::new(b, bn).with_label("E")));
+                        document.add_object(GeoObject::Segment3D(Segment3DObj::new(t, tn).with_label("E")));
+                    }
+                } else {
+                    result = Some("Extrude only supports Polygons with 3+ vertices".into());
+                }
+                input_text.clear(); return result;
+            }
+            "Script" if cmd.args.len() >= 1 => {
+                // Script[command1; command2; command3; ...]
+                let commands: Vec<String> = cmd.args[0].split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let mut output = String::new();
+                for c in &commands {
+                    let mut temp = c.clone();
+                    if let Some(res) = process_input(document, &mut temp) {
+                        output.push_str(&res);
+                        output.push('\n');
+                    }
+                }
+                result = if output.is_empty() { Some("Script executed".into()) } else { Some(output) };
+                input_text.clear(); return result;
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
