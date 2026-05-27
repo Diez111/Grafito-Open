@@ -12,6 +12,7 @@ pub struct Document {
     selection: Vec<ObjectId>,
     next_label_number: HashMap<String, usize>,
     pub variables: HashMap<String, f64>,
+    pub spreadsheet: Vec<Vec<String>>,
 }
 
 impl Document {
@@ -156,6 +157,31 @@ impl Document {
 
     pub fn variables(&self) -> &HashMap<String, f64> {
         &self.variables
+    }
+
+    pub fn get_spreadsheet_cell(&mut self, row: usize, col: usize) -> String {
+        while self.spreadsheet.len() <= row { self.spreadsheet.push(Vec::new()); }
+        while self.spreadsheet[row].len() <= col { self.spreadsheet[row].push(String::new()); }
+        self.spreadsheet[row][col].clone()
+    }
+
+    pub fn set_spreadsheet_cell(&mut self, row: usize, col: usize, value: String) {
+        while self.spreadsheet.len() <= row { self.spreadsheet.push(Vec::new()); }
+        while self.spreadsheet[row].len() <= col { self.spreadsheet[row].push(String::new()); }
+        self.spreadsheet[row][col] = value;
+    }
+
+    pub fn eval_spreadsheet_cell(&self, row: usize, col: usize) -> Option<f64> {
+        if row >= self.spreadsheet.len() || col >= self.spreadsheet[row].len() { return None; }
+        let expr = &self.spreadsheet[row][col];
+        if expr.is_empty() { return None; }
+        grafito_geometry::expr::evaluate(expr, &self.variables.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).ok()
+    }
+
+    pub fn spreadsheet_dim(&self) -> (usize, usize) {
+        let rows = self.spreadsheet.len();
+        let cols = self.spreadsheet.iter().map(|r| r.len()).max().unwrap_or(0);
+        (rows.max(20), cols.max(8))
     }
 
     pub fn object_count(&self) -> usize {

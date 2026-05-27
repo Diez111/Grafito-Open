@@ -416,7 +416,6 @@ impl GrafitoApp {
                         }
                     }
                 }
-                GeoObject::Text(_) => {}
                 GeoObject::Ellipse(el) => {
                     let stroke = Stroke::new(el.width, to_color32(el.color));
                     let n = 64;
@@ -607,16 +606,26 @@ impl GrafitoApp {
             }
         }
         // Axes
-        let _black = Stroke::new(2.5, Color32::BLACK);
         let red = Stroke::new(2.5, Color32::RED);
         let green = Stroke::new(2.5, Color32::GREEN);
         let blue = Stroke::new(2.5, Color32::BLUE);
         let o = self.camera.project(&Point3D::new(0.0,0.0,0.0), w, h);
         if let Some(o) = o {
             let ox = origin + Vec2::new(o.0, o.1);
-            for (dir, color) in &[(Point3D::new(r as f64,0.0,0.0), red), (Point3D::new(0.0,r as f64,0.0), green), (Point3D::new(0.0,0.0,r as f64), blue)] {
+            let axis_labels = [
+                (Point3D::new(r as f64, 0.0, 0.0), red, "X"),
+                (Point3D::new(0.0, r as f64, 0.0), green, "Y"),
+                (Point3D::new(0.0, 0.0, r as f64), blue, "Z"),
+            ];
+            for (dir, color, label) in &axis_labels {
                 if let Some(d) = self.camera.project(dir, w, h) {
-                    painter.line_segment([ox, origin + Vec2::new(d.0, d.1)], *color);
+                    let end = origin + Vec2::new(d.0, d.1);
+                    painter.line_segment([ox, end], *color);
+                    // Arrow tip
+                    painter.circle_filled(end, 3.0, color.color);
+                    // Label
+                    painter.text(end + Vec2::new(4.0, -4.0), egui::Align2::LEFT_BOTTOM,
+                        label, egui::FontId::proportional(14.0), color.color);
                 }
             }
         }
@@ -937,6 +946,36 @@ impl eframe::App for GrafitoApp {
                     ctx.request_repaint();
                 }
             }
+        });
+
+        // Right: Spreadsheet View
+        egui::SidePanel::right("spreadsheet").resizable(true).default_width(280.0).show(ctx, |ui| {
+            ui.heading("Spreadsheet");
+            ui.separator();
+            let (rows, cols) = self.document.spreadsheet_dim();
+            egui::ScrollArea::both().show(ui, |ui| {
+                egui::Grid::new("sp_grid").striped(true).show(ui, |ui| {
+                    ui.label(""); // top-left corner
+                    for c in 0..cols { ui.monospace(format!(" {}", (b'A' + c as u8) as char)); }
+                    ui.end_row();
+                    for r in 0..rows {
+                        ui.monospace(format!("{}", r + 1));
+                        for c in 0..cols {
+                            let mut val = self.document.get_spreadsheet_cell(r, c);
+                            let resp = ui.add_sized([60.0, 18.0], egui::TextEdit::singleline(&mut val).font(egui::TextStyle::Monospace));
+                            if resp.changed() {
+                                self.save_state();
+                                self.document.set_spreadsheet_cell(r, c, val.clone());
+                                // If cell contains coordinate => create point
+                                if let Ok((x, y)) = parse_point_str(&val) {
+                                    self.document.add_object(GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(format!("{}{}", (b'A' + c as u8) as char, r + 1))));
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
         });
 
         // Bottom: Input Bar
@@ -1310,6 +1349,58 @@ fn process_input(document: &mut Document, input_text: &mut String) -> Option<Str
                 document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(format!("N({},{})", mu, sigma))));
                 result = Some(format!("Normal distribution N({},{}) added", mu, sigma));
                 input_text.clear(); return result;
+            }
+            "Curve3D" if cmd.args.len() >= 4 => {
+                // Curve3D[(expr_x, expr_y, expr_z), t, t_min, t_max]
+                let exprs = cmd.args[0].trim();
+                let t_min: f64 = cmd.args[2].trim().parse().unwrap_or(0.0);
+                let t_max: f64 = cmd.args[3].trim().parse().unwrap_or(6.28);
+                // Store as a polygon with sampled points
+                let steps = 200;
+                let mut pts = Vec::new();
+                for i in 0..=steps {
+                    let t = t_min + (t_max - t_min) * i as f64 / steps as f64;
+                    let mut vars = document.variables.clone();
+                    vars.insert("t".to_string(), t);
+                    let inner = exprs.trim_start_matches('(').trim_end_matches(')');
+                    let parts: Vec<&str> = inner.split(',').collect();
+                    if parts.len() >= 3 {
+                        let vals: Vec<f64> = parts.iter().filter_map(|s| {
+                            let expr = s.trim();
+                            eval_function_with_vars(expr, t, &vars).ok().or_else(|| {
+                                evaluate(expr, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).ok()
+                            })
+                        }).collect();
+                        if vals.len() >= 3 {
+                            pts.push(Point3D::new(vals[0], vals[1], vals[2]));
+                        }
+                    }
+                }
+                if pts.len() >= 2 {
+                    let mut segs = Vec::new();
+                    for i in 1..pts.len() {
+                        segs.push((pts[i-1], pts[i]));
+                    }
+                    // Store as multiple segments
+                    for (a, b) in &segs {
+                        document.add_object(GeoObject::Segment3D(
+                            Segment3DObj::new(*a, *b).with_label("C3")
+                        ));
+                    }
+                }
+                input_text.clear(); return None;
+            }
+            "SetValue" if cmd.args.len() == 2 => {
+                if let Some(id) = find_object_by_label(document, &cmd.args[0]) {
+                    if let Ok(val) = cmd.args[1].trim().parse::<f64>() {
+                        document.set_variable(cmd.args[0].trim().to_string(), val);
+                    } else if let Ok((x, y)) = parse_point_str(&cmd.args[1]) {
+                        if let Some(obj) = document.get_object_mut(id) {
+                            if let GeoObject::Point(p) = obj { p.position = Point2::new(x, y); }
+                        }
+                    }
+                }
+                input_text.clear(); return None;
             }
             _ => {}
         }
