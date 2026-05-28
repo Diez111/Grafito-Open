@@ -1,6 +1,6 @@
 # Grafito — Plan de Desarrollo
 
-> **Versión:** 0.1.0-alpha | **19 commits** | **~6400 líneas Rust** | **0 tests**
+> **Versión:** 0.6.0-alpha | **24 commits** | **~9300 líneas Rust** | **33 tests**
 
 ## DoD (Definition of Done) por Feature
 

@@ -9,18 +9,15 @@ use grafito_core::{Document, GeoObject, ObjectId,
     PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, EllipseObj, Sphere3DObj, Cube3DObj,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
-use grafito_ui::{Tool, algebra_view, properties_panel, toolbar};
+use grafito_ui::Tool;
 use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
-use grafito_ui::animation::RippleManager;
-use grafito_ui::toast::ToastManager;
 use egui::{Pos2, Color32, Sense, Key};
 use glam::Vec2 as GlamVec2;
-use std::fs;
 
 const MAX_UNDO: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewMode { D2, D3 }
+pub enum ViewMode { D2, D3 }
 
 #[allow(dead_code)]
 fn to_color32(c: Color) -> Color32 {
@@ -40,14 +37,16 @@ pub struct GrafitoApp {
     pub snap_to_grid: bool,
     pub exam_mode: bool,
     pub dark_mode: bool,
-    pub ripple_manager: RippleManager,
-    pub toast_manager: ToastManager,
     pub pending_points: Vec<Point2>,
     pub pending_points_3d: Vec<Point3D>,
     pub last_mouse_pos: Option<Pos2>,
     pub selected_object: Option<ObjectId>,
+    pub preview_object: Option<GeoObject>,
     pub input_text: String,
     pub cas_result: String,
+    pub show_spreadsheet: bool,
+    pub keyboard_tab: usize,
+    pub sidebar_tab: usize,
     pub recent_files: Vec<String>,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<Document>,
@@ -57,6 +56,7 @@ impl GrafitoApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut document = Document::new();
         document.set_view(ViewTransform::new(1280.0, 720.0));
+        document.view_mut().scale = 50.0; // ~13 units each side — matches GeoGebra default zoom
         document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)).with_label("A")));
         document.add_object(GeoObject::Point(PointObj::new(Point2::new(3.0, 2.0)).with_label("B")));
         document.add_object(GeoObject::Line(LineObj::new(Point2::new(-2.0, -1.0), Point2::new(4.0, 3.0)).with_label("l")));
@@ -71,7 +71,7 @@ impl GrafitoApp {
         document.add_object(GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(2.0, 1.0, 0.0), 1.0).with_label("S1")));
         document.add_object(GeoObject::Ellipse(EllipseObj::new(Point2::new(-1.0, -2.0), 2.0, 1.0).with_label("E1")));
 
-        let dark_mode = true; // dark by default
+        let dark_mode = false; // light mode by default, like GeoGebra
         if dark_mode { THEME_DARK.apply(&_cc.egui_ctx); } else { THEME_LIGHT.apply(&_cc.egui_ctx); }
 
         Self {
@@ -84,14 +84,16 @@ impl GrafitoApp {
             snap_to_grid: false,
             exam_mode: false,
             dark_mode,
-            ripple_manager: RippleManager::default(),
-            toast_manager: ToastManager::default(),
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
             selected_object: None,
+            preview_object: None,
             input_text: String::new(),
             cas_result: String::new(),
+            show_spreadsheet: false,
+            keyboard_tab: 0,
+            sidebar_tab: 0,
             recent_files: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -169,79 +171,11 @@ impl GrafitoApp {
 
 impl eframe::App for GrafitoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if self.exam_mode { ui.label("Disabled in Exam Mode"); return; }
-                    if ui.button("Open...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Grafito Document", &["grafito", "json", "toml"]).pick_file()
-                        {
-                            if let Ok(content) = fs::read_to_string(&path) {
-                                if let Ok(doc) = serde_json::from_str::<Document>(&content) {
-                                    self.document = doc; self.undo_stack.clear(); self.redo_stack.clear();
-                                    let p = path.to_string_lossy().to_string();
-                                    if !self.recent_files.contains(&p) { self.recent_files.insert(0, p); self.recent_files.truncate(8); }
-                                }
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button("Save").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Grafito Document", &["grafito"]).set_file_name("grafito.grafito").save_file()
-                        {
-                            if let Ok(json) = serde_json::to_string_pretty(&self.document) { let _ = fs::write(path, json); }
-                        }
-                        ui.close_menu();
-                    }
-                    if !self.recent_files.is_empty() {
-                        ui.separator(); ui.label("Recent:");
-                        for f in self.recent_files.clone() {
-                            let name = std::path::Path::new(&f).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(f.clone());
-                            if ui.button(&name).clicked() {
-                                if let Ok(content) = fs::read_to_string(&f) {
-                                    if let Ok(doc) = serde_json::from_str::<Document>(&content) {
-                                        self.document = doc; self.undo_stack.clear(); self.redo_stack.clear();
-                                    }
-                                }
-                                ui.close_menu();
-                            }
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Export SVG...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("SVG Image", &["svg"]).set_file_name("grafito.svg").save_file()
-                            { let svg = export::export_svg(&self.document); let _ = fs::write(path, svg); }
-                        ui.close_menu();
-                    }
-                    if ui.button("Export TikZ...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("LaTeX TikZ", &["tex", "tikz"]).set_file_name("grafito.tex").save_file()
-                            { let tikz = export::export_tikz(&self.document); let _ = fs::write(path, tikz); }
-                        ui.close_menu();
-                    }
-                    if ui.button("Export PNG...").clicked() {
-                        let w = self.document.view().screen_size.x as u32;
-                        let h = self.document.view().screen_size.y as u32;
-                        if let Some(path) = rfd::FileDialog::new().add_filter("PNG Image", &["png"]).set_file_name("grafito.png").save_file()
-                            { let img = export::export_png(&self.document, w, h); let _ = img.save(path); }
-                        ui.close_menu();
-                    }
-                });
-                if !self.cas_result.is_empty() {
-                    ui.separator(); ui.colored_label(Color32::from_rgb(40, 120, 40), &self.cas_result);
-                }
-            });
-        });
-
         // Keyboard shortcuts
         if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) { self.undo(); }
         if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
             || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl) { self.redo(); }
         if ctx.input(|i| i.key_pressed(Key::Delete)) { self.delete_selected(); }
-
-        // Tool shortcuts (F1-F6)
         if ctx.input(|i| i.key_pressed(Key::F1)) { self.current_tool = Tool::Select; }
         if ctx.input(|i| i.key_pressed(Key::F2)) { self.current_tool = Tool::Point; }
         if ctx.input(|i| i.key_pressed(Key::F3)) { self.current_tool = Tool::Line; }
@@ -250,201 +184,485 @@ impl eframe::App for GrafitoApp {
         if ctx.input(|i| i.key_pressed(Key::F6)) { self.current_tool = Tool::Function; }
         if ctx.input(|i| i.key_pressed(Key::Escape)) { self.current_tool = Tool::Select; }
 
-        // Top toolbar with view mode tabs
-        egui::TopBottomPanel::top("toolbar").frame(
-            egui::Frame::none().fill(if self.dark_mode { Color32::from_rgb(35, 37, 46) } else { Color32::from_rgb(240, 240, 245) }).inner_margin(8.0)
-        ).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.current_view, ViewMode::D2, "📐 2D");
-                ui.selectable_value(&mut self.current_view, ViewMode::D3, "🧊 3D");
-                ui.separator();
-                toolbar(ui, &mut self.current_tool);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(if self.dark_mode { "☀" } else { "🌙" }).clicked() {
-                        self.dark_mode = !self.dark_mode;
-                        if self.dark_mode { THEME_DARK.apply(ui.ctx()); }
-                        else { THEME_LIGHT.apply(ui.ctx()); }
-                    }
-                    if ui.button("⛶").on_hover_text("Zoom to Fit").clicked() { self.zoom_to_fit(); }
-                    ui.checkbox(&mut self.show_grid, "Grid");
-                    if ui.checkbox(&mut self.exam_mode, "Exam").changed() && self.exam_mode {
-                        self.cas_result = "EXAM MODE: CAS disabled".into();
-                    }
-                });
-            });
-        });
+        let is_dark = self.dark_mode;
+        let accent   = Color32::from_rgb(100, 80, 200);
+        let bar_fill  = if is_dark { Color32::from_rgb(40, 42, 54)  } else { Color32::WHITE };
+        let side_fill = if is_dark { Color32::from_rgb(32, 34, 43)  } else { Color32::from_rgb(250,250,252) };
+        let alg_fill  = if is_dark { Color32::from_rgb(25, 27, 36)  } else { Color32::WHITE };
+        let sep_col   = if is_dark { Color32::from_gray(55)         } else { Color32::from_gray(225) };
+        let txt_col   = if is_dark { Color32::WHITE                 } else { Color32::from_gray(30) };
 
-        // Left: Algebra View + Variables + Sliders
-        egui::SidePanel::left("algebra").default_width(200.0).show(ctx, |ui| {
-            algebra_view(ui, &self.document, &mut self.selected_object);
-            if let Some(id) = self.selected_object {
-                ui.separator();
-                properties_panel(ui, &mut self.document, id);
-            }
-            if !self.document.variables.is_empty() {
-                ui.separator(); ui.heading("Variables");
-                ui.checkbox(&mut self.animation_running, "Animation");
-                let vars: Vec<(String, f64)> = self.document.variables.clone().into_iter().collect();
-                for (name, val) in &vars {
-                    let mut v = *val;
-                    let range = -10.0..=10.0;
-                    ui.horizontal(|ui| {
-                        ui.label(name);
-                        if ui.add(egui::Slider::new(&mut v, range).step_by(0.1)).changed() {
-                            self.document.set_variable(name.clone(), v);
+        // ─── 1. TOP BAR (40px) ────────────────────────────────────────────────
+        egui::TopBottomPanel::top("topbar")
+            .exact_height(40.0)
+            .frame(egui::Frame::none().fill(bar_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col))
+                .inner_margin(egui::Margin::symmetric(12.0, 0.0)))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let _ = ui.add(egui::Button::new(egui::RichText::new("☰").size(20.0).color(Color32::from_gray(150))).frame(false));
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Grafito").color(accent).strong().size(16.0));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Suite Calculadora").color(Color32::from_gray(120)).size(13.0));
+                    ui.add_space(10.0);
+                    let pill_bg = Color32::from_gray(if is_dark { 55 } else { 238 });
+                    egui::Frame::none().fill(pill_bg).rounding(16.0)
+                        .inner_margin(egui::Margin::symmetric(10.0, 4.0)).show(ui, |ui| {
+                        let is_3d = self.current_view == ViewMode::D3;
+                        let text = if is_3d { "Gráficos 3D" } else { "Gráficos 2D" };
+                        if ui.selectable_label(is_3d, egui::RichText::new(text).size(12.5)).clicked() {
+                            self.current_view = if is_3d { ViewMode::D2 } else { ViewMode::D3 };
                         }
                     });
-                }
-                if self.animation_running {
-                    for (name, _) in &vars {
-                        if let Some(v) = self.document.variables.get(name) {
-                            let new_val = (v + 0.02) % 20.0 - 10.0;
-                            self.document.set_variable(name.clone(), new_val);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        ui.button("Pantalla");
+                        ui.add_space(4.0);
+                        if ui.button("Tema").clicked() {
+                            self.dark_mode = !self.dark_mode;
+                            if self.dark_mode { THEME_DARK.apply(ui.ctx()); } else { THEME_LIGHT.apply(ui.ctx()); }
                         }
-                    }
-                    ctx.request_repaint();
-                }
-            }
-        });
+                        ui.add_space(4.0);
+                        ui.button("Ajustes");
+                        ui.add_space(4.0);
+                        if ui.selectable_label(self.exam_mode, "Examen").clicked() {
+                            self.exam_mode = !self.exam_mode;
+                            if self.exam_mode { self.cas_result = "EXAM MODE: CAS disabled".into(); }
+                        }
+                    });
+                });
+            });
 
-        // Right: Spreadsheet View
-        egui::SidePanel::right("spreadsheet").resizable(true).default_width(280.0).show(ctx, |ui| {
-            ui.heading("Spreadsheet"); ui.separator();
-            let (rows, cols) = self.document.spreadsheet_dim();
-            egui::ScrollArea::both().show(ui, |ui| {
-                egui::Grid::new("sp_grid").striped(true).show(ui, |ui| {
-                    ui.label("");
-                    for c in 0..cols { ui.monospace(format!(" {}", (b'A' + c as u8) as char)); }
-                    ui.end_row();
-                    for r in 0..rows {
-                        ui.monospace(format!("{}", r + 1));
-                        for c in 0..cols {
-                            let mut val = self.document.get_spreadsheet_cell(r, c);
-                            let resp = ui.add_sized([60.0, 18.0], egui::TextEdit::singleline(&mut val).font(egui::TextStyle::Monospace));
-                            if resp.changed() {
-                                self.save_state();
-                                self.document.set_spreadsheet_cell(r, c, val.clone());
-                                if let Ok((x, y)) = commands::parse_point_str(&val) {
-                                    self.document.add_object(GeoObject::Point(
-                                        PointObj::new(Point2::new(x, y)).with_label(format!("{}{}", (b'A' + c as u8) as char, r + 1))
-                                    ));
-                                }
-                            }
-                        }
-                        ui.end_row();
+        // ─── 2. LEFT ICON SIDEBAR (44px, icons only with tooltips) ────────────
+        egui::SidePanel::left("icon_bar")
+            .exact_width(44.0)
+            .resizable(false)
+            .frame(egui::Frame::none().fill(side_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(10.0);
+                    for (i, (icon, tip)) in [
+                        ("A","Álgebra"),
+                        ("T","Herramientas"),
+                        ("#","Tabla"),
+                        ("S","Hoja"),
+                    ].iter().enumerate() {
+                        let active = self.sidebar_tab == i;
+                        let bg = if active { Color32::from_rgba_unmultiplied(100,80,200,35) } else { Color32::TRANSPARENT };
+                        let ic = if active { accent } else { Color32::from_gray(130) };
+                        let resp = ui.add_sized([44.0,44.0],
+                            egui::Button::new(egui::RichText::new(*icon).size(20.0).color(ic))
+                                .fill(bg).frame(false));
+                        if resp.clicked() { self.sidebar_tab = i; }
+                        resp.on_hover_text(*tip);
+                        ui.add_space(2.0);
                     }
                 });
             });
-        });
 
-        // Bottom: Input Bar
-        egui::TopBottomPanel::bottom("input_bar").default_height(40.0).show(ctx, |ui| {
-            if self.exam_mode { ui.label("EXAM MODE — input disabled"); return; }
-            ui.horizontal(|ui| {
-                ui.label("Input:");
-                let response = ui.text_edit_singleline(&mut self.input_text);
-                if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    self.save_state();
-                    self.cas_result = commands::process_input(&mut self.document, &mut self.input_text).unwrap_or_default();
-                }
-                if ui.button("Enter").clicked() {
-                    self.save_state();
-                    self.cas_result = commands::process_input(&mut self.document, &mut self.input_text).unwrap_or_default();
-                }
+        // ─── 3. ALGEBRA PANEL ────────────────────────────────────────────────
+        if self.sidebar_tab == 0 {
+            egui::SidePanel::left("algebra_panel")
+            .default_width(220.0)
+            .min_width(160.0)
+            .resizable(true)
+            .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+            .show(ctx, |ui| {
+                // Input row
+                egui::Frame::none()
+                    .fill(if is_dark { Color32::from_gray(33) } else { Color32::from_gray(248) })
+                    .inner_margin(egui::Margin { left:8.0, right:8.0, top:6.0, bottom:6.0 })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
+                            ui.add_space(3.0);
+                            let r = ui.add_sized(
+                                [ui.available_width(), 22.0],
+                                egui::TextEdit::singleline(&mut self.input_text)
+                                    .hint_text("Entrada...")
+                                    .frame(false)
+                                    .text_color(txt_col));
+                            self.preview_object = None;
+                            if !self.input_text.is_empty() {
+                                self.preview_object = commands::parse_preview(&self.input_text);
+                            }
+                            if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                self.save_state();
+                                self.cas_result = commands::process_input(&mut self.document, &mut self.input_text).unwrap_or_default();
+                            }
+                        });
+                    });
+                ui.add(egui::Separator::default().spacing(0.0));
+
+                // ── Object list — compact, 1 line each ──────────────────────
+                egui::ScrollArea::vertical().auto_shrink([false;2]).show(ui, |ui| {
+                    let mut delete_id: Option<ObjectId> = None;
+                    let ids: Vec<ObjectId> = self.document.objects_iter().map(|(id,_)| *id).collect();
+                    for oid in ids {
+                        let (obj_label, obj_name, obj_vis, obj_col, obj_expr) = {
+                            let Some(obj) = self.document.get_object(oid) else { continue; };
+                            let col = match obj.name() {
+                                "Point"|"Point3D" => Color32::from_rgb(50,100,255),
+                                "Line"            => Color32::from_rgb(90,110,130),
+                                "Function"        => Color32::from_rgb(16,185,129),
+                                _                 => Color32::from_rgb(239,68,68),
+                            };
+                            let expr = match obj {
+                                grafito_core::GeoObject::Function(f) => f.expr.clone(),
+                                grafito_core::GeoObject::Point(p) => format!("({:.2}, {:.2})", p.position.x, p.position.y),
+                                grafito_core::GeoObject::Line(l) => format!("({:.2}, {:.2}) ↔ ({:.2}, {:.2})", l.start.x, l.start.y, l.end.x, l.end.y),
+                                grafito_core::GeoObject::Circle(c) => format!("(x - {:.2})² + (y - {:.2})² = {:.2}²", c.center.x, c.center.y, c.radius),
+                                grafito_core::GeoObject::Ellipse(e) => format!("(x - {:.2})²/{:.2}² + (y - {:.2})²/{:.2}² = 1", e.center.x, e.center.y, e.rx, e.ry),
+                                grafito_core::GeoObject::Polygon(p) => format!("{} vertices", p.vertices.len()),
+                                grafito_core::GeoObject::Point3D(p) => format!("({:.2}, {:.2}, {:.2})", p.position.x, p.position.y, p.position.z),
+                                grafito_core::GeoObject::Sphere3D(s) => format!("r={:.2} c=({:.2}, {:.2}, {:.2})", s.radius, s.center.x, s.center.y, s.center.z),
+                                grafito_core::GeoObject::Cube3D(c) => format!("size={:.2}", c.size),
+                                grafito_core::GeoObject::Segment3D(s) => format!("({:.2}, {:.2}, {:.2}) ↔ ({:.2}, {:.2}, {:.2})", s.a.x, s.a.y, s.a.z, s.b.x, s.b.y, s.b.z),
+                                _ => String::new(),
+                            };
+                            (obj.label().to_string(), obj.name().to_string(), obj.is_visible(), col, expr)
+                        };
+
+                        let is_sel = self.selected_object == Some(oid);
+                        let row_bg = if is_sel {
+                            if is_dark { Color32::from_gray(42) } else { Color32::from_rgb(238,238,252) }
+                        } else { Color32::TRANSPARENT };
+
+                        let mut row_clicked = false;
+                        egui::Frame::none()
+                            .fill(row_bg)
+                            .inner_margin(egui::Margin { left:8.0, right:4.0, top:5.0, bottom:5.0 })
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    // Right-side controls drawn first
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add_sized([24.0, 20.0], egui::Button::new("del").frame(false)).clicked() {
+                                            delete_id = Some(oid);
+                                        }
+                                        if ui.add_sized([24.0, 20.0], egui::Button::new(if obj_vis { "ver" } else { "ocu" }).frame(false)).clicked() {
+                                            if let Some(o) = self.document.get_object_mut(oid) {
+                                                let v = o.is_visible(); o.set_visible(!v);
+                                            }
+                                        }
+                                        
+                                        // Left-side controls in remaining space
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            let dot_alpha = if obj_vis { 255u8 } else { 80u8 };
+                                            let dot_col = Color32::from_rgba_unmultiplied(
+                                                obj_col.r(), obj_col.g(), obj_col.b(), dot_alpha);
+                                            let (dot_r, _) = ui.allocate_exact_size(egui::vec2(10.0,10.0), egui::Sense::hover());
+                                            ui.painter().circle_filled(dot_r.center(), 5.0, dot_col);
+                                            ui.add_space(5.0);
+                                            
+                                            let txt = if !obj_expr.is_empty() {
+                                                format!("{}: {}", obj_label, obj_expr)
+                                            } else {
+                                                format!("{}: {}", obj_label, obj_name)
+                                            };
+                                            let lbl_resp = ui.add(egui::Label::new(
+                                                egui::RichText::new(txt).size(13.0).color(txt_col)).sense(egui::Sense::click()).truncate());
+                                            if lbl_resp.clicked() { row_clicked = true; }
+                                            if lbl_resp.double_clicked() {
+                                                if !obj_expr.is_empty() && obj_name == "Function" {
+                                                    self.input_text = format!("{}={}", obj_label, obj_expr);
+                                                } else if obj_name == "Point" {
+                                                    self.input_text = format!("{}={}", obj_label, obj_expr);
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+                            });
+                        
+                        if row_clicked {
+                            self.selected_object = if is_sel { None } else { Some(oid) };
+                        }
+                        
+                        // Thin separator
+                        let (sr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                        ui.painter().hline(sr.x_range(), sr.center().y, egui::Stroke::new(0.5, sep_col));
+                    }
+                    if let Some(id) = delete_id {
+                        self.document.remove_object(id);
+                        if self.selected_object == Some(id) { self.selected_object = None; }
+                    }
+
+                    // Variables
+                    if !self.document.variables.is_empty() {
+                        ui.add_space(6.0);
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Variables").size(11.0).color(Color32::from_gray(130)));
+                        ui.checkbox(&mut self.animation_running, egui::RichText::new("Animación").size(12.0));
+                        let vars: Vec<(String,f64)> = self.document.variables.clone().into_iter().collect();
+                        for (name, val) in &vars {
+                            let mut v = *val;
+                            ui.horizontal(|ui| {
+                                ui.add_space(10.0);
+                                ui.label(egui::RichText::new(name).size(12.0));
+                                let sl = egui::Slider::new(&mut v,-10.0..=10.0).step_by(0.1);
+                                if ui.add_sized([100.0, 16.0], sl).changed() {
+                                    self.document.set_variable(name.clone(), v);
+                                }
+                            });
+                        }
+                        if self.animation_running {
+                            for (name,_) in &vars {
+                                if let Some(v) = self.document.variables.get(name) {
+                                    let nv = (v + 0.02) % 20.0 - 10.0;
+                                    self.document.set_variable(name.clone(), nv);
+                                }
+                            }
+                            ctx.request_repaint();
+                        }
+                    }
+                });
             });
-        });
+        } else {
+            egui::SidePanel::left("empty_panel")
+                .default_width(220.0)
+                .min_width(160.0)
+                .resizable(true)
+                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(egui::RichText::new("En construcción...").color(Color32::from_gray(150)));
+                    });
+                });
+        }
 
-        // Central canvas
+        // ─── 4. MATH KEYBOARD — docked bottom panel (central area only) ──────────────
+        egui::TopBottomPanel::bottom("math_keyboard")
+            .min_height(180.0)
+            .frame(egui::Frame::none()
+                .fill(if is_dark { Color32::from_rgb(28,28,36) } else { Color32::from_rgb(244,245,250) })
+                .stroke(egui::Stroke::new(1.0, sep_col)))
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal_centered(|ui| {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                        // Tab bar
+                        ui.horizontal(|ui| {
+                            for (i, lbl) in ["123", "f(x)", "ABC", "#&~"].iter().enumerate() {
+                                let active = self.keyboard_tab == i;
+                                let c = if active { accent } else { Color32::from_gray(110) };
+                                let fbg = if active { Color32::from_rgba_unmultiplied(100,80,200,30) } else { Color32::TRANSPARENT };
+                                let r = egui::Frame::none().fill(fbg).rounding(6.0)
+                                    .inner_margin(egui::Margin::symmetric(8.0,3.0)).show(ui, |ui| {
+                                    ui.label(egui::RichText::new(*lbl).size(12.0).color(c).strong());
+                                }).response;
+                                if ui.interact(r.rect, ui.id().with(i), egui::Sense::click()).clicked() {
+                                    self.keyboard_tab = i;
+                                }
+                                ui.add_space(4.0);
+                            }
+                        });
+                        ui.add_space(5.0);
+
+                        let avail_w = ui.available_width();
+                        let sp = 4.0_f32;
+                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(38.0, 65.0);
+                        let total_w = (btn_w * 8.0) + (sp * 7.0);
+                        let pad = ((avail_w - total_w) / 2.0).max(0.0);
+
+                        macro_rules! kb {
+                            ($ui:expr, $t:expr, $i:expr) => {{
+                                let (r,resp) = $ui.allocate_exact_size(egui::vec2(btn_w, 32.0), egui::Sense::click());
+                                if $ui.is_rect_visible(r) {
+                                    let bg = if resp.hovered() {
+                                        if is_dark { Color32::from_gray(70) } else { Color32::from_gray(215) }
+                                    } else {
+                                        if is_dark { Color32::from_gray(48) } else { Color32::WHITE }
+                                    };
+                                    $ui.painter().rect(r, 4.0, bg, egui::Stroke::new(1.0, Color32::from_gray(if is_dark {65} else {210})));
+                                    $ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, $t,
+                                        egui::FontId::proportional(15.0),
+                                        if is_dark { Color32::WHITE } else { Color32::BLACK });
+                                }
+                                if resp.clicked() { self.input_text.push_str($i); }
+                            }};
+                        }
+
+                        let key_rows: &[&[(&str,&str)]] = match self.keyboard_tab {
+                            0 => &[
+                                &[("x","x"),("y","y"),("π","π"),("e","e"),("7","7"),("8","8"),("9","9"),("/","/")],
+                                &[("x²","^2"),("v/","sqrt("),("^","^"),("|","abs("),("4","4"),("5","5"),("6","6"),("*","*")],
+                                &[("<","<"),(">",">"),("(", "("),(")",")"),("1","1"),("2","2"),("3","3"),("-","-")],
+                            ],
+                            1 => &[
+                                &[("sin","sin("),("cos","cos("),("tan","tan("),("asin","asin("),("acos","acos("),("atan","atan("),("log","log("),("ln","ln(")],
+                                &[("sec","sec("),("csc","csc("),("cot","cot("),("!","!"),("deg","deg"),("rad","rad"),("f","f"),("g","g")],
+                                &[("<","<"),(">",">"),("(", "("),(")",")"),("1","1"),("2","2"),("3","3"),("-","-")],
+                            ],
+                            2 => &[
+                                &[("q","q"),("w","w"),("e","e"),("r","r"),("t","t"),("y","y"),("u","u"),("i","i")],
+                                &[("a","a"),("s","s"),("d","d"),("f","f"),("g","g"),("h","h"),("j","j"),("k","k")],
+                                &[("z","z"),("x","x"),("c","c"),("v","v"),("b","b"),("n","n"),("m","m"),(",","")],
+                            ],
+                            _ => &[
+                                &[("@","@"),("#","#"),("$","$"),("%","%"),("&","&"),("*","*"),("?","?"),("!","!")],
+                                &[("+","+"),("-","-"),("=","="),("_","_"),(":",""),(";",""),("\"",""),("'","")],
+                                &[("<","<"),(">",">"),("(", "("),(")",")"),("[","["),("]","]"),("{","{"),("}","}")],
+                            ],
+                        };
+                        for row in key_rows {
+                            ui.horizontal(|ui| {
+                                ui.add_space(pad);
+                                for (t, i) in *row { kb!(ui, *t, *i); ui.add_space(sp); }
+                            });
+                            ui.add_space(sp);
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add_space(pad);
+                            kb!(ui,"ans","ans"); ui.add_space(sp);
+                            kb!(ui,".",".");   ui.add_space(sp);
+                            kb!(ui,"0","0");   ui.add_space(sp);
+                            kb!(ui,"(","(");   ui.add_space(sp);
+                            kb!(ui,")",")");   ui.add_space(sp);
+                            kb!(ui,"=","=");   ui.add_space(sp);
+                            // Backspace
+                            { let (r,resp)=ui.allocate_exact_size(egui::vec2(btn_w, 32.0),egui::Sense::click());
+                              let bg=if resp.hovered(){Color32::from_rgb(220,60,60)}else{Color32::from_gray(if is_dark{48}else{230})};
+                              ui.painter().rect(r,4.0,bg,egui::Stroke::new(1.0,Color32::from_gray(if is_dark{65}else{210})));
+                              ui.painter().text(r.center(),egui::Align2::CENTER_CENTER,"Del",egui::FontId::proportional(14.0),if is_dark{Color32::WHITE}else{Color32::BLACK});
+                              if resp.clicked(){self.input_text.pop();} }
+                            ui.add_space(sp);
+                            // Enter
+                            { let (r,resp)=ui.allocate_exact_size(egui::vec2(btn_w, 32.0),egui::Sense::click());
+                              let bg=if resp.hovered(){Color32::from_rgb(120,100,240)}else{Color32::from_rgb(100,80,200)};
+                              ui.painter().rect(r,4.0,bg,egui::Stroke::NONE);
+                              ui.painter().text(r.center(),egui::Align2::CENTER_CENTER,"Enter",egui::FontId::proportional(13.0),Color32::WHITE);
+                              if resp.clicked(){self.save_state();self.cas_result=commands::process_input(&mut self.document,&mut self.input_text).unwrap_or_default();} }
+                        });
+                        ui.add_space(12.0);
+                    });
+                });
+            });
+
+        // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
+        if self.show_spreadsheet {
+            egui::SidePanel::right("spreadsheet")
+                .resizable(true).default_width(280.0)
+                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .show(ctx, |ui| {
+                    ui.heading("Hoja de Cálculo");
+                    ui.separator();
+                    let (rows, cols) = self.document.spreadsheet_dim();
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        egui::Grid::new("sp").striped(true).show(ui, |ui| {
+                            ui.label("");
+                            for c in 0..cols { ui.monospace(format!(" {}", (b'A'+c as u8) as char)); }
+                            ui.end_row();
+                            for r in 0..rows {
+                                ui.monospace(format!("{}", r+1));
+                                for c in 0..cols {
+                                    let mut val = self.document.get_spreadsheet_cell(r,c);
+                                    if ui.add_sized([60.0,18.0], egui::TextEdit::singleline(&mut val).font(egui::TextStyle::Monospace)).changed() {
+                                        self.save_state();
+                                        self.document.set_spreadsheet_cell(r,c,val.clone());
+                                        if let Ok((x,y)) = commands::parse_point_str(&val) {
+                                            self.document.add_object(GeoObject::Point(
+                                                PointObj::new(Point2::new(x,y)).with_label(
+                                                    format!("{}{}", (b'A'+c as u8) as char, r+1))));
+                                        }
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                });
+        }
+
+        // ─── 6. CENTRAL CANVAS ───────────────────────────────────────────────
         match self.current_view {
             ViewMode::D2 => {
                 self.camera.aspect = 1.6;
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    let canvas_rect = ui.available_rect_before_wrap();
-                    self.handle_canvas_input(ui, canvas_rect);
-                    let response = ui.interact(canvas_rect, ui.id().with("ctx_menu"), Sense::click());
-                    if response.clicked_by(egui::PointerButton::Secondary) {
-                        response.context_menu(|ui| {
-                            if ui.button("Delete selected").clicked() { self.delete_selected(); ui.close_menu(); }
-                            if ui.button("Zoom to fit").clicked() { self.zoom_to_fit(); ui.close_menu(); }
-                            ui.separator();
-                            if ui.button("Reset view").clicked() {
-                                self.document.view_mut().scale = 1.0;
-                                self.document.view_mut().offset = GlamVec2::ZERO;
-                                ui.close_menu();
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(if is_dark { Color32::from_gray(18) } else { Color32::WHITE }))
+                    .show(ctx, |ui| {
+                        let canvas_rect = ui.available_rect_before_wrap();
+                        self.handle_canvas_input(ui, canvas_rect);
+
+                        // Compact canvas controls — top-right corner, inside canvas
+                        let ctrl_x = canvas_rect.right() - 44.0;
+                        let ctrl_y = canvas_rect.top() + 8.0;
+                        let painter = ui.painter();
+                        // Zoom-fit button
+                        let zf_rect = egui::Rect::from_min_size(
+                            egui::pos2(ctrl_x, ctrl_y), egui::vec2(34.0, 28.0));
+                        painter.rect(zf_rect, 4.0, Color32::from_rgba_unmultiplied(255,255,255,200),
+                            egui::Stroke::new(1.0, Color32::from_gray(200)));
+                        painter.text(zf_rect.center(), egui::Align2::CENTER_CENTER, "[ ]",
+                            egui::FontId::proportional(16.0), Color32::from_gray(60));
+                        if ui.interact(zf_rect, ui.id().with("zf"), egui::Sense::click()).clicked() {
+                            self.zoom_to_fit();
+                        }
+
+                        let mut painter = ui.painter().clone();
+                        painter.set_clip_rect(canvas_rect);
+                        self.draw_grid(&painter, canvas_rect);
+                        self.draw_axes(&painter, canvas_rect);
+                        self.draw_objects(&painter, canvas_rect);
+
+                        if let Some(preview) = &self.preview_object {
+                            match preview {
+                                GeoObject::Function(fun) => {
+                                    let mut f = fun.clone(); f.color = Color::new(0.5,0.5,0.5,0.6);
+                                    self.draw_object(&painter, canvas_rect, &GeoObject::Function(f));
+                                }
+                                GeoObject::Point(p) => {
+                                    let mut pt = p.clone(); pt.color = Color::new(0.5,0.5,0.5,0.6);
+                                    self.draw_object(&painter, canvas_rect, &GeoObject::Point(pt));
+                                }
+                                _ => {}
                             }
-                            ui.checkbox(&mut self.show_grid, "Show Grid");
-                            ui.checkbox(&mut self.snap_to_grid, "Snap to Grid");
-                        });
-                    }
-                    let painter = ui.painter();
-                    self.draw_grid(painter, canvas_rect);
-                    self.draw_axes(painter, canvas_rect);
-                    self.draw_objects(painter, canvas_rect);
-                });
+                        }
+                    });
             }
             ViewMode::D3 => {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let canvas_rect = ui.available_rect_before_wrap();
                     let w = canvas_rect.width(); let h = canvas_rect.height();
                     self.camera.aspect = w / h.max(1.0);
-                    let ctx_resp = ui.interact(canvas_rect, ui.id().with("ctx_menu_3d"), Sense::click());
+                    let ctx_resp = ui.interact(canvas_rect, ui.id().with("ctx3d"), Sense::click());
                     if ctx_resp.clicked_by(egui::PointerButton::Secondary) {
                         ctx_resp.context_menu(|ui| {
-                            if ui.button("Delete selected").clicked() { self.delete_selected(); ui.close_menu(); }
-                            if ui.button("Reset view").clicked() { self.camera = Camera3D::new(w / h.max(1.0)); ui.close_menu(); }
+                            if ui.button("Borrar selección").clicked() { self.delete_selected(); ui.close_menu(); }
+                            if ui.button("Reiniciar vista").clicked() { self.camera = Camera3D::new(w/h.max(1.0)); ui.close_menu(); }
                         });
                     }
                     let response = ui.interact(canvas_rect, ui.id().with("canvas3d"), Sense::click_and_drag());
                     if let Some(pos) = response.hover_pos() {
                         if response.dragged_by(egui::PointerButton::Secondary) {
-                            if let Some(last) = self.last_mouse_pos { self.camera.orbit((pos.x - last.x) * 0.005, (pos.y - last.y) * 0.005); }
+                            if let Some(last) = self.last_mouse_pos {
+                                self.camera.orbit((pos.x-last.x)*0.005, (pos.y-last.y)*0.005);
+                            }
                         }
                         if response.dragged_by(egui::PointerButton::Primary) {
                             if let Some(last) = self.last_mouse_pos {
-                                if self.current_tool == Tool::Select { self.camera.pan(pos.x - last.x, pos.y - last.y); }
+                                if self.current_tool == Tool::Select { self.camera.pan(pos.x-last.x, pos.y-last.y); }
                             }
                         }
                         if response.hovered() {
-                            let scroll = ui.input(|i| i.smooth_scroll_delta);
-                            if scroll.y != 0.0 { self.camera.zoom(1.0 + scroll.y * 0.005); }
+                            let sc = ui.input(|i| i.smooth_scroll_delta);
+                            if sc.y != 0.0 { self.camera.zoom(1.0 + sc.y*0.005); }
                         }
                         self.last_mouse_pos = Some(pos);
                     }
                     if response.clicked_by(egui::PointerButton::Primary) && self.current_tool != Tool::Select {
                         self.handle_3d_click(ui, &response, canvas_rect, w, h);
                     }
-                    let painter = ui.painter();
-                    self.draw_3d_grid(painter, canvas_rect, w, h);
-                    self.draw_3d_objects(painter, canvas_rect, w, h);
+                    self.draw_3d_grid(ui.painter(), canvas_rect, w, h);
+                    self.draw_3d_objects(ui.painter(), canvas_rect, w, h);
                 });
             }
         }
-
-        // Status bar
-        egui::TopBottomPanel::bottom("status").min_height(20.0).frame(
-            egui::Frame::none().fill(if self.dark_mode { Color32::from_rgb(28, 30, 36) } else { Color32::from_rgb(245, 245, 248) }).inner_margin(6.0)
-        ).show(ctx, |ui| {
-            let tool_hint = match self.current_tool {
-                Tool::Select => "🖱 Select: Click to pick, drag to pan, scroll to zoom",
-                Tool::Point => "⊙ Point: Click to place | (x,y) or A=(x,y) in input bar",
-                Tool::Line => "╱ Line: Click two points | F3",
-                Tool::Circle => "○ Circle: Click center then edge | F4",
-                Tool::Polygon => "⬠ Polygon: Click vertices | F5",
-                Tool::Function => "𝑓 Function: f(x)=expr in input bar | F6",
-            };
-            ui.horizontal(|ui| {
-                ui.label(tool_hint);
-                ui.add_space(20.0);
-                ui.label(format!("Objs: {} | {}", self.document.object_count(),
-                    if self.current_view == ViewMode::D2 { "2D" } else { "3D" }));
-            });
-        });
-
-        // Ripples and toasts drawn last (on the 2D canvas painter)
-        // They are drawn via the canvas painter in render_2d.
     }
 }
+
 
 fn main() {
     env_logger::init();

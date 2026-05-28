@@ -97,28 +97,28 @@ impl GrafitoApp {
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
 
-        // Adaptive grid step based on zoom level
-        let screen_range = canvas_rect.width().max(canvas_rect.height()) as f64;
-        let world_range = (world_br.x - world_tl.x).max(world_tl.y - world_br.y).max(0.001);
-        let pixels_per_unit = screen_range / world_range;
-
-        let (major_step, minor_step) = if pixels_per_unit > 200.0 { (1.0, 0.2) }
-            else if pixels_per_unit > 80.0 { (1.0, 0.5) }
-            else if pixels_per_unit > 30.0 { (5.0, 1.0) }
-            else if pixels_per_unit > 10.0 { (10.0, 2.0) }
-            else if pixels_per_unit > 3.0 { (25.0, 5.0) }
-            else if pixels_per_unit > 1.0 { (50.0, 10.0) }
-            else { (100.0, 25.0) };
+        // Dynamic grid step based on zoom level (target ~100 pixels per major step)
+        let pixels_per_unit = self.document.view().scale as f64; // Scale is roughly pixels per unit
+        let target_world_step = 100.0 / pixels_per_unit.max(1e-6);
+        let magnitude = target_world_step.log10().floor();
+        let base = 10f64.powf(magnitude);
+        let factor = target_world_step / base;
+        
+        let major_step = if factor < 2.0 { 1.0 * base }
+            else if factor < 5.0 { 2.0 * base }
+            else { 5.0 * base };
+        let minor_step = major_step / 5.0;
 
         let min_x = (world_tl.x / minor_step).floor() as i32 - 1;
         let max_x = (world_br.x / minor_step).ceil() as i32 + 1;
         let min_y = (world_br.y / minor_step).floor() as i32 - 1;
         let max_y = (world_tl.y / minor_step).ceil() as i32 + 1;
 
-        let minor_color = to_color32(Color::new(0.88, 0.88, 0.90, 1.0));
-        let major_color = to_color32(Color::new(0.78, 0.78, 0.82, 1.0));
+        // GeoGebra-style: very faint minor grid, slightly visible major grid
+        let minor_color = if self.dark_mode { Color32::from_rgba_unmultiplied(255, 255, 255, 12) } else { Color32::from_rgba_unmultiplied(0, 0, 0, 15) };
+        let major_color = if self.dark_mode { Color32::from_rgba_unmultiplied(255, 255, 255, 28) } else { Color32::from_rgba_unmultiplied(0, 0, 0, 35) };
         let minor_stroke = Stroke::new(0.5, minor_color);
-        let major_stroke = Stroke::new(1.0, major_color);
+        let major_stroke = Stroke::new(0.5, major_color);
 
         for xi in min_x..=max_x {
             let x = xi as f64 * minor_step;
@@ -153,7 +153,7 @@ impl GrafitoApp {
         let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
         let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
 
-        let stroke = Stroke::new(2.0, Color32::BLACK);
+        let stroke = if self.dark_mode { Stroke::new(1.0, Color32::from_gray(180)) } else { Stroke::new(1.0, Color32::from_gray(80)) };
 
         let x_axis_a = view.world_to_screen(Point2::new(world_tl.x, x_axis_y));
         let x_axis_b = view.world_to_screen(Point2::new(world_br.x, x_axis_y));
@@ -168,31 +168,97 @@ impl GrafitoApp {
             [canvas_rect.min + Vec2::new(y_axis_a.x, y_axis_a.y), canvas_rect.min + Vec2::new(y_axis_b.x, y_axis_b.y)],
             stroke,
         );
+
+        // Dynamic grid step for axis numbers
+        let pixels_per_unit = self.document.view().scale as f64;
+        let target_world_step = 100.0 / pixels_per_unit.max(1e-6);
+        let magnitude = target_world_step.log10().floor();
+        let base = 10f64.powf(magnitude);
+        let factor = target_world_step / base;
+        
+        let major_step = if factor < 2.0 { 1.0 * base }
+            else if factor < 5.0 { 2.0 * base }
+            else { 5.0 * base };
+
+        let format_num = |v: f64| -> String {
+            let rounded = (v * 1000.0).round() / 1000.0;
+            format!("{}", rounded)
+        };
+
+        let text_color = if self.dark_mode { Color32::from_gray(180) } else { Color32::from_gray(80) };
+        let font = egui::FontId::proportional(12.0);
+
+        let min_x = (world_tl.x / major_step).floor() as i32 - 1;
+        let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+        for xi in min_x..=max_x {
+            let x = xi as f64 * major_step;
+            if x.abs() < 1e-9 { continue; } // Origin handled separately
+            let s = view.world_to_screen(Point2::new(x, x_axis_y));
+            let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+            painter.line_segment([pos + Vec2::new(0.0, -3.0), pos + Vec2::new(0.0, 3.0)], stroke);
+            painter.text(pos + Vec2::new(0.0, 6.0), egui::Align2::CENTER_TOP, format_num(x), font.clone(), text_color);
+        }
+
+        let min_y = (world_br.y / major_step).floor() as i32 - 1;
+        let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+        for yi in min_y..=max_y {
+            let y = yi as f64 * major_step;
+            if y.abs() < 1e-9 { continue; }
+            let s = view.world_to_screen(Point2::new(y_axis_x, y));
+            let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+            painter.line_segment([pos + Vec2::new(-3.0, 0.0), pos + Vec2::new(3.0, 0.0)], stroke);
+            painter.text(pos + Vec2::new(-6.0, 0.0), egui::Align2::RIGHT_CENTER, format_num(y), font.clone(), text_color);
+        }
+
+        let origin = view.world_to_screen(Point2::new(0.0, 0.0));
+        let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
+        painter.text(origin_pos + Vec2::new(-6.0, 6.0), egui::Align2::RIGHT_TOP, "0", font, text_color);
     }
 
     pub(crate) fn draw_objects(&self, painter: &egui::Painter, canvas_rect: Rect) {
-        let view = self.document.view();
         for (_, obj) in self.document.objects_iter() {
-            if !obj.is_visible() {
-                continue;
+            if obj.is_visible() {
+                self.draw_object(painter, canvas_rect, obj);
             }
-            match obj {
-                GeoObject::Point(p) => {
-                    let screen = view.world_to_screen(p.position);
-                    let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                    let size = p.size.max(1.0);
-                    let color = to_color32(p.color);
-                    painter.circle_filled(pos, size, color);
-                    if !p.label.is_empty() {
-                        painter.text(
-                            pos + Vec2::new(size + 2.0, -size - 2.0),
-                            egui::Align2::LEFT_BOTTOM,
-                            &p.label,
-                            egui::FontId::proportional(12.0),
-                            Color32::BLACK,
-                        );
-                    }
+        }
+        
+        if let Some(preview) = &self.preview_object {
+            let mut preview_clone = preview.clone();
+            match &mut preview_clone {
+                GeoObject::Function(f) => {
+                    f.color = Color { r: 0.4, g: 0.4, b: 0.4, a: 0.8 };
+                    f.width = 2.5;
+                    f.label = String::new();
                 }
+                GeoObject::Point(p) => {
+                    p.color = Color { r: 0.4, g: 0.4, b: 0.4, a: 0.8 };
+                    p.label = String::new();
+                }
+                _ => {}
+            }
+            self.draw_object(painter, canvas_rect, &preview_clone);
+        }
+    }
+
+    pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
+        let view = self.document.view();
+        match obj {
+            GeoObject::Point(p) => {
+                let screen = view.world_to_screen(p.position);
+                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                let size = p.size.max(1.0);
+                let color = to_color32(p.color);
+                painter.circle_filled(pos, size, color);
+                if !p.label.is_empty() {
+                    painter.text(
+                        pos + Vec2::new(size + 2.0, -size - 2.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        &p.label,
+                        egui::FontId::proportional(12.0),
+                        Color32::BLACK,
+                    );
+                }
+            }
                 GeoObject::Line(l) => {
                     let a = view.world_to_screen(l.start);
                     let b = view.world_to_screen(l.end);
@@ -298,14 +364,7 @@ impl GrafitoApp {
                         }
                     }
 
-                    for ax in &asymptotes {
-                        let s = view.world_to_screen(Point2::new(*ax, 0.0));
-                        let dash_stroke = Stroke::new(1.0, Color32::from_rgb(180, 100, 100));
-                        painter.line_segment([
-                            canvas_rect.min + Vec2::new(s.x, 0.0),
-                            canvas_rect.min + Vec2::new(s.x, canvas_rect.height()),
-                        ], dash_stroke);
-                    }
+                    // Asymptotes drawing disabled to avoid false grid lines
                     if !fun.label.is_empty() {
                         let mid_x = (min_x + max_x) * 0.5;
                         if let Ok(y) = eval_function_with_vars(&fun.expr, mid_x, &self.document.variables) {
@@ -433,6 +492,5 @@ impl GrafitoApp {
                 }
                 _ => {}
             }
-        }
     }
 }

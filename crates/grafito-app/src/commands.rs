@@ -10,11 +10,49 @@ use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::symbolic;
 use std::collections::{HashMap, HashSet};
 
+fn insert_implicit_multiplication(text: &str) -> String {
+    let mut res = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len() {
+        res.push(chars[i]);
+        if i + 1 < chars.len() {
+            let c1 = chars[i];
+            let c2 = chars[i + 1];
+            if c1.is_ascii_digit() && c2.is_ascii_alphabetic() { res.push('*'); }
+            if c1 == ')' && c2.is_ascii_alphabetic() { res.push('*'); }
+            if c1 == ')' && c2.is_ascii_digit() { res.push('*'); }
+            if c1.is_ascii_digit() && c2 == '(' { res.push('*'); }
+            if c1 == ')' && c2 == '(' { res.push('*'); }
+            if (c1 == 'x' || c1 == 'y') && c2 == '(' { res.push('*'); }
+            if (c1 == 'x' || c1 == 'y') && c2.is_ascii_alphabetic() { res.push('*'); }
+        }
+    }
+    res
+}
+
 pub fn process_input(document: &mut Document, input_text: &mut String) -> Option<String> {
-    let text = input_text.trim();
-    if text.is_empty() {
+    let raw_text = input_text.trim().to_string();
+    if raw_text.is_empty() {
         return None;
     }
+    
+    // Sanitize mathematical unicode symbols and uppercase variables from virtual keyboard
+    let text = raw_text
+        .replace("X", "x")
+        .replace("Y", "y")
+        .replace("F(x)", "f(x)")
+        .replace("G(x)", "g(x)")
+        .replace("x²", "x^2")
+        .replace("√", "sqrt")
+        .replace("|x|", "abs(x)")
+        .replace("π", "3.14159265359")
+        .replace("÷", "/")
+        .replace("×", "*")
+        .replace("≤", "<=")
+        .replace("≥", ">=");
+        
+    let text_with_implicit = insert_implicit_multiplication(&text);
+    let text = text_with_implicit.as_str();
     let mut result: Option<String> = None;
 
     if let Some(cmd) = parse_cas_command(text) {
@@ -395,7 +433,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 return None;
             }
         }
-        if is_function_lhs(name) && (contains_var(rest, 'x') || rest.chars().all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))) {
+        if is_function_lhs(name) && (rest.contains('x') || rest.chars().all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))) {
+            if let Some(id) = find_object_by_label(document, name) {
+                document.remove_object(id);
+            }
             let obj = GeoObject::Function(FunctionObj::new(rest).with_label(name));
             document.add_object(obj);
             input_text.clear();
@@ -567,7 +608,9 @@ pub fn is_function_lhs(name: &str) -> bool {
     if let Some((id, args)) = name.split_once('(') {
         let id = id.trim();
         let args = args.trim_end_matches(')').trim();
-        id.chars().all(|c| c.is_alphabetic())
+        id.chars().all(|c| c.is_alphabetic() || c.is_ascii_digit())
+            && !id.is_empty()
+            && !id.chars().next().unwrap().is_ascii_digit()
             && args.len() == 1
             && args.chars().all(|c| c.is_alphabetic())
     } else {
@@ -651,6 +694,55 @@ pub fn root_10<F: Fn(f64) -> f64>(f: &F) -> Option<(f64, f64)> {
             if r >= -10.0 && r <= 10.0 {
                 let fx = f(r);
                 if fx.abs() < 0.1 { return Some((r, fx)); }
+            }
+        }
+    }
+    None
+}
+
+pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
+    let raw_text = input_text.trim().to_string();
+    if raw_text.is_empty() { return None; }
+    let text = raw_text
+        .replace("x²", "x^2")
+        .replace("√", "sqrt")
+        .replace("|x|", "abs(x)")
+        .replace("π", "3.14159265359")
+        .replace("÷", "/")
+        .replace("×", "*")
+        .replace("≤", "<=")
+        .replace("≥", ">=");
+    let text_with_implicit = insert_implicit_multiplication(&text);
+    let text = text_with_implicit.as_str();
+
+    if parse_cas_command(text).is_some() { return None; }
+
+    if let Some((name, rest)) = text.split_once('=') {
+        let name = name.trim();
+        let rest = rest.trim();
+        if is_function_lhs(name) && (rest.contains('x') || rest.chars().all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))) {
+            return Some(GeoObject::Function(FunctionObj::new(rest).with_label(name)));
+        }
+        if rest.starts_with('(') && rest.ends_with(')') {
+            let inner = &rest[1..rest.len()-1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 2 {
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                    return Some(GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(name)));
+                }
+            }
+        }
+    } else {
+        if text.contains('x') {
+            return Some(GeoObject::Function(FunctionObj::new(text).with_label("preview")));
+        }
+        if text.starts_with('(') && text.ends_with(')') {
+            let inner = &text[1..text.len()-1];
+            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if parts.len() == 2 {
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                    return Some(GeoObject::Point(PointObj::new(Point2::new(x, y))));
+                }
             }
         }
     }

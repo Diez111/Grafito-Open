@@ -137,6 +137,28 @@ impl GeoObject {
         }
     }
 
+    pub fn set_visible(&mut self, visible: bool) {
+        match self {
+            GeoObject::Point(o) => o.visible = visible,
+            GeoObject::Line(o) => o.visible = visible,
+            GeoObject::Circle(o) => o.visible = visible,
+            GeoObject::Polygon(o) => o.visible = visible,
+            GeoObject::Function(o) => o.visible = visible,
+            GeoObject::Text(o) => o.visible = visible,
+            GeoObject::Ellipse(o) => o.visible = visible,
+            GeoObject::Parabola(o) => o.visible = visible,
+            GeoObject::Hyperbola(o) => o.visible = visible,
+            GeoObject::Point3D(o) => o.visible = visible,
+            GeoObject::Segment3D(o) => o.visible = visible,
+            GeoObject::Sphere3D(o) => o.visible = visible,
+            GeoObject::Cube3D(o) => o.visible = visible,
+            GeoObject::Pyramid3D(o) => o.visible = visible,
+            GeoObject::Cone3D(o) => o.visible = visible,
+            GeoObject::Cylinder3D(o) => o.visible = visible,
+            GeoObject::Surface3D(o) => o.visible = visible,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             GeoObject::Point(_) => "Point",

@@ -12,15 +12,6 @@ pub fn svg_color(c: Color) -> String {
     )
 }
 
-pub fn tikz_color(c: Color) -> String {
-    format!(
-        "rgb,255:red,{};green,{};blue,{}",
-        (c.r * 255.0) as u8,
-        (c.g * 255.0) as u8,
-        (c.b * 255.0) as u8
-    )
-}
-
 pub fn export_tikz(document: &Document) -> String {
     let view = document.view();
     let mut out = String::from("% Grafito TikZ Export\n\\begin{tikzpicture}[scale=1]\n");
