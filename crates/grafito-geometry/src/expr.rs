@@ -235,9 +235,10 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
         // Auto-truncate: stop when terms become numerically negligible
         // (coefficients < 1e-14 or arguments to trig exceed f64 precision at ~1e15)
         if terms.len() >= min_terms {
-            // Quick magnitude check at x=0: if the term contributes nothing, skip
-            let mag = eval_single_point(&substituted, 0.0);
-            if mag.is_none() || (mag.unwrap().abs() < 1e-14) {
+            // Evaluate at x=0.5 (not x=0) to expose precision loss in trig:
+            // cos(11^50 * pi * 0.5) has argument ~5e51 → f64 mantissa saturated → garbage
+            let mag = eval_single_point(&substituted, 0.5);
+            if mag.is_none() || (mag.unwrap().abs() < 1e-10) {
                 tiny_count += 1;
                 if tiny_count >= 3 {
                     break; // Series has converged numerically — remaining terms won't affect result
