@@ -242,8 +242,8 @@ impl GrafitoApp {
 
         // Vertical grid lines
         if view.x_log {
-            let min_pow = (world_tl.x.max(1e-300).log10().floor() as i32 - 1);
-            let max_pow = (world_br.x.max(1e-300).log10().ceil() as i32 + 1);
+            let min_pow = world_tl.x.max(1e-300).log10().floor() as i32 - 1;
+            let max_pow = world_br.x.max(1e-300).log10().ceil() as i32 + 1;
             for pow in min_pow..=max_pow {
                 let x = 10_f64.powf(pow as f64);
                 let a = view.world_to_screen(Point2::new(x, world_br.y));
@@ -278,8 +278,8 @@ impl GrafitoApp {
 
         // Horizontal grid lines
         if view.y_log {
-            let min_pow = (world_br.y.max(1e-300).log10().floor() as i32 - 1);
-            let max_pow = (world_tl.y.max(1e-300).log10().ceil() as i32 + 1);
+            let min_pow = world_br.y.max(1e-300).log10().floor() as i32 - 1;
+            let max_pow = world_tl.y.max(1e-300).log10().ceil() as i32 + 1;
             for pow in min_pow..=max_pow {
                 let y = 10_f64.powf(pow as f64);
                 let a = view.world_to_screen(Point2::new(world_tl.x, y));
@@ -1108,15 +1108,15 @@ impl GrafitoApp {
                                     grafito_geometry::expr::evaluate(&vf.expr_u, &vars_eval),
                                     grafito_geometry::expr::evaluate(&vf.expr_v, &vars_eval),
                                 ) {
-                                    if !u.is_finite() || !v.is_finite() { prev = None; break; }
+                                    if !u.is_finite() || !v.is_finite() { break; }
                                     let k1x = u; let k1y = v;
                                     let half_dt = sl_dt * 0.5;
                                     // k2
-                                    let (k2x, k2y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    let (k2x, k2y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { break; } };
                                     // k3
-                                    let (k3x, k3y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    let (k3x, k3y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { break; } };
                                     // k4
-                                    let (k4x, k4y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    let (k4x, k4y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { break; } };
                                     x += sl_dt / 6.0 * (k1x + 2.0*k2x + 2.0*k3x + k4x);
                                     y += sl_dt / 6.0 * (k1y + 2.0*k2y + 2.0*k3y + k4y);
                                     let screen = view.world_to_screen(Point2::new(x, y));
@@ -1126,7 +1126,7 @@ impl GrafitoApp {
                                         painter.line_segment([prev_pos, pos], sl_stroke);
                                     }
                                     prev = Some(pos);
-                                } else { prev = None; break; }
+                                } else { break; }
                             }
                         }
                     }

@@ -193,9 +193,9 @@ impl Expr {
                 Box::new(u.diff(var)),
             ),
             // floor/ceil/round: zero almost everywhere
-            Floor(u) => Const(0.0),
-            Ceil(u) => Const(0.0),
-            Round(u) => Const(0.0),
+            Floor(_u) => Const(0.0),
+            Ceil(_u) => Const(0.0),
+            Round(_u) => Const(0.0),
             // sec(u)' = sec(u)*tan(u)*u'
             Sec(u) => Mul(Box::new(Mul(Box::new(Sec(u.clone())), Box::new(Tan(u.clone())))), Box::new(u.diff(var))),
             // csc(u)' = -csc(u)*cot(u)*u'
@@ -865,11 +865,14 @@ fn replace_standalone(expr: &str, pattern: &str, replacement: &str) -> String {
             if !prev_is_ident && !next_is_ident {
                 result.push_str(replacement);
                 let pattern_char_count = pattern.chars().count();
-                for _ in 0..pattern_char_count {
+                // Skip remaining pattern chars (first char was already consumed by outer loop)
+                for _ in 1..pattern_char_count {
                     if let Some(skipped) = chars.next() {
                         byte_offset += skipped.len_utf8();
                     }
                 }
+                // Account for the first pattern char consumed by the outer while loop
+                byte_offset += c_byte_len;
                 prev_char = pattern.chars().last();
                 continue;
             }

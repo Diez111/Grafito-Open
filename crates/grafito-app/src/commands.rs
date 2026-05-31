@@ -1101,10 +1101,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             }
             "Contour" if cmd.args.len() >= 6 => {
                 let expr = cmd.args[0].trim();
-                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
-                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
-                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
-                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+                let _x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
+                let _x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
+                let _y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
+                let _y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
                 let levels: Vec<f64> = cmd.args[5..].iter()
                     .filter_map(|s| s.trim().parse::<f64>().ok()).collect();
                 if levels.is_empty() { return None; }
