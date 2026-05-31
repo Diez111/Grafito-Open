@@ -153,6 +153,11 @@ impl HsvColorPicker {
         // Manejar interacción — click+drag para posicionamiento absoluto
         if response.clicked() || response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
+                // Black color fix: if value is 0, the wheel shows nothing (black * any hue = black).
+                // Auto-set value to 1.0 on first interaction so the selected color becomes visible.
+                if self.value < 0.01 {
+                    self.value = 1.0;
+                }
                 let delta = pos - rect.center();
                 let distance = delta.length();
                 if distance <= radius {
