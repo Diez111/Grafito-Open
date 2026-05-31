@@ -169,10 +169,19 @@ impl ViewTransform {
         self.scale = (self.scale * factor as f64).clamp(1e-20, 1e20);
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
-        let new_anchor_screen_x = ox + anchor_world.x * self.scale;
-        let new_anchor_screen_y = oy - anchor_world.y * self.scale;
-        self.offset.x += anchor_screen.x as f64 - new_anchor_screen_x;
-        self.offset.y += anchor_screen.y as f64 - new_anchor_screen_y;
+        // Use log-aware coordinate transform, consistent with world_to_screen()
+        let sx = if self.x_log {
+            if anchor_world.x <= 0.0 { f64::NEG_INFINITY } else { ox + anchor_world.x.log10() * self.scale }
+        } else {
+            ox + anchor_world.x * self.scale
+        };
+        let sy = if self.y_log {
+            if anchor_world.y <= 0.0 { f64::NEG_INFINITY } else { oy - anchor_world.y.log10() * self.scale }
+        } else {
+            oy - anchor_world.y * self.scale
+        };
+        self.offset.x += anchor_screen.x as f64 - sx;
+        self.offset.y += anchor_screen.y as f64 - sy;
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
