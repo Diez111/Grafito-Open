@@ -450,23 +450,25 @@ fn replace_standalone(expr: &str, pattern: &str, replacement: &str) -> String {
     let mut result = String::with_capacity(expr.len() + replacement.len());
     let mut chars = expr.chars().peekable();
     let mut prev_char: Option<char> = None;
+    let mut byte_offset = 0;
     
     while let Some(c) = chars.next() {
-        // Check if we're at the start of the pattern
-        if expr[result.len()..].starts_with(pattern) {
+        let c_byte_len = c.len_utf8();
+        if expr[byte_offset..].starts_with(pattern) {
             let pattern_len = pattern.len();
-            let next_char = expr[result.len() + pattern_len..].chars().next();
+            let after = byte_offset + pattern_len;
+            let next_char = if after < expr.len() { expr[after..].chars().next() } else { None };
             
-            // Check if pattern is standalone (not part of a larger identifier)
             let prev_is_ident = prev_char.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
             let next_is_ident = next_char.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false);
             
             if !prev_is_ident && !next_is_ident {
-                // Standalone token - replace it
                 result.push_str(replacement);
-                // Skip the pattern characters
-                for _ in 0..pattern_len {
-                    chars.next();
+                let pattern_char_count = pattern.chars().count();
+                for _ in 0..pattern_char_count {
+                    if let Some(skipped) = chars.next() {
+                        byte_offset += skipped.len_utf8();
+                    }
                 }
                 prev_char = pattern.chars().last();
                 continue;
@@ -475,6 +477,7 @@ fn replace_standalone(expr: &str, pattern: &str, replacement: &str) -> String {
         
         result.push(c);
         prev_char = Some(c);
+        byte_offset += c_byte_len;
     }
     
     result
