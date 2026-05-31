@@ -150,21 +150,16 @@ impl HsvColorPicker {
             egui::Stroke::new(2.0, Color32::BLACK),
         );
 
-        // Manejar interacción con drag_delta (movimiento relativo, inmune a offset de Window)
-        if response.dragged() {
-            let delta = response.drag_delta();
-            self.hue = (self.hue + delta.x * 0.8).rem_euclid(360.0);
-            self.saturation = (self.saturation + delta.y * 0.005).clamp(0.0, 1.0);
-            return true;
-        }
-        if response.clicked() {
-            if let Some(pos) = response.hover_pos() {
+        // Manejar interacción — click+drag para posicionamiento absoluto
+        if response.clicked() || response.dragged() {
+            if let Some(pos) = response.interact_pointer_pos() {
                 let delta = pos - rect.center();
                 let distance = delta.length();
-                if distance <= radius && distance >= radius * 0.3 {
+                if distance <= radius {
+                    let clamped_dist = distance.clamp(radius * 0.3, radius);
                     let angle = delta.y.atan2(delta.x);
                     self.hue = ((angle / std::f32::consts::TAU) * 360.0 + 360.0) % 360.0;
-                    self.saturation = ((distance - radius * 0.3) / (radius * 0.7)).clamp(0.0, 1.0);
+                    self.saturation = ((clamped_dist - radius * 0.3) / (radius * 0.7)).clamp(0.0, 1.0);
                     return true;
                 }
             }
@@ -223,14 +218,9 @@ impl HsvColorPicker {
         painter.rect_filled(ind_rect, 3.0, Color32::WHITE);
         painter.rect_stroke(ind_rect, 3.0, egui::Stroke::new(1.0, Color32::from_gray(80)));
 
-        // Manejar interacción con drag_delta (movimiento relativo, inmune a offset de Window)
-        if response.dragged() {
-            let delta = response.drag_delta();
-            self.value = (self.value + delta.x / rect.width()).clamp(0.0, 1.0);
-            return true;
-        }
-        if response.clicked() {
-            if let Some(pos) = response.hover_pos() {
+        // Manejar interacción — click+drag para posicionamiento absoluto
+        if response.clicked() || response.dragged() {
+            if let Some(pos) = response.interact_pointer_pos() {
                 let value = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
                 self.value = value;
                 return true;
