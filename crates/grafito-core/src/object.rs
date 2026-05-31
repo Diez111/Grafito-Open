@@ -494,6 +494,7 @@ pub struct FunctionObj {
     pub width: f32,
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
+    pub fill_color: Option<Color>,
 }
 
 impl FunctionObj {
@@ -507,11 +508,17 @@ impl FunctionObj {
             width: 2.0,
             domain_min: None,
             domain_max: None,
+            fill_color: None,
         }
     }
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    pub fn with_fill(mut self, color: Color) -> Self {
+        self.fill_color = Some(color);
         self
     }
 }
@@ -752,12 +759,14 @@ pub struct PolarCurveObj {
     pub expr_r: String,
     pub t_min: f64, pub t_max: f64,
     pub color: Color, pub visible: bool, pub width: f32,
+    pub fill_color: Option<Color>,
 }
 impl PolarCurveObj {
     pub fn new(expr_r: &str, t_min: f64, t_max: f64) -> Self {
-        Self { id: ObjectId::new(), label: String::new(), expr_r: expr_r.to_string(), t_min, t_max, color: Color::new(0.0, 0.7, 0.3, 1.0), visible: true, width: 2.0 }
+        Self { id: ObjectId::new(), label: String::new(), expr_r: expr_r.to_string(), t_min, t_max, color: Color::new(0.0, 0.7, 0.3, 1.0), visible: true, width: 2.0, fill_color: None }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+    pub fn with_fill(mut self, color: Color) -> Self { self.fill_color = Some(color); self }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -823,10 +832,12 @@ pub struct ImplicitCurveObj {
     pub expr_rhs: String,
     pub operator: RelationOperator,
     pub color: Color, pub visible: bool, pub width: f32,
+    pub contour_levels: Option<Vec<f64>>,
+    pub contour_colors: Option<Vec<Color>>,
 }
 impl ImplicitCurveObj {
     pub fn new(expr_lhs: &str, expr_rhs: &str, operator: RelationOperator) -> Self {
-        Self { id: ObjectId::new(), label: String::new(), expr_lhs: expr_lhs.to_string(), expr_rhs: expr_rhs.to_string(), operator, color: Color::new(0.6, 0.2, 0.8, 1.0), visible: true, width: 2.0 }
+        Self { id: ObjectId::new(), label: String::new(), expr_lhs: expr_lhs.to_string(), expr_rhs: expr_rhs.to_string(), operator, color: Color::new(0.6, 0.2, 0.8, 1.0), visible: true, width: 2.0, contour_levels: None, contour_colors: None }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 }

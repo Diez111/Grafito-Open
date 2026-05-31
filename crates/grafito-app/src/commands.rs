@@ -8,7 +8,7 @@ use grafito_core::{
     ImplicitCurveObj, RelationOperator,
     Attractor3DObj, Fractal2DObj, HyperSurface4DObj, VectorField3DObj,
     HistogramObj, ScatterPlotObj, BoxPlotObj, RegressionLineObj,
-    ComplexGridObj,
+    ComplexGridObj, PolarCurveObj, ParametricCurve2DObj,
 };
 use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
@@ -1067,6 +1067,43 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(GeoObject::ComplexGrid(cg2));
                 input_text.clear(); return Some(format!("Heat map ({}x{}) created", res, res));
             }
+            "PolarCurve" if cmd.args.len() >= 3 => {
+                let expr = cmd.args[0].trim();
+                let t_min = cmd.args[1].trim().parse().unwrap_or(0.0);
+                let t_max = cmd.args[2].trim().parse().unwrap_or(6.2831853);
+                let obj = GeoObject::PolarCurve(PolarCurveObj::new(expr, t_min, t_max));
+                document.add_object(obj);
+                input_text.clear(); return Some(format!("Polar curve r = {} [{}..{}]", expr, t_min, t_max));
+            }
+            "ParametricCurve2D" if cmd.args.len() >= 5 => {
+                let expr_x = cmd.args[0].trim();
+                let expr_y = cmd.args[1].trim();
+                let t_min = cmd.args[2].trim().parse().unwrap_or(0.0);
+                let t_max = cmd.args[3].trim().parse().unwrap_or(6.2831853);
+                let obj = GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(expr_x, expr_y, t_min, t_max));
+                document.add_object(obj);
+                input_text.clear(); return Some("Parametric curve created".into());
+            }
+            "Contour" if cmd.args.len() >= 6 => {
+                let expr = cmd.args[0].trim();
+                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
+                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
+                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
+                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+                let levels: Vec<f64> = cmd.args[5..].iter()
+                    .filter_map(|s| s.trim().parse::<f64>().ok()).collect();
+                if levels.is_empty() { return None; }
+                // Split LHS/RHS on '='
+                let (lhs, rhs) = if let Some(pos) = expr.find('=') {
+                    (expr[..pos].trim().to_string(), expr[pos+1..].trim().to_string())
+                } else {
+                    (expr.to_string(), "0".to_string())
+                };
+                let mut obj = ImplicitCurveObj::new(&lhs, &rhs, RelationOperator::Eq);
+                obj.contour_levels = Some(levels);
+                document.add_object(GeoObject::ImplicitCurve(obj));
+                input_text.clear(); return Some("Contour curves created".into());
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
@@ -1130,6 +1167,31 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             return None;
         }
 
+        // Polar curve: r = f(theta) or r(theta) = f(theta)
+        if name == "r" || name == "r(θ)" || name == "r(t)" || name == "r(theta)" {
+            let t_min = 0.0;
+            let t_max = 2.0 * std::f64::consts::PI;
+            let obj = GeoObject::PolarCurve(PolarCurveObj::new(rest, t_min, t_max));
+            document.add_object(obj);
+            input_text.clear();
+            return None;
+        }
+
+        // Parametric 2D: (x(t), y(t)) = (f(t), g(t))
+        if let Some(inner) = name.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+            let name_parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+            if name_parts.len() == 2 && name_parts[0].ends_with("(t)") && name_parts[1].ends_with("(t)") {
+                let rest_clean = rest.trim_matches(|c| c == '(' || c == ')');
+                let rest_parts: Vec<&str> = rest_clean.split(',').map(|s| s.trim()).collect();
+                if rest_parts.len() == 2 {
+                    let obj = GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(rest_parts[0], rest_parts[1], 0.0, 6.28));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return None;
+                }
+            }
+        }
+
         if rest == "y" {
             let label = next_function_label(document);
             let obj = GeoObject::Function(FunctionObj::new(name).with_label(&label));
@@ -1138,6 +1200,22 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             return None;
         }
 
+        // Contour: f(x,y) = [c1, c2, c3] → multi-level implicit
+        if rest.starts_with('[') && rest.ends_with(']') {
+            if let Ok(levels) = rest[1..rest.len()-1].split(',')
+                .map(|s| s.trim().parse::<f64>())
+                .collect::<Result<Vec<f64>, _>>()
+            {
+                if levels.len() >= 2 {
+                    let mut obj = ImplicitCurveObj::new(name, "0", RelationOperator::Eq);
+                    obj.contour_levels = Some(levels);
+                    document.add_object(GeoObject::ImplicitCurve(obj));
+                    input_text.clear();
+                    return None;
+                }
+            }
+        }
+        
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(name, rest, RelationOperator::Eq));
         document.add_object(obj);
         input_text.clear();
@@ -1245,6 +1323,9 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
             "domaincoloring" | "domain_coloring" | "dcolor" => "DomainColoring",
             "heatmap" | "heat_map" | "hmap" => "HeatMap",
+            "polarcurve" | "polar_curve" | "polar" => "PolarCurve",
+            "parametriccurve2d" | "parametric_curve_2d" | "param2d" => "ParametricCurve2D",
+            "contour" | "contourlines" | "contour_lines" => "Contour",
             _ => {
                 if args.is_empty() { return None; }
                 return Some(CasCmd { command, args });

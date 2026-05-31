@@ -245,6 +245,13 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
         tool_btn(ui, current_tool, Tool::Attractor,   "Attractor", "");
         tool_btn(ui, current_tool, Tool::Fractal,     "Fractal", "");
         
+        // Visualization tools (only in 2D mode)
+        if !is_3d {
+            tool_btn(ui, current_tool, Tool::DomainColoring, "DomColor", "");
+            tool_btn(ui, current_tool, Tool::HeatMap,        "HeatMap", "");
+            tool_btn(ui, current_tool, Tool::ComplexGrid,    "CplxGrid", "");
+        }
+        
         // Statistics tools (only in 2D mode)
         if !is_3d {
             tool_btn(ui, current_tool, Tool::Histogram,   "Histogram", "");
@@ -380,6 +387,20 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
             painter.line_segment([c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)], stroke);
             painter.line_segment([c - egui::vec2(0.0, -10.0), c + egui::vec2(0.0, 10.0)], stroke);
         }
+        Tool::DomainColoring => {
+            painter.text(c, egui::Align2::CENTER_CENTER, "🌈", egui::FontId::new(18.0, egui::FontFamily::Proportional), text_color);
+        }
+        Tool::HeatMap => {
+            let r1 = egui::Rect::from_min_max(c - egui::vec2(10.0, 8.0), c + egui::vec2(-2.0, -8.0));
+            let r2 = egui::Rect::from_min_max(c - egui::vec2(0.0, 8.0), c + egui::vec2(8.0, -8.0));
+            painter.rect_filled(r1, 0.0, Color32::from_rgb(50, 100, 200));
+            painter.rect_filled(r2, 0.0, Color32::from_rgb(200, 50, 50));
+        }
+        Tool::ComplexGrid => {
+            painter.circle_stroke(c, 10.0, stroke);
+            painter.line_segment([c - egui::vec2(12.0, 0.0), c + egui::vec2(12.0, 0.0)], stroke);
+            painter.line_segment([c - egui::vec2(0.0, -12.0), c + egui::vec2(0.0, 12.0)], stroke);
+        }
     }
 
     response.on_hover_ui(|ui| {
@@ -409,6 +430,10 @@ pub enum Tool {
     // Construction tools
     Tangent,
     Perpendicular,
+    // Complex & Visualization
+    DomainColoring,
+    HeatMap,
+    ComplexGrid,
 }
 
 impl Default for Tool {
@@ -425,6 +450,7 @@ impl Tool {
             Tool::Line | Tool::Circle | Tool::Polygon | Tool::Function 
             | Tool::Sphere3D | Tool::Cube3D | Tool::Attractor | Tool::Fractal
             | Tool::Histogram | Tool::ScatterPlot | Tool::Tangent | Tool::Perpendicular 
+            | Tool::DomainColoring | Tool::HeatMap | Tool::ComplexGrid
             => egui::CursorIcon::Crosshair,
         }
     }

@@ -143,6 +143,18 @@ impl GrafitoApp {
                         self.input_text = "PerpendicularBisector[(x1,y1), (x2,y2)]".to_string();
                         self.selected_object = None;
                     }
+                    Tool::DomainColoring => {
+                        self.input_text = "DomainColoring[z^2 + 1, -3, 3, -3, 3, 200]".to_string();
+                        self.selected_object = None;
+                    }
+                    Tool::HeatMap => {
+                        self.input_text = "HeatMap[x^2 + y^2, -5, 5, -5, 5, 150]".to_string();
+                        self.selected_object = None;
+                    }
+                    Tool::ComplexGrid => {
+                        self.input_text = "ComplexGrid[sin(z), -3, 3, -3, 3]".to_string();
+                        self.selected_object = None;
+                    }
                 }
             }
 
@@ -583,6 +595,39 @@ impl GrafitoApp {
                     }
                     let samples = refined_samples;
 
+                    // Fill area under curve if fill_color is set
+                    if let Some(fill) = fun.fill_color {
+                        let mut fill_pts: Vec<Pos2> = Vec::new();
+                        // Top edge: left to right along the curve
+                        for &(x, y_opt) in &samples {
+                            if let Some(y) = y_opt {
+                                if y.is_finite() {
+                                    let s = view.world_to_screen(Point2::new(x, y));
+                                    fill_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                                }
+                            }
+                        }
+                        // Bottom edge: right to left along y=0 (or min_y)
+                        if !fill_pts.is_empty() {
+                            let mut bottom_pts: Vec<Pos2> = Vec::new();
+                            for &(x, _) in samples.iter().rev() {
+                                let s = view.world_to_screen(Point2::new(x, 0.0));
+                                bottom_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                            }
+                            fill_pts.append(&mut bottom_pts);
+                            // Close polygon on the left
+                            if let Some(first) = fill_pts.first() {
+                                fill_pts.push(*first);
+                            }
+                            if fill_pts.len() >= 3 {
+                                let fill_rgba = to_color32(fill);
+                                let fill_stroke = Stroke::new(0.5, fill_rgba);
+                                painter.add(Shape::line(fill_pts.clone(), fill_stroke));
+                                painter.add(Shape::convex_polygon(fill_pts, fill_rgba, Stroke::NONE));
+                            }
+                        }
+                    }
+
                     let stroke = Stroke::new(fun.width, to_color32(fun.color));
                     let mut optimized_points = Vec::new();
                     let mut i = 0;
@@ -917,6 +962,7 @@ impl GrafitoApp {
                     let steps = 500;
                     let dt = (pol.t_max - pol.t_min) / steps as f64;
                     let mut prev: Option<Pos2> = None;
+                    let mut all_pts: Vec<Pos2> = Vec::new();
                     for i in 0..=steps {
                         let t = pol.t_min + i as f64 * dt;
                         if let Ok(r) = eval_function_with_vars(&pol.expr_r, t, &self.document.variables) {
@@ -928,12 +974,26 @@ impl GrafitoApp {
                                 if let Some(prev_pos) = prev {
                                     painter.line_segment([prev_pos, pos], Stroke::new(pol.width, to_color32(pol.color)));
                                 }
+                                all_pts.push(pos);
                                 prev = Some(pos);
                             } else {
                                 prev = None;
                             }
                         } else {
                             prev = None;
+                        }
+                    }
+                    // Fill from origin
+                    if let Some(fill) = pol.fill_color {
+                        if all_pts.len() >= 3 {
+                            let origin = view.world_to_screen(Point2::new(0.0, 0.0));
+                            let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
+                            let mut fill_pts = all_pts.clone();
+                            fill_pts.push(origin_pos);
+                            if let Some(&first) = all_pts.first() {
+                                fill_pts.push(first);
+                            }
+                            painter.add(Shape::convex_polygon(fill_pts, to_color32(fill), Stroke::NONE));
                         }
                     }
                 }
@@ -988,15 +1048,14 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::ImplicitCurve(ic) => {
-                    // Marching squares for implicit curves
                     let grid_size = 100;
                     let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                     let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                     let dx = (world_br.x - world_tl.x) / grid_size as f64;
                     let dy = (world_br.y - world_tl.y) / grid_size as f64;
                     
-                    // Evaluate function on grid
-                    let mut values = vec![vec![0.0f64; grid_size + 1]; grid_size + 1];
+                    // Build the base values grid (lhs - rhs, or appropriate for operator)
+                    let mut base_values = vec![vec![0.0f64; grid_size + 1]; grid_size + 1];
                     for i in 0..=grid_size {
                         for j in 0..=grid_size {
                             let x = world_tl.x + i as f64 * dx;
@@ -1013,79 +1072,86 @@ impl GrafitoApp {
                                     grafito_core::RelationOperator::LessEq => lhs - rhs,
                                     grafito_core::RelationOperator::GreaterEq => rhs - lhs,
                                 };
-                                values[i][j] = if val.is_finite() { val } else { f64::NAN };
+                                base_values[i][j] = if val.is_finite() { val } else { f64::NAN };
                             } else {
-                                values[i][j] = f64::NAN;
+                                base_values[i][j] = f64::NAN;
                             }
                         }
                     }
                     
-                    // Marching squares
-                    for i in 0..grid_size {
-                        for j in 0..grid_size {
-                            let v00 = values[i][j];
-                            let v10 = values[i + 1][j];
-                            let v01 = values[i][j + 1];
-                            let v11 = values[i + 1][j + 1];
-                            
-                            if v00.is_nan() || v10.is_nan() || v01.is_nan() || v11.is_nan() {
-                                continue;
-                            }
-                            
-                            let s00 = v00 >= 0.0;
-                            let s10 = v10 >= 0.0;
-                            let s01 = v01 >= 0.0;
-                            let s11 = v11 >= 0.0;
-                            
-                            let case = (s00 as u8) | ((s10 as u8) << 1) | ((s01 as u8) << 2) | ((s11 as u8) << 3);
-                            
-                            if case == 0 || case == 15 {
-                                continue; // All same sign
-                            }
-                            
-                            let x0 = world_tl.x + i as f64 * dx;
-                            let y0 = world_tl.y + j as f64 * dy;
-                            let x1 = x0 + dx;
-                            let y1 = y0 + dy;
-                            
-                            // Interpolate edge crossings
-                            let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
-                                let t = va / (va - vb);
-                                pa + t * (pb - pa)
-                            };
-                            
-                            let mut points = Vec::new();
-                            
-                            // Bottom edge (v00 -> v10)
-                            if s00 != s10 {
-                                let x = interp(v00, v10, x0, x1);
-                                points.push((x, y0));
-                            }
-                            // Right edge (v10 -> v11)
-                            if s10 != s11 {
-                                let y = interp(v10, v11, y0, y1);
-                                points.push((x1, y));
-                            }
-                            // Top edge (v01 -> v11)
-                            if s01 != s11 {
-                                let x = interp(v01, v11, x0, x1);
-                                points.push((x, y1));
-                            }
-                            // Left edge (v00 -> v01)
-                            if s00 != s01 {
-                                let y = interp(v00, v01, y0, y1);
-                                points.push((x0, y));
-                            }
-                            
-                            // Draw line segments
-                            if points.len() >= 2 {
-                                for k in (0..points.len()).step_by(2) {
-                                    if k + 1 < points.len() {
-                                        let p1 = view.world_to_screen(Point2::new(points[k].0, points[k].1));
-                                        let p2 = view.world_to_screen(Point2::new(points[k + 1].0, points[k + 1].1));
-                                        let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
-                                        let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
-                                        painter.line_segment([pos1, pos2], Stroke::new(ic.width, to_color32(ic.color)));
+                    // Determine levels to render
+                    let levels: Vec<(f64, Color)> = if let Some(ref contour_levels) = ic.contour_levels {
+                        let colors = ic.contour_colors.as_ref().map(|c| c.as_slice()).unwrap_or(&[]);
+                        contour_levels.iter().enumerate().map(|(idx, &lvl)| {
+                            let c = colors.get(idx).cloned().unwrap_or_else(|| {
+                                let t = idx as f64 / contour_levels.len().max(1) as f64;
+                                Color::new((0.5 + t * 0.5) as f32, (0.2 + (1.0 - t) * 0.6) as f32, 0.2, 1.0)
+                            });
+                            (lvl, c)
+                        }).collect()
+                    } else {
+                        vec![(0.0, ic.color)]
+                    };
+                    
+                    // Marching squares for each level
+                    for (level, level_color) in &levels {
+                        let level_offset = *level;
+                        let stroke = Stroke::new(ic.width, to_color32(*level_color));
+                        
+                        for i in 0..grid_size {
+                            for j in 0..grid_size {
+                                let v00 = base_values[i][j];
+                                let v10 = base_values[i + 1][j];
+                                let v01 = base_values[i][j + 1];
+                                let v11 = base_values[i + 1][j + 1];
+                                
+                                if v00.is_nan() || v10.is_nan() || v01.is_nan() || v11.is_nan() { continue; }
+                                
+                                let s00 = (v00 - level_offset) >= 0.0;
+                                let s10 = (v10 - level_offset) >= 0.0;
+                                let s01 = (v01 - level_offset) >= 0.0;
+                                let s11 = (v11 - level_offset) >= 0.0;
+                                
+                                let case = (s00 as u8) | ((s10 as u8) << 1) | ((s01 as u8) << 2) | ((s11 as u8) << 3);
+                                if case == 0 || case == 15 { continue; }
+                                
+                                let x0 = world_tl.x + i as f64 * dx;
+                                let y0 = world_tl.y + j as f64 * dy;
+                                let x1 = x0 + dx;
+                                let y1 = y0 + dy;
+                                
+                                let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
+                                    let t = (va - level_offset) / ((va - level_offset) - (vb - level_offset));
+                                    pa + t * (pb - pa)
+                                };
+                                
+                                let mut points = Vec::new();
+                                if s00 != s10 {
+                                    let x = interp(v00, v10, x0, x1);
+                                    points.push((x, y0));
+                                }
+                                if s10 != s11 {
+                                    let y = interp(v10, v11, y0, y1);
+                                    points.push((x1, y));
+                                }
+                                if s01 != s11 {
+                                    let x = interp(v01, v11, x0, x1);
+                                    points.push((x, y1));
+                                }
+                                if s00 != s01 {
+                                    let y = interp(v00, v01, y0, y1);
+                                    points.push((x0, y));
+                                }
+                                
+                                if points.len() >= 2 {
+                                    for k in (0..points.len()).step_by(2) {
+                                        if k + 1 < points.len() {
+                                            let p1 = view.world_to_screen(Point2::new(points[k].0, points[k].1));
+                                            let p2 = view.world_to_screen(Point2::new(points[k + 1].0, points[k + 1].1));
+                                            let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
+                                            let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
+                                            painter.line_segment([pos1, pos2], stroke);
+                                        }
                                     }
                                 }
                             }
