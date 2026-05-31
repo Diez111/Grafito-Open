@@ -47,9 +47,157 @@ fn setup_math_context() -> HashMapContext {
     ctx
 }
 
+fn split_args_depth0(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(s[start..].trim().to_string());
+    args
+}
+
+fn replace_standalone_var(expr: &str, var: &str, value: f64) -> String {
+    let var_chars: Vec<char> = var.chars().collect();
+    let expr_chars: Vec<char> = expr.chars().collect();
+    let vs = if value == value.trunc() && value.is_finite() {
+        format!("{:.1}", value)
+    } else {
+        value.to_string()
+    };
+    let mut result = String::new();
+    let mut i = 0;
+    while i < expr_chars.len() {
+        if i + var_chars.len() <= expr_chars.len()
+            && expr_chars[i..i + var_chars.len()] == var_chars[..]
+        {
+            let prev_is_bound = i == 0 || !expr_chars[i - 1].is_ascii_alphabetic();
+            let next_is_bound = i + var_chars.len() >= expr_chars.len()
+                || !expr_chars[i + var_chars.len()].is_ascii_alphabetic();
+            if prev_is_bound && next_is_bound {
+                result.push_str(&vs);
+                i += var_chars.len();
+                continue;
+            }
+        }
+        result.push(expr_chars[i]);
+        i += 1;
+    }
+    result
+}
+
+fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
+    let chars: Vec<char> = expr.chars().collect();
+    let patterns: &[(&str, bool)] = &[
+        ("sum(", false),
+        ("product(", true),
+        ("prod(", true),
+    ];
+    for i in 0..chars.len() {
+        for &(pat, is_prod) in patterns {
+            if expr[i..].starts_with(pat) {
+                let is_standalone = i == 0 || !chars[i - 1].is_ascii_alphabetic();
+                if is_standalone {
+                    let open_paren = i + pat.len() - 1;
+                    if let Some(close) = find_matching_close(expr, open_paren) {
+                        return Some((i, close, is_prod));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn expand_sum_product_once(expr: &str) -> Option<String> {
+    let (func_start, close, is_product) = find_standalone_sum_product(expr)?;
+    let op = if is_product { "*" } else { "+" };
+    let open = expr[func_start..].find('(')? + func_start;
+    let inside = &expr[open + 1..close];
+    let args = split_args_depth0(inside);
+    if args.len() != 4 {
+        return None;
+    }
+
+    let body = &args[0];
+    let var = &args[1];
+    let start: i64 = args[2].trim().parse().ok()?;
+    let end: i64 = args[3].trim().parse().ok()?;
+
+    let num_terms = (end - start).abs() as usize + 1;
+    const MAX_TERMS: usize = 2000;
+    if num_terms > MAX_TERMS {
+        return None;
+    }
+    if num_terms == 0 {
+        return Some("0".to_string());
+    }
+
+    let step: i64 = if end >= start { 1 } else { -1 };
+    let mut terms = Vec::with_capacity(num_terms);
+    let mut val = start;
+    loop {
+        let substituted = replace_standalone_var(body, var, val as f64);
+        terms.push(format!("({})", substituted));
+        if val == end {
+            break;
+        }
+        val += step;
+    }
+
+    let expanded = terms.join(op);
+    let prefix = &expr[..func_start];
+    let suffix = &expr[close + 1..];
+    Some(format!("{}{}{}", prefix, expanded, suffix))
+}
+
+fn find_matching_close(s: &str, open: usize) -> Option<usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut depth = 0;
+    for (i, ch) in chars.iter().enumerate().skip(open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn expand_sum_product(expr: &str) -> String {
+    let mut s = expr.to_string();
+    let mut new_len;
+    loop {
+        match expand_sum_product_once(&s) {
+            Some(expanded) => {
+                new_len = expanded.len();
+                s = expanded;
+            }
+            None => break,
+        }
+        if new_len == s.len() {
+            break;
+        }
+    }
+    s
+}
 
 pub fn preprocess_expr(expr: &str) -> String {
-    let mut s = expr.to_string();
+    let mut s = expand_sum_product(expr);
     
     // Replace LaTeX rac{A}{B} with ((A)/(B))
     // We will do a simple iterative replacement finding rac
@@ -366,5 +514,23 @@ mod tests {
         println!("(x+1)(x-1) -> {}", insert_implicit_multiplication("(x+1)(x-1)"));
         println!("sin(x) -> {}", insert_implicit_multiplication("sin(x)"));
         println!("2sin(x) -> {}", insert_implicit_multiplication("2sin(x)"));
+    }
+
+    #[test]
+    fn test_sum_expansion() {
+        // sum(n^2, n, 1, 5) = 1+4+9+16+25 = 55
+        assert!((eval_function("sum(n^2, n, 1, 5)", 0.0).unwrap() - 55.0).abs() < 0.01);
+        // sum(1/n, n, 1, 4) = 1 + 1/2 + 1/3 + 1/4 ≈ 2.08333
+        let v = eval_function("sum(1/n, n, 1, 4)", 0.0).unwrap();
+        assert!((v - 2.08333333).abs() < 0.01, "got {}", v);
+        // product(i, i, 1, 4) = 24
+        assert!((eval_function("product(i, i, 1, 4)", 0.0).unwrap() - 24.0).abs() < 0.01);
+        // sum(sin(n*x)/n, n, 1, 3) at x=0.5
+        let v = eval_function("sum(sin(n*x)/n, n, 1, 3)", 0.5).unwrap();
+        assert!((v - 1.23266).abs() < 0.01, "got {}", v);
+        // Negative range: sum(n, n, -2, 2) = 0
+        assert!((eval_function("sum(n, n, -2, 2)", 0.0).unwrap() - 0.0).abs() < 0.01);
+        // Sum with x: f(x) = sum(n*x, n, 1, 3) = x + 2x + 3x = 6x, at x=2 = 12
+        assert!((eval_function("sum(n*x, n, 1, 3)", 2.0).unwrap() - 12.0).abs() < 0.01);
     }
 }
