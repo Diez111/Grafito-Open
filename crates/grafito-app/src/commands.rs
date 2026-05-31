@@ -1085,6 +1085,17 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(obj);
                 input_text.clear(); return Some("Parametric curve created".into());
             }
+            "Piecewise" if cmd.args.len() >= 3 => {
+                let mut expr = format!("piecewise({}", cmd.args[0].trim());
+                for a in &cmd.args[1..] {
+                    expr.push_str(", ");
+                    expr.push_str(a.trim());
+                }
+                expr.push(')');
+                let label = next_function_label(document);
+                document.add_object(GeoObject::Function(FunctionObj::new(&expr).with_label(&label)));
+                input_text.clear(); return Some(format!("Piecewise function → {}", label));
+            }
             "VectorField2D" if cmd.args.len() >= 2 => {
                 let obj = GeoObject::VectorField2D(VectorField2DObj::new(
                     cmd.args[0].trim(), cmd.args[1].trim()
@@ -1343,6 +1354,7 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "vectorfield2d" | "vector_field_2d" | "vf2d" => "VectorField2D",
             "phaseportrait" | "phase_portrait" | "phase" => "PhasePortrait",
             "contour" | "contourlines" | "contour_lines" => "Contour",
+            "piecewise" | "pw" => "Piecewise",
             _ => {
                 if args.is_empty() { return None; }
                 return Some(CasCmd { command, args });
