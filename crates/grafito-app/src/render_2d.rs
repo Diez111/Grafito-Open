@@ -18,6 +18,35 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
+/// HSL to RGB conversion for domain coloring
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    if s == 0.0 { return (l, l, l); }
+    let hue_to_rgb = |p: f64, q: f64, mut t: f64| -> f64 {
+        while t < 0.0 { t += 1.0; }
+        while t > 1.0 { t -= 1.0; }
+        if t < 1.0 / 6.0 { p + (q - p) * 6.0 * t }
+        else if t < 1.0 / 2.0 { q }
+        else if t < 2.0 / 3.0 { p + (q - p) * (2.0 / 3.0 - t) * 6.0 }
+        else { p }
+    };
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
+/// Thermal colormap for heat maps: blue → cyan → green → yellow → red
+fn thermal_colormap(t: f64) -> (f64, f64, f64) {
+    let t = t.clamp(0.0, 1.0);
+    let r = (t * 3.0 - 1.5).clamp(0.0, 1.0).min(1.0); // red from mid to end
+    let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0); // green peak at mid
+    let b = (1.5 - t * 3.0).clamp(0.0, 1.0); // blue at start, fade
+    (r, g, b)
+}
+
 #[allow(dead_code)]
 impl GrafitoApp {
     pub(crate) fn draw_grid_numbers_overlay(&self, painter: &egui::Painter, canvas_rect: Rect) {
@@ -1064,21 +1093,89 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::ComplexGrid(cg) => {
-                    // Draw deformed grid under complex mapping
                     use num_complex::Complex64;
                     use std::collections::HashMap;
                     
+                    if cg.render_mode == 1 || cg.render_mode == 2 {
+                        // Domain coloring (complex f(z)) or Heat map (real f(x,y))
+                        let res = cg.density.max(50).min(500);
+                        let dx = (cg.x_max - cg.x_min) / res as f64;
+                        let dy = (cg.y_max - cg.y_min) / res as f64;
+                        
+                        let is_heatmap = cg.render_mode == 2;
+                        
+                        if is_heatmap {
+                            // Heat map: evaluate f(x,y) using real AST
+                            let vars_map: std::collections::HashMap<String, f64> = self.document.variables.clone();
+                            let prepared = prepare_function_ast(&cg.expr, &vars_map, &["x", "y"]);
+                            
+                            if let Ok(ast) = prepared {
+                                for j in 0..res {
+                                    let y = cg.y_min + (res - 1 - j) as f64 * dy;
+                                    for i in 0..res {
+                                        let x = cg.x_min + i as f64 * dx;
+                                        let val = ast.eval_2d("x", x, "y", y);
+                                        if val.is_finite() {
+                                            // Thermal colormap: blue(cold) through green to red(hot)
+                                            let t = (val.atan() / std::f64::consts::FRAC_PI_2).clamp(-1.0, 1.0);
+                                            let t = (t + 1.0) * 0.5; // [0, 1]
+                                            let (r, g, b) = thermal_colormap(t);
+                                            let sp1 = view.world_to_screen(Point2::new(cg.x_min + i as f64 * dx, cg.y_min + (res - 1 - j) as f64 * dy));
+                                            let sp2 = view.world_to_screen(Point2::new(cg.x_min + (i + 1) as f64 * dx, cg.y_min + (res - j) as f64 * dy));
+                                            let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
+                                            let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
+                                            let c = Color32::from_rgb((r*255.0) as u8, (g*255.0) as u8, (b*255.0) as u8);
+                                            painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Domain coloring: evaluate complex f(z)
+                            let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
+                                Ok(e) => e,
+                                Err(_) => return,
+                            };
+                            let mut vars: HashMap<String, Complex64> = HashMap::new();
+                            for (name, val) in &self.document.variables {
+                                vars.insert(name.clone(), Complex64::new(*val, 0.0));
+                            }
+                            for j in 0..res {
+                                let y = cg.y_min + (res - 1 - j) as f64 * dy;
+                                for i in 0..res {
+                                    let x = cg.x_min + i as f64 * dx;
+                                    vars.insert("z".to_string(), Complex64::new(x, y));
+                                    if let Ok(fz) = expr.eval(&vars) {
+                                        if fz.re.is_finite() && fz.im.is_finite() {
+                                            let arg = fz.arg();
+                                            let mag = fz.norm();
+                                            let hue = (arg + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
+                                            let lightness = (mag.max(1e-10).ln().atan() / std::f64::consts::FRAC_PI_2) * 0.5 + 0.5;
+                                            let (r, g, b) = hsl_to_rgb(hue, 0.85, lightness.clamp(0.0, 1.0));
+                                            let sp1 = view.world_to_screen(Point2::new(cg.x_min + i as f64 * dx, cg.y_min + (res - 1 - j) as f64 * dy));
+                                            let sp2 = view.world_to_screen(Point2::new(cg.x_min + (i + 1) as f64 * dx, cg.y_min + (res - j) as f64 * dy));
+                                            let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
+                                            let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
+                                            let c = Color32::from_rgb((r*255.0) as u8, (g*255.0) as u8, (b*255.0) as u8);
+                                            painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    
+                    // Original: Draw deformed grid under complex mapping
                     let grid_lines = cg.density;
                     let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
                     let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
                     
-                    // Parse the complex expression once
                     let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
                         Ok(e) => e,
                         Err(_) => return,
                     };
                     
-                    // Convert document variables to complex
                     let mut vars: HashMap<String, Complex64> = HashMap::new();
                     for (name, val) in &self.document.variables {
                         vars.insert(name.clone(), Complex64::new(*val, 0.0));

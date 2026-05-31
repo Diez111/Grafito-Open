@@ -8,6 +8,7 @@ use grafito_core::{
     ImplicitCurveObj, RelationOperator,
     Attractor3DObj, Fractal2DObj, HyperSurface4DObj, VectorField3DObj,
     HistogramObj, ScatterPlotObj, BoxPlotObj, RegressionLineObj,
+    ComplexGridObj,
 };
 use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
@@ -1018,6 +1019,54 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     input_text.clear(); return Some(format!("CI ({:.0}%): [{:.4}, {:.4}, {:.4}]", confidence * 100.0, lower, p_hat, upper));
                 }
             }
+            "ComplexGrid" if cmd.args.len() >= 5 => {
+                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
+                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
+                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
+                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+                let density: usize = cmd.args.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(10);
+                let mut cg = ComplexGridObj::new(&format!("{}->z", cmd.args[0].trim()), x_min, x_max, y_min, y_max);
+                cg.density = density;
+                // Support expr = "f(z)" syntax: strip "f(z)=" prefix
+                let expr = cmd.args[0].trim();
+                let expr = expr.strip_prefix("f(z)=").unwrap_or(expr);
+                let expr = expr.strip_prefix("w=").unwrap_or(expr);
+                cg.expr = expr.to_string();
+                document.add_object(GeoObject::ComplexGrid(cg));
+                input_text.clear(); return Some("Complex grid created — scroll/zoom to explore".into());
+            }
+            "DomainColoring" if cmd.args.len() >= 5 => {
+                let x_min = cmd.args[1].trim().parse().unwrap_or(-3.0);
+                let x_max = cmd.args[2].trim().parse().unwrap_or(3.0);
+                let y_min = cmd.args[3].trim().parse().unwrap_or(-3.0);
+                let y_max = cmd.args[4].trim().parse().unwrap_or(3.0);
+                let res: usize = cmd.args.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(200);
+                let expr = cmd.args[0].trim();
+                let expr = expr.strip_prefix("f(z)=").unwrap_or(expr);
+                let expr = expr.strip_prefix("w=").unwrap_or(expr);
+                let cg = ComplexGridObj::new(expr, x_min, x_max, y_min, y_max)
+                    .as_domain_coloring();
+                let mut cg2 = cg;
+                cg2.density = res;
+                document.add_object(GeoObject::ComplexGrid(cg2));
+                input_text.clear(); return Some(format!("Domain coloring ({}x{}) created", res, res));
+            }
+            "HeatMap" if cmd.args.len() >= 5 => {
+                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
+                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
+                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
+                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+                let res: usize = cmd.args.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(150);
+                let expr = cmd.args[0].trim();
+                let expr = expr.strip_prefix("f(x,y)=").unwrap_or(expr);
+                let expr = expr.strip_prefix("z=").unwrap_or(expr);
+                let cg = ComplexGridObj::new(expr, x_min, x_max, y_min, y_max)
+                    .as_heat_map();
+                let mut cg2 = cg;
+                cg2.density = res;
+                document.add_object(GeoObject::ComplexGrid(cg2));
+                input_text.clear(); return Some(format!("Heat map ({}x{}) created", res, res));
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
@@ -1193,6 +1242,9 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "determinant" | "det" => "Determinant",
             "inverse" | "inversa" => "Inverse",
             "taylor" => "Taylor",
+            "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
+            "domaincoloring" | "domain_coloring" | "dcolor" => "DomainColoring",
+            "heatmap" | "heat_map" | "hmap" => "HeatMap",
             _ => {
                 if args.is_empty() { return None; }
                 return Some(CasCmd { command, args });

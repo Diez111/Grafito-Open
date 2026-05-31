@@ -768,12 +768,16 @@ pub struct ComplexGridObj {
     pub y_min: f64, pub y_max: f64,
     pub density: usize,
     pub color: Color, pub visible: bool,
+    /// 0 = grid lines, 1 = domain coloring (complex), 2 = heat map (real f(x,y))
+    pub render_mode: u8,
 }
 impl ComplexGridObj {
     pub fn new(expr: &str, x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> Self {
-        Self { id: ObjectId::new(), label: String::new(), expr: expr.to_string(), x_min, x_max, y_min, y_max, density: 10, color: Color::BLUE, visible: true }
+        Self { id: ObjectId::new(), label: String::new(), expr: expr.to_string(), x_min, x_max, y_min, y_max, density: 10, color: Color::BLUE, visible: true, render_mode: 0 }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+    pub fn as_domain_coloring(mut self) -> Self { self.render_mode = 1; self.density = self.density.max(200); self }
+    pub fn as_heat_map(mut self) -> Self { self.render_mode = 2; self.density = self.density.max(150); self }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
