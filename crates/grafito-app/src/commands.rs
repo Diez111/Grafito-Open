@@ -594,7 +594,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 };
                 let obj = GeoObject::HyperSurface4D(HyperSurface4DObj::hypercube().with_rotation(angles));
                 document.add_object(obj);
-                input_text.clear(); return Some("4D Hypercube (tesseract) created".into());
+                input_text.clear(); return Some("Hipercubo 4D creado (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
             }
             "Hypersphere" => {
                 let angles = if cmd.args.len() >= 3 {
@@ -604,7 +604,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 };
                 let obj = GeoObject::HyperSurface4D(HyperSurface4DObj::hypersphere().with_rotation(angles));
                 document.add_object(obj);
-                input_text.clear(); return Some("4D Hypersphere created".into());
+                input_text.clear(); return Some("Hiperesfera 4D creada (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
             }
             "VectorField3D" if cmd.args.len() >= 3 => {
                 let obj = GeoObject::VectorField3D(VectorField3DObj::new(

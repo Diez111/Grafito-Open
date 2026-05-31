@@ -907,7 +907,7 @@ impl HyperSurface4DObj {
     pub fn hypercube() -> Self {
         Self {
             id: ObjectId::new(), label: String::new(),
-            surface_type: "hypercube".to_string(), params: vec![1.0],
+            surface_type: "hypercube".to_string(), params: vec![3.0],
             rotation_angles: vec![0.3, 0.5, 0.7],
             resolution: 16,
             color: Color::new(0.8, 0.2, 0.8, 1.0), visible: true, width: 1.5,
@@ -916,7 +916,7 @@ impl HyperSurface4DObj {
     pub fn hypersphere() -> Self {
         Self {
             id: ObjectId::new(), label: String::new(),
-            surface_type: "hypersphere".to_string(), params: vec![1.0],
+            surface_type: "hypersphere".to_string(), params: vec![3.0],
             rotation_angles: vec![0.3, 0.5, 0.7],
             resolution: 20,
             color: Color::new(0.2, 0.8, 0.8, 1.0), visible: true, width: 1.5,
