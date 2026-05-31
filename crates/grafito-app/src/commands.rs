@@ -387,10 +387,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 result = Some(format!("P(X={}) = {:.6} (Poisson({}))", k, prob, lambda));
                 input_text.clear(); return result;
             }
-            "Curve3D" if cmd.args.len() >= 4 => {
+            "Curve3D" if cmd.args.len() >= 3 => {
                 let exprs = cmd.args[0].trim();
-                let t_min: f64 = cmd.args[2].trim().parse().unwrap_or(0.0);
-                let t_max: f64 = cmd.args[3].trim().parse().unwrap_or(6.28);
+                let t_min: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
+                let t_max: f64 = cmd.args[2].trim().parse().unwrap_or(6.28);
                 let steps = 200;
                 let mut pts = Vec::new();
                 for i in 0..=steps {
@@ -1076,7 +1076,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(obj);
                 input_text.clear(); return Some(format!("Polar curve r = {} [{}..{}]", expr, t_min, t_max));
             }
-            "ParametricCurve2D" if cmd.args.len() >= 5 => {
+            "ParametricCurve2D" if cmd.args.len() >= 4 => {
                 let expr_x = cmd.args[0].trim();
                 let expr_y = cmd.args[1].trim();
                 let t_min = cmd.args[2].trim().parse().unwrap_or(0.0);
@@ -1391,8 +1391,8 @@ pub fn split_args(s: &str) -> Vec<String> {
     let mut start = 0;
     for (i, ch) in s.char_indices() {
         match ch {
-            '(' => depth += 1,
-            ')' => depth -= 1,
+            '(' | '{' => depth += 1,
+            ')' | '}' => depth -= 1,
             ',' if depth == 0 => {
                 args.push(s[start..i].to_string());
                 start = i + 1;

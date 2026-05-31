@@ -347,7 +347,8 @@ impl eframe::App for GrafitoApp {
                             // Filter objects by current view mode
                             let is_3d_object = matches!(obj.name(),
                                 "Point3D" | "Segment3D" | "Sphere3D" | "Cube3D" | "Pyramid3D" |
-                                "Cone3D" | "Cylinder3D" | "Surface3D" | "ParametricCurve3D" |
+                                "Cone3D" | "Cylinder3D" | "Torus3D" | "MoebiusStrip" |
+                                "Surface3D" | "ParametricCurve3D" |
                                 "Attractor3D" | "HyperSurface4D" | "VectorField3D"
                             );
                             let is_3d_view = self.current_view == ViewMode::D3;
