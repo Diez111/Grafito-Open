@@ -30,8 +30,10 @@ fn insert_implicit_multiplication(text: &str) -> String {
             if c1 == ')' && c2.is_ascii_digit() { res.push('*'); }
             if c1.is_ascii_digit() && c2 == '(' { res.push('*'); }
             if c1 == ')' && c2 == '(' { res.push('*'); }
-            if (c1 == 'x' || c1 == 'y') && c2 == '(' { res.push('*'); }
-            if (c1 == 'x' || c1 == 'y') && c2.is_ascii_alphabetic() { res.push('*'); }
+            if (c1 == 'x' || c1 == 'y') && c2 == '(' 
+                && (i == 0 || !chars[i-1].is_ascii_alphabetic()) { res.push('*'); }
+            if (c1 == 'x' || c1 == 'y') && c2.is_ascii_alphabetic()
+                && (i == 0 || !chars[i-1].is_ascii_alphabetic()) { res.push('*'); }
         }
     }
     res
@@ -60,6 +62,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         
     let text_with_implicit = insert_implicit_multiplication(&text);
     let text = text_with_implicit.as_str();
+    
     let mut result: Option<String> = None;
 
     if let Some(cmd) = parse_cas_command(text) {
