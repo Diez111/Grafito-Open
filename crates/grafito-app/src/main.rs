@@ -194,6 +194,18 @@ impl eframe::App for GrafitoApp {
         if ctx.input(|i| i.key_pressed(Key::F5)) { self.current_tool = Tool::Polygon; self.tool_ghost = None; self.pending_points.clear(); }
         if ctx.input(|i| i.key_pressed(Key::F6)) { self.current_tool = Tool::Function; self.tool_ghost = None; }
         if ctx.input(|i| i.key_pressed(Key::Escape)) { self.current_tool = Tool::Select; self.tool_ghost = None; self.pending_points.clear(); }
+        // Log axis toggles: Shift+L = X, Shift+K = Y, Shift+J = both
+        if ctx.input(|i| i.key_pressed(Key::L) && i.modifiers.shift) {
+            self.document.view_mut().x_log = !self.document.view().x_log;
+        }
+        if ctx.input(|i| i.key_pressed(Key::K) && i.modifiers.shift) {
+            self.document.view_mut().y_log = !self.document.view().y_log;
+        }
+        if ctx.input(|i| i.key_pressed(Key::J) && i.modifiers.shift) {
+            let v = self.document.view_mut();
+            let both = !v.x_log || !v.y_log;
+            v.x_log = both; v.y_log = both;
+        }
 
         let is_dark = self.dark_mode;
         let accent   = Color32::from_rgb(100, 80, 200);
@@ -242,6 +254,9 @@ impl eframe::App for GrafitoApp {
                             ui.checkbox(&mut self.show_grid, "Mostrar Cuadrícula");
                             ui.checkbox(&mut self.snap_to_grid, "Ajustar a la Cuadrícula");
                             ui.checkbox(&mut self.exam_mode, "Modo Examen");
+                            ui.separator();
+                            ui.checkbox(&mut self.document.view_mut().x_log, "Eje X logarítmico");
+                            ui.checkbox(&mut self.document.view_mut().y_log, "Eje Y logarítmico");
                         });
                         ui.add_space(4.0);
                         if ui.selectable_label(self.exam_mode, "Examen").clicked() {

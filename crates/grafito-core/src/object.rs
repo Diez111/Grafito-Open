@@ -671,14 +671,16 @@ pub struct Surface3DObj {
     pub id: ObjectId, pub label: String, pub expr: String,
     pub x_min: f64, pub x_max: f64, pub y_min: f64, pub y_max: f64,
     pub color: Color, pub visible: bool, pub width: f32,
+    pub solid: bool, pub mesh_res: usize,
 }
 impl Surface3DObj {
     pub fn new(expr: impl Into<String>, xr: (f64, f64), yr: (f64, f64)) -> Self {
         Self { id: ObjectId::new(), label: String::new(), expr: expr.into(),
                x_min: xr.0, x_max: xr.1, y_min: yr.0, y_max: yr.1,
-               color: Color::BLUE, visible: true, width: 1.0 }
+               color: Color::BLUE, visible: true, width: 1.0, solid: false, mesh_res: 30 }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+    pub fn as_solid(mut self) -> Self { self.solid = true; self }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EllipseObj {
@@ -812,6 +814,23 @@ pub struct VectorField2DObj {
 impl VectorField2DObj {
     pub fn new(expr_u: &str, expr_v: &str) -> Self {
         Self { id: ObjectId::new(), label: String::new(), expr_u: expr_u.to_string(), expr_v: expr_v.to_string(), color: Color::new(0.8, 0.4, 0.0, 1.0), visible: true, density: 15 }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
+}
+
+/// Phase portrait for autonomous ODE system dx/dt = P(x,y), dy/dt = Q(x,y)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhasePortraitObj {
+    pub id: ObjectId, pub label: String,
+    pub expr_dx: String, pub expr_dy: String,
+    pub x_min: f64, pub x_max: f64,
+    pub y_min: f64, pub y_max: f64,
+    pub density: usize,
+    pub color: Color, pub visible: bool,
+}
+impl PhasePortraitObj {
+    pub fn new(expr_dx: &str, expr_dy: &str, x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> Self {
+        Self { id: ObjectId::new(), label: String::new(), expr_dx: expr_dx.to_string(), expr_dy: expr_dy.to_string(), x_min, x_max, y_min, y_max, density: 20, color: Color::new(0.2, 0.2, 0.8, 1.0), visible: true }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self { self.label = l.into(); self }
 }

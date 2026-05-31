@@ -371,6 +371,7 @@ pub fn preprocess_expr(expr: &str) -> String {
 
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    let expr_raw = expr;
     let expr = preprocess_expr(expr);
 
     // FAST PATH: try custom AST parser first
@@ -391,6 +392,19 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
         }
     }
 
+    // COMPLEX PATH: try complex evaluation if expression contains standalone 'i'
+    if has_standalone_i(expr_raw) {
+        if let Ok(complex_ast) = crate::complex_expr::parse(expr_raw) {
+            let mut cmap = std::collections::HashMap::new();
+            for (name, val) in vars {
+                cmap.insert(name.clone(), num_complex::Complex64::new(*val, 0.0));
+            }
+            if let Ok(result) = complex_ast.eval(&cmap) {
+                if result.re.is_finite() { return Ok(result.re); }
+            }
+        }
+    }
+
     // SLOW PATH FALLBACK: evalexpr
     let mut ctx = setup_math_context();
     for (name, val) in vars {
@@ -404,6 +418,20 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
         Ok(other) => Err(format!("Expression did not evaluate to a number: {:?}", other)),
         Err(e) => Err(format!("Evaluation error: {}", e)),
     }
+}
+
+fn has_standalone_i(expr: &str) -> bool {
+    let chars: Vec<char> = expr.chars().collect();
+    for idx in 0..chars.len() {
+        if chars[idx] == 'i' || chars[idx] == 'I' {
+            let prev_bound = idx == 0 || !chars[idx - 1].is_ascii_alphabetic();
+            let next_bound = idx + 1 >= chars.len() || !chars[idx + 1].is_ascii_alphabetic();
+            if prev_bound && next_bound {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Evaluate a function f(x) expression.
@@ -447,6 +475,26 @@ pub fn eval_batch_1d(expr: &str, var_name: &str, xs: impl Iterator<Item = f64> +
     }
 
     let expr_clean = preprocess_expr(expr_clean);
+    let is_complex = has_standalone_i(expr.trim());
+    
+    // COMPLEX PATH: if expression contains i, use complex evaluator
+    if is_complex {
+        if let Ok(complex_ast) = crate::complex_expr::parse(expr.trim()) {
+            let mut cmap = std::collections::HashMap::new();
+            for (k, v) in vars {
+                cmap.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+            }
+            let mut results = Vec::new();
+            for x in xs.clone() {
+                cmap.insert(var_name.to_string(), num_complex::Complex64::new(x, 0.0));
+                match complex_ast.eval(&cmap) {
+                    Ok(val) if val.re.is_finite() => results.push(Some(val.re)),
+                    _ => results.push(None),
+                }
+            }
+            return Ok(results);
+        }
+    }
     
     // FAST PATH: try to parse with our custom AST
     if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {

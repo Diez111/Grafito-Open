@@ -94,6 +94,8 @@ pub struct ViewTransform {
     pub offset: Point2,
     pub scale: f64,
     pub screen_size: Vec2,
+    pub x_log: bool,
+    pub y_log: bool,
 }
 
 impl Default for ViewTransform {
@@ -102,6 +104,8 @@ impl Default for ViewTransform {
             offset: Point2::new(0.0, 0.0),
             scale: 1.0,
             screen_size: Vec2::new(800.0, 600.0),
+            x_log: false,
+            y_log: false,
         }
     }
 }
@@ -112,31 +116,48 @@ impl ViewTransform {
             offset: Point2::new(0.0, 0.0),
             scale: 1.0,
             screen_size: Vec2::new(screen_width, screen_height),
+            x_log: false,
+            y_log: false,
         }
     }
 
-    /// Transform world point to screen coordinates with f64 intermediate precision.
-    /// Prevents precision loss at extreme zoom levels.
+    /// Transform world coordinate to screen using current axis modes
     pub fn world_to_screen(&self, world: Point2) -> Vec2 {
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
-        let s = self.scale;
-        Vec2::new(
-            (ox + world.x * s) as f32,
-            (oy - world.y * s) as f32,
-        )
+        let sx = if self.x_log {
+            if world.x <= 0.0 { f64::NEG_INFINITY } else { ox + world.x.log10() * self.scale }
+        } else {
+            ox + world.x * self.scale
+        };
+        let sy = if self.y_log {
+            if world.y <= 0.0 { f64::NEG_INFINITY } else { oy - world.y.log10() * self.scale }
+        } else {
+            oy - world.y * self.scale
+        };
+        Vec2::new(sx as f32, sy as f32)
     }
 
-    /// Transform screen point to world coordinates with f64 intermediate precision.
+    /// Transform screen point to world coordinates
     pub fn screen_to_world(&self, screen: Vec2) -> Point2 {
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
-        let inv = 1.0 / self.scale;
-        Point2::new(
-            (screen.x as f64 - ox) * inv,
-            (oy - screen.y as f64) * inv,
-        )
+        let wx = if self.x_log {
+            10_f64.powf((screen.x as f64 - ox) / self.scale)
+        } else {
+            (screen.x as f64 - ox) / self.scale
+        };
+        let wy = if self.y_log {
+            10_f64.powf((oy - screen.y as f64) / self.scale)
+        } else {
+            (oy - screen.y as f64) / self.scale
+        };
+        Point2::new(wx, wy)
     }
+
+    /// Toggle log mode for both axes (log-log, semi-log, or linear)
+    pub fn toggle_log_x(&mut self) { self.x_log = !self.x_log; }
+    pub fn toggle_log_y(&mut self) { self.y_log = !self.y_log; }
 
     pub fn pan(&mut self, delta_screen: Vec2) {
         self.offset.x += delta_screen.x as f64;

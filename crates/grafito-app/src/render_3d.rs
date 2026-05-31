@@ -695,6 +695,84 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Surface3D(surf) => {
+                    if surf.solid {
+                        // Solid Gouraud-shaded surface
+                        let res = surf.mesh_res.max(8).min(50);
+                        let xs = surf.x_min; let xe = surf.x_max;
+                        let ys = surf.y_min; let ye = surf.y_max;
+                        let dx = (xe - xs) / res as f64;
+                        let dy = (ye - ys) / res as f64;
+                        
+                        // Evaluate all z values
+                        let mut pts = Vec::with_capacity((res + 1) * (res + 1));
+                        for i in 0..=res {
+                            for j in 0..=res {
+                                pts.push((xs + j as f64 * dx, ys + i as f64 * dy));
+                            }
+                        }
+                        if let Ok(z_vals) = grafito_geometry::expr::eval_surface_batch(&surf.expr, pts.iter().copied(), &self.document.variables) {
+                            let light_dir = glam::Vec3::new(0.5, 0.8, 0.3).normalize();
+                            let ambient = 0.4;
+                            let base = to_color32(surf.color);
+                            // Triangulate and draw depth-sorted faces
+                            for i in 0..res {
+                                for j in 0..res {
+                                    let idx00 = i * (res + 1) + j;
+                                    let idx10 = i * (res + 1) + j + 1;
+                                    let idx01 = (i + 1) * (res + 1) + j;
+                                    let idx11 = (i + 1) * (res + 1) + j + 1;
+                                    
+                                    let (x0, y0) = pts[idx00]; let z0 = z_vals[idx00].unwrap_or(f64::NAN);
+                                    let (x1, y1) = pts[idx10]; let z1 = z_vals[idx10].unwrap_or(f64::NAN);
+                                    let (x2, y2) = pts[idx01]; let z2 = z_vals[idx01].unwrap_or(f64::NAN);
+                                    let (x3, y3) = pts[idx11]; let z3 = z_vals[idx11].unwrap_or(f64::NAN);
+                                    
+                                    if !z0.is_finite() || !z1.is_finite() || !z2.is_finite() || !z3.is_finite() || z0.abs() > 100.0 || z1.abs() > 100.0 || z2.abs() > 100.0 || z3.abs() > 100.0 { continue; }
+                                    
+                                    // Compute two triangle normals
+                                    let v00 = glam::Vec3::new(x0 as f32, z0 as f32, y0 as f32);
+                                    let v10 = glam::Vec3::new(x1 as f32, z1 as f32, y1 as f32);
+                                    let v01 = glam::Vec3::new(x2 as f32, z2 as f32, y2 as f32);
+                                    let v11 = glam::Vec3::new(x3 as f32, z3 as f32, y3 as f32);
+                                    
+                                    let n1 = (v10 - v00).cross(v01 - v00).normalize();
+                                    let n2 = (v11 - v10).cross(v01 - v10).normalize();
+                                    
+                                    let shade1 = (ambient + (1.0 - ambient) * n1.dot(light_dir).max(0.0)).clamp(0.0, 1.0);
+                                    let shade2 = (ambient + (1.0 - ambient) * n2.dot(light_dir).max(0.0)).clamp(0.0, 1.0);
+                                    
+                                    let c1 = Color32::from_rgba_unmultiplied((base.r() as f32 * shade1) as u8, (base.g() as f32 * shade1) as u8, (base.b() as f32 * shade1) as u8, 255);
+                                    let c2 = Color32::from_rgba_unmultiplied((base.r() as f32 * shade2) as u8, (base.g() as f32 * shade2) as u8, (base.b() as f32 * shade2) as u8, 255);
+                                    
+                                    // Project and draw triangle 1
+                                    if let (Some(p0), Some(p1), Some(p2)) = (
+                                        self.camera.project(&Point3D::new(x0, z0, y0), w, h),
+                                        self.camera.project(&Point3D::new(x1, z1, y1), w, h),
+                                        self.camera.project(&Point3D::new(x2, z2, y2), w, h),
+                                    ) {
+                                        let pts1 = vec![origin + Vec2::new(p0.0, p0.1), origin + Vec2::new(p1.0, p1.1), origin + Vec2::new(p2.0, p2.1)];
+                                        painter.add(egui::Shape::convex_polygon(pts1, c1, Stroke::new(0.5, c1)));
+                                    }
+                                    // Project and draw triangle 2
+                                    if let (Some(p1), Some(p2), Some(p3)) = (
+                                        self.camera.project(&Point3D::new(x1, z1, y1), w, h),
+                                        self.camera.project(&Point3D::new(x2, z2, y2), w, h),
+                                        self.camera.project(&Point3D::new(x3, z3, y3), w, h),
+                                    ) {
+                                        let pts2 = vec![origin + Vec2::new(p1.0, p1.1), origin + Vec2::new(p2.0, p2.1), origin + Vec2::new(p3.0, p3.1)];
+                                        painter.add(egui::Shape::convex_polygon(pts2, c2, Stroke::new(0.5, c2)));
+                                    }
+                                }
+                            }
+                        }
+                        if !surf.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&Point3D::new((surf.x_min + surf.x_max) * 0.5, 1.0, (surf.y_min + surf.y_max) * 0.5), w, h) {
+                                painter.text(origin + Vec2::new(pt.0, pt.1), egui::Align2::CENTER_BOTTOM, &surf.label, egui::FontId::proportional(12.0), label_color);
+                            }
+                        }
+                        return;
+                    }
+                    // Original wireframe rendering
                     let stroke = Stroke::new(surf.width, to_color32(surf.color));
                     let steps = 20;
                     let xs = surf.x_min; let xe = surf.x_max;

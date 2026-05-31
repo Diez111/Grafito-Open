@@ -8,9 +8,10 @@ use grafito_core::{
     ImplicitCurveObj, RelationOperator,
     Attractor3DObj, Fractal2DObj, HyperSurface4DObj, VectorField3DObj,
     HistogramObj, ScatterPlotObj, BoxPlotObj, RegressionLineObj,
-    ComplexGridObj, PolarCurveObj, ParametricCurve2DObj,
+    ComplexGridObj, PolarCurveObj, ParametricCurve2DObj, VectorField2DObj,
 };
 use grafito_geometry::Point2;
+use grafito_geometry::Color;
 use grafito_geometry::Point3D;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::symbolic;
@@ -1084,6 +1085,20 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(obj);
                 input_text.clear(); return Some("Parametric curve created".into());
             }
+            "VectorField2D" if cmd.args.len() >= 2 => {
+                let obj = GeoObject::VectorField2D(VectorField2DObj::new(
+                    cmd.args[0].trim(), cmd.args[1].trim()
+                ));
+                document.add_object(obj);
+                input_text.clear(); return Some("Vector field 2D created — streamlines auto-rendered".into());
+            }
+            "PhasePortrait" if cmd.args.len() >= 2 => {
+                let mut vf = VectorField2DObj::new(cmd.args[0].trim(), cmd.args[1].trim());
+                vf.density = 25;
+                vf.color = Color::new(0.2, 0.2, 0.8, 1.0);
+                document.add_object(GeoObject::VectorField2D(vf));
+                input_text.clear(); return Some("Phase portrait created — dx/dt, dy/dt with streamlines".into());
+            }
             "Contour" if cmd.args.len() >= 6 => {
                 let expr = cmd.args[0].trim();
                 let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
@@ -1325,6 +1340,8 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "heatmap" | "heat_map" | "hmap" => "HeatMap",
             "polarcurve" | "polar_curve" | "polar" => "PolarCurve",
             "parametriccurve2d" | "parametric_curve_2d" | "param2d" => "ParametricCurve2D",
+            "vectorfield2d" | "vector_field_2d" | "vf2d" => "VectorField2D",
+            "phaseportrait" | "phase_portrait" | "phase" => "PhasePortrait",
             "contour" | "contourlines" | "contour_lines" => "Contour",
             _ => {
                 if args.is_empty() { return None; }

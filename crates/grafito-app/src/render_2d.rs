@@ -236,38 +236,79 @@ impl GrafitoApp {
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
 
-        // Dynamic grid step based on zoom level (target ~100 pixels per major step)
-        let pixels_per_unit = self.document.view().scale as f64; // Scale is roughly pixels per unit
-        let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
-        let magnitude = target_world_step.log10().floor();
-        let base = 10f64.powf(magnitude);
-        let factor = target_world_step / base;
-        
-        let major_step = if factor < 2.0 { 1.0 * base }
-            else if factor < 5.0 { 2.0 * base }
-            else { 5.0 * base };
-
-        let min_x = (world_tl.x / major_step).floor() as i32 - 1;
-        let max_x = (world_br.x / major_step).ceil() as i32 + 1;
-        let min_y = (world_br.y / major_step).floor() as i32 - 1;
-        let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
-
-        // GeoGebra-style: clear, distinct squares without the dense minor mesh
         let grid_color = if self.dark_mode { Color32::from_rgba_unmultiplied(255, 255, 255, 25) } else { Color32::from_rgba_unmultiplied(0, 0, 0, 25) };
         let grid_stroke = Stroke::new(1.0, grid_color);
+        let minor_stroke = Stroke::new(0.5, if self.dark_mode { Color32::from_rgba_unmultiplied(255, 255, 255, 12) } else { Color32::from_rgba_unmultiplied(0, 0, 0, 12) });
 
-        for xi in min_x..=max_x {
-            let x = xi as f64 * major_step;
-            let a = view.world_to_screen(Point2::new(x, min_y as f64 * major_step));
-            let b = view.world_to_screen(Point2::new(x, max_y as f64 * major_step));
-            painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+        // Vertical grid lines
+        if view.x_log {
+            let min_pow = (world_tl.x.max(1e-300).log10().floor() as i32 - 1);
+            let max_pow = (world_br.x.max(1e-300).log10().ceil() as i32 + 1);
+            for pow in min_pow..=max_pow {
+                let x = 10_f64.powf(pow as f64);
+                let a = view.world_to_screen(Point2::new(x, world_br.y));
+                let b = view.world_to_screen(Point2::new(x, world_tl.y));
+                painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+                // Minor grid at 2..9 * 10^pow
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let xm = k as f64 * 10_f64.powf(pow as f64);
+                        let am = view.world_to_screen(Point2::new(xm, world_br.y));
+                        let bm = view.world_to_screen(Point2::new(xm, world_tl.y));
+                        painter.line_segment([canvas_rect.min + Vec2::new(am.x, am.y), canvas_rect.min + Vec2::new(bm.x, bm.y)], minor_stroke);
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
+            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
+            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            for xi in min_x..=max_x {
+                let x = xi as f64 * major_step;
+                let a = view.world_to_screen(Point2::new(x, world_br.y.min(world_tl.y)));
+                let b = view.world_to_screen(Point2::new(x, world_br.y.max(world_tl.y)));
+                painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+            }
         }
 
-        for yi in min_y..=max_y {
-            let y = yi as f64 * major_step;
-            let a = view.world_to_screen(Point2::new(min_x as f64 * major_step, y));
-            let b = view.world_to_screen(Point2::new(max_x as f64 * major_step, y));
-            painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+        // Horizontal grid lines
+        if view.y_log {
+            let min_pow = (world_br.y.max(1e-300).log10().floor() as i32 - 1);
+            let max_pow = (world_tl.y.max(1e-300).log10().ceil() as i32 + 1);
+            for pow in min_pow..=max_pow {
+                let y = 10_f64.powf(pow as f64);
+                let a = view.world_to_screen(Point2::new(world_tl.x, y));
+                let b = view.world_to_screen(Point2::new(world_br.x, y));
+                painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let ym = k as f64 * 10_f64.powf(pow as f64);
+                        let am = view.world_to_screen(Point2::new(world_tl.x, ym));
+                        let bm = view.world_to_screen(Point2::new(world_br.x, ym));
+                        painter.line_segment([canvas_rect.min + Vec2::new(am.x, am.y), canvas_rect.min + Vec2::new(bm.x, bm.y)], minor_stroke);
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
+            let min_y = (world_br.y / major_step).floor() as i32 - 1;
+            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            for yi in min_y..=max_y {
+                let y = yi as f64 * major_step;
+                let a = view.world_to_screen(Point2::new(world_tl.x, y));
+                let b = view.world_to_screen(Point2::new(world_br.x, y));
+                painter.line_segment([canvas_rect.min + Vec2::new(a.x, a.y), canvas_rect.min + Vec2::new(b.x, b.y)], grid_stroke);
+            }
         }
     }
 
@@ -1043,6 +1084,49 @@ impl GrafitoApp {
                                         painter.line_segment([end_pos, head2], Stroke::new(1.5, to_color32(vf.color)));
                                     }
                                 }
+                            }
+                        }
+                    }
+                    // Streamlines: trace from seed points using RK4
+                    let sl_steps = 200;
+                    let sl_dt = 0.05;
+                    let sl_color = Color32::from_rgba_unmultiplied(180, 100, 200, 180);
+                    let sl_stroke = Stroke::new(1.2, sl_color);
+                    // Distribute seeds uniformly
+                    let seeds_x = 5;
+                    let seeds_y = 5;
+                    let sx = (world_br.x - world_tl.x) / (seeds_x + 1) as f64;
+                    let sy = (world_br.y - world_tl.y) / (seeds_y + 1) as f64;
+                    for si in 1..=seeds_x {
+                        for sj in 1..=seeds_y {
+                            let mut x = world_tl.x + si as f64 * sx;
+                            let mut y = world_tl.y + sj as f64 * sy;
+                            let mut prev: Option<Pos2> = None;
+                            for _ in 0..sl_steps {
+                                let vars_eval = vec![("x".to_string(), x), ("y".to_string(), y)];
+                                if let (Ok(u), Ok(v)) = (
+                                    grafito_geometry::expr::evaluate(&vf.expr_u, &vars_eval),
+                                    grafito_geometry::expr::evaluate(&vf.expr_v, &vars_eval),
+                                ) {
+                                    if !u.is_finite() || !v.is_finite() { prev = None; break; }
+                                    let k1x = u; let k1y = v;
+                                    let half_dt = sl_dt * 0.5;
+                                    // k2
+                                    let (k2x, k2y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k1x), ("y".into(), y + half_dt * k1y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    // k3
+                                    let (k3x, k3y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + half_dt * k2x), ("y".into(), y + half_dt * k2y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    // k4
+                                    let (k4x, k4y) = match (grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)]), grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".into(), x + sl_dt * k3x), ("y".into(), y + sl_dt * k3y)])) { (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b), _ => { prev = None; break; } };
+                                    x += sl_dt / 6.0 * (k1x + 2.0*k2x + 2.0*k3x + k4x);
+                                    y += sl_dt / 6.0 * (k1y + 2.0*k2y + 2.0*k3y + k4y);
+                                    let screen = view.world_to_screen(Point2::new(x, y));
+                                    let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                                    if x < world_tl.x - dx || x > world_br.x + dx || y < world_tl.y - dy || y > world_br.y + dy { break; }
+                                    if let Some(prev_pos) = prev {
+                                        painter.line_segment([prev_pos, pos], sl_stroke);
+                                    }
+                                    prev = Some(pos);
+                                } else { prev = None; break; }
                             }
                         }
                     }
