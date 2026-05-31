@@ -478,6 +478,28 @@ pub fn validate(expr: &str) -> bool {
     eval_function(expr, 0.0).is_ok()
 }
 
+/// Parse, preprocess, substitute variables, and simplify a function expression
+/// into a reusable AST. This avoids re-parsing the expression for every sample
+/// point during rendering — critical for sum()-expanded functions.
+pub fn prepare_function_ast(
+    expr: &str,
+    vars: &std::collections::HashMap<String, f64>,
+    ignore: &[&str],
+) -> Result<crate::ast::Expr, String> {
+    let expr_clean = preprocess_expr(expr);
+    let mut ast = crate::ast::parse_ast(&expr_clean).map_err(|e| format!("Parse error: {}", e))?;
+    ast = ast.substitute_vars(vars, ignore).simplify();
+    Ok(ast)
+}
+
+/// Evaluate a pre-parsed AST at a batch of x values.
+pub fn eval_parsed_batch(ast: &crate::ast::Expr, var_name: &str, xs: impl Iterator<Item = f64>) -> Vec<Option<f64>> {
+    xs.map(|x| {
+        let res = ast.eval_at(var_name, x);
+        if res.is_nan() { None } else { Some(res) }
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

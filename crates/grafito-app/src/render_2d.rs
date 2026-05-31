@@ -4,7 +4,7 @@ use grafito_core::{
     PointObj, LineObj, CircleObj, PolygonObj,
 };
 use grafito_geometry::{Point2, Color};
-use grafito_geometry::expr::eval_function_with_vars;
+use grafito_geometry::expr::{eval_function_with_vars, prepare_function_ast, eval_parsed_batch};
 use grafito_ui::Tool;
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense};
 use glam::Vec2 as GlamVec2;
@@ -454,11 +454,16 @@ impl GrafitoApp {
                     steps = steps.min(500_000);
                     step = world_width / steps as f64;
                     
-                    let variables = &self.document.variables;
+                     let variables = &self.document.variables;
                     let xs = (0..=steps).map(|i| min_x + i as f64 * step);
                     
+                    let prepared = prepare_function_ast(&fun.expr, variables, &["x"]);
+                    
                     let mut samples: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
-                    let batch_results = grafito_geometry::expr::eval_batch_1d(&fun.expr, "x", xs.clone(), variables).unwrap_or_default();
+                    let batch_results = match &prepared {
+                        Ok(ast) => eval_parsed_batch(ast, "x", xs.clone()),
+                        Err(_) => grafito_geometry::expr::eval_batch_1d(&fun.expr, "x", xs.clone(), variables).unwrap_or_default(),
+                    };
                     
                     for (x, y_opt) in xs.zip(batch_results.into_iter().chain(std::iter::repeat(None))) {
                         if let Some(y) = y_opt {
@@ -467,29 +472,40 @@ impl GrafitoApp {
                                 continue;
                             }
                         }
-                        // Patch NaN/Inf by evaluating nearby points
-                        let eps = 1e-9;
-                        if let (Ok(y1), Ok(y2)) = (
-                            grafito_geometry::expr::eval_function_with_vars(&fun.expr, x - eps, variables),
-                            grafito_geometry::expr::eval_function_with_vars(&fun.expr, x + eps, variables)
-                        ) {
+                        if let Ok(ast) = &prepared {
+                            let eps = 1e-9;
+                            let y1 = ast.eval_at("x", x - eps);
+                            let y2 = ast.eval_at("x", x + eps);
                             if y1.is_finite() && y2.is_finite() && (y1 - y2).abs() < 1.0 {
                                 samples.push((x, Some((y1 + y2) * 0.5)));
                                 continue;
                             }
-                        }
-                        
-                        if let Ok(y) = grafito_geometry::expr::eval_function_with_vars(&fun.expr, x, variables) {
+                            let y = ast.eval_at("x", x);
                             if y.is_finite() && y.abs() < 1e50 {
                                 samples.push((x, Some(y)));
                                 continue;
+                            }
+                        } else {
+                            let eps = 1e-9;
+                            if let (Ok(y1), Ok(y2)) = (
+                                eval_function_with_vars(&fun.expr, x - eps, variables),
+                                eval_function_with_vars(&fun.expr, x + eps, variables)
+                            ) {
+                                if y1.is_finite() && y2.is_finite() && (y1 - y2).abs() < 1.0 {
+                                    samples.push((x, Some((y1 + y2) * 0.5)));
+                                    continue;
+                                }
+                            }
+                            if let Ok(y) = eval_function_with_vars(&fun.expr, x, variables) {
+                                if y.is_finite() && y.abs() < 1e50 {
+                                    samples.push((x, Some(y)));
+                                    continue;
+                                }
                             }
                         }
                         samples.push((x, None));
                     }
                     
-                    // Refine boundaries using bisection to capture asymptote tails accurately
-                    // without falsely extending vertical tangents to infinity.
                     let mut refined_samples = Vec::with_capacity(samples.len() + 100);
                     for i in 0..samples.len() {
                         refined_samples.push(samples[i]);
@@ -497,33 +513,41 @@ impl GrafitoApp {
                             let (x1, y1_opt) = samples[i];
                             let (x2, y2_opt) = samples[i+1];
                             if y1_opt.is_some() != y2_opt.is_some() {
-                                // Boundary detected. Bisect 12 times to get ~4000x closer to the boundary
                                 let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
                                 let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
                                 let mut best_y = if y1_opt.is_some() { y1_opt.unwrap() } else { y2_opt.unwrap() };
                                 
-                                for _ in 0..24 {
-                                    let mid = (good_x + bad_x) * 0.5;
-                                    if let Ok(y) = grafito_geometry::expr::eval_function_with_vars(&fun.expr, mid, variables) {
+                                if let Ok(ast) = &prepared {
+                                    for _ in 0..24 {
+                                        let mid = (good_x + bad_x) * 0.5;
+                                        let y = ast.eval_at("x", mid);
                                         if y.is_finite() && y.abs() < 1e50 {
                                             good_x = mid;
                                             best_y = y;
                                         } else {
                                             bad_x = mid;
                                         }
-                                    } else {
-                                        bad_x = mid;
+                                    }
+                                } else {
+                                    for _ in 0..24 {
+                                        let mid = (good_x + bad_x) * 0.5;
+                                        if let Ok(y) = eval_function_with_vars(&fun.expr, mid, variables) {
+                                            if y.is_finite() && y.abs() < 1e50 {
+                                                good_x = mid;
+                                                best_y = y;
+                                            } else {
+                                                bad_x = mid;
+                                            }
+                                        } else {
+                                            bad_x = mid;
+                                        }
                                     }
                                 }
                                 
-                                // Insert the extremely close point
                                 if y1_opt.is_some() {
                                     refined_samples.push((good_x, Some(best_y)));
                                 } else {
                                     refined_samples.push((good_x, Some(best_y)));
-                                    // Wait, if y1 was None, we are transitioning None -> Some.
-                                    // So the boundary point should be placed BEFORE x2 (which is Some).
-                                    // The loop order is: push i, then push boundary. So it works perfectly!
                                 }
                             }
                         }
