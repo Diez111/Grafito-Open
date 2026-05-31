@@ -34,6 +34,78 @@ fn setup_math_context() -> HashMapContext {
     let _ = ctx.set_function("floor".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.floor()))));
     let _ = ctx.set_function("ceil".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.ceil()))));
     let _ = ctx.set_function("round".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.round()))));
+    let _ = ctx.set_function("sec".into(), evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.cos()))));
+    let _ = ctx.set_function("csc".into(), evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.sin()))));
+    let _ = ctx.set_function("cot".into(), evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.tan()))));
+    let _ = ctx.set_function("asinh".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.asinh()))));
+    let _ = ctx.set_function("acosh".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.acosh()))));
+    let _ = ctx.set_function("atanh".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.atanh()))));
+    let _ = ctx.set_function("heaviside".into(), evalexpr::Function::new(|arg| Ok(Value::Float(if arg.as_float()? < 0.0 { 0.0 } else { 1.0 }))));
+    let _ = ctx.set_function("step".into(), evalexpr::Function::new(|arg| Ok(Value::Float(if arg.as_float()? < 0.0 { 0.0 } else { 1.0 }))));
+    let _ = ctx.set_function("cbrt".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.cbrt()))));
+    let _ = ctx.set_function("re".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?))));
+    let _ = ctx.set_function("real".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?))));
+    let _ = ctx.set_function("im".into(), evalexpr::Function::new(|_| Ok(Value::Float(0.0))));
+    let _ = ctx.set_function("imag".into(), evalexpr::Function::new(|_| Ok(Value::Float(0.0))));
+    let _ = ctx.set_function("arg".into(), evalexpr::Function::new(|arg| {
+        let v = arg.as_float()?;
+        Ok(Value::Float(if v >= 0.0 { 0.0 } else { std::f64::consts::PI }))
+    }));
+    let _ = ctx.set_function("conj".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?))));
+    let _ = ctx.set_function("conjugate".into(), evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?))));
+    // Special functions
+    let _ = ctx.set_function("erf".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::erf(arg.as_float()?)))));
+    let _ = ctx.set_function("erfc".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::erfc(arg.as_float()?)))));
+    let _ = ctx.set_function("gamma".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::gamma(arg.as_float()?)))));
+    let _ = ctx.set_function("lngamma".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::ln_gamma(arg.as_float()?)))));
+    let _ = ctx.set_function("lgamma".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::ln_gamma(arg.as_float()?)))));
+    let _ = ctx.set_function("digamma".into(), evalexpr::Function::new(|arg| Ok(Value::Float(crate::special_functions::digamma(arg.as_float()?)))));
+    // Multi-arg functions via tuples
+    let _ = ctx.set_function("atan2".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(t[0].as_float()?.atan2(t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("mod".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(t[0].as_float()? % t[1].as_float()?)) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("min".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(t[0].as_float()?.min(t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("max".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(t[0].as_float()?.max(t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("clamp".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 3 { Ok(Value::Float(t[0].as_float()?.clamp(t[1].as_float()?, t[2].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(3, t.len())) }
+    }));
+    let _ = ctx.set_function("beta".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(crate::special_functions::beta(t[0].as_float()?, t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("besselj".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(crate::special_functions::bessel_j(t[0].as_float()? as i32, t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("bessely".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(crate::special_functions::bessel_y(t[0].as_float()? as i32, t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
+    let _ = ctx.set_function("besseli".into(), evalexpr::Function::new(|arg| {
+        let t = arg.as_tuple()?;
+        if t.len() == 2 { Ok(Value::Float(crate::special_functions::bessel_i(t[0].as_float()? as i32, t[1].as_float()?))) }
+        else { Err(evalexpr::EvalexprError::wrong_function_argument_amount(2, t.len())) }
+    }));
     let _ = ctx.set_function("log".into(), evalexpr::Function::new(|arg| {
         let t = arg.as_tuple()?;
         if t.len() == 2 {
@@ -288,7 +360,8 @@ pub fn preprocess_expr(expr: &str) -> String {
             if c1.is_ascii_digit() && c2.is_ascii_alphabetic() { res.push('*'); }
             if c1 == ')' && c2.is_ascii_alphabetic() { res.push('*'); }
             if c1 == ')' && c2.is_ascii_digit() { res.push('*'); }
-            if c1.is_ascii_digit() && c2 == '(' { res.push('*'); }
+            if c1.is_ascii_digit() && c2 == '(' 
+                && (i == 0 || !chars[i-1].is_ascii_alphabetic()) { res.push('*'); }
             if c1 == ')' && c2 == '(' { res.push('*'); }
         }
     }
@@ -298,9 +371,28 @@ pub fn preprocess_expr(expr: &str) -> String {
 
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
-    let mut ctx = setup_math_context();
     let expr = preprocess_expr(expr);
-    
+
+    // FAST PATH: try custom AST parser first
+    let vars_map: std::collections::HashMap<String, f64> = vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let ignore: Vec<&str> = vars.iter().map(|(k, _)| k.as_str()).collect();
+    if let Ok(mut ast) = crate::ast::parse_ast(&expr) {
+        ast = ast.substitute_vars(&vars_map, &ignore).simplify();
+        // For 1-var functions, use eval_at
+        if vars.len() == 1 {
+            let (var, val) = &vars[0];
+            let result = ast.eval_at(var, *val);
+            if result.is_finite() { return Ok(result); }
+        } else if vars.len() == 2 {
+            let (v1, x1) = &vars[0];
+            let (v2, x2) = &vars[1];
+            let result = ast.eval_2d(v1, *x1, v2, *x2);
+            if result.is_finite() { return Ok(result); }
+        }
+    }
+
+    // SLOW PATH FALLBACK: evalexpr
+    let mut ctx = setup_math_context();
     for (name, val) in vars {
         if let Err(e) = ctx.set_value(name.clone(), Value::from(*val)) {
             return Err(format!("Variable error: {}", e));
@@ -522,7 +614,8 @@ mod tests {
                 if c1.is_ascii_digit() && c2.is_ascii_alphabetic() { res.push('*'); }
                 if c1 == ')' && c2.is_ascii_alphabetic() { res.push('*'); }
                 if c1 == ')' && c2.is_ascii_digit() { res.push('*'); }
-                if c1.is_ascii_digit() && c2 == '(' { res.push('*'); }
+            if c1.is_ascii_digit() && c2 == '(' 
+                && (i == 0 || !chars[i-1].is_ascii_alphabetic()) { res.push('*'); }  // 3( but not atan2(
                 if c1 == ')' && c2 == '(' { res.push('*'); }
             }
         }
