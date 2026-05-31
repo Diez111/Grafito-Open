@@ -41,10 +41,26 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
 /// Thermal colormap for heat maps: blue → cyan → green → yellow → red
 fn thermal_colormap(t: f64) -> (f64, f64, f64) {
     let t = t.clamp(0.0, 1.0);
-    let r = (t * 3.0 - 1.5).clamp(0.0, 1.0).min(1.0); // red from mid to end
-    let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0); // green peak at mid
-    let b = (1.5 - t * 3.0).clamp(0.0, 1.0); // blue at start, fade
+    let r = (t * 3.0 - 1.5).clamp(0.0, 1.0).min(1.0);
+    let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0);
+    let b = (1.5 - t * 3.0).clamp(0.0, 1.0);
     (r, g, b)
+}
+
+/// Convert integer exponent to Unicode superscript (e.g. 3 → "³", -2 → "⁻²")
+fn superscript(exp: i32) -> String {
+    let digits: Vec<char> = exp.to_string().chars().collect();
+    let mut result = String::new();
+    for &c in &digits {
+        result.push(match c {
+            '-' => '⁻',
+            '0' => '⁰', '1' => '¹', '2' => '²', '3' => '³',
+            '4' => '⁴', '5' => '⁵', '6' => '⁶', '7' => '⁷',
+            '8' => '⁸', '9' => '⁹',
+            _ => c,
+        });
+    }
+    result
 }
 
 #[allow(dead_code)]
@@ -335,46 +351,99 @@ impl GrafitoApp {
             [canvas_rect.min + Vec2::new(y_axis_a.x, y_axis_a.y), canvas_rect.min + Vec2::new(y_axis_b.x, y_axis_b.y)],
             stroke,
         );
-
-        // Dynamic grid step for axis numbers
-        let pixels_per_unit = self.document.view().scale as f64;
-        let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
-        let magnitude = target_world_step.log10().floor();
-        let base = 10f64.powf(magnitude);
-        let factor = target_world_step / base;
-        
-        let major_step = if factor < 2.0 { 1.0 * base }
-            else if factor < 5.0 { 2.0 * base }
-            else { 5.0 * base };
-
-        let format_num = |v: f64| -> String {
-            let rounded = (v * 1000.0).round() / 1000.0;
-            format!("{}", rounded)
-        };
-
+        // Tick marks and labels — log-appropriate or linear
         let text_color = if self.dark_mode { Color32::from_gray(180) } else { Color32::from_gray(80) };
         let font = egui::FontId::proportional(12.0);
+        let minor_tick = Stroke::new(0.5, text_color);
 
-        let min_x = (world_tl.x / major_step).floor() as i32 - 1;
-        let max_x = (world_br.x / major_step).ceil() as i32 + 1;
-        for xi in min_x..=max_x {
-            let x = xi as f64 * major_step;
-            if x.abs() < 1e-9 { continue; } // Origin handled separately
-            let s = view.world_to_screen(Point2::new(x, x_axis_y));
-            let pos = canvas_rect.min + Vec2::new(s.x, s.y);
-            painter.line_segment([pos + Vec2::new(0.0, -3.0), pos + Vec2::new(0.0, 3.0)], stroke);
-            painter.text(pos + Vec2::new(0.0, 6.0), egui::Align2::CENTER_TOP, format_num(x), font.clone(), text_color);
+        // X-axis ticks
+        if view.x_log {
+            let min_pow = world_tl.x.max(1e-300).log10().floor() as i32 - 1 ;
+            let max_pow = world_br.x.max(1e-300).log10().ceil() as i32 + 1 ;
+            for pow in min_pow..=max_pow {
+                let x = 10_f64.powf(pow as f64);
+                let s = view.world_to_screen(Point2::new(x, x_axis_y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment([pos + Vec2::new(0.0, -4.0), pos + Vec2::new(0.0, 4.0)], stroke);
+                let label = if pow == 0 { "1".into() }
+                    else if pow == 1 { "10".into() }
+                    else if pow == -1 { "10⁻¹".into() }
+                    else { format!("10{}", superscript(pow)) };
+                painter.text(pos + Vec2::new(0.0, 6.0), egui::Align2::CENTER_TOP, label, font.clone(), text_color);
+                // Minor ticks at 2..9 * 10^pow
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let xm = k as f64 * 10_f64.powf(pow as f64);
+                        let sm = view.world_to_screen(Point2::new(xm, x_axis_y));
+                        let posm = canvas_rect.min + Vec2::new(sm.x, sm.y);
+                        painter.line_segment([posm + Vec2::new(0.0, -2.0), posm + Vec2::new(0.0, 2.0)], minor_tick);
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
+            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
+            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            for xi in min_x..=max_x {
+                let x = xi as f64 * major_step;
+                if x.abs() < 1e-9 { continue; }
+                let s = view.world_to_screen(Point2::new(x, x_axis_y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment([pos + Vec2::new(0.0, -3.0), pos + Vec2::new(0.0, 3.0)], stroke);
+                // Format nicely
+                let label = if (x.fract()).abs() < 1e-9 { format!("{}", x as i64) }
+                    else { format!("{:.2}", x).trim_end_matches('0').trim_end_matches('.').to_string() };
+                painter.text(pos + Vec2::new(0.0, 6.0), egui::Align2::CENTER_TOP, label, font.clone(), text_color);
+            }
         }
 
-        let min_y = (world_br.y / major_step).floor() as i32 - 1;
-        let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
-        for yi in min_y..=max_y {
-            let y = yi as f64 * major_step;
-            if y.abs() < 1e-9 { continue; }
-            let s = view.world_to_screen(Point2::new(y_axis_x, y));
-            let pos = canvas_rect.min + Vec2::new(s.x, s.y);
-            painter.line_segment([pos + Vec2::new(-3.0, 0.0), pos + Vec2::new(3.0, 0.0)], stroke);
-            painter.text(pos + Vec2::new(-6.0, 0.0), egui::Align2::RIGHT_CENTER, format_num(y), font.clone(), text_color);
+        // Y-axis ticks
+        if view.y_log {
+            let min_pow = world_br.y.max(1e-300).log10().floor() as i32 - 1 ;
+            let max_pow = world_tl.y.max(1e-300).log10().ceil() as i32 + 1 ;
+            for pow in min_pow..=max_pow {
+                let y = 10_f64.powf(pow as f64);
+                let s = view.world_to_screen(Point2::new(y_axis_x, y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment([pos + Vec2::new(-4.0, 0.0), pos + Vec2::new(4.0, 0.0)], stroke);
+                let label = if pow == 0 { "1".into() }
+                    else if pow == 1 { "10".into() }
+                    else if pow == -1 { "10⁻¹".into() }
+                    else { format!("10{}", superscript(pow)) };
+                painter.text(pos + Vec2::new(-6.0, 0.0), egui::Align2::RIGHT_CENTER, label, font.clone(), text_color);
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let ym = k as f64 * 10_f64.powf(pow as f64);
+                        let sm = view.world_to_screen(Point2::new(y_axis_x, ym));
+                        let posm = canvas_rect.min + Vec2::new(sm.x, sm.y);
+                        painter.line_segment([posm + Vec2::new(-2.0, 0.0), posm + Vec2::new(2.0, 0.0)], minor_tick);
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
+            let min_y = (world_br.y / major_step).floor() as i32 - 1;
+            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            for yi in min_y..=max_y {
+                let y = yi as f64 * major_step;
+                if y.abs() < 1e-9 { continue; }
+                let s = view.world_to_screen(Point2::new(y_axis_x, y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment([pos + Vec2::new(-3.0, 0.0), pos + Vec2::new(3.0, 0.0)], stroke);
+                let label = if (y.fract()).abs() < 1e-9 { format!("{}", y as i64) }
+                    else { format!("{:.2}", y).trim_end_matches('0').trim_end_matches('.').to_string() };
+                painter.text(pos + Vec2::new(-6.0, 0.0), egui::Align2::RIGHT_CENTER, label, font.clone(), text_color);
+            }
         }
 
         let origin = view.world_to_screen(Point2::new(0.0, 0.0));
