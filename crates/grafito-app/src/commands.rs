@@ -60,12 +60,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         .replace("≤", "<=")
         .replace("≥", ">=");
         
-    let text_with_implicit = insert_implicit_multiplication(&text);
-    let text = text_with_implicit.as_str();
-    
     let mut result: Option<String> = None;
 
-    if let Some(cmd) = parse_cas_command(text) {
+    if let Some(mut cmd) = parse_cas_command(&text) {
+        cmd.args = cmd.args.iter().map(|a| insert_implicit_multiplication(a)).collect();
         match cmd.command.as_str() {
             "Ellipse" if cmd.args.len() >= 3 => {
                 let center_str = cmd.args[0].trim();
@@ -1028,6 +1026,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
 
     }
 
+    let text_with_implicit = insert_implicit_multiplication(&text);
+    let text = text_with_implicit.as_str();
+
     if let Some((name, rest)) = text.split_once('=') {
         let name = name.trim();
         let rest = rest.trim();
@@ -1524,10 +1525,10 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
         .replace("×", "*")
         .replace("≤", "<=")
         .replace("≥", ">=");
+    if parse_cas_command(&text).is_some() { return None; }
+
     let text_with_implicit = insert_implicit_multiplication(&text);
     let text = text_with_implicit.as_str();
-
-    if parse_cas_command(text).is_some() { return None; }
 
     if let Some((name, rest)) = text.split_once('=') {
         let name = name.trim();
