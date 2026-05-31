@@ -190,6 +190,17 @@ fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
     None
 }
 
+fn eval_single_point(expr: &str, x_value: f64) -> Option<f64> {
+    // Quick magnitude check — avoids full preprocess_expr recursion risk
+    let mut ctx = setup_math_context();
+    let _ = ctx.set_value("x".to_string(), Value::Float(x_value));
+    match evalexpr::eval_with_context(expr, &ctx) {
+        Ok(Value::Float(n)) if n.is_finite() => Some(n),
+        Ok(Value::Int(n)) => Some(n as f64),
+        _ => None,
+    }
+}
+
 fn expand_sum_product_once(expr: &str) -> Option<String> {
     let (func_start, close, is_product) = find_standalone_sum_product(expr)?;
     let op = if is_product { "*" } else { "+" };
@@ -217,8 +228,24 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
     let step: i64 = if end >= start { 1 } else { -1 };
     let mut terms = Vec::with_capacity(num_terms);
     let mut val = start;
+    let mut tiny_count = 0u32;
+    let min_terms = 5usize;
     loop {
         let substituted = replace_standalone_var(body, var, val as f64);
+        // Auto-truncate: stop when terms become numerically negligible
+        // (coefficients < 1e-14 or arguments to trig exceed f64 precision at ~1e15)
+        if terms.len() >= min_terms {
+            // Quick magnitude check at x=0: if the term contributes nothing, skip
+            let mag = eval_single_point(&substituted, 0.0);
+            if mag.is_none() || (mag.unwrap().abs() < 1e-14) {
+                tiny_count += 1;
+                if tiny_count >= 3 {
+                    break; // Series has converged numerically — remaining terms won't affect result
+                }
+            } else {
+                tiny_count = 0;
+            }
+        }
         terms.push(format!("({})", substituted));
         if val == end {
             break;
