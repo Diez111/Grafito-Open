@@ -597,7 +597,7 @@ impl GrafitoApp {
                     let world_width = max_x - min_x;
                     
                     let mut steps = screen_width.max(400.0).min(4000.0) as usize;
-                    let max_world_step = 0.05; 
+                    let max_world_step = 0.01;
                     let mut step = world_width / steps as f64;
                     if step > max_world_step {
                         steps = (world_width / max_world_step).ceil() as usize;
