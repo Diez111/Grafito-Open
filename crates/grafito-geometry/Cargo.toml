@@ -18,4 +18,5 @@ evalexpr.workspace = true
 serde.workspace = true
 log.workspace = true
 rug.workspace = true
+num-complex.workspace = true
 rayon.workspace = true

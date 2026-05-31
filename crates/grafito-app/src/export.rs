@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use grafito_core::{Document, GeoObject};
 use grafito_geometry::{Point2, Color};
 use grafito_geometry::expr::eval_function_with_vars;
@@ -30,7 +31,7 @@ pub fn export_tikz(document: &Document) -> String {
             }
             GeoObject::Circle(c) => {
                 let cen = view.world_to_screen(c.center);
-                let r = c.radius as f32 * view.scale;
+                let r = c.radius * view.scale;
                 out.push_str(&format!("  \\draw ({:.2},{:.2}) circle ({:.2});\n", cen.x, cen.y, r));
             }
             GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
@@ -42,7 +43,7 @@ pub fn export_tikz(document: &Document) -> String {
             GeoObject::Ellipse(el) => {
                 let cen = view.world_to_screen(el.center);
                 out.push_str(&format!("  \\draw ({:.2},{:.2}) ellipse ({:.2} and {:.2});\n",
-                    cen.x, cen.y, el.rx as f32 * view.scale, el.ry as f32 * view.scale));
+                    cen.x, cen.y, el.rx * view.scale, el.ry * view.scale));
             }
             _ => {}
         }
@@ -108,13 +109,13 @@ pub fn export_svg(document: &Document) -> String {
             }
             GeoObject::Circle(c) => {
                 let center = view.world_to_screen(c.center);
-                let r = (c.radius as f32) * view.scale;
+                let r = c.radius * view.scale;
                 if let Some(fill) = c.fill_color {
                     let _ = writeln!(svg, r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="{}"/>"#, center.x, center.y, r, svg_color(fill));
                 }
                 let _ = writeln!(svg, r#"<circle cx="{:.1}" cy="{:.1}" r="{:.1}" fill="none" stroke="{}" stroke-width="{}"/>"#, center.x, center.y, r, svg_color(c.color), c.width);
                 if !c.label.is_empty() {
-                    let _ = writeln!(svg, r#"<text x="{:.1}" y="{:.1}" font-family="sans-serif" font-size="12" fill="black">{}</text>"#, center.x + r + 2.0, center.y - r - 2.0, c.label);
+                    let _ = writeln!(svg, r#"<text x="{:.1}" y="{:.1}" font-family="sans-serif" font-size="12" fill="black">{}</text>"#, center.x + r as f32 + 2.0, center.y - r as f32 - 2.0, c.label);
                 }
             }
             GeoObject::Polygon(poly) => {
@@ -233,7 +234,7 @@ pub fn export_png(document: &Document, width: u32, height: u32) -> image::RgbaIm
             }
             GeoObject::Circle(c) => {
                 let center = view.world_to_screen(c.center);
-                let r = (c.radius as f32 * view.scale).max(0.5) as i32;
+                let r = (c.radius * view.scale).max(0.5) as i32;
                 if let Some(fill) = c.fill_color {
                     let fc = [(fill.r*255.0) as u8, (fill.g*255.0) as u8, (fill.b*255.0) as u8, 255];
                     fill_circle(&mut img, center.x as i32, center.y as i32, r, fc);

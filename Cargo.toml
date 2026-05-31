@@ -3,7 +3,7 @@ members = ["crates/grafito-app", "crates/grafito-core", "crates/grafito-geometry
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0-alpha"
+version = "0.8.0"
 edition = "2021"
 authors = ["Grafito Contributors"]
 license = "GPL-3.0-or-later"
@@ -36,11 +36,12 @@ robust = "1.1"
 
 # Rendering
 lyon = "1.0"
-bytemuck = "1.16"
+bytemuck = { version = "1.16", features = ["derive"] }
 
 # Parsing & Expressions
 evalexpr = "11.3"
 rug = { version = "1.28", features = ["integer", "rational", "float"] }
+num-complex = "0.4"
 
 # Parallelism
 rayon = "1.10"

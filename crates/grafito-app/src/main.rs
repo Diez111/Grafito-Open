@@ -6,13 +6,13 @@ mod render_2d;
 mod render_3d;
 
 use grafito_core::{Document, GeoObject, ObjectId,
-    PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, EllipseObj, Sphere3DObj, Cube3DObj,
+    PointObj, LineObj, CircleObj, PolygonObj, FunctionObj, EllipseObj, Sphere3DObj, Cube3DObj, Point3DObj,
 };
 use grafito_geometry::{Point2, Point3D, ViewTransform, Camera3D, Color};
 use grafito_ui::Tool;
 use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
-use egui::{Pos2, Color32, Sense, Key};
-use glam::Vec2 as GlamVec2;
+use egui::{Pos2, Vec2, Color32, Sense, Key};
+
 
 const MAX_UNDO: usize = 50;
 
@@ -50,6 +50,10 @@ pub struct GrafitoApp {
     pub recent_files: Vec<String>,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<Document>,
+    pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
+    pub active_color_picker: Option<(ObjectId, grafito_ui::color_picker::HsvColorPicker)>,
+    pub color_favorites: [grafito_geometry::Color; 5],
+    pub tool_ghost: Option<GeoObject>,
 }
 
 impl GrafitoApp {
@@ -97,6 +101,16 @@ impl GrafitoApp {
             recent_files: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            attractor_cache: std::collections::HashMap::new(),
+            active_color_picker: None,
+            tool_ghost: None,
+            color_favorites: [
+                grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
+                grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
+                grafito_geometry::Color::new(0.1, 0.3, 0.9, 1.0),
+                grafito_geometry::Color::new(0.9, 0.6, 0.1, 1.0),
+                grafito_geometry::Color::new(0.5, 0.1, 0.9, 1.0),
+            ],
         }
     }
 
@@ -155,16 +169,13 @@ impl GrafitoApp {
             }
         }
         if let Some((min, max)) = bounds {
-            let sw = self.document.view().screen_size.x;
-            let sh = self.document.view().screen_size.y;
-            let margin = 1.2;
-            let w = (max.x - min.x).max(0.1) * margin;
-            let h = (max.y - min.y).max(0.1) * margin;
-            let scale = (sw / w as f32).min(sh / h as f32);
-            let cx = (min.x + max.x) * 0.5;
-            let cy = (min.y + max.y) * 0.5;
-            self.document.view_mut().scale = scale;
-            self.document.view_mut().offset = GlamVec2::new(-cx as f32 * scale, cy as f32 * scale);
+            let cx = (min.x + max.x) / 2.0;
+            let cy = (min.y + max.y) / 2.0;
+            let dx = (max.x - min.x).max(10.0);
+            let dy = (max.y - min.y).max(10.0);
+            let scale = (1000.0 / dx).min(600.0 / dy) * 0.8;
+            self.document.view_mut().scale = scale as f64;
+            self.document.view_mut().offset = grafito_geometry::Point2::new(-cx as f64 * scale as f64, cy as f64 * scale as f64);
         }
     }
 }
@@ -176,13 +187,13 @@ impl eframe::App for GrafitoApp {
         if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
             || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl) { self.redo(); }
         if ctx.input(|i| i.key_pressed(Key::Delete)) { self.delete_selected(); }
-        if ctx.input(|i| i.key_pressed(Key::F1)) { self.current_tool = Tool::Select; }
-        if ctx.input(|i| i.key_pressed(Key::F2)) { self.current_tool = Tool::Point; }
-        if ctx.input(|i| i.key_pressed(Key::F3)) { self.current_tool = Tool::Line; }
-        if ctx.input(|i| i.key_pressed(Key::F4)) { self.current_tool = Tool::Circle; }
-        if ctx.input(|i| i.key_pressed(Key::F5)) { self.current_tool = Tool::Polygon; }
-        if ctx.input(|i| i.key_pressed(Key::F6)) { self.current_tool = Tool::Function; }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) { self.current_tool = Tool::Select; }
+        if ctx.input(|i| i.key_pressed(Key::F1)) { self.current_tool = Tool::Select; self.tool_ghost = None; self.pending_points.clear(); }
+        if ctx.input(|i| i.key_pressed(Key::F2)) { self.current_tool = Tool::Point; self.tool_ghost = None; }
+        if ctx.input(|i| i.key_pressed(Key::F3)) { self.current_tool = Tool::Line; self.tool_ghost = None; self.pending_points.clear(); }
+        if ctx.input(|i| i.key_pressed(Key::F4)) { self.current_tool = Tool::Circle; self.tool_ghost = None; self.pending_points.clear(); }
+        if ctx.input(|i| i.key_pressed(Key::F5)) { self.current_tool = Tool::Polygon; self.tool_ghost = None; self.pending_points.clear(); }
+        if ctx.input(|i| i.key_pressed(Key::F6)) { self.current_tool = Tool::Function; self.tool_ghost = None; }
+        if ctx.input(|i| i.key_pressed(Key::Escape)) { self.current_tool = Tool::Select; self.tool_ghost = None; self.pending_points.clear(); }
 
         let is_dark = self.dark_mode;
         let accent   = Color32::from_rgb(100, 80, 200);
@@ -217,14 +228,21 @@ impl eframe::App for GrafitoApp {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(6.0);
-                        ui.button("Pantalla");
+                        if ui.button("Pantalla").clicked() {
+                            let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+                        }
                         ui.add_space(4.0);
                         if ui.button("Tema").clicked() {
                             self.dark_mode = !self.dark_mode;
                             if self.dark_mode { THEME_DARK.apply(ui.ctx()); } else { THEME_LIGHT.apply(ui.ctx()); }
                         }
                         ui.add_space(4.0);
-                        ui.button("Ajustes");
+                        ui.menu_button("Ajustes", |ui| {
+                            ui.checkbox(&mut self.show_grid, "Mostrar Cuadrícula");
+                            ui.checkbox(&mut self.snap_to_grid, "Ajustar a la Cuadrícula");
+                            ui.checkbox(&mut self.exam_mode, "Modo Examen");
+                        });
                         ui.add_space(4.0);
                         if ui.selectable_label(self.exam_mode, "Examen").clicked() {
                             self.exam_mode = !self.exam_mode;
@@ -254,7 +272,15 @@ impl eframe::App for GrafitoApp {
                         let resp = ui.add_sized([44.0,44.0],
                             egui::Button::new(egui::RichText::new(*icon).size(20.0).color(ic))
                                 .fill(bg).frame(false));
-                        if resp.clicked() { self.sidebar_tab = i; }
+                        if resp.clicked() { 
+                            if self.sidebar_tab == i && i != 0 {
+                                self.sidebar_tab = 0;
+                            } else {
+                                self.sidebar_tab = i; 
+                            }
+                            // Sync spreadsheet visibility with tab 3
+                            self.show_spreadsheet = self.sidebar_tab == 3;
+                        }
                         resp.on_hover_text(*tip);
                         ui.add_space(2.0);
                     }
@@ -302,6 +328,18 @@ impl eframe::App for GrafitoApp {
                     for oid in ids {
                         let (obj_label, obj_name, obj_vis, obj_col, obj_expr) = {
                             let Some(obj) = self.document.get_object(oid) else { continue; };
+                            
+                            // Filter objects by current view mode
+                            let is_3d_object = matches!(obj.name(),
+                                "Point3D" | "Segment3D" | "Sphere3D" | "Cube3D" | "Pyramid3D" |
+                                "Cone3D" | "Cylinder3D" | "Surface3D" | "ParametricCurve3D" |
+                                "Attractor3D" | "HyperSurface4D" | "VectorField3D"
+                            );
+                            let is_3d_view = self.current_view == ViewMode::D3;
+                            if is_3d_object != is_3d_view {
+                                continue;
+                            }
+                            
                             let col = match obj.name() {
                                 "Point"|"Point3D" => Color32::from_rgb(50,100,255),
                                 "Line"            => Color32::from_rgb(90,110,130),
@@ -374,6 +412,31 @@ impl eframe::App for GrafitoApp {
                                         });
                                     });
                                 });
+                                
+                                // Properties Panel (Inline)
+                                if is_sel {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(20.0); // indent
+                                        ui.label("Color:");
+                                        let obj_color = self.document.get_object(oid).map(|o| o.color()).unwrap_or_else(|| grafito_geometry::Color::new(1.0, 1.0, 1.0, 1.0));
+                                        let color32 = Color32::from_rgba_unmultiplied(
+                                            (obj_color.r * 255.0) as u8,
+                                            (obj_color.g * 255.0) as u8,
+                                            (obj_color.b * 255.0) as u8,
+                                            (obj_color.a * 255.0) as u8,
+                                        );
+                                        let (rect, resp) = ui.allocate_exact_size(egui::Vec2::new(30.0, 20.0), Sense::click());
+                                        let painter = ui.painter();
+                                        painter.rect_filled(rect.translate(egui::Vec2::new(0.0, 1.0)), 4.0, Color32::from_black_alpha(40)); // shadow
+                                        painter.rect_filled(rect, 4.0, color32);
+                                        painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, if resp.hovered() { Color32::WHITE } else { Color32::from_gray(120) }));
+                                        
+                                        if resp.clicked() {
+                                            self.active_color_picker = Some((oid, grafito_ui::color_picker::HsvColorPicker::new(obj_color)));
+                                        }
+                                    });
+                                }
                             });
                         
                         if row_clicked {
@@ -419,6 +482,40 @@ impl eframe::App for GrafitoApp {
                     }
                 });
             });
+        } else if self.sidebar_tab == 1 {
+            egui::SidePanel::left("tools_panel")
+                .default_width(220.0)
+                .min_width(160.0)
+                .resizable(true)
+                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .show(ctx, |ui| {
+                    ui.add_space(10.0);
+                    grafito_ui::toolbar(ui, &mut self.current_tool, self.current_view == ViewMode::D3);
+                });
+        } else if self.sidebar_tab == 3 {
+            egui::SidePanel::left("spreadsheet_panel")
+                .default_width(220.0)
+                .min_width(160.0)
+                .resizable(true)
+                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(egui::RichText::new("La Hoja de Cálculo se muestra a la derecha.").color(Color32::from_gray(150)));
+                    });
+                });
+        } else if self.sidebar_tab == 2 {
+            egui::SidePanel::left("table_panel")
+                .default_width(220.0)
+                .min_width(160.0)
+                .resizable(true)
+                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(30.0);
+                        ui.label(egui::RichText::new("Tabla de Valores (Próximamente)\nUsa la Hoja de Cálculo (S) por ahora.").color(Color32::from_gray(150)));
+                    });
+                });
         } else {
             egui::SidePanel::left("empty_panel")
                 .default_width(220.0)
@@ -445,7 +542,7 @@ impl eframe::App for GrafitoApp {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                         // Tab bar
                         ui.horizontal(|ui| {
-                            for (i, lbl) in ["123", "f(x)", "ABC", "#&~"].iter().enumerate() {
+                            for (i, lbl) in ["123", "f(x)", "ABC", "3D"].iter().enumerate() {
                                 let active = self.keyboard_tab == i;
                                 let c = if active { accent } else { Color32::from_gray(110) };
                                 let fbg = if active { Color32::from_rgba_unmultiplied(100,80,200,30) } else { Color32::TRANSPARENT };
@@ -463,7 +560,7 @@ impl eframe::App for GrafitoApp {
 
                         let avail_w = ui.available_width();
                         let sp = 4.0_f32;
-                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(38.0, 65.0);
+                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(24.0, 65.0);
                         let total_w = (btn_w * 8.0) + (sp * 7.0);
                         let pad = ((avail_w - total_w) / 2.0).max(0.0);
 
@@ -478,7 +575,7 @@ impl eframe::App for GrafitoApp {
                                     };
                                     $ui.painter().rect(r, 4.0, bg, egui::Stroke::new(1.0, Color32::from_gray(if is_dark {65} else {210})));
                                     $ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, $t,
-                                        egui::FontId::proportional(15.0),
+                                        egui::FontId::proportional((btn_w * 0.4).clamp(10.0, 15.0)),
                                         if is_dark { Color32::WHITE } else { Color32::BLACK });
                                 }
                                 if resp.clicked() { self.input_text.push_str($i); }
@@ -502,8 +599,8 @@ impl eframe::App for GrafitoApp {
                                 &[("z","z"),("x","x"),("c","c"),("v","v"),("b","b"),("n","n"),("m","m"),(",","")],
                             ],
                             _ => &[
-                                &[("@","@"),("#","#"),("$","$"),("%","%"),("&","&"),("*","*"),("?","?"),("!","!")],
-                                &[("+","+"),("-","-"),("=","="),("_","_"),(":",""),(";",""),("\"",""),("'","")],
+                                &[("Lor","Lorenz[10, 28, 2.66]"),("Roe","Rossler[0.2, 0.2, 5.7]"),("Aiz","Aizawa[0.95, 0.7, 0.6, 3.5, 0.25, 0.1]"),("Rab","Dadras[3, 2.7, 1.7, 2, 9]"),("Sph","Sphere[0,0,0,5]"),("Cub","Cube[0,0,0,5]"),("P3D","Point3D[1,1,1]"),("S3D","Segment3D[0,0,0,1,1,1]")],
+                                &[("Hal","Halvorsen[2.0]"),("Tho","Thomas[0.208186]"),("Che","Chen[35, 3, 28]"),("Spr","Chua[15.6, 28, -1.14, -0.71]"),("Cyl","Cylinder[0,0,0,2,5]"),("Con","Cone[0,0,0,3,5]"),("Tor","Torus[0,0,0,4,1]"),("Moe","Moebius[2,1]")],
                                 &[("<","<"),(">",">"),("(", "("),(")",")"),("[","["),("]","]"),("{","{"),("}","}")],
                             ],
                         };
@@ -550,22 +647,43 @@ impl eframe::App for GrafitoApp {
                     ui.heading("Hoja de Cálculo");
                     ui.separator();
                     let (rows, cols) = self.document.spreadsheet_dim();
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        egui::Grid::new("sp").striped(true).show(ui, |ui| {
-                            ui.label("");
-                            for c in 0..cols { ui.monospace(format!(" {}", (b'A'+c as u8) as char)); }
+                    let text_col = if is_dark { Color32::WHITE } else { Color32::BLACK };
+                    let hdr_col = if is_dark { Color32::from_gray(160) } else { Color32::from_gray(80) };
+
+                    egui::ScrollArea::both().auto_shrink([false; 2]).show(ui, |ui| {
+                        egui::Grid::new("sp_grid")
+                            .min_col_width(52.0)
+                            .spacing(egui::vec2(1.0, 1.0))
+                            .striped(true)
+                            .show(ui, |ui| {
+                            // Header row
+                            ui.label(""); // corner
+                            for c in 0..cols {
+                                let letter = if c < 26 { format!("{}", (b'A' + c as u8) as char) } else { format!("{}", c + 1) };
+                                ui.centered_and_justified(|ui| {
+                                    ui.label(egui::RichText::new(letter).monospace().strong().color(hdr_col));
+                                });
+                            }
                             ui.end_row();
+
+                            // Data rows
                             for r in 0..rows {
-                                ui.monospace(format!("{}", r+1));
+                                ui.label(egui::RichText::new(format!("{}", r + 1)).monospace().strong().color(hdr_col));
                                 for c in 0..cols {
-                                    let mut val = self.document.get_spreadsheet_cell(r,c);
-                                    if ui.add_sized([60.0,18.0], egui::TextEdit::singleline(&mut val).font(egui::TextStyle::Monospace)).changed() {
+                                    let mut val = self.document.get_spreadsheet_cell(r, c);
+                                    let resp = ui.add_sized([52.0, 18.0],
+                                        egui::TextEdit::singleline(&mut val)
+                                            .font(egui::TextStyle::Monospace)
+                                            .text_color(text_col)
+                                            .horizontal_align(egui::Align::Center)
+                                    );
+                                    if resp.changed() {
                                         self.save_state();
-                                        self.document.set_spreadsheet_cell(r,c,val.clone());
-                                        if let Ok((x,y)) = commands::parse_point_str(&val) {
+                                        self.document.set_spreadsheet_cell(r, c, val.clone());
+                                        if let Ok((x, y)) = commands::parse_point_str(&val) {
                                             self.document.add_object(GeoObject::Point(
-                                                PointObj::new(Point2::new(x,y)).with_label(
-                                                    format!("{}{}", (b'A'+c as u8) as char, r+1))));
+                                                PointObj::new(Point2::new(x, y)).with_label(
+                                                    format!("{}{}", (b'A' + c as u8) as char, r + 1))));
                                         }
                                     }
                                 }
@@ -597,7 +715,9 @@ impl eframe::App for GrafitoApp {
                             egui::Stroke::new(1.0, Color32::from_gray(200)));
                         painter.text(zf_rect.center(), egui::Align2::CENTER_CENTER, "[ ]",
                             egui::FontId::proportional(16.0), Color32::from_gray(60));
-                        if ui.interact(zf_rect, ui.id().with("zf"), egui::Sense::click()).clicked() {
+                        if ui.interact(zf_rect, ui.id().with("zf"), egui::Sense::click())
+                            .on_hover_text("Ajustar Vista")
+                            .clicked() {
                             self.zoom_to_fit();
                         }
 
@@ -606,6 +726,7 @@ impl eframe::App for GrafitoApp {
                         self.draw_grid(&painter, canvas_rect);
                         self.draw_axes(&painter, canvas_rect);
                         self.draw_objects(&painter, canvas_rect);
+                        self.draw_tool_ghost(&painter, canvas_rect);
 
                         if let Some(preview) = &self.preview_object {
                             match preview {
@@ -650,14 +771,76 @@ impl eframe::App for GrafitoApp {
                             let sc = ui.input(|i| i.smooth_scroll_delta);
                             if sc.y != 0.0 { self.camera.zoom(1.0 + sc.y*0.005); }
                         }
+                        
+                        // Tool ghost for 3D mode
+                        self.tool_ghost = None;
+                        if matches!(self.current_tool, Tool::Point3D | Tool::Sphere3D | Tool::Cube3D) {
+                            let t = self.camera.target;
+                            let ghost_pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
+                            self.tool_ghost = Some(GeoObject::Point3D(Point3DObj::new(ghost_pos)));
+                        }
+                        
                         self.last_mouse_pos = Some(pos);
                     }
-                    if response.clicked_by(egui::PointerButton::Primary) && self.current_tool != Tool::Select {
+                    if (response.clicked_by(egui::PointerButton::Primary) 
+                        || response.drag_stopped_by(egui::PointerButton::Primary))
+                        && self.current_tool != Tool::Select {
                         self.handle_3d_click(ui, &response, canvas_rect, w, h);
+                        self.tool_ghost = None;
                     }
                     self.draw_3d_grid(ui.painter(), canvas_rect, w, h);
                     self.draw_3d_objects(ui.painter(), canvas_rect, w, h);
+                    
+                    // Draw 3D tool ghost
+                    if let Some(GeoObject::Point3D(ghost)) = &self.tool_ghost {
+                        let painter = ui.painter();
+                        let origin = canvas_rect.min;
+                        if let Some(pt) = self.camera.project(&ghost.position, w, h) {
+                            let pos = origin + Vec2::new(pt.0, pt.1);
+                            // Render ghost with reduced opacity
+                            let ghost_color = Color32::from_rgba_premultiplied(
+                                (ghost.color.r * 255.0) as u8,
+                                (ghost.color.g * 255.0) as u8,
+                                (ghost.color.b * 255.0) as u8,
+                                80, // ~30% opacity
+                            );
+                            painter.circle_filled(pos, ghost.size.min(8.0) * 1.3, ghost_color);
+                            painter.circle_stroke(pos, ghost.size.min(8.0) * 1.3, 
+                                egui::Stroke::new(1.5, Color32::from_rgba_premultiplied(100, 150, 255, 120)));
+                        }
+                    }
                 });
+            }
+        }
+
+        if let Some((oid, mut picker)) = self.active_color_picker.clone() {
+            let mut keep_open = true;
+            let mut changed = false;
+            
+            // Adjust the window design to be centered and not ugly
+            egui::Window::new("🎨 Selector de Color")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.0)
+                .fixed_size([320.0, 300.0])
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    if picker.show(ui, &mut self.color_favorites) {
+                        changed = true;
+                    }
+                });
+
+            if changed {
+                if let Some(o) = self.document.get_object_mut(oid) {
+                    o.set_color(picker.to_color());
+                }
+            }
+
+            if keep_open {
+                self.active_color_picker = Some((oid, picker));
+            } else {
+                self.active_color_picker = None;
             }
         }
     }

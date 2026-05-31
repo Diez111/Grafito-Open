@@ -3,11 +3,18 @@ use grafito_core::{
     PointObj, LineObj, FunctionObj, EllipseObj,
     PolygonObj, ParabolaObj, HyperbolaObj,
     Point3DObj, Segment3DObj, Surface3DObj,
+    Sphere3DObj, Cube3DObj, Cone3DObj, Cylinder3DObj,
+    Torus3DObj, MoebiusStripObj,
+    ImplicitCurveObj, RelationOperator,
+    Attractor3DObj, Fractal2DObj, HyperSurface4DObj, VectorField3DObj,
+    HistogramObj, ScatterPlotObj, BoxPlotObj, RegressionLineObj,
 };
 use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::symbolic;
+use grafito_geometry::statistics;
+use grafito_geometry::matrices::{Matrix, taylor_series};
 use std::collections::{HashMap, HashSet};
 
 fn insert_implicit_multiplication(text: &str) -> String {
@@ -130,6 +137,62 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(obj);
                     input_text.clear();
                     return None;
+                }
+            }
+            "Point3D" if cmd.args.len() == 3 => {
+                if let (Ok(x), Ok(y), Ok(z)) = (cmd.args[0].trim().parse(), cmd.args[1].trim().parse(), cmd.args[2].trim().parse()) {
+                    let obj = GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Segment3D" if cmd.args.len() == 6 => {
+                if let (Ok(x1), Ok(y1), Ok(z1), Ok(x2), Ok(y2), Ok(z2)) = (cmd.args[0].trim().parse(), cmd.args[1].trim().parse(), cmd.args[2].trim().parse(), cmd.args[3].trim().parse(), cmd.args[4].trim().parse(), cmd.args[5].trim().parse()) {
+                    let obj = GeoObject::Segment3D(Segment3DObj::new(Point3D::new(x1, y1, z1), Point3D::new(x2, y2, z2)));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Sphere" if cmd.args.len() == 4 => {
+                if let (Ok(x), Ok(y), Ok(z), Ok(r)) = (cmd.args[0].trim().parse(), cmd.args[1].trim().parse(), cmd.args[2].trim().parse(), cmd.args[3].trim().parse()) {
+                    let obj = GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(x, y, z), r));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Cube" if cmd.args.len() == 4 => {
+                if let (Ok(x), Ok(y), Ok(z), Ok(s)) = (cmd.args[0].trim().parse(), cmd.args[1].trim().parse(), cmd.args[2].trim().parse(), cmd.args[3].trim().parse()) {
+                    let obj = GeoObject::Cube3D(Cube3DObj::new(Point3D::new(x, y, z), s));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Cylinder" if cmd.args.len() == 5 => {
+                if let (Ok(x), Ok(y), Ok(z), Ok(r), Ok(h)) = (cmd.args[0].trim().parse::<f64>(), cmd.args[1].trim().parse::<f64>(), cmd.args[2].trim().parse::<f64>(), cmd.args[3].trim().parse::<f64>(), cmd.args[4].trim().parse::<f64>()) {
+                    let obj = GeoObject::Cylinder3D(Cylinder3DObj::new(Point3D::new(x, y, z), Point3D::new(x, y, z + h), r));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Cone" if cmd.args.len() == 5 => {
+                if let (Ok(x), Ok(y), Ok(z), Ok(r), Ok(h)) = (cmd.args[0].trim().parse::<f64>(), cmd.args[1].trim().parse::<f64>(), cmd.args[2].trim().parse::<f64>(), cmd.args[3].trim().parse::<f64>(), cmd.args[4].trim().parse::<f64>()) {
+                    let obj = GeoObject::Cone3D(Cone3DObj::new(Point3D::new(x, y, z), Point3D::new(x, y, z + h), r));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Torus" if cmd.args.len() == 5 => {
+                if let (Ok(x), Ok(y), Ok(z), Ok(rmaj), Ok(rmin)) = (cmd.args[0].trim().parse::<f64>(), cmd.args[1].trim().parse::<f64>(), cmd.args[2].trim().parse::<f64>(), cmd.args[3].trim().parse::<f64>(), cmd.args[4].trim().parse::<f64>()) {
+                    let obj = GeoObject::Torus3D(Torus3DObj::new(Point3D::new(x, y, z), rmaj, rmin));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
+                }
+            }
+            "Moebius" if cmd.args.len() == 2 => {
+                if let (Ok(r), Ok(w)) = (cmd.args[0].trim().parse::<f64>(), cmd.args[1].trim().parse::<f64>()) {
+                    let obj = GeoObject::MoebiusStrip(MoebiusStripObj::new(Point3D::new(0.0, 0.0, 0.0), r, w));
+                    document.add_object(obj);
+                    input_text.clear(); return None;
                 }
             }
             "Tangent" => {
@@ -416,11 +479,550 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 }
                 input_text.clear(); return result;
             }
+            "Lorenz" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![10.0, 28.0, 8.0/3.0]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                if params.is_empty() {
+                    input_text.clear();
+                    return Some("Error: Invalid parameters for Lorenz. Use: Lorenz[sigma, rho, beta] or Lorenz[sigma=10, rho=28, beta=8/3]".into());
+                }
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("lorenz", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Lorenz attractor created".into());
+            }
+            "Rossler" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![0.2, 0.2, 5.7]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("rossler", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Rössler attractor created".into());
+            }
+            "Thomas" | "Butterfly" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![0.208186]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("thomas", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Thomas butterfly attractor created".into());
+            }
+            "Aizawa" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![0.95, 0.7, 0.6, 3.5, 0.25, 0.1]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("aizawa", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Aizawa attractor created".into());
+            }
+            "Chen" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![35.0, 3.0, 28.0]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("chen", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Chen attractor created".into());
+            }
+            "Halvorsen" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![1.89]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("halvorsen", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Halvorsen attractor created".into());
+            }
+            "Dadras" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![3.0, 2.7, 1.7, 2.0, 9.0]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("dadras", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Dadras attractor created".into());
+            }
+            "Chua" => {
+                let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
+                    vec![15.6, 28.0, -1.143, -0.714]
+                } else {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                };
+                let obj = GeoObject::Attractor3D(Attractor3DObj::new("chua", params));
+                document.add_object(obj);
+                input_text.clear(); return Some("Chua attractor created".into());
+            }
+            "Mandelbrot" => {
+                let max_iter = cmd.args.first()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(256);
+                let obj = GeoObject::Fractal2D(Fractal2DObj::mandelbrot().with_max_iter(max_iter));
+                document.add_object(obj);
+                input_text.clear(); return Some("Mandelbrot fractal created".into());
+            }
+            "Julia" if cmd.args.len() >= 2 => {
+                let cr: f64 = cmd.args[0].trim().parse().unwrap_or(-0.70176);
+                let ci: f64 = cmd.args[1].trim().parse().unwrap_or(-0.3842);
+                let max_iter = cmd.args.get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(256);
+                let obj = GeoObject::Fractal2D(Fractal2DObj::julia(cr, ci).with_max_iter(max_iter));
+                document.add_object(obj);
+                input_text.clear(); return Some(format!("Julia set c={cr}+{ci}i created"));
+            }
+            "BurningShip" => {
+                let obj = GeoObject::Fractal2D(Fractal2DObj::burning_ship());
+                document.add_object(obj);
+                input_text.clear(); return Some("Burning Ship fractal created".into());
+            }
+            "Hypercube" => {
+                let angles = if cmd.args.len() >= 3 {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                } else {
+                    vec![0.3, 0.5, 0.7]
+                };
+                let obj = GeoObject::HyperSurface4D(HyperSurface4DObj::hypercube().with_rotation(angles));
+                document.add_object(obj);
+                input_text.clear(); return Some("4D Hypercube (tesseract) created".into());
+            }
+            "Hypersphere" => {
+                let angles = if cmd.args.len() >= 3 {
+                    cmd.args.iter().filter_map(|s| s.trim().parse().ok()).collect()
+                } else {
+                    vec![0.3, 0.5, 0.7]
+                };
+                let obj = GeoObject::HyperSurface4D(HyperSurface4DObj::hypersphere().with_rotation(angles));
+                document.add_object(obj);
+                input_text.clear(); return Some("4D Hypersphere created".into());
+            }
+            "VectorField3D" if cmd.args.len() >= 3 => {
+                let obj = GeoObject::VectorField3D(VectorField3DObj::new(
+                    cmd.args[0].trim(), cmd.args[1].trim(), cmd.args[2].trim()
+                ));
+                document.add_object(obj);
+                input_text.clear(); return Some("3D Vector Field created".into());
+            }
+            "Histogram" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                let bins = cmd.args.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(10);
+                if !data.is_empty() {
+                    let obj = GeoObject::Histogram(HistogramObj::new(data, bins));
+                    document.add_object(obj);
+                    input_text.clear(); return Some("Histogram created".into());
+                }
+            }
+            "ScatterPlot" if cmd.args.len() >= 2 => {
+                let xs = parse_brace_list(&cmd.args[0]);
+                let ys = parse_brace_list(&cmd.args[1]);
+                if !xs.is_empty() && xs.len() == ys.len() {
+                    let obj = GeoObject::ScatterPlot(ScatterPlotObj::new(xs, ys));
+                    document.add_object(obj);
+                    input_text.clear(); return Some("Scatter plot created".into());
+                }
+            }
+            "BoxPlot" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                if !data.is_empty() {
+                    let obj = GeoObject::BoxPlot(BoxPlotObj::new(data));
+                    document.add_object(obj);
+                    input_text.clear(); return Some("Box plot created".into());
+                }
+            }
+            "LinearRegression" if cmd.args.len() >= 2 => {
+                let xs = parse_brace_list(&cmd.args[0]);
+                let ys = parse_brace_list(&cmd.args[1]);
+                if !xs.is_empty() && xs.len() == ys.len() {
+                    if let Some((slope, intercept, r2)) = statistics::linear_regression(&xs, &ys) {
+                        let obj = GeoObject::RegressionLine(RegressionLineObj::linear(xs, ys, slope, intercept, r2));
+                        document.add_object(obj);
+                        input_text.clear(); return Some(format!("y = {:.4}x + {:.4}, R²={:.4}", slope, intercept, r2));
+                    }
+                }
+            }
+            "Mean" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                if let Some(m) = statistics::mean(&data) {
+                    input_text.clear(); return Some(format!("Mean = {:.6}", m));
+                }
+            }
+            "Median" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                if let Some(m) = statistics::median(&data) {
+                    input_text.clear(); return Some(format!("Median = {:.6}", m));
+                }
+            }
+            "StdDev" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                if let Some(s) = statistics::std_dev(&data) {
+                    input_text.clear(); return Some(format!("StdDev = {:.6}", s));
+                }
+            }
+            "Correlation" if cmd.args.len() >= 2 => {
+                let xs = parse_brace_list(&cmd.args[0]);
+                let ys = parse_brace_list(&cmd.args[1]);
+                if let Some(r) = statistics::pearson_correlation(&xs, &ys) {
+                    input_text.clear(); return Some(format!("r = {:.6}", r));
+                }
+            }
+            "Determinant" if cmd.args.len() >= 1 => {
+                if let Some(m) = parse_matrix_arg(&cmd.args[0]) {
+                    if let Some(det) = m.determinant() {
+                        input_text.clear(); return Some(format!("det = {:.6}", det));
+                    }
+                }
+            }
+            "Inverse" if cmd.args.len() >= 1 => {
+                if let Some(m) = parse_matrix_arg(&cmd.args[0]) {
+                    if let Some(inv) = m.inverse() {
+                        input_text.clear(); return Some(format!("Inverse:\n{}", inv));
+                    }
+                }
+            }
+            "Taylor" if cmd.args.len() >= 2 => {
+                let expr = cmd.args[0].trim();
+                let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+                let center = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+                let order = cmd.args.get(3).and_then(|s| s.trim().parse().ok()).unwrap_or(5);
+                if let Some(series) = taylor_series(expr, var, center, order) {
+                    input_text.clear(); return Some(format!("Taylor: {}", series));
+                }
+            }
+            "Cardioid" if cmd.args.len() >= 1 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let steps = 200;
+                let points = grafito_geometry::special_curves::cardioid(a, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "Cardioid".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Cardioid(a={}) created", a));
+            }
+            "Rose" if cmd.args.len() >= 3 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let n: i32 = cmd.args[1].trim().parse().unwrap_or(3);
+                let d: i32 = cmd.args[2].trim().parse().unwrap_or(1);
+                let steps = 400;
+                let points = grafito_geometry::special_curves::rose(a, n, d, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = format!("Rose({}/{})", n, d);
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Rose(a={}, n={}, d={}) created", a, n, d));
+            }
+            "ArchimedeanSpiral" if cmd.args.len() >= 3 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(0.1);
+                let max_theta: f64 = cmd.args[2].trim().parse().unwrap_or(20.0);
+                let steps = 300;
+                let points = grafito_geometry::special_curves::archimedean_spiral(a, b, max_theta, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "Spiral".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Archimedean Spiral(a={}, b={}, θ={}) created", a, b, max_theta));
+            }
+            "LogarithmicSpiral" if cmd.args.len() >= 3 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(0.1);
+                let max_theta: f64 = cmd.args[2].trim().parse().unwrap_or(10.0);
+                let steps = 300;
+                let points = grafito_geometry::special_curves::logarithmic_spiral(a, b, max_theta, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "LogSpiral".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Logarithmic Spiral(a={}, b={}, θ={}) created", a, b, max_theta));
+            }
+            "Lissajous" if cmd.args.len() >= 5 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let freq_x: f64 = cmd.args[2].trim().parse().unwrap_or(3.0);
+                let freq_y: f64 = cmd.args[3].trim().parse().unwrap_or(2.0);
+                let delta: f64 = cmd.args[4].trim().parse().unwrap_or(0.0);
+                let steps = 400;
+                let points = grafito_geometry::special_curves::lissajous(a, b, freq_x, freq_y, delta, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "Lissajous".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Lissajous(a={}, b={}, fx={}, fy={}, δ={}) created", a, b, freq_x, freq_y, delta));
+            }
+            "Epicycloid" if cmd.args.len() >= 2 => {
+                let r: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let k: f64 = cmd.args[1].trim().parse().unwrap_or(3.0);
+                let steps = 400;
+                let points = grafito_geometry::special_curves::epicycloid(r, k, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "Epicycloid".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Epicycloid(r={}, k={}) created", r, k));
+            }
+            "Hypocycloid" if cmd.args.len() >= 2 => {
+                let r: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let k: f64 = cmd.args[1].trim().parse().unwrap_or(4.0);
+                let steps = 400;
+                let points = grafito_geometry::special_curves::hypocycloid(r, k, steps);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = "Hypocycloid".to_string();
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("Hypocycloid(r={}, k={}) created", r, k));
+            }
+            "ODE" if cmd.args.len() >= 4 => {
+                let expr = cmd.args[0].trim();
+                let t0: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
+                let y0: f64 = cmd.args[2].trim().parse().unwrap_or(1.0);
+                let t_end: f64 = cmd.args[3].trim().parse().unwrap_or(10.0);
+                let steps: usize = cmd.args.get(4).and_then(|s| s.trim().parse().ok()).unwrap_or(200);
+                let method = cmd.args.get(5).map(|s| s.trim().to_lowercase()).unwrap_or("rk4".to_string());
+                
+                let f = |t: f64, y: f64| -> f64 {
+                    let mut vars = document.variables.clone();
+                    vars.insert("t".to_string(), t);
+                    vars.insert("y".to_string(), y);
+                    evaluate(expr, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).unwrap_or(0.0)
+                };
+                
+                let solution = if method == "euler" {
+                    grafito_geometry::ode::euler(f, t0, y0, t_end, steps)
+                } else {
+                    grafito_geometry::ode::runge_kutta_4(f, t0, y0, t_end, steps)
+                };
+                
+                let points = grafito_geometry::ode::solution_to_points(&solution);
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = format!("ODE({})", method);
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("ODE solved with {} method ({} steps)", method, steps));
+            }
+            "ODESystem" if cmd.args.len() >= 5 => {
+                let expr1 = cmd.args[0].trim();
+                let expr2 = cmd.args[1].trim();
+                let t0: f64 = cmd.args[2].trim().parse().unwrap_or(0.0);
+                let y0_1: f64 = cmd.args[3].trim().parse().unwrap_or(1.0);
+                let y0_2: f64 = cmd.args[4].trim().parse().unwrap_or(0.0);
+                let t_end: f64 = cmd.args.get(5).and_then(|s| s.trim().parse().ok()).unwrap_or(10.0);
+                let steps: usize = cmd.args.get(6).and_then(|s| s.trim().parse().ok()).unwrap_or(200);
+                let method = cmd.args.get(7).map(|s| s.trim().to_lowercase()).unwrap_or("rk4".to_string());
+                
+                let f = |_t: f64, state: &[f64]| -> Vec<f64> {
+                    let mut vars = document.variables.clone();
+                    vars.insert("y1".to_string(), state[0]);
+                    vars.insert("y2".to_string(), state[1]);
+                    let dy1 = evaluate(expr1, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).unwrap_or(0.0);
+                    let dy2 = evaluate(expr2, &vars.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).unwrap_or(0.0);
+                    vec![dy1, dy2]
+                };
+                
+                let solution = if method == "euler" {
+                    grafito_geometry::ode::euler_system(f, t0, vec![y0_1, y0_2], t_end, steps)
+                } else {
+                    grafito_geometry::ode::runge_kutta_4_system(f, t0, vec![y0_1, y0_2], t_end, steps)
+                };
+                
+                // Plot y1 vs y2 (phase portrait)
+                let points: Vec<Point2> = solution.iter()
+                    .map(|(_, state)| Point2::new(state[0], state[1]))
+                    .collect();
+                
+                if points.len() >= 3 {
+                    let mut poly = PolygonObj::new(points);
+                    poly.label = format!("Phase({})", method);
+                    document.add_object(GeoObject::Polygon(poly));
+                }
+                input_text.clear(); return Some(format!("ODE system solved with {} method ({} steps)", method, steps));
+            }
+            "Gamma" if cmd.args.len() >= 1 => {
+                let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::gamma(x);
+                input_text.clear(); return Some(format!("Γ({}) = {:.6}", x, result));
+            }
+            "LnGamma" if cmd.args.len() >= 1 => {
+                let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::ln_gamma(x);
+                input_text.clear(); return Some(format!("ln(Γ({})) = {:.6}", x, result));
+            }
+            "Beta" if cmd.args.len() >= 2 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::beta(a, b);
+                input_text.clear(); return Some(format!("B({}, {}) = {:.6}", a, b, result));
+            }
+            "BesselJ" if cmd.args.len() >= 2 => {
+                let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
+                let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::bessel_j(n, x);
+                input_text.clear(); return Some(format!("J_{}({}) = {:.6}", n, x, result));
+            }
+            "BesselY" if cmd.args.len() >= 2 => {
+                let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
+                let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::bessel_y(n, x);
+                input_text.clear(); return Some(format!("Y_{}({}) = {:.6}", n, x, result));
+            }
+            "BesselI" if cmd.args.len() >= 2 => {
+                let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
+                let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::bessel_i(n, x);
+                input_text.clear(); return Some(format!("I_{}({}) = {:.6}", n, x, result));
+            }
+            "Erf" if cmd.args.len() >= 1 => {
+                let x: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let result = grafito_geometry::special_functions::erf(x);
+                input_text.clear(); return Some(format!("erf({}) = {:.6}", x, result));
+            }
+            "Erfc" if cmd.args.len() >= 1 => {
+                let x: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let result = grafito_geometry::special_functions::erfc(x);
+                input_text.clear(); return Some(format!("erfc({}) = {:.6}", x, result));
+            }
+            "Digamma" if cmd.args.len() >= 1 => {
+                let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let result = grafito_geometry::special_functions::digamma(x);
+                input_text.clear(); return Some(format!("ψ({}) = {:.6}", x, result));
+            }
+            "Uniform" if cmd.args.len() >= 2 => {
+                let a: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.5);
+                let pdf = grafito_geometry::statistics::uniform_pdf(x, a, b);
+                let cdf = grafito_geometry::statistics::uniform_cdf(x, a, b);
+                input_text.clear(); return Some(format!("U({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}", a, b, x, pdf, x, cdf));
+            }
+            "GammaDist" if cmd.args.len() >= 2 => {
+                let alpha: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let beta: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
+                let pdf = grafito_geometry::statistics::gamma_pdf(x, alpha, beta);
+                input_text.clear(); return Some(format!("Gamma({},{}): PDF({}) = {:.6}", alpha, beta, x, pdf));
+            }
+            "BetaDist" if cmd.args.len() >= 2 => {
+                let alpha: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let beta: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.5);
+                let pdf = grafito_geometry::statistics::beta_pdf(x, alpha, beta);
+                input_text.clear(); return Some(format!("Beta({},{}): PDF({}) = {:.6}", alpha, beta, x, pdf));
+            }
+            "Cauchy" if cmd.args.len() >= 2 => {
+                let x0: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let gamma: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+                let pdf = grafito_geometry::statistics::cauchy_pdf(x, x0, gamma);
+                let cdf = grafito_geometry::statistics::cauchy_cdf(x, x0, gamma);
+                input_text.clear(); return Some(format!("Cauchy({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}", x0, gamma, x, pdf, x, cdf));
+            }
+            "Pareto" if cmd.args.len() >= 2 => {
+                let xm: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let alpha: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(2.0);
+                let pdf = grafito_geometry::statistics::pareto_pdf(x, xm, alpha);
+                let cdf = grafito_geometry::statistics::pareto_cdf(x, xm, alpha);
+                input_text.clear(); return Some(format!("Pareto({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}", xm, alpha, x, pdf, x, cdf));
+            }
+            "Rayleigh" if cmd.args.len() >= 1 => {
+                let sigma: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(1.0);
+                let pdf = grafito_geometry::statistics::rayleigh_pdf(x, sigma);
+                let cdf = grafito_geometry::statistics::rayleigh_cdf(x, sigma);
+                input_text.clear(); return Some(format!("Rayleigh({}): PDF({}) = {:.6}, CDF({}) = {:.6}", sigma, x, pdf, x, cdf));
+            }
+            "Laplace" if cmd.args.len() >= 2 => {
+                let mu: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
+                let b: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
+                let x: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+                let pdf = grafito_geometry::statistics::laplace_pdf(x, mu, b);
+                let cdf = grafito_geometry::statistics::laplace_cdf(x, mu, b);
+                input_text.clear(); return Some(format!("Laplace({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}", mu, b, x, pdf, x, cdf));
+            }
+            "NegBinomial" if cmd.args.len() >= 2 => {
+                let r: u32 = cmd.args[0].trim().parse().unwrap_or(1);
+                let p: f64 = cmd.args[1].trim().parse().unwrap_or(0.5);
+                let k: u32 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+                let pmf = grafito_geometry::statistics::negative_binomial_pmf(r, p, k);
+                let cdf = grafito_geometry::statistics::negative_binomial_cdf(r, p, k);
+                input_text.clear(); return Some(format!("NegBin({},{}): PMF({}) = {:.6}, CDF({}) = {:.6}", r, p, k, pmf, k, cdf));
+            }
+            "TTest" if cmd.args.len() >= 2 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                let mu0: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
+                if let Some((t_stat, p_value)) = grafito_geometry::statistics::t_test_one_sample(&data, mu0) {
+                    input_text.clear(); return Some(format!("t-test: t = {:.4}, p = {:.6}", t_stat, p_value));
+                }
+            }
+            "TTest2" if cmd.args.len() >= 2 => {
+                let data1 = parse_brace_list(&cmd.args[0]);
+                let data2 = parse_brace_list(&cmd.args[1]);
+                if let Some((t_stat, p_value)) = grafito_geometry::statistics::t_test_two_sample(&data1, &data2) {
+                    input_text.clear(); return Some(format!("t-test (2 samples): t = {:.4}, p = {:.6}", t_stat, p_value));
+                }
+            }
+            "ZTest" if cmd.args.len() >= 3 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                let mu0: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
+                let sigma: f64 = cmd.args[2].trim().parse().unwrap_or(1.0);
+                if let Some((z_stat, p_value)) = grafito_geometry::statistics::z_test_one_sample(&data, mu0, sigma) {
+                    input_text.clear(); return Some(format!("z-test: z = {:.4}, p = {:.6}", z_stat, p_value));
+                }
+            }
+            "ChiSqTest" if cmd.args.len() >= 2 => {
+                let observed = parse_brace_list(&cmd.args[0]);
+                let expected = parse_brace_list(&cmd.args[1]);
+                if let Some((chi2, p_value)) = grafito_geometry::statistics::chi_squared_test(&observed, &expected) {
+                    input_text.clear(); return Some(format!("χ²-test: χ² = {:.4}, p = {:.6}", chi2, p_value));
+                }
+            }
+            "ANOVA" if cmd.args.len() >= 2 => {
+                let mut groups: Vec<Vec<f64>> = Vec::new();
+                for arg in &cmd.args {
+                    groups.push(parse_brace_list(arg));
+                }
+                let group_refs: Vec<&[f64]> = groups.iter().map(|g| g.as_slice()).collect();
+                if let Some((f_stat, p_value)) = grafito_geometry::statistics::anova_one_way(&group_refs) {
+                    input_text.clear(); return Some(format!("ANOVA: F = {:.4}, p = {:.6}", f_stat, p_value));
+                }
+            }
+            "CIMean" if cmd.args.len() >= 1 => {
+                let data = parse_brace_list(&cmd.args[0]);
+                let confidence: f64 = cmd.args.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(0.95);
+                if let Some((lower, mean, upper)) = grafito_geometry::statistics::confidence_interval_mean(&data, confidence) {
+                    input_text.clear(); return Some(format!("CI ({:.0}%): [{:.4}, {:.4}, {:.4}]", confidence * 100.0, lower, mean, upper));
+                }
+            }
+            "CIProportion" if cmd.args.len() >= 2 => {
+                let successes: u32 = cmd.args[0].trim().parse().unwrap_or(0);
+                let n: u32 = cmd.args[1].trim().parse().unwrap_or(1);
+                let confidence: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0.95);
+                if let Some((lower, p_hat, upper)) = grafito_geometry::statistics::confidence_interval_proportion(successes, n, confidence) {
+                    input_text.clear(); return Some(format!("CI ({:.0}%): [{:.4}, {:.4}, {:.4}]", confidence * 100.0, lower, p_hat, upper));
+                }
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
         input_text.clear();
         return result;
+
     }
 
     if let Some((name, rest)) = text.split_once('=') {
@@ -466,6 +1068,47 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 }
             }
         }
+        
+        if name == "y" {
+            let label = next_function_label(document);
+            let obj = GeoObject::Function(FunctionObj::new(rest).with_label(&label));
+            document.add_object(obj);
+            input_text.clear();
+            return None;
+        }
+
+        if rest == "y" {
+            let label = next_function_label(document);
+            let obj = GeoObject::Function(FunctionObj::new(name).with_label(&label));
+            document.add_object(obj);
+            input_text.clear();
+            return None;
+        }
+
+        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(name, rest, RelationOperator::Eq));
+        document.add_object(obj);
+        input_text.clear();
+        return None;
+    } else if let Some((lhs, rhs)) = text.split_once("<=") {
+        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::LessEq));
+        document.add_object(obj);
+        input_text.clear();
+        return None;
+    } else if let Some((lhs, rhs)) = text.split_once(">=") {
+        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::GreaterEq));
+        document.add_object(obj);
+        input_text.clear();
+        return None;
+    } else if let Some((lhs, rhs)) = text.split_once('<') {
+        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::Less));
+        document.add_object(obj);
+        input_text.clear();
+        return None;
+    } else if let Some((lhs, rhs)) = text.split_once('>') {
+        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::Greater));
+        document.add_object(obj);
+        input_text.clear();
+        return None;
     } else {
         if contains_var(text, 'x') {
             let label = next_function_label(document);
@@ -512,13 +1155,78 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
         let command = text[..open].trim().to_string();
         let inside = &text[open+1..close];
         let args: Vec<String> = split_args(inside).into_iter().map(|s| s.trim().to_string()).collect();
-        if command.is_empty() || args.is_empty() { return None; }
-        match command.as_str() {
-            "Derivative" | "Integral" | "Solve" | "Limit" | "NSolve" | "Factor" | "Expand" | "Simplify" => {}
-            _ => return None,
-        }
-        Some(CasCmd { command, args })
+        if command.is_empty() { return None; }
+        let normalized = match command.to_lowercase().as_str() {
+            "derivative" | "derivada" | "deriv" | "diff" => "Derivative",
+            "integral" | "integrar" | "int" => "Integral",
+            "solve" | "nsolve" | "resolver" => "Solve",
+            "limit" | "limite" | "lim" => "Limit",
+            "factor" | "factorizar" => "Factor",
+            "expand" | "expandir" => "Expand",
+            "simplify" | "simplificar" => "Simplify",
+            "lorenz" => "Lorenz",
+            "rossler" | "rössler" => "Rossler",
+            "thomas" | "butterfly" => "Thomas",
+            "aizawa" => "Aizawa",
+            "chen" => "Chen",
+            "halvorsen" => "Halvorsen",
+            "dadras" => "Dadras",
+            "chua" => "Chua",
+            "mandelbrot" => "Mandelbrot",
+            "julia" => "Julia",
+            "burningship" | "burning_ship" => "BurningShip",
+            "hypercube" | "tesseract" => "Hypercube",
+            "hypersphere" => "Hypersphere",
+            "vectorfield3d" | "vectorfield" => "VectorField3D",
+            "histogram" | "histograma" => "Histogram",
+            "scatterplot" | "scatter" => "ScatterPlot",
+            "boxplot" => "BoxPlot",
+            "linearregression" | "regression" | "regresion" => "LinearRegression",
+            "mean" | "media" => "Mean",
+            "median" | "mediana" => "Median",
+            "stddev" | "desviacion" => "StdDev",
+            "correlation" | "correlacion" => "Correlation",
+            "determinant" | "det" => "Determinant",
+            "inverse" | "inversa" => "Inverse",
+            "taylor" => "Taylor",
+            _ => {
+                if args.is_empty() { return None; }
+                return Some(CasCmd { command, args });
+            }
+        };
+        Some(CasCmd { command: normalized.to_string(), args })
     } else {
+        let cmd_lower = text.to_lowercase();
+        let bare_commands = [
+            "lorenz", "rossler", "thomas", "butterfly", "aizawa", "chen",
+            "halvorsen", "dadras", "chua", "mandelbrot", "burningship",
+            "hypercube", "hypersphere",
+        ];
+        for &cmd in &bare_commands {
+            if cmd_lower == cmd {
+                let normalized = match cmd {
+                    "burningship" => "BurningShip".to_string(),
+                    "butterfly" => "Thomas".to_string(),
+                    "lorenz" => "Lorenz".to_string(),
+                    "rossler" => "Rossler".to_string(),
+                    "thomas" => "Thomas".to_string(),
+                    "aizawa" => "Aizawa".to_string(),
+                    "chen" => "Chen".to_string(),
+                    "halvorsen" => "Halvorsen".to_string(),
+                    "dadras" => "Dadras".to_string(),
+                    "chua" => "Chua".to_string(),
+                    "mandelbrot" => "Mandelbrot".to_string(),
+                    "hypercube" => "Hypercube".to_string(),
+                    "hypersphere" => "Hypersphere".to_string(),
+                    _ => {
+                        let mut c = cmd.to_string();
+                        c[..1].make_ascii_uppercase();
+                        c
+                    }
+                };
+                return Some(CasCmd { command: normalized, args: vec![] });
+            }
+        }
         None
     }
 }
@@ -542,42 +1250,143 @@ pub fn split_args(s: &str) -> Vec<String> {
     args
 }
 
-pub fn execute_cas_command(document: &Document, cmd: &CasCmd) -> Option<String> {
+pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<String> {
     match cmd.command.as_str() {
         "Derivative" => {
             let expr = cmd.args.get(0)?;
-            Some(format!("Derivative[{}]: approx (f(x+h)-f(x))/h with f(x)={}", expr, expr))
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            match symbolic::derivative(expr, var) {
+                Ok(d_expr) => {
+                    // Also graph the derivative if it contains the variable
+                    if d_expr.contains(var) || d_expr.parse::<f64>().is_ok() {
+                        let label = next_function_label(document);
+                        document.add_object(GeoObject::Function(FunctionObj::new(&d_expr).with_label(&label)));
+                        Some(format!("d/d{var}({expr}) = {d_expr}  →  Graficado como {label}"))
+                    } else {
+                        Some(format!("d/d{var}({expr}) = {d_expr}"))
+                    }
+                }
+                Err(e) => Some(format!("Error calculando derivada: {}", e)),
+            }
         }
         "Integral" => {
             let expr = cmd.args.get(0)?;
-            let a: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let b: f64 = cmd.args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
-            let f = move |x: f64| {
-                eval_function_with_vars(expr, x, &document.variables).unwrap_or(0.0)
-            };
-            let result = grafito_geometry::cas::integral_auto(f, a, b);
-            Some(format!("∫[{}..{}] {} dx = {:.6}", a, b, expr, result))
-        }
-        "Solve" | "NSolve" => {
-            let expr = cmd.args.get(0)?;
-            let a: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(-10.0);
-            let b: f64 = cmd.args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
-            let f = move |x: f64| {
-                eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
-            };
-            match grafito_geometry::cas::find_root(f, (a, b)) {
-                Some(root) => Some(format!("Root of {} in [{:.1}, {:.1}] ≈ {:.6}", expr, a, b, root)),
-                None => Some(format!("No root found for {} in [{}, {}]", expr, a, b)),
+            let mut var = "x".to_string();
+            let mut a_str = None;
+            let mut b_str = None;
+
+            if cmd.args.len() == 4 {
+                var = cmd.args.get(1).unwrap().trim().to_string();
+                a_str = cmd.args.get(2);
+                b_str = cmd.args.get(3);
+            } else if cmd.args.len() == 3 {
+                a_str = cmd.args.get(1);
+                b_str = cmd.args.get(2);
+            } else if cmd.args.len() == 2 {
+                var = cmd.args.get(1).unwrap().trim().to_string();
+            }
+
+            let label = next_function_label(document);
+            document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(&label)));
+            
+            if let (Some(a_s), Some(b_s)) = (a_str, b_str) {
+                let a: f64 = a_s.trim().parse().unwrap_or(0.0);
+                let b: f64 = b_s.trim().parse().unwrap_or(1.0);
+                match symbolic::integrate_definite(expr, &var, a, b) {
+                    Ok(result) => Some(format!("{} → Graficado como {}", result, label)),
+                    Err(e) => Some(format!("Error calculando integral: {}", e)),
+                }
+            } else {
+                match symbolic::integrate(expr, &var) {
+                    Ok(result) => Some(format!("{} → Graficado original como {}", result, label)),
+                    Err(e) => Some(format!("Error calculando integral: {}", e)),
+                }
             }
         }
+        "Solve" => {
+            let expr = cmd.args.get(0)?;
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            let a: f64 = cmd.args.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(-20.0);
+            let b: f64 = cmd.args.get(3).and_then(|s| s.trim().parse().ok()).unwrap_or(20.0);
+            
+            let label = next_function_label(document);
+            document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(&label)));
+            
+            let expr_c1 = expr.clone();
+            let expr_c2 = expr.clone();
+            let vars1 = document.variables.clone();
+            let vars2 = document.variables.clone();
+            let f = move |x: f64| {
+                eval_function_with_vars(&expr_c1, x, &vars1).unwrap_or(f64::NAN)
+            };
+            let mut roots = Vec::new();
+            let steps = 4000;
+            let step = (b - a) / steps as f64;
+            let mut prev = f(a);
+            for i in 1..=steps {
+                let x = a + i as f64 * step;
+                let curr = f(x);
+                if curr.abs() < 1e-12 {
+                    let duplicate = roots.iter().any(|&r: &f64| (r - x).abs() < 1e-6);
+                    if !duplicate { roots.push(x); }
+                } else if prev.is_finite() && curr.is_finite() && prev * curr <= 0.0 {
+                    let mut left = x - step;
+                    let mut right = x;
+                    let mut f_left = prev;
+                    let mut root = left;
+                    for _ in 0..50 {
+                        let mid = (left + right) * 0.5;
+                        let f_mid = eval_function_with_vars(&expr_c2, mid, &vars2).unwrap_or(f64::NAN);
+                        if f_mid.abs() < 1e-9 { root = mid; break; }
+                        if f_mid.is_finite() {
+                            if f_left * f_mid < 0.0 { right = mid; }
+                            else { left = mid; f_left = f_mid; }
+                        } else { break; }
+                        root = mid;
+                    }
+                    let duplicate = roots.iter().any(|&r: &f64| (r - root).abs() < 1e-6);
+                    if !duplicate { roots.push(root); }
+                }
+                prev = curr;
+            }
+            if roots.is_empty() {
+                Some(format!("Sin raíces para {expr} en [{a:.1}, {b:.1}] → Graficado como {label}"))
+            } else {
+                let mut strs = Vec::new();
+                for r in &roots {
+                    strs.push(format!("{var} ≈ {:.6}", r));
+                    document.add_object(GeoObject::Point(PointObj::new(Point2::new(*r, 0.0)).with_label("Raíz")));
+                }
+                Some(format!("{} → Graficado como {}", strs.join(", "), label))
+            }
+        }
+
         "Limit" => {
             let expr = cmd.args.get(0)?;
-            let x0: f64 = cmd.args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-            let f = move |x: f64| {
-                eval_function_with_vars(expr, x, &document.variables).unwrap_or(f64::NAN)
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            let at_str = cmd.args.get(2).map(|s| s.trim()).unwrap_or("0");
+            let at: f64 = match at_str {
+                "inf" | "Inf" | "∞" => f64::INFINITY,
+                "-inf" | "-Inf" | "-∞" => f64::NEG_INFINITY,
+                s => s.parse().unwrap_or(0.0),
             };
-            let result = grafito_geometry::cas::limit(f, x0);
-            Some(format!("lim[x→{:.1}] {} ≈ {:.6}", x0, expr, result))
+            
+            let label = next_function_label(document);
+            document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(&label)));
+            
+            match symbolic::limit(expr, var, at) {
+                Ok(result) => {
+                    if let Some(val_str) = result.split("=").last() {
+                        if let Ok(val) = val_str.trim().parse::<f64>() {
+                            if at.is_finite() {
+                                document.add_object(GeoObject::Point(PointObj::new(Point2::new(at, val)).with_label("Límite")));
+                            }
+                        }
+                    }
+                    Some(format!("{} → Graficado como {}", result, label))
+                },
+                Err(e) => Some(format!("Error: {}", e)),
+            }
         }
         "Factor" => {
             let expr = cmd.args.get(0)?;
@@ -747,4 +1556,36 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
         }
     }
     None
+}
+
+fn parse_brace_list(s: &str) -> Vec<f64> {
+    let s = s.trim().trim_start_matches('{').trim_end_matches('}');
+    s.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).collect()
+}
+
+fn parse_matrix_arg(s: &str) -> Option<Matrix> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') { return None; }
+    let inner = &s[1..s.len()-1];
+    let mut rows = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let row_str = &inner[start..=i];
+                    let row: Vec<f64> = row_str.trim_matches(|c| c == '[' || c == ']')
+                        .split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                    rows.push(row);
+                    start = i + 1;
+                }
+            }
+            ',' if depth == 0 => { start = i + 1; }
+            _ => {}
+        }
+    }
+    Matrix::from_rows(rows)
 }

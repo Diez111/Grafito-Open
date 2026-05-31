@@ -86,32 +86,32 @@ impl HiFloat {
 impl std::ops::Add for HiFloat {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        let bits = self.prec.bits().max(rhs.prec.bits());
-        Self { inner: Float::with_val(bits, &self.inner + &rhs.inner), prec: self.prec }
+        let prec = if self.prec.bits() >= rhs.prec.bits() { self.prec } else { rhs.prec };
+        Self { inner: Float::with_val(prec.bits(), &self.inner + &rhs.inner), prec }
     }
 }
 
 impl std::ops::Sub for HiFloat {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        let bits = self.prec.bits().max(rhs.prec.bits());
-        Self { inner: Float::with_val(bits, &self.inner - &rhs.inner), prec: self.prec }
+        let prec = if self.prec.bits() >= rhs.prec.bits() { self.prec } else { rhs.prec };
+        Self { inner: Float::with_val(prec.bits(), &self.inner - &rhs.inner), prec }
     }
 }
 
 impl std::ops::Mul for HiFloat {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        let bits = self.prec.bits().max(rhs.prec.bits());
-        Self { inner: Float::with_val(bits, &self.inner * &rhs.inner), prec: self.prec }
+        let prec = if self.prec.bits() >= rhs.prec.bits() { self.prec } else { rhs.prec };
+        Self { inner: Float::with_val(prec.bits(), &self.inner * &rhs.inner), prec }
     }
 }
 
 impl std::ops::Div for HiFloat {
     type Output = Self;
     fn div(self, rhs: Self) -> Self {
-        let bits = self.prec.bits().max(rhs.prec.bits());
-        Self { inner: Float::with_val(bits, &self.inner / &rhs.inner), prec: self.prec }
+        let prec = if self.prec.bits() >= rhs.prec.bits() { self.prec } else { rhs.prec };
+        Self { inner: Float::with_val(prec.bits(), &self.inner / &rhs.inner), prec }
     }
 }
 

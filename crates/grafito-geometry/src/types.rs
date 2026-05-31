@@ -91,15 +91,15 @@ impl AABB {
 /// 2D camera/view transform.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ViewTransform {
-    pub offset: Vec2,
-    pub scale: f32,
+    pub offset: Point2,
+    pub scale: f64,
     pub screen_size: Vec2,
 }
 
 impl Default for ViewTransform {
     fn default() -> Self {
         Self {
-            offset: Vec2::ZERO,
+            offset: Point2::new(0.0, 0.0),
             scale: 1.0,
             screen_size: Vec2::new(800.0, 600.0),
         }
@@ -109,7 +109,7 @@ impl Default for ViewTransform {
 impl ViewTransform {
     pub fn new(screen_width: f32, screen_height: f32) -> Self {
         Self {
-            offset: Vec2::ZERO,
+            offset: Point2::new(0.0, 0.0),
             scale: 1.0,
             screen_size: Vec2::new(screen_width, screen_height),
         }
@@ -118,9 +118,9 @@ impl ViewTransform {
     /// Transform world point to screen coordinates with f64 intermediate precision.
     /// Prevents precision loss at extreme zoom levels.
     pub fn world_to_screen(&self, world: Point2) -> Vec2 {
-        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x as f64;
-        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y as f64;
-        let s = self.scale as f64;
+        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
+        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
+        let s = self.scale;
         Vec2::new(
             (ox + world.x * s) as f32,
             (oy - world.y * s) as f32,
@@ -129,9 +129,9 @@ impl ViewTransform {
 
     /// Transform screen point to world coordinates with f64 intermediate precision.
     pub fn screen_to_world(&self, screen: Vec2) -> Point2 {
-        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x as f64;
-        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y as f64;
-        let inv = 1.0 / self.scale as f64;
+        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
+        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
+        let inv = 1.0 / self.scale;
         Point2::new(
             (screen.x as f64 - ox) * inv,
             (oy - screen.y as f64) * inv,
@@ -139,15 +139,19 @@ impl ViewTransform {
     }
 
     pub fn pan(&mut self, delta_screen: Vec2) {
-        self.offset += delta_screen;
+        self.offset.x += delta_screen.x as f64;
+        self.offset.y += delta_screen.y as f64;
     }
 
     pub fn zoom(&mut self, factor: f32, anchor_screen: Vec2) {
         let anchor_world = self.screen_to_world(anchor_screen);
-        self.scale = (self.scale * factor).clamp(0.0001, 50000.0);
-        let new_anchor_screen = self.world_to_screen(anchor_world);
-        self.offset.x += anchor_screen.x - new_anchor_screen.x;
-        self.offset.y += anchor_screen.y - new_anchor_screen.y;
+        self.scale = (self.scale * factor as f64).clamp(1e-20, 1e20);
+        let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
+        let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
+        let new_anchor_screen_x = ox + anchor_world.x * self.scale;
+        let new_anchor_screen_y = oy - anchor_world.y * self.scale;
+        self.offset.x += anchor_screen.x as f64 - new_anchor_screen_x;
+        self.offset.y += anchor_screen.y as f64 - new_anchor_screen_y;
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
@@ -163,8 +167,8 @@ impl ViewTransform {
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::from_scale(Vec3::new(self.scale, self.scale, 1.0))
-            * Mat4::from_translation(Vec3::new(self.offset.x, self.offset.y, 0.0))
+        Mat4::from_translation(Vec3::new(self.offset.x as f32, self.offset.y as f32, 0.0))
+            * Mat4::from_scale(Vec3::new(self.scale as f32, self.scale as f32, 1.0))
     }
 
     pub fn mvp_matrix(&self) -> Mat4 {

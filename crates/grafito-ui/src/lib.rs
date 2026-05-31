@@ -4,6 +4,7 @@ pub mod theme;
 pub mod animation;
 pub mod toast;
 pub mod command_palette;
+pub mod color_picker;
 
 use grafito_core::{Document, ObjectId};
 use egui::{Ui, Response, Color32};
@@ -105,24 +106,64 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
     ui.heading("Properties");
     ui.separator();
     if let Some(obj) = document.get_object_mut(id) {
-        ui.label(format!("Type: {}", obj.name()));
-        ui.label(format!("Label: {}", obj.label()));
-        ui.checkbox(&mut true, "Visible");
+        // Basic properties
+        ui.label(egui::RichText::new(format!("Type: {}", obj.name())).strong());
+        ui.add_space(4.0);
+        
+        // Editable label
+        let mut label = obj.label().to_string();
+        ui.horizontal(|ui| {
+            ui.label("Label:");
+            if ui.text_edit_singleline(&mut label).changed() {
+                obj.set_label(label);
+            }
+        });
+        ui.add_space(4.0);
+        
+        // Visibility checkbox
+        let mut visible = obj.is_visible();
+        if ui.checkbox(&mut visible, "Visible").changed() {
+            obj.set_visible(visible);
+        }
+        ui.add_space(4.0);
+        
+        // Color picker button
+        let color = obj.color();
+        let color_btn = egui::Button::new(
+            egui::RichText::new("■").color(Color32::from_rgba_premultiplied(
+                (color.r * 255.0) as u8,
+                (color.g * 255.0) as u8,
+                (color.b * 255.0) as u8,
+                (color.a * 255.0) as u8,
+            )).size(20.0)
+        );
+        if ui.add(color_btn).on_hover_text("Change color").clicked() {
+            // TODO: Open color picker
+        }
+        
+        ui.separator();
+        ui.label(egui::RichText::new("Measurements").strong());
+        ui.add_space(4.0);
+        
         // Measurements
         fn px(val: f64) -> String { format!("{:.2}", val) }
         match obj {
+            grafito_core::GeoObject::Point(p) => {
+                ui.label(format!("Position: ({}, {})", px(p.position.x), px(p.position.y)));
+            }
             grafito_core::GeoObject::Line(l) => {
-                ui.separator();
+                ui.label(format!("Start: ({}, {})", px(l.start.x), px(l.start.y)));
+                ui.label(format!("End: ({}, {})", px(l.end.x), px(l.end.y)));
                 ui.label(format!("Length: {}", px(l.start.distance(&l.end))));
             }
             grafito_core::GeoObject::Circle(c) => {
-                ui.separator();
+                ui.label(format!("Center: ({}, {})", px(c.center.x), px(c.center.y)));
                 ui.label(format!("Radius: {}", px(c.radius)));
                 ui.label(format!("Area: {}", px(std::f64::consts::PI * c.radius * c.radius)));
                 ui.label(format!("Circumference: {}", px(2.0 * std::f64::consts::PI * c.radius)));
             }
             grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                ui.separator();
+                ui.label(format!("Vertices: {}", poly.vertices.len()));
                 let mut perimeter = 0.0;
                 for i in 0..poly.vertices.len() {
                     let a = poly.vertices[i];
@@ -139,17 +180,39 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
                 }
                 ui.label(format!("Area: {}", px(area.abs() * 0.5)));
             }
+            grafito_core::GeoObject::Function(f) => {
+                ui.label(format!("Expression: {}", f.expr));
+                if let Some(min) = f.domain_min {
+                    ui.label(format!("Domain min: {}", px(min)));
+                }
+                if let Some(max) = f.domain_max {
+                    ui.label(format!("Domain max: {}", px(max)));
+                }
+            }
+            grafito_core::GeoObject::Ellipse(e) => {
+                ui.label(format!("Center: ({}, {})", px(e.center.x), px(e.center.y)));
+                ui.label(format!("Semi-major (rx): {}", px(e.rx)));
+                ui.label(format!("Semi-minor (ry): {}", px(e.ry)));
+                ui.label(format!("Area: {}", px(std::f64::consts::PI * e.rx * e.ry)));
+            }
             grafito_core::GeoObject::Point3D(p) => {
-                ui.separator();
-                ui.label(format!("Pos: ({}, {}, {})", px(p.position.x), px(p.position.y), px(p.position.z)));
+                ui.label(format!("Position: ({}, {}, {})", px(p.position.x), px(p.position.y), px(p.position.z)));
             }
             grafito_core::GeoObject::Sphere3D(s) => {
-                ui.separator();
+                ui.label(format!("Center: ({}, {}, {})", px(s.center.x), px(s.center.y), px(s.center.z)));
                 ui.label(format!("Radius: {}", px(s.radius)));
                 ui.label(format!("Volume: {}", px(4.0/3.0 * std::f64::consts::PI * s.radius.powi(3))));
                 ui.label(format!("Surface Area: {}", px(4.0 * std::f64::consts::PI * s.radius.powi(2))));
             }
-            _ => {}
+            grafito_core::GeoObject::Cube3D(c) => {
+                ui.label(format!("Center: ({}, {}, {})", px(c.center.x), px(c.center.y), px(c.center.z)));
+                ui.label(format!("Size: {}", px(c.size)));
+                ui.label(format!("Volume: {}", px(c.size.powi(3))));
+                ui.label(format!("Surface Area: {}", px(6.0 * c.size.powi(2))));
+            }
+            _ => {
+                ui.label("No measurements available");
+            }
         }
     } else {
         ui.label("No object selected");
@@ -157,16 +220,42 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
 }
 
 /// A toolbar with icon buttons and keyboard shortcuts.
-pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool) -> Response {
-    ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
-    ui.horizontal(|ui| {
+/// `is_3d` filters which tools are visible based on the current view mode.
+pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+    ui.horizontal_wrapped(|ui| {
+        // Basic tools (work in both modes)
         tool_btn(ui, current_tool, Tool::Select,   "Select", "F1");
-        tool_btn(ui, current_tool, Tool::Point,    "Point", "F2");
+        if !is_3d { tool_btn(ui, current_tool, Tool::Point,    "Point", "F2"); }
         tool_btn(ui, current_tool, Tool::Line,     "Line", "F3");
         tool_btn(ui, current_tool, Tool::Circle,   "Circle", "F4");
         tool_btn(ui, current_tool, Tool::Polygon,  "Polygon", "F5");
-        ui.separator();
         tool_btn(ui, current_tool, Tool::Function, "Function", "F6");
+        
+        ui.separator();
+        
+        // 3D-specific tools (only in 3D mode)
+        if is_3d {
+            tool_btn(ui, current_tool, Tool::Point3D,  "Point 3D", "F7");
+            tool_btn(ui, current_tool, Tool::Sphere3D, "Sphere", "F8");
+            tool_btn(ui, current_tool, Tool::Cube3D,   "Cube", "F9");
+        }
+        
+        // Advanced tools (insert commands, work in both modes)
+        tool_btn(ui, current_tool, Tool::Attractor,   "Attractor", "");
+        tool_btn(ui, current_tool, Tool::Fractal,     "Fractal", "");
+        
+        // Statistics tools (only in 2D mode)
+        if !is_3d {
+            tool_btn(ui, current_tool, Tool::Histogram,   "Histogram", "");
+            tool_btn(ui, current_tool, Tool::ScatterPlot, "Scatter", "");
+            
+            ui.separator();
+            
+            // Construction tools (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::Tangent,      "Tangent", "");
+            tool_btn(ui, current_tool, Tool::Perpendicular, "Perpendicular", "");
+        }
     }).response
 }
 
@@ -226,6 +315,71 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
         Tool::Function => {
             painter.text(c, egui::Align2::CENTER_CENTER, "f(x)", egui::FontId::new(16.0, egui::FontFamily::Proportional), text_color);
         }
+        Tool::Point3D => {
+            painter.circle_filled(c, 4.0, text_color);
+            painter.text(c + egui::vec2(6.0, -6.0), egui::Align2::CENTER_CENTER, "3", egui::FontId::new(10.0, egui::FontFamily::Proportional), text_color);
+        }
+        Tool::Sphere3D => {
+            painter.circle_stroke(c, 10.0, stroke);
+            painter.circle_stroke(c, 6.0, egui::Stroke::new(1.0, text_color));
+        }
+        Tool::Cube3D => {
+            let p1 = c - egui::vec2(8.0, 8.0);
+            let p2 = c + egui::vec2(8.0, -8.0);
+            let p3 = c + egui::vec2(8.0, 8.0);
+            let p4 = c - egui::vec2(8.0, -8.0);
+            painter.line_segment([p1, p2], stroke);
+            painter.line_segment([p2, p3], stroke);
+            painter.line_segment([p3, p4], stroke);
+            painter.line_segment([p4, p1], stroke);
+            let offset = egui::vec2(4.0, -4.0);
+            painter.line_segment([p1 + offset, p2 + offset], stroke);
+            painter.line_segment([p2 + offset, p3 + offset], stroke);
+            painter.line_segment([p3 + offset, p4 + offset], stroke);
+            painter.line_segment([p4 + offset, p1 + offset], stroke);
+            painter.line_segment([p1, p1 + offset], stroke);
+            painter.line_segment([p2, p2 + offset], stroke);
+        }
+        Tool::Attractor => {
+            painter.text(c, egui::Align2::CENTER_CENTER, "∞", egui::FontId::new(20.0, egui::FontFamily::Proportional), text_color);
+        }
+        Tool::Fractal => {
+            painter.text(c, egui::Align2::CENTER_CENTER, "❄", egui::FontId::new(20.0, egui::FontFamily::Proportional), text_color);
+        }
+        Tool::Histogram => {
+            let bar_width = 4.0;
+            let heights = [8.0, 12.0, 6.0, 10.0];
+            for (i, h) in heights.iter().enumerate() {
+                let x = c.x - 8.0 + i as f32 * (bar_width + 1.0);
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(x, c.y + 8.0 - h),
+                    egui::pos2(x + bar_width, c.y + 8.0),
+                );
+                painter.rect_filled(rect, 0.0, text_color);
+            }
+        }
+        Tool::ScatterPlot => {
+            let points = [
+                egui::vec2(-8.0, -6.0),
+                egui::vec2(-4.0, 4.0),
+                egui::vec2(2.0, -2.0),
+                egui::vec2(6.0, 6.0),
+                egui::vec2(8.0, -4.0),
+            ];
+            for p in points {
+                painter.circle_filled(c + p, 2.5, text_color);
+            }
+        }
+        Tool::Tangent => {
+            painter.circle_stroke(c, 8.0, stroke);
+            let tangent_start = c + egui::vec2(-10.0, -6.0);
+            let tangent_end = c + egui::vec2(10.0, 6.0);
+            painter.line_segment([tangent_start, tangent_end], stroke);
+        }
+        Tool::Perpendicular => {
+            painter.line_segment([c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)], stroke);
+            painter.line_segment([c - egui::vec2(0.0, -10.0), c + egui::vec2(0.0, 10.0)], stroke);
+        }
     }
 
     response.on_hover_ui(|ui| {
@@ -236,12 +390,25 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
+    // Basic 2D tools
     Select,
     Point,
     Line,
     Circle,
     Polygon,
     Function,
+    // 3D tools
+    Point3D,
+    Sphere3D,
+    Cube3D,
+    // Advanced tools
+    Attractor,
+    Fractal,
+    Histogram,
+    ScatterPlot,
+    // Construction tools
+    Tangent,
+    Perpendicular,
 }
 
 impl Default for Tool {
@@ -254,7 +421,11 @@ impl Tool {
     pub fn cursor_icon(&self) -> egui::CursorIcon {
         match self {
             Tool::Select => egui::CursorIcon::Default,
-            _ => egui::CursorIcon::Crosshair,
+            Tool::Point | Tool::Point3D => egui::CursorIcon::Crosshair,
+            Tool::Line | Tool::Circle | Tool::Polygon | Tool::Function 
+            | Tool::Sphere3D | Tool::Cube3D | Tool::Attractor | Tool::Fractal
+            | Tool::Histogram | Tool::ScatterPlot | Tool::Tangent | Tool::Perpendicular 
+            => egui::CursorIcon::Crosshair,
         }
     }
 }

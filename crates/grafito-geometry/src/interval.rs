@@ -39,7 +39,7 @@ pub fn safe_sample<F: Fn(f64) -> f64>(f: F, x_min: f64, x_max: f64, n: usize) ->
     (0..n).map(|i| {
         let x = x_min + i as f64 * dx;
         let y = f(x);
-        if y.is_finite() && y.abs() < 1e6 {
+        if y.is_finite() && y.abs() < 1e50 {
             (x, Some(y))
         } else {
             (x, None)
@@ -52,7 +52,7 @@ pub fn detect_asymptotes(samples: &[(f64, Option<f64>)]) -> Vec<f64> {
     let mut asymptotes = Vec::new();
     for i in 1..samples.len() {
         if let (Some(y0), Some(y1)) = (samples[i-1].1, samples[i].1) {
-            if y0.signum() != y1.signum() && (y1 / y0.max(1e-10)).abs() > 100.0 {
+            if y0.signum() != y1.signum() && (y1 / y0.abs().max(1e-10)).abs() > 100.0 {
                 asymptotes.push((samples[i-1].0 + samples[i].0) * 0.5);
             }
         }

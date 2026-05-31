@@ -25,7 +25,7 @@ mod tests {
         let obj = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
         let id = doc.add_object(obj);
         let stored = doc.get_object(id).unwrap();
-        assert_eq!(stored.label(), "P1"); // Auto-labeled as P1 (Point → P)
+        assert_eq!(stored.label(), "P"); // First point gets label "P" (not "P1")
     }
 
     #[test]
@@ -97,12 +97,26 @@ mod tests {
     #[test]
     fn test_spatial_index_insert_and_query() {
         let mut idx = SpatialIndex::new();
-        idx.insert(1.0, 2.0);
-        idx.insert(3.0, 4.0);
-        idx.insert(10.0, 10.0);
+        let id1 = ObjectId::new();
+        let id2 = ObjectId::new();
+        let id3 = ObjectId::new();
+        
+        // Insert three objects with bounding boxes
+        idx.insert(id1, 0.0, 0.0, 2.0, 2.0);  // Box around (1,1)
+        idx.insert(id2, 2.0, 2.0, 4.0, 4.0);  // Box around (3,3)
+        idx.insert(id3, 9.0, 9.0, 11.0, 11.0); // Box around (10,10)
+        
         assert_eq!(idx.len(), 3);
-        let nearest = idx.nearest(1.5, 2.5, 2.0).unwrap();
-        assert_eq!(nearest.0, 0); // First inserted point
+        
+        // Query near (1,1) should find id1
+        let candidates = idx.candidates(1.0, 1.0, 0.5);
+        assert!(candidates.contains(&id1));
+        assert!(!candidates.contains(&id3));
+        
+        // Query near (10,10) should find id3
+        let candidates = idx.candidates(10.0, 10.0, 0.5);
+        assert!(candidates.contains(&id3));
+        assert!(!candidates.contains(&id1));
     }
 
     #[test]

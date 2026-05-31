@@ -194,7 +194,7 @@ impl Camera3D {
     }
 
     pub fn up(&self) -> Vec3 { Vec3::Y }
-    pub fn right(&self) -> Vec3 { self.position().cross(self.up()).normalize() }
+    pub fn right(&self) -> Vec3 { (self.target - self.position()).cross(self.up()).normalize() }
 
     /// Project a 3D point to normalized device coordinates, then to screen.
     /// Returns (screen_x, screen_y, w) where w is used for clipping.
@@ -203,7 +203,6 @@ impl Camera3D {
         if clip.w <= 0.0 { return None; }
         let ndc_x = clip.x / clip.w;
         let ndc_y = clip.y / clip.w;
-        if ndc_x.abs() > 1.5 || ndc_y.abs() > 1.5 { return None; }
         let sx = (ndc_x + 1.0) * 0.5 * screen_w;
         let sy = (1.0 - ndc_y) * 0.5 * screen_h;
         Some((sx, sy))
