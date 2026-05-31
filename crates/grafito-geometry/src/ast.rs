@@ -405,9 +405,9 @@ impl Expr {
                 if den.abs() < 1e-300 { f64::NAN } else { a.eval_2d(var1, val1, var2, val2) / den }
             }
             Pow(a, b) => a.eval_2d(var1, val1, var2, val2).powf(b.eval_2d(var1, val1, var2, val2)),
-            Sin(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e12 { 0.0 } else { a.sin() } }
-            Cos(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e12 { 0.0 } else { a.cos() } }
-            Tan(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e12 { 0.0 } else { a.tan() } }
+            Sin(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.sin() } }
+            Cos(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.cos() } }
+            Tan(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.tan() } }
             Asin(u) => u.eval_2d(var1, val1, var2, val2).asin(),
             Acos(u) => u.eval_2d(var1, val1, var2, val2).acos(),
             Atan(u) => u.eval_2d(var1, val1, var2, val2).atan(),
@@ -416,15 +416,15 @@ impl Expr {
             Log(u) => u.eval_2d(var1, val1, var2, val2).log10(),
             Sqrt(u) => u.eval_2d(var1, val1, var2, val2).sqrt(),
             Abs(u) => u.eval_2d(var1, val1, var2, val2).abs(),
-            Sinh(u) => u.eval_2d(var1, val1, var2, val2).sinh(),
-            Cosh(u) => u.eval_2d(var1, val1, var2, val2).cosh(),
-            Tanh(u) => u.eval_2d(var1, val1, var2, val2).tanh(),
+            Sinh(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.sinh() } }
+            Cosh(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.cosh() } }
+            Tanh(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { a.tanh() } }
             Floor(u) => u.eval_2d(var1, val1, var2, val2).floor(),
             Ceil(u) => u.eval_2d(var1, val1, var2, val2).ceil(),
             Round(u) => u.eval_2d(var1, val1, var2, val2).round(),
-            Sec(u) => 1.0 / u.eval_2d(var1, val1, var2, val2).cos(),
-            Csc(u) => 1.0 / u.eval_2d(var1, val1, var2, val2).sin(),
-            Cot(u) => 1.0 / u.eval_2d(var1, val1, var2, val2).tan(),
+            Sec(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.cos() } }
+            Csc(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.sin() } }
+            Cot(u) => { let a = u.eval_2d(var1, val1, var2, val2); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.tan() } }
             Asinh(u) => u.eval_2d(var1, val1, var2, val2).asinh(),
             Acosh(u) => u.eval_2d(var1, val1, var2, val2).acosh(),
             Atanh(u) => u.eval_2d(var1, val1, var2, val2).atanh(),
@@ -476,9 +476,9 @@ impl Expr {
                 if den.abs() < 1e-300 { f64::NAN } else { a.eval_at(var, value) / den }
             }
             Pow(a, b) => a.eval_at(var, value).powf(b.eval_at(var, value)),
-            Sin(u) => { let a = u.eval_at(var, value); if a.abs() > 1e12 { 0.0 } else { a.sin() } }
-            Cos(u) => { let a = u.eval_at(var, value); if a.abs() > 1e12 { 0.0 } else { a.cos() } }
-            Tan(u) => { let a = u.eval_at(var, value); if a.abs() > 1e12 { 0.0 } else { a.tan() } }
+            Sin(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.sin() } }
+            Cos(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.cos() } }
+            Tan(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.tan() } }
             Asin(u) => u.eval_at(var, value).asin(),
             Acos(u) => u.eval_at(var, value).acos(),
             Atan(u) => u.eval_at(var, value).atan(),
@@ -487,15 +487,15 @@ impl Expr {
             Log(u) => u.eval_at(var, value).log10(),
             Sqrt(u) => u.eval_at(var, value).sqrt(),
             Abs(u) => u.eval_at(var, value).abs(),
-            Sinh(u) => u.eval_at(var, value).sinh(),
-            Cosh(u) => u.eval_at(var, value).cosh(),
-            Tanh(u) => u.eval_at(var, value).tanh(),
+            Sinh(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.sinh() } }
+            Cosh(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.cosh() } }
+            Tanh(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { a.tanh() } }
             Floor(u) => u.eval_at(var, value).floor(),
             Ceil(u) => u.eval_at(var, value).ceil(),
             Round(u) => u.eval_at(var, value).round(),
-            Sec(u) => 1.0 / u.eval_at(var, value).cos(),
-            Csc(u) => 1.0 / u.eval_at(var, value).sin(),
-            Cot(u) => 1.0 / u.eval_at(var, value).tan(),
+            Sec(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.cos() } }
+            Csc(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.sin() } }
+            Cot(u) => { let a = u.eval_at(var, value); if a.abs() > 1e9 { 0.0 } else { 1.0 / a.tan() } }
             Asinh(u) => u.eval_at(var, value).asinh(),
             Acosh(u) => u.eval_at(var, value).acosh(),
             Atanh(u) => u.eval_at(var, value).atanh(),
@@ -618,9 +618,9 @@ impl Expr {
                     _ => Pow(Box::new(sa), Box::new(sb)),
                 }
             }
-            Sin(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e12 { Const(0.0) } else { Const(c.sin()) } } else { Sin(Box::new(sa)) } }
-            Cos(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e12 { Const(0.0) } else { Const(c.cos()) } } else { Cos(Box::new(sa)) } }
-            Tan(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e12 { Const(0.0) } else { Const(c.tan()) } } else { Tan(Box::new(sa)) } }
+            Sin(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.sin()) } } else { Sin(Box::new(sa)) } }
+            Cos(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.cos()) } } else { Cos(Box::new(sa)) } }
+            Tan(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.tan()) } } else { Tan(Box::new(sa)) } }
             Asin(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.asin()) } else { Asin(Box::new(sa)) } }
             Acos(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.acos()) } else { Acos(Box::new(sa)) } }
             Atan(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.atan()) } else { Atan(Box::new(sa)) } }
@@ -629,15 +629,15 @@ impl Expr {
             Log(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.log10()) } else { Log(Box::new(sa)) } }
             Sqrt(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.sqrt()) } else { Sqrt(Box::new(sa)) } }
             Abs(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.abs()) } else { Abs(Box::new(sa)) } }
-            Sinh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.sinh()) } else { Sinh(Box::new(sa)) } }
-            Cosh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.cosh()) } else { Cosh(Box::new(sa)) } }
-            Tanh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.tanh()) } else { Tanh(Box::new(sa)) } }
+            Sinh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.sinh()) } } else { Sinh(Box::new(sa)) } }
+            Cosh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.cosh()) } } else { Cosh(Box::new(sa)) } }
+            Tanh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(c.tanh()) } } else { Tanh(Box::new(sa)) } }
             Floor(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.floor()) } else { Floor(Box::new(sa)) } }
             Ceil(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.ceil()) } else { Ceil(Box::new(sa)) } }
             Round(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.round()) } else { Round(Box::new(sa)) } }
-            Sec(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(1.0 / c.cos()) } else { Sec(Box::new(sa)) } }
-            Csc(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(1.0 / c.sin()) } else { Csc(Box::new(sa)) } }
-            Cot(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(1.0 / c.tan()) } else { Cot(Box::new(sa)) } }
+            Sec(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(1.0 / c.cos()) } } else { Sec(Box::new(sa)) } }
+            Csc(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(1.0 / c.sin()) } } else { Csc(Box::new(sa)) } }
+            Cot(a) => { let sa = a.simplify_once(); if let Const(c) = sa { if c.abs() > 1e9 { Const(0.0) } else { Const(1.0 / c.tan()) } } else { Cot(Box::new(sa)) } }
             Asinh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.asinh()) } else { Asinh(Box::new(sa)) } }
             Acosh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.acosh()) } else { Acosh(Box::new(sa)) } }
             Atanh(a) => { let sa = a.simplify_once(); if let Const(c) = sa { Const(c.atanh()) } else { Atanh(Box::new(sa)) } }
