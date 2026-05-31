@@ -7,3 +7,10 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+
+# Scratch & test files
+scratch*
+test_*
+debug_patch2
+update_ast.py
+update_preprocess.py
