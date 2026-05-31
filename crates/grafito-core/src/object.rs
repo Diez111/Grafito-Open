@@ -495,6 +495,10 @@ pub struct FunctionObj {
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
     pub fill_color: Option<Color>,
+    // Integral function: ∫_[integral_lower]^x expr(var) d(var)
+    pub is_integral: bool,
+    pub integral_var: String,
+    pub integral_lower: f64,
 }
 
 impl FunctionObj {
@@ -509,6 +513,9 @@ impl FunctionObj {
             domain_min: None,
             domain_max: None,
             fill_color: None,
+            is_integral: false,
+            integral_var: String::new(),
+            integral_lower: 0.0,
         }
     }
 
@@ -519,6 +526,13 @@ impl FunctionObj {
 
     pub fn with_fill(mut self, color: Color) -> Self {
         self.fill_color = Some(color);
+        self
+    }
+
+    pub fn as_integral(mut self, var: &str, lower: f64) -> Self {
+        self.is_integral = true;
+        self.integral_var = var.to_string();
+        self.integral_lower = lower;
         self
     }
 }

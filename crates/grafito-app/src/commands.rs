@@ -1440,6 +1440,21 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 var = cmd.args.get(1).unwrap().trim().to_string();
             }
 
+            // Check if upper limit is a variable (e.g. Integral[expr, t, 0, x])
+            // → graph as f(x) = ∫ₐˣ expr dt
+            if let (Some(a_s), Some(b_s)) = (a_str, b_str) {
+                let b_trim = b_s.trim();
+                if b_trim.len() == 1 && b_trim.chars().all(|c| c.is_alphabetic()) {
+                    let lower: f64 = a_s.trim().parse().unwrap_or(0.0);
+                    let label = next_function_label(document);
+                    let obj = FunctionObj::new(expr)
+                        .with_label(&label)
+                        .as_integral(&var, lower);
+                    document.add_object(GeoObject::Function(obj));
+                    return Some(format!("F({}) = ∫₍{}₎ˣ {} d{} → {}", b_trim, lower, expr, var, label));
+                }
+            }
+
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(FunctionObj::new(expr).with_label(&label)));
             

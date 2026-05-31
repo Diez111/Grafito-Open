@@ -4,7 +4,7 @@ use grafito_core::{
     PointObj, LineObj, CircleObj, PolygonObj,
 };
 use grafito_geometry::{Point2, Color};
-use grafito_geometry::expr::{eval_function_with_vars, prepare_function_ast, eval_parsed_batch};
+use grafito_geometry::expr::{eval_function_with_vars, prepare_function_ast, eval_parsed_batch, eval_integral_batch};
 use grafito_ui::Tool;
 use egui::{Pos2, Vec2, Stroke, Shape, Color32, Rect, Sense};
 use glam::Vec2 as GlamVec2;
@@ -608,12 +608,20 @@ impl GrafitoApp {
                      let variables = &self.document.variables;
                     let xs = (0..=steps).map(|i| min_x + i as f64 * step);
                     
-                    let prepared = prepare_function_ast(&fun.expr, variables, &["x"]);
+                    let prepared = if fun.is_integral {
+                        Err("integral function".to_string())
+                    } else {
+                        prepare_function_ast(&fun.expr, variables, &["x"])
+                    };
                     
                     let mut samples: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
-                    let batch_results = match &prepared {
-                        Ok(ast) => eval_parsed_batch(ast, "x", xs.clone()),
-                        Err(_) => grafito_geometry::expr::eval_batch_1d(&fun.expr, "x", xs.clone(), variables).unwrap_or_default(),
+                    let batch_results = if fun.is_integral {
+                        eval_integral_batch(&fun.expr, &fun.integral_var, fun.integral_lower, xs.clone(), variables)
+                    } else {
+                        match &prepared {
+                            Ok(ast) => eval_parsed_batch(ast, "x", xs.clone()),
+                            Err(_) => grafito_geometry::expr::eval_batch_1d(&fun.expr, "x", xs.clone(), variables).unwrap_or_default(),
+                        }
                     };
                     
                     for (x, y_opt) in xs.zip(batch_results.into_iter().chain(std::iter::repeat(None))) {

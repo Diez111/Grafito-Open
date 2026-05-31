@@ -668,6 +668,70 @@ pub fn eval_parsed_batch(ast: &crate::ast::Expr, var_name: &str, xs: impl Iterat
     }).collect()
 }
 
+/// Evaluate ∫[lower → x] integrand(var) d(var) for each x value.
+/// Uses Gauss-Legendre 5-point quadrature with adaptive subdivision.
+pub fn eval_integral_batch(
+    integrand: &str,
+    int_var: &str,
+    lower: f64,
+    xs: impl Iterator<Item = f64> + Clone,
+    vars: &std::collections::HashMap<String, f64>,
+) -> Vec<Option<f64>> {
+    // Prepare the integrand AST once
+    let expr_clean = preprocess_expr(integrand);
+    let prepared = crate::ast::parse_ast(&expr_clean)
+        .map(|ast| ast.substitute_vars(vars, &[int_var]).simplify());
+    
+    let prepared = match prepared {
+        Ok(p) => p,
+        Err(_) => return xs.map(|_| None).collect(),
+    };
+    
+    let gl_integrate = |a: f64, b: f64| -> Option<f64> {
+        let nodes = [-0.906179845938664, -0.538469310105683, 0.0, 0.538469310105683, 0.906179845938664];
+        let weights = [0.236926885056189, 0.478628670499366, 0.568888888888889, 0.478628670499366, 0.236926885056189];
+        let mid = (a + b) * 0.5;
+        let half = (b - a) * 0.5;
+        let mut sum = 0.0;
+        for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
+            let t = mid + half * xi;
+            let val = prepared.eval_at(int_var, t);
+            if val.is_finite() { sum += wi * val; }
+        }
+        Some(sum * half)
+    };
+    
+    fn adaptive_integrate(prepared: &crate::ast::Expr, int_var: &str, a: f64, b: f64, depth: u32) -> Option<f64> {
+        if depth == 0 {
+            let nodes = [-0.906179845938664, -0.538469310105683, 0.0, 0.538469310105683, 0.906179845938664];
+            let weights = [0.236926885056189, 0.478628670499366, 0.568888888888889, 0.478628670499366, 0.236926885056189];
+            let mid = (a + b) * 0.5;
+            let half = (b - a) * 0.5;
+            let mut sum = 0.0;
+            for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
+                let t = mid + half * xi;
+                let val = prepared.eval_at(int_var, t);
+                if val.is_finite() { sum += wi * val; }
+            }
+            return Some(sum * half);
+        }
+        let mid = (a + b) * 0.5;
+        let left = adaptive_integrate(prepared, int_var, a, mid, depth - 1)?;
+        let right = adaptive_integrate(prepared, int_var, mid, b, depth - 1)?;
+        Some(left + right)
+    }
+    
+    xs.map(|x| {
+        if x < lower {
+            adaptive_integrate(&prepared, int_var, x, lower, 4).map(|v| -v)
+        } else if (x - lower).abs() < 1e-12 {
+            Some(0.0)
+        } else {
+            adaptive_integrate(&prepared, int_var, lower, x, 4)
+        }
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
