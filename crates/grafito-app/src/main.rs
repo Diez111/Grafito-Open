@@ -829,6 +829,7 @@ impl eframe::App for GrafitoApp {
                         if let Some(o) = self.document.get_object_mut(oid) {
                             o.set_color(picker.to_color());
                         }
+                        ctx.request_repaint();
                     }
                 });
 

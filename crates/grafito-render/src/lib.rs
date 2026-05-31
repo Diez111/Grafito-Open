@@ -11,8 +11,8 @@ mod tests;
 
 /// Simple lighting calculation for 3D objects
 pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam::Vec3) -> Color {
-    let ambient = 0.3;
-    let diffuse = 0.7;
+    let ambient = 0.45;
+    let diffuse = 0.65;
     
     let normal = normal.normalize();
     let light_dir = light_dir.normalize();
