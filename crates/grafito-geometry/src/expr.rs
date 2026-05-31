@@ -687,20 +687,6 @@ pub fn eval_integral_batch(
         Err(_) => return xs.map(|_| None).collect(),
     };
     
-    let gl_integrate = |a: f64, b: f64| -> Option<f64> {
-        let nodes = [-0.906179845938664, -0.538469310105683, 0.0, 0.538469310105683, 0.906179845938664];
-        let weights = [0.236926885056189, 0.478628670499366, 0.568888888888889, 0.478628670499366, 0.236926885056189];
-        let mid = (a + b) * 0.5;
-        let half = (b - a) * 0.5;
-        let mut sum = 0.0;
-        for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
-            let t = mid + half * xi;
-            let val = prepared.eval_at(int_var, t);
-            if val.is_finite() { sum += wi * val; }
-        }
-        Some(sum * half)
-    };
-    
     fn adaptive_integrate(prepared: &crate::ast::Expr, int_var: &str, a: f64, b: f64, depth: u32) -> Option<f64> {
         if depth == 0 {
             let nodes = [-0.906179845938664, -0.538469310105683, 0.0, 0.538469310105683, 0.906179845938664];
