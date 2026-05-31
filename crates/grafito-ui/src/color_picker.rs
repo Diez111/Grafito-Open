@@ -153,7 +153,9 @@ impl HsvColorPicker {
         // Manejar interacción
         if response.clicked() || response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let delta = pos - center;
+                // Calculate delta from center using local widget coordinates
+                let w_center = rect.size() / 2.0;
+                let delta = pos - rect.min - w_center;
                 let distance = delta.length();
                 
                 if distance <= radius && distance >= radius * 0.3 {

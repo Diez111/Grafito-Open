@@ -815,7 +815,6 @@ impl eframe::App for GrafitoApp {
 
         if let Some((oid, mut picker)) = self.active_color_picker.clone() {
             let mut keep_open = true;
-            let mut changed = false;
             
             // Adjust the window design to be centered and not ugly
             egui::Window::new("🎨 Selector de Color")
@@ -827,15 +826,11 @@ impl eframe::App for GrafitoApp {
                 .open(&mut keep_open)
                 .show(ctx, |ui| {
                     if picker.show(ui, &mut self.color_favorites) {
-                        changed = true;
+                        if let Some(o) = self.document.get_object_mut(oid) {
+                            o.set_color(picker.to_color());
+                        }
                     }
                 });
-
-            if changed {
-                if let Some(o) = self.document.get_object_mut(oid) {
-                    o.set_color(picker.to_color());
-                }
-            }
 
             if keep_open {
                 self.active_color_picker = Some((oid, picker));
