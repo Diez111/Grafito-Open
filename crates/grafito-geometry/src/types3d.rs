@@ -1,4 +1,4 @@
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// 3D point in world coordinates.
@@ -10,7 +10,9 @@ pub struct Point3D {
 }
 
 impl Point3D {
-    pub fn new(x: f64, y: f64, z: f64) -> Self { Self { x, y, z } }
+    pub fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
 
     pub fn to_vec3(&self) -> Vec3 {
         Vec3::new(self.x as f32, self.y as f32, self.z as f32)
@@ -24,7 +26,7 @@ impl Point3D {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
         let dz = self.z - other.z;
-        (dx*dx + dy*dy + dz*dz).sqrt()
+        (dx * dx + dy * dy + dz * dz).sqrt()
     }
 }
 
@@ -36,7 +38,9 @@ pub struct Segment3D {
 }
 
 impl Segment3D {
-    pub fn new(a: Point3D, b: Point3D) -> Self { Self { a, b } }
+    pub fn new(a: Point3D, b: Point3D) -> Self {
+        Self { a, b }
+    }
 }
 
 /// 3D sphere (center + radius).
@@ -47,7 +51,9 @@ pub struct Sphere3D {
 }
 
 impl Sphere3D {
-    pub fn new(center: Point3D, radius: f64) -> Self { Self { center, radius } }
+    pub fn new(center: Point3D, radius: f64) -> Self {
+        Self { center, radius }
+    }
 }
 
 /// Cube defined by center and half-size per axis.
@@ -58,16 +64,24 @@ pub struct Cube3D {
 }
 
 impl Cube3D {
-    pub fn new(center: Point3D, size: f64) -> Self { Self { center, size } }
+    pub fn new(center: Point3D, size: f64) -> Self {
+        Self { center, size }
+    }
 
     pub fn vertices(&self) -> [Point3D; 8] {
         let h = self.size * 0.5;
-        let x = self.center.x; let y = self.center.y; let z = self.center.z;
+        let x = self.center.x;
+        let y = self.center.y;
+        let z = self.center.z;
         [
-            Point3D::new(x-h, y-h, z-h), Point3D::new(x+h, y-h, z-h),
-            Point3D::new(x+h, y+h, z-h), Point3D::new(x-h, y+h, z-h),
-            Point3D::new(x-h, y-h, z+h), Point3D::new(x+h, y-h, z+h),
-            Point3D::new(x+h, y+h, z+h), Point3D::new(x-h, y+h, z+h),
+            Point3D::new(x - h, y - h, z - h),
+            Point3D::new(x + h, y - h, z - h),
+            Point3D::new(x + h, y + h, z - h),
+            Point3D::new(x - h, y + h, z - h),
+            Point3D::new(x - h, y - h, z + h),
+            Point3D::new(x + h, y - h, z + h),
+            Point3D::new(x + h, y + h, z + h),
+            Point3D::new(x - h, y + h, z + h),
         ]
     }
 }
@@ -82,15 +96,21 @@ pub struct Pyramid3D {
 
 impl Pyramid3D {
     pub fn new(base_center: Point3D, apex: Point3D, base_size: f64) -> Self {
-        Self { base_center, apex, base_size }
+        Self {
+            base_center,
+            apex,
+            base_size,
+        }
     }
 
     pub fn base_vertices(&self) -> [Point3D; 4] {
         let h = self.base_size * 0.5;
         let (cx, cy, cz) = (self.base_center.x, self.base_center.y, self.base_center.z);
         [
-            Point3D::new(cx-h, cy, cz-h), Point3D::new(cx+h, cy, cz-h),
-            Point3D::new(cx+h, cy, cz+h), Point3D::new(cx-h, cy, cz+h),
+            Point3D::new(cx - h, cy, cz - h),
+            Point3D::new(cx + h, cy, cz - h),
+            Point3D::new(cx + h, cy, cz + h),
+            Point3D::new(cx - h, cy, cz + h),
         ]
     }
 }
@@ -105,7 +125,11 @@ pub struct Cone3D {
 
 impl Cone3D {
     pub fn new(base_center: Point3D, apex: Point3D, radius: f64) -> Self {
-        Self { base_center, apex, radius }
+        Self {
+            base_center,
+            apex,
+            radius,
+        }
     }
 }
 
@@ -119,18 +143,22 @@ pub struct Cylinder3D {
 
 impl Cylinder3D {
     pub fn new(base_center: Point3D, top_center: Point3D, radius: f64) -> Self {
-        Self { base_center, top_center, radius }
+        Self {
+            base_center,
+            top_center,
+            radius,
+        }
     }
 }
 
 /// Orbit camera for 3D view.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Camera3D {
-    pub theta: f32,      // azimuth angle (radians)
-    pub phi: f32,        // elevation angle (radians)  
-    pub distance: f32,   // distance from target
-    pub target: Vec3,    // look-at point
-    pub fov: f32,        // vertical field of view in degrees
+    pub theta: f32,    // azimuth angle (radians)
+    pub phi: f32,      // elevation angle (radians)
+    pub distance: f32, // distance from target
+    pub target: Vec3,  // look-at point
+    pub fov: f32,      // vertical field of view in degrees
     pub near: f32,
     pub far: f32,
     pub aspect: f32,
@@ -153,7 +181,10 @@ impl Default for Camera3D {
 
 impl Camera3D {
     pub fn new(aspect: f32) -> Self {
-        Self { aspect, ..Default::default() }
+        Self {
+            aspect,
+            ..Default::default()
+        }
     }
 
     pub fn position(&self) -> Vec3 {
@@ -166,10 +197,16 @@ impl Camera3D {
 
     pub fn orbit(&mut self, dtheta: f32, dphi: f32) {
         self.theta -= dtheta;
-        self.phi = (self.phi + dphi).clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+        self.phi = (self.phi + dphi).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
     }
 
     pub fn zoom(&mut self, factor: f32) {
+        if factor.is_nan() || factor.is_infinite() || factor <= 1e-4 {
+            return;
+        }
         self.distance = (self.distance * factor).clamp(0.5, 200.0);
     }
 
@@ -186,21 +223,27 @@ impl Camera3D {
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
-        Mat4::perspective_rh(self.fov.to_radians(), self.aspect, self.near, self.far)
+        Mat4::perspective_rh(self.fov.to_radians(), self.aspect.max(0.001), self.near, self.far)
     }
 
     pub fn mvp(&self) -> Mat4 {
         self.projection_matrix() * self.view_matrix()
     }
 
-    pub fn up(&self) -> Vec3 { Vec3::Y }
-    pub fn right(&self) -> Vec3 { (self.target - self.position()).cross(self.up()).normalize() }
+    pub fn up(&self) -> Vec3 {
+        Vec3::Y
+    }
+    pub fn right(&self) -> Vec3 {
+        (self.target - self.position()).cross(self.up()).normalize()
+    }
 
     /// Project a 3D point to normalized device coordinates, then to screen.
     /// Returns (screen_x, screen_y, w) where w is used for clipping.
     pub fn project(&self, p: &Point3D, screen_w: f32, screen_h: f32) -> Option<(f32, f32)> {
         let clip = self.mvp() * p.to_vec3().extend(1.0);
-        if clip.w <= 0.0 { return None; }
+        if clip.w <= 0.0 {
+            return None;
+        }
         let ndc_x = clip.x / clip.w;
         let ndc_y = clip.y / clip.w;
         let sx = (ndc_x + 1.0) * 0.5 * screen_w;
@@ -210,10 +253,18 @@ impl Camera3D {
 
     /// Generate circle points in 3D for rendering spheres/cylinders/cones.
     /// Returns points on a circle at `center` in the `u`-`v` plane with `radius`.
-    pub fn circle_points(center: Vec3, u: Vec3, v: Vec3, radius: f32, segments: usize) -> Vec<Vec3> {
-        (0..=segments).map(|i| {
-            let angle = i as f32 / segments as f32 * std::f32::consts::TAU;
-            center + u * radius * angle.cos() + v * radius * angle.sin()
-        }).collect()
+    pub fn circle_points(
+        center: Vec3,
+        u: Vec3,
+        v: Vec3,
+        radius: f32,
+        segments: usize,
+    ) -> Vec<Vec3> {
+        (0..=segments)
+            .map(|i| {
+                let angle = i as f32 / segments as f32 * std::f32::consts::TAU;
+                center + u * radius * angle.cos() + v * radius * angle.sin()
+            })
+            .collect()
     }
 }

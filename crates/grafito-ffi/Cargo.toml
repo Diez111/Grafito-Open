@@ -1,0 +1,37 @@
+[package]
+name = "grafito-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "grafito_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+uniffi.workspace = true
+uniffi_bindgen = "0.31.1"
+camino = "1.1"
+thiserror = "1.0"
+grafito-core.workspace = true
+grafito-command.workspace = true
+grafito-geometry.workspace = true
+grafito-render.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+uuid.workspace = true
+pollster.workspace = true
+raw-window-handle.workspace = true
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.13"
+jni = { version = "0.21", features = ["invocation"] }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-render", "crates/grafito-ui"]
+members = ["crates/grafito-app", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-ffi"]
 resolver = "2"
 
 [workspace.package]
@@ -13,6 +13,7 @@ rust-version = "1.78"
 [workspace.dependencies]
 # Core
 grafito-core = { path = "crates/grafito-core" }
+grafito-command = { path = "crates/grafito-command" }
 grafito-geometry = { path = "crates/grafito-geometry" }
 grafito-render = { path = "crates/grafito-render" }
 grafito-ui = { path = "crates/grafito-ui" }
@@ -40,7 +41,6 @@ bytemuck = { version = "1.16", features = ["derive"] }
 
 # Parsing & Expressions
 evalexpr = "11.3"
-rug = { version = "1.28", features = ["integer", "rational", "float"] }
 num-complex = "0.4"
 
 # Parallelism
@@ -52,8 +52,9 @@ rstar = "0.12"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
-ron = "0.8"
+
+# FFI
+uniffi = { version = "0.31.1", features = ["bindgen"] }
 
 # Utilities
 uuid = { version = "1.10", features = ["v4", "serde"] }

@@ -17,6 +17,6 @@ robust.workspace = true
 evalexpr.workspace = true
 serde.workspace = true
 log.workspace = true
-rug.workspace = true
+libm = "0.2"
 num-complex.workspace = true
 rayon.workspace = true

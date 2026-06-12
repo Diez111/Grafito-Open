@@ -10,7 +10,7 @@ fn main() {
     let mut samples: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
     match grafito_geometry::expr::eval_function_batch(expr, xs.clone(), &variables) {
         Ok(results) => {
-            for (x, y) in xs.zip(results.into_iter()) {
+            for (x, y) in xs.zip(results) {
                 samples.push((x, y.filter(|v| v.is_finite() && v.abs() < 1e6)));
             }
             let valid_count = samples.iter().filter(|(_, y)| y.is_some()).count();

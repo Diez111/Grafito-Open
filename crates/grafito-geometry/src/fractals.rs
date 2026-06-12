@@ -8,13 +8,39 @@ pub enum FractalType {
 }
 
 impl FractalType {
-    pub fn mandelbrot() -> Self { Self::Mandelbrot { max_iter: 256 } }
-    pub fn julia_dendrite() -> Self { Self::Julia { cr: -0.70176, ci: -0.3842, max_iter: 256 } }
-    pub fn julia_siegel() -> Self { Self::Julia { cr: -0.39054, ci: -0.58679, max_iter: 256 } }
-    pub fn julia_galaxy() -> Self { Self::Julia { cr: -0.742, ci: 0.1, max_iter: 256 } }
-    pub fn burning_ship() -> Self { Self::BurningShip { max_iter: 256 } }
-    pub fn tricorn() -> Self { Self::Tricorn { max_iter: 256 } }
-    pub fn newton() -> Self { Self::Newton { max_iter: 64 } }
+    pub fn mandelbrot() -> Self {
+        Self::Mandelbrot { max_iter: 256 }
+    }
+    pub fn julia_dendrite() -> Self {
+        Self::Julia {
+            cr: -0.70176,
+            ci: -0.3842,
+            max_iter: 256,
+        }
+    }
+    pub fn julia_siegel() -> Self {
+        Self::Julia {
+            cr: -0.39054,
+            ci: -0.58679,
+            max_iter: 256,
+        }
+    }
+    pub fn julia_galaxy() -> Self {
+        Self::Julia {
+            cr: -0.742,
+            ci: 0.1,
+            max_iter: 256,
+        }
+    }
+    pub fn burning_ship() -> Self {
+        Self::BurningShip { max_iter: 256 }
+    }
+    pub fn tricorn() -> Self {
+        Self::Tricorn { max_iter: 256 }
+    }
+    pub fn newton() -> Self {
+        Self::Newton { max_iter: 64 }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +109,11 @@ fn burning_ship_iter(cr: f64, ci: f64, max_iter: u32) -> (u32, f64) {
         zr = new_zr;
         i += 1;
     }
-    let smooth = if i < max_iter { i as f64 } else { max_iter as f64 };
+    let smooth = if i < max_iter {
+        i as f64
+    } else {
+        max_iter as f64
+    };
     (i, smooth)
 }
 
@@ -97,7 +127,11 @@ fn tricorn_iter(cr: f64, ci: f64, max_iter: u32) -> (u32, f64) {
         zr = new_zr;
         i += 1;
     }
-    let smooth = if i < max_iter { i as f64 } else { max_iter as f64 };
+    let smooth = if i < max_iter {
+        i as f64
+    } else {
+        max_iter as f64
+    };
     (i, smooth)
 }
 
@@ -110,13 +144,17 @@ fn newton_iter(zr0: f64, zi0: f64, max_iter: u32) -> (u32, f64) {
         let zr2 = zr * zr;
         let zi2 = zi * zi;
         let denom = 3.0 * (zr2 + zi2);
-        if denom.abs() < 1e-15 { break; }
+        if denom.abs() < 1e-15 {
+            break;
+        }
         let fz_r = zr * zr2 - 3.0 * zr * zi2 - 1.0;
         let fz_i = 3.0 * zr2 * zi - zi * zi2;
         let fp_r = 3.0 * (zr2 - zi2);
         let fp_i = 6.0 * zr * zi;
         let fp_mag2 = fp_r * fp_r + fp_i * fp_i;
-        if fp_mag2 < 1e-15 { break; }
+        if fp_mag2 < 1e-15 {
+            break;
+        }
         let new_zr = zr - (fz_r * fp_r + fz_i * fp_i) / fp_mag2;
         let new_zi = zi - (fz_i * fp_r - fz_r * fp_i) / fp_mag2;
         if (new_zr - zr).powi(2) + (new_zi - zi).powi(2) < tol * tol {
@@ -131,39 +169,52 @@ fn newton_iter(zr0: f64, zi0: f64, max_iter: u32) -> (u32, f64) {
 
 pub fn compute_fractal(
     fractal: &FractalType,
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
-    width: usize, height: usize,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
 ) -> Vec<FractalPixel> {
     use rayon::prelude::*;
-    
+
     let dx = (x_max - x_min) / width as f64;
     let dy = (y_max - y_min) / height as f64;
-    
+
     let max_iter = match fractal {
-        FractalType::Mandelbrot { max_iter } | FractalType::Julia { max_iter, .. }
-        | FractalType::BurningShip { max_iter } | FractalType::Tricorn { max_iter }
+        FractalType::Mandelbrot { max_iter }
+        | FractalType::Julia { max_iter, .. }
+        | FractalType::BurningShip { max_iter }
+        | FractalType::Tricorn { max_iter }
         | FractalType::Newton { max_iter } => *max_iter,
     };
-    
-    (0..height).into_par_iter()
+
+    (0..height)
+        .into_par_iter()
         .flat_map(|j| {
             let y = y_min + j as f64 * dy;
-            (0..width).map(move |i| {
-                let x = x_min + i as f64 * dx;
-                let (iter, smooth) = match fractal {
-                    FractalType::Mandelbrot { max_iter } => mandelbrot_iter(x, y, *max_iter),
-                    FractalType::Julia { cr, ci, max_iter } => julia_iter(x, y, *cr, *ci, *max_iter),
-                    FractalType::BurningShip { max_iter } => burning_ship_iter(x, y, *max_iter),
-                    FractalType::Tricorn { max_iter } => tricorn_iter(x, y, *max_iter),
-                    FractalType::Newton { max_iter } => newton_iter(x, y, *max_iter),
-                };
-                FractalPixel {
-                    x, y, iter, max_iter,
-                    escaped: iter < max_iter,
-                    smooth_value: smooth,
-                }
-            }).collect::<Vec<_>>()
+            (0..width)
+                .map(move |i| {
+                    let x = x_min + i as f64 * dx;
+                    let (iter, smooth) = match fractal {
+                        FractalType::Mandelbrot { max_iter } => mandelbrot_iter(x, y, *max_iter),
+                        FractalType::Julia { cr, ci, max_iter } => {
+                            julia_iter(x, y, *cr, *ci, *max_iter)
+                        }
+                        FractalType::BurningShip { max_iter } => burning_ship_iter(x, y, *max_iter),
+                        FractalType::Tricorn { max_iter } => tricorn_iter(x, y, *max_iter),
+                        FractalType::Newton { max_iter } => newton_iter(x, y, *max_iter),
+                    };
+                    FractalPixel {
+                        x,
+                        y,
+                        iter,
+                        max_iter,
+                        escaped: iter < max_iter,
+                        smooth_value: smooth,
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -183,12 +234,19 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f32, f32, f32, f32) {
     let c = v * s;
     let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
     let m = v - c;
-    let (r, g, b) = if h < 60.0 { (c, x, 0.0) }
-    else if h < 120.0 { (x, c, 0.0) }
-    else if h < 180.0 { (0.0, c, x) }
-    else if h < 240.0 { (0.0, x, c) }
-    else if h < 300.0 { (x, 0.0, c) }
-    else { (c, 0.0, x) };
+    let (r, g, b) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
     ((r + m) as f32, (g + m) as f32, (b + m) as f32, 1.0)
 }
 

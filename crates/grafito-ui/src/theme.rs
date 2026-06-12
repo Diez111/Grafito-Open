@@ -42,7 +42,7 @@ impl Theme {
         visuals.selection.stroke = egui::Stroke::new(1.0, self.accent);
         visuals.window_rounding = egui::Rounding::same(12.0);
         visuals.menu_rounding = egui::Rounding::same(8.0);
-        
+
         // GeoGebra-like flat but slightly elevated look
         visuals.window_shadow = egui::Shadow {
             offset: egui::vec2(0.0, 4.0),
@@ -88,44 +88,43 @@ impl Theme {
 }
 
 pub const DARK: Theme = Theme {
-    canvas_bg:          Color32::from_rgb(30, 41, 59), // slate-800
-    canvas_grid_minor:  Color32::from_rgb(51, 65, 85), // slate-700
-    panel_bg:           Color32::from_rgb(15, 23, 42), // slate-900
-    toolbar_bg:         Color32::from_rgb(15, 23, 42),
-    text_primary:       Color32::from_rgb(248, 250, 252), // slate-50
-    accent:             Color32::from_rgb(59, 130, 246), // blue-500
-    danger:             Color32::from_rgb(239, 68, 68), // red-500
-    success:            Color32::from_rgb(34, 197, 94), // green-500
-    selection_bg:       Color32::from_rgb(30, 58, 138), // blue-900
-    input_bg:           Color32::from_rgb(30, 41, 59),
-    input_text:         Color32::from_rgb(248, 250, 252),
-    button_bg:          Color32::from_rgb(30, 41, 59),
-    button_hover:       Color32::from_rgb(51, 65, 85),
-    axis_2d:            Color32::from_rgb(148, 163, 184), // slate-400
-    object_point:       Color32::from_rgb(96, 165, 250), // blue-400
-    object_line:        Color32::from_rgb(203, 213, 225), // slate-300
-    object_function:    Color32::from_rgb(52, 211, 153), // emerald-400
-    object_conic:       Color32::from_rgb(248, 113, 113), // red-400
+    canvas_bg: Color32::from_rgb(30, 41, 59), // slate-800
+    canvas_grid_minor: Color32::from_rgb(51, 65, 85), // slate-700
+    panel_bg: Color32::from_rgb(15, 23, 42),  // slate-900
+    toolbar_bg: Color32::from_rgb(15, 23, 42),
+    text_primary: Color32::from_rgb(248, 250, 252), // slate-50
+    accent: Color32::from_rgb(59, 130, 246),        // blue-500
+    danger: Color32::from_rgb(239, 68, 68),         // red-500
+    success: Color32::from_rgb(34, 197, 94),        // green-500
+    selection_bg: Color32::from_rgb(30, 58, 138),   // blue-900
+    input_bg: Color32::from_rgb(30, 41, 59),
+    input_text: Color32::from_rgb(248, 250, 252),
+    button_bg: Color32::from_rgb(30, 41, 59),
+    button_hover: Color32::from_rgb(51, 65, 85),
+    axis_2d: Color32::from_rgb(148, 163, 184), // slate-400
+    object_point: Color32::from_rgb(96, 165, 250), // blue-400
+    object_line: Color32::from_rgb(203, 213, 225), // slate-300
+    object_function: Color32::from_rgb(52, 211, 153), // emerald-400
+    object_conic: Color32::from_rgb(248, 113, 113), // red-400
 };
 
 pub const LIGHT: Theme = Theme {
-    canvas_bg:          Color32::WHITE,
-    canvas_grid_minor:  Color32::from_rgb(230, 230, 230),
-    panel_bg:           Color32::WHITE,
-    toolbar_bg:         Color32::WHITE,
-    text_primary:       Color32::from_rgb(32, 33, 36),
-    accent:             Color32::from_rgb(101, 87, 210), // GeoGebra purple-blue
-    danger:             Color32::from_rgb(220, 38, 38),
-    success:            Color32::from_rgb(22, 163, 74),
-    selection_bg:       Color32::from_rgb(238, 236, 251), // Light purple selection
-    input_bg:           Color32::WHITE,
-    input_text:         Color32::from_rgb(32, 33, 36),
-    button_bg:          Color32::from_rgb(243, 243, 248),
-    button_hover:       Color32::from_rgb(230, 230, 235),
-    axis_2d:            Color32::from_rgb(100, 100, 100),
-    object_point:       Color32::from_rgb(37, 99, 235),
-    object_line:        Color32::from_rgb(71, 85, 105),
-    object_function:    Color32::from_rgb(5, 150, 105),
-    object_conic:       Color32::from_rgb(220, 38, 38),   // red-600
+    canvas_bg: Color32::WHITE,
+    canvas_grid_minor: Color32::from_rgb(230, 230, 230),
+    panel_bg: Color32::WHITE,
+    toolbar_bg: Color32::WHITE,
+    text_primary: Color32::from_rgb(32, 33, 36),
+    accent: Color32::from_rgb(101, 87, 210), // GeoGebra purple-blue
+    danger: Color32::from_rgb(220, 38, 38),
+    success: Color32::from_rgb(22, 163, 74),
+    selection_bg: Color32::from_rgb(238, 236, 251), // Light purple selection
+    input_bg: Color32::WHITE,
+    input_text: Color32::from_rgb(32, 33, 36),
+    button_bg: Color32::from_rgb(243, 243, 248),
+    button_hover: Color32::from_rgb(230, 230, 235),
+    axis_2d: Color32::from_rgb(100, 100, 100),
+    object_point: Color32::from_rgb(37, 99, 235),
+    object_line: Color32::from_rgb(71, 85, 105),
+    object_function: Color32::from_rgb(5, 150, 105),
+    object_conic: Color32::from_rgb(220, 38, 38), // red-600
 };
-

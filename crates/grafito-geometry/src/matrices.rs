@@ -9,27 +9,43 @@ pub struct Matrix {
 
 impl Matrix {
     pub fn new(rows: usize, cols: usize, data: Vec<f64>) -> Option<Self> {
-        if data.len() != rows * cols { return None; }
+        if data.len() != rows * cols {
+            return None;
+        }
         Some(Self { rows, cols, data })
     }
 
     pub fn zeros(rows: usize, cols: usize) -> Self {
-        Self { rows, cols, data: vec![0.0; rows * cols] }
+        Self {
+            rows,
+            cols,
+            data: vec![0.0; rows * cols],
+        }
     }
 
     pub fn identity(n: usize) -> Self {
         let mut m = Self::zeros(n, n);
-        for i in 0..n { m.data[i * n + i] = 1.0; }
+        for i in 0..n {
+            m.data[i * n + i] = 1.0;
+        }
         m
     }
 
     pub fn from_rows(rows: Vec<Vec<f64>>) -> Option<Self> {
-        if rows.is_empty() { return None; }
+        if rows.is_empty() {
+            return None;
+        }
         let r = rows.len();
         let c = rows[0].len();
-        if rows.iter().any(|row| row.len() != c) { return None; }
+        if rows.iter().any(|row| row.len() != c) {
+            return None;
+        }
         let data: Vec<f64> = rows.into_iter().flatten().collect();
-        Some(Self { rows: r, cols: c, data })
+        Some(Self {
+            rows: r,
+            cols: c,
+            data,
+        })
     }
 
     pub fn get(&self, r: usize, c: usize) -> f64 {
@@ -41,19 +57,43 @@ impl Matrix {
     }
 
     pub fn add(&self, other: &Matrix) -> Option<Matrix> {
-        if self.rows != other.rows || self.cols != other.cols { return None; }
-        let data: Vec<f64> = self.data.iter().zip(&other.data).map(|(a, b)| a + b).collect();
-        Some(Matrix { rows: self.rows, cols: self.cols, data })
+        if self.rows != other.rows || self.cols != other.cols {
+            return None;
+        }
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(&other.data)
+            .map(|(a, b)| a + b)
+            .collect();
+        Some(Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data,
+        })
     }
 
     pub fn sub(&self, other: &Matrix) -> Option<Matrix> {
-        if self.rows != other.rows || self.cols != other.cols { return None; }
-        let data: Vec<f64> = self.data.iter().zip(&other.data).map(|(a, b)| a - b).collect();
-        Some(Matrix { rows: self.rows, cols: self.cols, data })
+        if self.rows != other.rows || self.cols != other.cols {
+            return None;
+        }
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(&other.data)
+            .map(|(a, b)| a - b)
+            .collect();
+        Some(Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data,
+        })
     }
 
     pub fn mul(&self, other: &Matrix) -> Option<Matrix> {
-        if self.cols != other.rows { return None; }
+        if self.cols != other.rows {
+            return None;
+        }
         let mut result = Matrix::zeros(self.rows, other.cols);
         for i in 0..self.rows {
             for j in 0..other.cols {
@@ -69,7 +109,11 @@ impl Matrix {
 
     pub fn scale(&self, s: f64) -> Matrix {
         let data: Vec<f64> = self.data.iter().map(|v| v * s).collect();
-        Matrix { rows: self.rows, cols: self.cols, data }
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            data,
+        }
     }
 
     pub fn transpose(&self) -> Matrix {
@@ -83,15 +127,24 @@ impl Matrix {
     }
 
     pub fn determinant(&self) -> Option<f64> {
-        if self.rows != self.cols { return None; }
+        if self.rows != self.cols {
+            return None;
+        }
         let n = self.rows;
-        if n == 1 { return Some(self.data[0]); }
-        if n == 2 { return Some(self.get(0, 0) * self.get(1, 1) - self.get(0, 1) * self.get(1, 0)); }
+        if n == 1 {
+            return Some(self.data[0]);
+        }
+        if n == 2 {
+            return Some(self.get(0, 0) * self.get(1, 1) - self.get(0, 1) * self.get(1, 0));
+        }
         if n == 3 {
             return Some(
-                self.get(0, 0) * (self.get(1, 1) * self.get(2, 2) - self.get(1, 2) * self.get(2, 1))
-              - self.get(0, 1) * (self.get(1, 0) * self.get(2, 2) - self.get(1, 2) * self.get(2, 0))
-              + self.get(0, 2) * (self.get(1, 0) * self.get(2, 1) - self.get(1, 1) * self.get(2, 0))
+                self.get(0, 0)
+                    * (self.get(1, 1) * self.get(2, 2) - self.get(1, 2) * self.get(2, 1))
+                    - self.get(0, 1)
+                        * (self.get(1, 0) * self.get(2, 2) - self.get(1, 2) * self.get(2, 0))
+                    + self.get(0, 2)
+                        * (self.get(1, 0) * self.get(2, 1) - self.get(1, 1) * self.get(2, 0)),
             );
         }
         let mut lu = self.clone();
@@ -99,7 +152,9 @@ impl Matrix {
         for col in 0..n {
             let mut max_row = col;
             for row in (col + 1)..n {
-                if lu.get(row, col).abs() > lu.get(max_row, col).abs() { max_row = row; }
+                if lu.get(row, col).abs() > lu.get(max_row, col).abs() {
+                    max_row = row;
+                }
             }
             if max_row != col {
                 for j in 0..n {
@@ -109,7 +164,9 @@ impl Matrix {
                 }
                 sign *= -1.0;
             }
-            if lu.get(col, col).abs() < 1e-15 { return Some(0.0); }
+            if lu.get(col, col).abs() < 1e-15 {
+                return Some(0.0);
+            }
             for row in (col + 1)..n {
                 let factor = lu.get(row, col) / lu.get(col, col);
                 for j in col..n {
@@ -119,12 +176,16 @@ impl Matrix {
             }
         }
         let mut det = sign;
-        for i in 0..n { det *= lu.get(i, i); }
+        for i in 0..n {
+            det *= lu.get(i, i);
+        }
         Some(det)
     }
 
     pub fn inverse(&self) -> Option<Matrix> {
-        if self.rows != self.cols { return None; }
+        if self.rows != self.cols {
+            return None;
+        }
         let n = self.rows;
         let mut aug = Matrix::zeros(n, 2 * n);
         for i in 0..n {
@@ -136,16 +197,25 @@ impl Matrix {
         for col in 0..n {
             let mut max_row = col;
             for row in (col + 1)..n {
-                if aug.get(row, col).abs() > aug.get(max_row, col).abs() { max_row = row; }
+                if aug.get(row, col).abs() > aug.get(max_row, col).abs() {
+                    max_row = row;
+                }
             }
-            aug.data.swap_ranges(col * 2 * n..(col + 1) * 2 * n, max_row * 2 * n..(max_row + 1) * 2 * n);
+            aug.data.swap_ranges(
+                col * 2 * n..(col + 1) * 2 * n,
+                max_row * 2 * n..(max_row + 1) * 2 * n,
+            );
             let pivot = aug.get(col, col);
-            if pivot.abs() < 1e-15 { return None; }
+            if pivot.abs() < 1e-15 {
+                return None;
+            }
             for j in 0..2 * n {
                 aug.set(col, j, aug.get(col, j) / pivot);
             }
             for row in 0..n {
-                if row == col { continue; }
+                if row == col {
+                    continue;
+                }
                 let factor = aug.get(row, col);
                 for j in 0..2 * n {
                     let v = aug.get(row, j) - factor * aug.get(col, j);
@@ -163,7 +233,9 @@ impl Matrix {
     }
 
     pub fn trace(&self) -> Option<f64> {
-        if self.rows != self.cols { return None; }
+        if self.rows != self.cols {
+            return None;
+        }
         Some((0..self.rows).map(|i| self.get(i, i)).sum())
     }
 
@@ -190,25 +262,42 @@ impl<T: Copy> SwapRanges<T> for Vec<T> {
 }
 
 pub fn solve_linear_system(a: &Matrix, b: &Matrix) -> Option<Matrix> {
-    if a.rows != a.cols || b.rows != a.rows { return None; }
+    if a.rows != a.cols || b.rows != a.rows {
+        return None;
+    }
     let n = a.rows;
     let m = b.cols;
     let mut aug = Matrix::zeros(n, n + m);
     for i in 0..n {
-        for j in 0..n { aug.set(i, j, a.get(i, j)); }
-        for j in 0..m { aug.set(i, n + j, b.get(i, j)); }
+        for j in 0..n {
+            aug.set(i, j, a.get(i, j));
+        }
+        for j in 0..m {
+            aug.set(i, n + j, b.get(i, j));
+        }
     }
     for col in 0..n {
         let mut max_row = col;
         for row in (col + 1)..n {
-            if aug.get(row, col).abs() > aug.get(max_row, col).abs() { max_row = row; }
+            if aug.get(row, col).abs() > aug.get(max_row, col).abs() {
+                max_row = row;
+            }
         }
-        aug.data.swap_ranges(col * (n + m)..(col + 1) * (n + m), max_row * (n + m)..(max_row + 1) * (n + m));
+        aug.data.swap_ranges(
+            col * (n + m)..(col + 1) * (n + m),
+            max_row * (n + m)..(max_row + 1) * (n + m),
+        );
         let pivot = aug.get(col, col);
-        if pivot.abs() < 1e-15 { return None; }
-        for j in 0..(n + m) { aug.set(col, j, aug.get(col, j) / pivot); }
+        if pivot.abs() < 1e-15 {
+            return None;
+        }
+        for j in 0..(n + m) {
+            aug.set(col, j, aug.get(col, j) / pivot);
+        }
         for row in 0..n {
-            if row == col { continue; }
+            if row == col {
+                continue;
+            }
             let factor = aug.get(row, col);
             for j in 0..(n + m) {
                 let v = aug.get(row, j) - factor * aug.get(col, j);
@@ -232,17 +321,33 @@ pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option
     let mut current = ast.clone();
     let mut factorial = 1.0f64;
     for n in 0..=order {
-        if n > 0 { factorial *= n as f64; }
+        if n > 0 {
+            factorial *= n as f64;
+        }
         let coeff = current.eval_at(var, center) / factorial;
         if coeff.abs() > 1e-12 {
             let term = if (center).abs() < 1e-12 {
-                if n == 0 { format_coeff(coeff) }
-                else if n == 1 { format!("{}*{}", format_coeff(coeff), var) }
-                else { format!("{}*{}^{}", format_coeff(coeff), var, n) }
+                if n == 0 {
+                    format_coeff(coeff)
+                } else if n == 1 {
+                    format!("{}*{}", format_coeff(coeff), var)
+                } else {
+                    format!("{}*{}^{}", format_coeff(coeff), var, n)
+                }
             } else {
-                if n == 0 { format_coeff(coeff) }
-                else if n == 1 { format!("{}*({}-{})", format_coeff(coeff), var, format_f64(center)) }
-                else { format!("{}*({}-{})^{}", format_coeff(coeff), var, format_f64(center), n) }
+                if n == 0 {
+                    format_coeff(coeff)
+                } else if n == 1 {
+                    format!("{}*({}-{})", format_coeff(coeff), var, format_f64(center))
+                } else {
+                    format!(
+                        "{}*({}-{})^{}",
+                        format_coeff(coeff),
+                        var,
+                        format_f64(center),
+                        n
+                    )
+                }
             };
             terms.push(term);
         }
@@ -250,7 +355,9 @@ pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option
             current = current.diff(var);
         }
     }
-    if terms.is_empty() { return Some("0".to_string()); }
+    if terms.is_empty() {
+        return Some("0".to_string());
+    }
     Some(terms.join(" + ").replace("+ -", "- "))
 }
 
@@ -275,7 +382,9 @@ impl fmt::Display for Matrix {
         for i in 0..self.rows {
             write!(f, "[")?;
             for j in 0..self.cols {
-                if j > 0 { write!(f, ", ")?; }
+                if j > 0 {
+                    write!(f, ", ")?;
+                }
                 write!(f, "{:.4}", self.get(i, j))?;
             }
             writeln!(f, "]")?;
@@ -308,7 +417,8 @@ mod tests {
             vec![1.0, 2.0, 3.0],
             vec![4.0, 5.0, 6.0],
             vec![7.0, 8.0, 10.0],
-        ]).unwrap();
+        ])
+        .unwrap();
         let det = m.determinant().unwrap();
         assert!((det - (-3.0)).abs() < 1e-10);
     }

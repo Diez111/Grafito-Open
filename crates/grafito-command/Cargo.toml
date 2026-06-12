@@ -1,0 +1,16 @@
+[package]
+name = "grafito-command"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafito-core.workspace = true
+grafito-geometry.workspace = true
+
+[dev-dependencies]
+grafito-core.workspace = true
+grafito-geometry.workspace = true

@@ -8,6 +8,6 @@ fn main() {
         }
     }
     let start = std::time::Instant::now();
-    let res = eval_batch_2d("x^2+y^2", "x", "y", points.into_iter(), &HashMap::new());
+    let _res = eval_batch_2d("x^2+y^2", "x", "y", points.into_iter(), &HashMap::new());
     println!("Elapsed: {:?}", start.elapsed());
 }

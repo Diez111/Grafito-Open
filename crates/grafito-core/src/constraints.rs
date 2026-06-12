@@ -67,7 +67,12 @@ impl ConstraintGraph {
     }
 
     /// Add a constraint that produces output objects from input objects.
-    pub fn add_constraint(&mut self, name: &str, inputs: Vec<ObjectId>, outputs: Vec<ObjectId>) -> usize {
+    pub fn add_constraint(
+        &mut self,
+        name: &str,
+        inputs: Vec<ObjectId>,
+        outputs: Vec<ObjectId>,
+    ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         let order = self.next_order;
@@ -132,7 +137,10 @@ impl ConstraintGraph {
 
         // Sort by construction order for correct evaluation
         order.sort_by_key(|id| {
-            self.constraints.get(id).map(|c| c.order).unwrap_or(usize::MAX)
+            self.constraints
+                .get(id)
+                .map(|c| c.order)
+                .unwrap_or(usize::MAX)
         });
 
         order
@@ -145,9 +153,27 @@ impl ConstraintGraph {
 
     /// Get the constraint that created an object.
     pub fn creator_of(&self, id: &ObjectId) -> Option<&Constraint> {
-        self.creator.get(id).and_then(|cid| self.constraints.get(cid))
+        self.creator
+            .get(id)
+            .and_then(|cid| self.constraints.get(cid))
     }
 
-    pub fn constraint_count(&self) -> usize { self.constraints.len() }
-    pub fn free_count(&self) -> usize { self.free_objects.len() }
+    pub fn constraint_count(&self) -> usize {
+        self.constraints.len()
+    }
+    pub fn free_count(&self) -> usize {
+        self.free_objects.len()
+    }
+
+    pub fn get_constraint(&self, id: usize) -> Option<&Constraint> {
+        self.constraints.get(&id)
+    }
+
+    pub fn free_objects_iter(&self) -> impl Iterator<Item = &ObjectId> {
+        self.free_objects.iter()
+    }
+
+    pub fn dependents_of(&self, id: &ObjectId) -> Option<&Vec<usize>> {
+        self.dependents.get(id)
+    }
 }

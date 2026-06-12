@@ -1,5 +1,5 @@
 //! HSV Color Picker con rueda de color, slider de valor y favoritos
-//! 
+//!
 //! Características:
 //! - Rueda de color HSV interactiva
 //! - Slider de valor (brightness)
@@ -59,7 +59,7 @@ impl HsvColorPicker {
             cols[0].vertical_centered(|ui| {
                 changed |= self.show_wheel(ui, 150.0);
             });
-            
+
             // Columna Derecha: Slider y Preview
             cols[1].vertical_centered(|ui| {
                 ui.add_space(5.0);
@@ -89,24 +89,32 @@ impl HsvColorPicker {
         for i in 0..segments {
             let angle1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
             let angle2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
-            
+
             // Dibujar sector con gradiente de saturación
             let inner_radius = radius * 0.3;
             let outer_radius = radius;
-            
+
             for j in 0..8 {
                 let sat1 = j as f32 / 8.0;
                 let sat2 = (j + 1) as f32 / 8.0;
-                
+
                 let hue = (i as f32 / segments as f32) * 360.0;
                 // Siempre dibujamos la rueda con valor = 1.0 para que se vean los colores
                 let color1 = hsv_to_color32(hue, sat1, 1.0);
-                
-                let p1 = center + Vec2::new(angle1.cos(), angle1.sin()) * (inner_radius + (outer_radius - inner_radius) * sat1);
-                let p2 = center + Vec2::new(angle1.cos(), angle1.sin()) * (inner_radius + (outer_radius - inner_radius) * sat2);
-                let p3 = center + Vec2::new(angle2.cos(), angle2.sin()) * (inner_radius + (outer_radius - inner_radius) * sat2);
-                let p4 = center + Vec2::new(angle2.cos(), angle2.sin()) * (inner_radius + (outer_radius - inner_radius) * sat1);
-                
+
+                let p1 = center
+                    + Vec2::new(angle1.cos(), angle1.sin())
+                        * (inner_radius + (outer_radius - inner_radius) * sat1);
+                let p2 = center
+                    + Vec2::new(angle1.cos(), angle1.sin())
+                        * (inner_radius + (outer_radius - inner_radius) * sat2);
+                let p3 = center
+                    + Vec2::new(angle2.cos(), angle2.sin())
+                        * (inner_radius + (outer_radius - inner_radius) * sat2);
+                let p4 = center
+                    + Vec2::new(angle2.cos(), angle2.sin())
+                        * (inner_radius + (outer_radius - inner_radius) * sat1);
+
                 painter.add(egui::Shape::convex_polygon(
                     vec![p1, p2, p3, p4],
                     color1,
@@ -131,24 +139,16 @@ impl HsvColorPicker {
         let angle = (self.hue / 360.0) * std::f32::consts::TAU;
         let indicator_radius = radius * (0.3 + 0.7 * self.saturation);
         let indicator_pos = center + Vec2::new(angle.cos(), angle.sin()) * indicator_radius;
-        
+
         // Sombra sutil del indicador
         painter.circle_filled(
             indicator_pos + Vec2::new(0.0, 2.0),
             6.0,
             Color32::from_black_alpha(60),
         );
-        
-        painter.circle_filled(
-            indicator_pos,
-            6.0,
-            Color32::WHITE,
-        );
-        painter.circle_stroke(
-            indicator_pos,
-            6.0,
-            egui::Stroke::new(2.0, Color32::BLACK),
-        );
+
+        painter.circle_filled(indicator_pos, 6.0, Color32::WHITE);
+        painter.circle_stroke(indicator_pos, 6.0, egui::Stroke::new(2.0, Color32::BLACK));
 
         // Manejar interacción — click+drag para posicionamiento absoluto
         if response.clicked() || response.dragged() {
@@ -164,7 +164,8 @@ impl HsvColorPicker {
                     let clamped_dist = distance.clamp(radius * 0.3, radius);
                     let angle = delta.y.atan2(delta.x);
                     self.hue = ((angle / std::f32::consts::TAU) * 360.0 + 360.0) % 360.0;
-                    self.saturation = ((clamped_dist - radius * 0.3) / (radius * 0.7)).clamp(0.0, 1.0);
+                    self.saturation =
+                        ((clamped_dist - radius * 0.3) / (radius * 0.7)).clamp(0.0, 1.0);
                     return true;
                 }
             }
@@ -176,35 +177,40 @@ impl HsvColorPicker {
     /// Dibujar slider de valor (brightness)
     fn show_value_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
         let height = 24.0;
-        
+
         ui.label(egui::RichText::new("Valor (Brillo):").strong());
         ui.add_space(4.0);
-        
-        let (response, mut painter) = ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
+
+        let (response, mut painter) =
+            ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
         let rect = response.rect;
 
         // Dibujar gradiente de valor con bordes redondeados
         let segments = 32;
         let rounding = 4.0;
-        
+
         // Usar clip rect para el redondeo
         painter.set_clip_rect(rect);
         for i in 0..segments {
             let val1 = i as f32 / segments as f32;
             let val2 = (i + 1) as f32 / segments as f32;
-            
+
             let color1 = hsv_to_color32(self.hue, self.saturation, val1);
-            
+
             let x1 = rect.left() + rect.width() * val1;
             let x2 = rect.left() + rect.width() * val2;
-            
+
             painter.rect_filled(
                 Rect::from_min_max(Pos2::new(x1, rect.top()), Pos2::new(x2, rect.bottom())),
-                if i == 0 { rounding } else if i == segments - 1 { rounding } else { 0.0 }, // Simple approx
+                if i == 0 || i == segments - 1 {
+                    rounding
+                } else {
+                    0.0
+                },
                 color1,
             );
         }
-        
+
         // Bordes del slider
         painter.rect_stroke(
             rect,
@@ -214,14 +220,25 @@ impl HsvColorPicker {
 
         // Dibujar indicador
         let indicator_x = rect.left() + (rect.width() - 8.0) * self.value + 4.0;
-        let ind_rect = Rect::from_center_size(Pos2::new(indicator_x, rect.center().y), Vec2::new(8.0, rect.height() + 4.0));
-        
+        let ind_rect = Rect::from_center_size(
+            Pos2::new(indicator_x, rect.center().y),
+            Vec2::new(8.0, rect.height() + 4.0),
+        );
+
         // Sombra
-        painter.rect_filled(ind_rect.translate(Vec2::new(0.0, 1.0)), 3.0, Color32::from_black_alpha(60));
-        
+        painter.rect_filled(
+            ind_rect.translate(Vec2::new(0.0, 1.0)),
+            3.0,
+            Color32::from_black_alpha(60),
+        );
+
         // Indicador
         painter.rect_filled(ind_rect, 3.0, Color32::WHITE);
-        painter.rect_stroke(ind_rect, 3.0, egui::Stroke::new(1.0, Color32::from_gray(80)));
+        painter.rect_stroke(
+            ind_rect,
+            3.0,
+            egui::Stroke::new(1.0, Color32::from_gray(80)),
+        );
 
         // Manejar interacción — click+drag para posicionamiento absoluto
         if response.clicked() || response.dragged() {
@@ -239,14 +256,18 @@ impl HsvColorPicker {
     fn show_preview(&self, ui: &mut Ui) {
         ui.label(egui::RichText::new("Previsualización:").strong());
         ui.add_space(4.0);
-        
+
         ui.horizontal(|ui| {
             // Color original
             ui.vertical_centered(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(60.0, 32.0), Sense::hover());
                 painter_draw_swatch(ui, rect, color_to_color32(self.original_color));
                 ui.add_space(2.0);
-                ui.label(egui::RichText::new("Original").small().color(Color32::from_gray(120)));
+                ui.label(
+                    egui::RichText::new("Original")
+                        .small()
+                        .color(Color32::from_gray(120)),
+                );
             });
 
             ui.add_space(16.0);
@@ -264,18 +285,19 @@ impl HsvColorPicker {
     /// Dibujar colores favoritos
     fn show_favorites(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> bool {
         let mut changed = false;
-        
+
         ui.label(egui::RichText::new("Favoritos:").strong());
         ui.add_space(4.0);
-        
+
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            #[allow(clippy::needless_range_loop)]
             for i in 0..5 {
                 let color = favorites[i];
                 let size = 32.0;
-                
+
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-                
+
                 painter_draw_swatch_interactive(ui, &response, rect, color_to_color32(color));
 
                 // Click izquierdo: aplicar color favorito
@@ -309,35 +331,28 @@ fn painter_draw_swatch(ui: &mut Ui, rect: Rect, color: Color32) {
     painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_gray(100)));
 }
 
-fn painter_draw_swatch_interactive(ui: &mut Ui, response: &egui::Response, rect: Rect, color: Color32) {
+fn painter_draw_swatch_interactive(
+    ui: &mut Ui,
+    response: &egui::Response,
+    rect: Rect,
+    color: Color32,
+) {
     let painter = ui.painter();
-    
+
     // Shadow
     painter.rect_filled(
         rect.translate(Vec2::new(0.0, 2.0)),
         6.0,
         Color32::from_black_alpha(30),
     );
-    
+
     // Dibujar swatch
-    painter.rect_filled(
-        rect,
-        6.0,
-        color,
-    );
-    
+    painter.rect_filled(rect, 6.0, color);
+
     if response.hovered() {
-        painter.rect_stroke(
-            rect,
-            6.0,
-            egui::Stroke::new(2.0, Color32::WHITE),
-        );
+        painter.rect_stroke(rect, 6.0, egui::Stroke::new(2.0, Color32::WHITE));
     } else {
-        painter.rect_stroke(
-            rect,
-            6.0,
-            egui::Stroke::new(1.0, Color32::from_gray(100)),
-        );
+        painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_gray(100)));
     }
 }
 
@@ -473,7 +488,7 @@ mod tests {
         let original = Color::new(0.5, 0.3, 0.8, 1.0);
         let (h, s, v) = rgb_to_hsv(original);
         let converted = hsv_to_rgb(h, s, v);
-        
+
         assert!((original.r - converted.r).abs() < 0.01);
         assert!((original.g - converted.g).abs() < 0.01);
         assert!((original.b - converted.b).abs() < 0.01);
@@ -482,7 +497,7 @@ mod tests {
     #[test]
     fn test_grayscale() {
         let color = Color::new(0.5, 0.5, 0.5, 1.0);
-        let (h, s, v) = rgb_to_hsv(color);
+        let (_h, s, v) = rgb_to_hsv(color);
         assert!((s - 0.0).abs() < 0.01); // Sin saturación
         assert!((v - 0.5).abs() < 0.01);
     }

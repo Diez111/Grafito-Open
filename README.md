@@ -19,6 +19,38 @@ grafito/
 
 ---
 
+## Soporte Android
+
+Grafito soporta compilación para Android usando Android Studio (Flatpak en Linux).
+
+### Requisitos
+
+- Android Studio (Flatpak): `flatpak install com.google.AndroidStudio`
+- NDK instalado desde Android Studio
+- cargo-ndk: `cargo install cargo-ndk`
+
+### Configuración Rápida
+
+```bash
+# Configurar entorno automáticamente
+./scripts/setup-android-env.sh
+
+# Aplicar variables de entorno
+source ~/.grafito-android-env
+
+# Compilar para Android
+./scripts/build-android.sh
+
+# Instalar en dispositivo conectado
+./scripts/install-android.sh
+```
+
+### Documentación Completa
+
+Ver [ANDROID.md](ANDROID.md) para guía completa de compilación, instalación y solución de problemas.
+
+---
+
 ## Motor Matemático (grafito-geometry)
 
 ### Computer Algebra System (CAS)

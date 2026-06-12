@@ -29,7 +29,13 @@ pub fn integral_auto<F: Fn(f64) -> f64>(f: F, a: f64, b: f64) -> f64 {
 }
 
 /// Find root using Newton's method. Returns Ok(guess) or Err(reason).
-pub fn newton_root<F, G>(f: F, df: G, initial: f64, max_iter: usize, tol: f64) -> Result<f64, String>
+pub fn newton_root<F, G>(
+    f: F,
+    df: G,
+    initial: f64,
+    max_iter: usize,
+    tol: f64,
+) -> Result<f64, String>
 where
     F: Fn(f64) -> f64,
     G: Fn(f64) -> f64,
@@ -44,7 +50,7 @@ where
         if dfx.abs() < 1e-15 {
             return Err("Derivative near zero".into());
         }
-        x = x - fx / dfx;
+        x -= fx / dfx;
     }
     Err("Newton did not converge".into())
 }
@@ -62,7 +68,7 @@ pub fn newton_root_auto<F: Fn(f64) -> f64>(f: &F, initial: f64) -> Result<f64, S
         if dfx.abs() < 1e-15 {
             return Err("Derivative near zero".into());
         }
-        x = x - fx / dfx;
+        x -= fx / dfx;
     }
     Err("Newton did not converge".into())
 }
@@ -81,13 +87,22 @@ pub fn find_root<F: Fn(f64) -> f64>(f: F, range: (f64, f64)) -> Option<f64> {
 }
 
 /// Evaluate expression with f(x) form and find all roots in [a, b] by scanning.
-pub fn solve_expression(expr: &str, var: f64, vars: &std::collections::HashMap<String, f64>, a: f64, b: f64) -> Result<f64, String> {
+pub fn solve_expression(
+    expr: &str,
+    var: f64,
+    vars: &std::collections::HashMap<String, f64>,
+    a: f64,
+    b: f64,
+) -> Result<f64, String> {
     let expr_owned = expr.to_string();
     let f = move |x: f64| {
         let mut v = vars.clone();
         v.insert("x".to_string(), x);
-        crate::expr::evaluate(&expr_owned, &v.iter().map(|(k, v)| (k.clone(), *v)).collect::<Vec<_>>())
-            .unwrap_or(f64::NAN)
+        crate::expr::evaluate(
+            &expr_owned,
+            &v.iter().map(|(k, v)| (k.clone(), *v)).collect::<Vec<_>>(),
+        )
+        .unwrap_or(f64::NAN)
     };
     // Try equal to zero: solve f(x)=var
     let g = move |x: f64| f(x) - var;
@@ -98,9 +113,9 @@ pub fn solve_expression(expr: &str, var: f64, vars: &std::collections::HashMap<S
 pub fn limit<F: Fn(f64) -> f64>(f: F, x: f64) -> f64 {
     let h0 = 0.1;
     let mut vals = [0.0f64; 5];
-    for i in 0..5 {
+    for (i, val) in vals.iter_mut().enumerate() {
         let h = h0 / (1 << i) as f64;
-        vals[i] = f(x + h);
+        *val = f(x + h);
     }
     // Richardson extrapolation
     let mut r = vals.to_vec();

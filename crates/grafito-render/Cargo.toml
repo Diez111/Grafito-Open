@@ -18,3 +18,4 @@ bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
+num-complex.workspace = true

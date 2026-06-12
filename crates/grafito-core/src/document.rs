@@ -1,15 +1,26 @@
+use crate::constraints::ConstraintGraph;
 use crate::{GeoObject, ObjectId, RelationOperator};
-use grafito_geometry::{Point2, ViewTransform};
+use grafito_geometry::{Point2, Point3D, ViewTransform};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 fn to_subscript(n: usize) -> String {
     let s = n.to_string();
-    s.chars().map(|c| match c {
-        '0' => '₀', '1' => '₁', '2' => '₂', '3' => '₃', '4' => '₄',
-        '5' => '₅', '6' => '₆', '7' => '₇', '8' => '₈', '9' => '₉',
-        _ => c
-    }).collect()
+    s.chars()
+        .map(|c| match c {
+            '0' => '₀',
+            '1' => '₁',
+            '2' => '₂',
+            '3' => '₃',
+            '4' => '₄',
+            '5' => '₅',
+            '6' => '₆',
+            '7' => '₇',
+            '8' => '₈',
+            '9' => '₉',
+            _ => c,
+        })
+        .collect()
 }
 
 /// The main document containing all geometric objects.
@@ -27,6 +38,8 @@ pub struct Document {
     #[serde(skip)]
     pub spatial_dirty: bool,
     pub complex_base_symbol: String,
+    #[serde(skip)]
+    pub constraints: ConstraintGraph,
 }
 
 impl Default for Document {
@@ -41,6 +54,7 @@ impl Default for Document {
             spatial: crate::spatial::SpatialIndex::new(),
             spatial_dirty: true,
             complex_base_symbol: "z".to_string(),
+            constraints: ConstraintGraph::new(),
         }
     }
 }
@@ -52,29 +66,29 @@ impl Document {
 
     pub fn migrate_complex_symbol(&mut self, new_symbol: &str) {
         let old = self.complex_base_symbol.clone();
-        if old == new_symbol { return; }
-        
+        if old == new_symbol {
+            return;
+        }
+
         self.complex_base_symbol = new_symbol.to_string();
-        
+
         let mut updates = Vec::new();
         for (id, obj) in &mut self.objects {
             let label = obj.label();
             if label.starts_with(&old) {
                 // Determine if it's the exact old symbol or a subscript variant
                 let rest = &label[old.len()..];
-                let is_subscript = rest.is_empty() || rest.chars().all(|c| {
-                    match c {
-                        '₀'|'₁'|'₂'|'₃'|'₄'|'₅'|'₆'|'₇'|'₈'|'₉' => true,
-                        _ => false
-                    }
-                });
+                let is_subscript = rest.is_empty()
+                    && rest.chars().all(|c| {
+                        matches!(c, '₀' | '₁' | '₂' | '₃' | '₄' | '₅' | '₆' | '₇' | '₈' | '₉')
+                    });
                 if is_subscript {
                     let new_label = format!("{}{}", new_symbol, rest);
                     updates.push((*id, new_label));
                 }
             }
         }
-        
+
         for (id, new_label) in updates {
             if let Some(obj) = self.objects.get_mut(&id) {
                 match obj {
@@ -93,14 +107,16 @@ impl Document {
             let mut obj = obj;
             let name = obj.name();
             let base_name = match &obj {
-                GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_) => self.complex_base_symbol.clone(),
+                GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_) => {
+                    self.complex_base_symbol.clone()
+                }
                 _ => name.chars().next().unwrap().to_string(),
             };
             let n = self.next_label_number.entry(base_name.clone()).or_insert(1);
-            let label = if *n == 1 { 
-                base_name 
-            } else { 
-                format!("{}{}", base_name, to_subscript(*n - 1)) 
+            let label = if *n == 1 {
+                base_name
+            } else {
+                format!("{}{}", base_name, to_subscript(*n - 1))
             };
             *n += 1;
             match &mut obj {
@@ -138,19 +154,197 @@ impl Document {
                 GeoObject::RegressionLine(o) => o.label = label,
                 GeoObject::Torus3D(o) => o.label = label,
                 GeoObject::MoebiusStrip(o) => o.label = label,
+                GeoObject::PhasePortrait(o) => o.label = label,
             }
             obj
         } else {
             obj
         };
         self.objects.insert(id, obj);
+        self.constraints.add_free_object(id);
         self.spatial_dirty = true;
         id
     }
 
+    pub fn add_constructed_object(
+        &mut self,
+        obj: GeoObject,
+        constraint_name: &str,
+        inputs: &[ObjectId],
+    ) -> (ObjectId, usize) {
+        let id = self.add_object(obj);
+        let cons_id = self.constraints
+            .add_constraint(constraint_name, inputs.to_vec(), vec![id]);
+        (id, cons_id)
+    }
+
     pub fn remove_object(&mut self, id: ObjectId) -> Option<GeoObject> {
+        self.constraints.remove_object(id);
         self.spatial_dirty = true;
         self.objects.remove(&id)
+    }
+
+    /// Move a free point and return IDs of all affected objects (via constraint propagation).
+    /// The caller is responsible for re-evaluating the constraints in dependency order.
+    pub fn move_point(&mut self, id: ObjectId, new_pos: Point2) -> Vec<ObjectId> {
+        if !self.constraints.is_free(&id) {
+            return vec![];
+        }
+        let mut affected = vec![id];
+        if let Some(GeoObject::Point(p)) = self.get_object_mut(id) {
+            p.position = new_pos;
+        }
+        // Collect all objects downstream of this one
+        let constraint_order = self.constraints.get_update_order(&[id]);
+        for cons_id in constraint_order {
+            if let Some(cons) = self.constraints.get_constraint(cons_id) {
+                affected.extend(cons.outputs.iter().cloned());
+            }
+        }
+        affected
+    }
+
+    /// Move a free 3D point and return IDs of all affected objects.
+    pub fn move_point3d(&mut self, id: ObjectId, new_pos: grafito_geometry::Point3D) -> Vec<ObjectId> {
+        if !self.constraints.is_free(&id) {
+            return vec![];
+        }
+        let mut affected = vec![id];
+        if let Some(GeoObject::Point3D(p)) = self.get_object_mut(id) {
+            p.position = new_pos;
+        }
+        let constraint_order = self.constraints.get_update_order(&[id]);
+        for cons_id in constraint_order {
+            if let Some(cons) = self.constraints.get_constraint(cons_id) {
+                affected.extend(cons.outputs.iter().cloned());
+            }
+        }
+        affected
+    }
+
+    /// Get the update order for re-evaluating dependent objects when these IDs change.
+    pub fn propagation_order(&self, changed: &[ObjectId]) -> Vec<usize> {
+        self.constraints.get_update_order(changed)
+    }
+
+    pub fn is_free_object(&self, id: &ObjectId) -> bool {
+        self.constraints.is_free(id)
+    }
+
+    pub fn creator_of(&self, id: &ObjectId) -> Option<&crate::constraints::Constraint> {
+        self.constraints.creator_of(id)
+    }
+
+    pub fn re_evaluate_constraints(&mut self, order: &[usize]) {
+        for cons_id in order {
+            let cons_info = self.constraints.get_constraint(*cons_id).map(|c| {
+                (c.name.clone(), c.inputs.clone(), c.outputs.clone(), c.id)
+            });
+            if let Some((name, inputs, outputs, cons_id)) = cons_info {
+                match name.as_str() {
+                    "Midpoint"
+                        if inputs.len() >= 2 && !outputs.is_empty() => {
+                            let a = self.get_object(inputs[0]).cloned();
+                            let b = self.get_object(inputs[1]).cloned();
+                            if let (Some(GeoObject::Point(a)), Some(GeoObject::Point(b))) = (&a, &b) {
+                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                    out.position = grafito_geometry::Point2::new(
+                                        (a.position.x + b.position.x) * 0.5,
+                                        (a.position.y + b.position.y) * 0.5,
+                                    );
+                                }
+                            }
+                        }
+                    "Translate"
+                        if !inputs.is_empty() && !outputs.is_empty() => {
+                            let obj = self.get_object(inputs[0]).cloned();
+                            let dx = self.get_constraint_param(cons_id, "_tr_dx");
+                            let dy = self.get_constraint_param(cons_id, "_tr_dy");
+                            if let Some(GeoObject::Point(p)) = &obj {
+                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                    out.position = grafito_geometry::Point2::new(
+                                        p.position.x + dx, p.position.y + dy);
+                                }
+                            }
+                        }
+                    "Rotate"
+                        if inputs.len() >= 2 && !outputs.is_empty() => {
+                            let obj = self.get_object(inputs[0]).cloned();
+                            let angle = self.get_constraint_param(cons_id, "_rot_a");
+                            let angle_rad = angle.to_radians();
+                            if let Some(GeoObject::Point(p)) = &obj {
+                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                    out.position = grafito_geometry::Point2::new(
+                                        p.position.x * angle_rad.cos() - p.position.y * angle_rad.sin(),
+                                        p.position.x * angle_rad.sin() + p.position.y * angle_rad.cos(),
+                                    );
+                                }
+                            }
+                        }
+                    "Intersect"
+                        if inputs.len() >= 2 => {
+                            let a = self.get_object(inputs[0]).cloned();
+                            let b = self.get_object(inputs[1]).cloned();
+                            if let (Some(a), Some(b)) = (&a, &b) {
+                                let pts = doc_intersect(a, b);
+                                for (i, out_id) in outputs.iter().enumerate() {
+                                    if let Some(GeoObject::Point(out)) = self.get_object_mut(*out_id) {
+                                        if let Some(pt) = pts.get(i) {
+                                            out.position = *pt;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    "Extrude" if !inputs.is_empty() => {
+                        let height = self.get_constraint_param(cons_id, "_ext_h");
+                        if height.abs() < 1e-12 { return; }
+                        if let Some(GeoObject::Polygon(poly)) = self.get_object(inputs[0]) {
+                            let verts = poly.vertices.clone();
+                            if verts.len() < 3 { return; }
+                            let base_y = 0.0;
+                            let top_y = height;
+                            let mut seg_idx = 0;
+                            for i in 0..verts.len() {
+                                let v = verts[i];
+                                let vn = verts[(i+1)%verts.len()];
+                                let b = Point3D::new(v.x, base_y, v.y);
+                                let t = Point3D::new(v.x, top_y, v.y);
+                                let bn = Point3D::new(vn.x, base_y, vn.y);
+                                let tn = Point3D::new(vn.x, top_y, vn.y);
+                                if seg_idx < outputs.len() {
+                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
+                                        s.a = b; s.b = t;
+                                    }
+                                }
+                                seg_idx += 1;
+                                if seg_idx < outputs.len() {
+                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
+                                        s.a = b; s.b = bn;
+                                    }
+                                }
+                                seg_idx += 1;
+                                if seg_idx < outputs.len() {
+                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
+                                        s.a = t; s.b = tn;
+                                    }
+                                }
+                                seg_idx += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn get_constraint_param(&self, cons_id: usize, key: &str) -> f64 {
+        self.variables.get(&format!("{}_{}", key, cons_id)).copied().unwrap_or(0.0)
+    }
+
+    pub fn set_constraint_param(&mut self, cons_id: usize, key: &str, value: f64) {
+        self.variables.insert(format!("{}_{}", key, cons_id), value);
     }
 
     pub fn get_object(&self, id: ObjectId) -> Option<&GeoObject> {
@@ -218,15 +412,21 @@ impl Document {
         if candidates.is_empty() {
             // Fallback for objects not in spatial index or if index is empty
             for (id, obj) in &self.objects {
-                if !obj.is_visible() { continue; }
-                if self.check_hit(obj, world, tolerance) { return Some(*id); }
+                if !obj.is_visible() {
+                    continue;
+                }
+                if self.check_hit(obj, world, tolerance) {
+                    return Some(*id);
+                }
             }
             return None;
         }
 
         for id in candidates {
             if let Some(obj) = self.objects.get(&id) {
-                if !obj.is_visible() { continue; }
+                if !obj.is_visible() {
+                    continue;
+                }
                 // Use precise check
                 if self.check_hit(obj, world, tolerance) {
                     // For simplicity, just return the first hit or compute actual distance
@@ -239,19 +439,19 @@ impl Document {
 
     fn check_hit(&self, obj: &GeoObject, world: Point2, tolerance: f64) -> bool {
         match obj {
-            GeoObject::Point(p) => p.position.distance(&world) <= tolerance.max(p.size as f64 / self.view.scale as f64),
+            GeoObject::Point(p) => {
+                p.position.distance(&world) <= tolerance.max(p.size as f64 / self.view.scale)
+            }
             GeoObject::Line(l) => distance_point_to_segment(world, l.start, l.end) <= tolerance,
             GeoObject::Circle(c) => (c.center.distance(&world) - c.radius).abs() <= tolerance,
-            GeoObject::Polygon(poly) => {
-                if poly.vertices.len() >= 3 {
-                    distance_point_to_polygon(world, &poly.vertices) <= tolerance
-                } else {
-                    false
-                }
+            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                distance_point_to_polygon(world, &poly.vertices) <= tolerance
             }
             GeoObject::Function(f) => {
                 // Evaluate function at world.x and check if world.y is close
-                if let Ok(y) = grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), world.x)]) {
+                if let Ok(y) =
+                    grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), world.x)])
+                {
                     (world.y - y).abs() <= tolerance
                 } else {
                     false
@@ -298,8 +498,10 @@ impl Document {
                 // Simple bounding box check
                 let width = txt.content.len() as f64 * txt.font_size as f64 * 0.6;
                 let height = txt.font_size as f64;
-                world.x >= txt.position.x && world.x <= txt.position.x + width &&
-                world.y >= txt.position.y - height && world.y <= txt.position.y
+                world.x >= txt.position.x
+                    && world.x <= txt.position.x + width
+                    && world.y >= txt.position.y - height
+                    && world.y <= txt.position.y
             }
             GeoObject::ParametricCurve2D(pc) => {
                 // Sample the curve and check distance to segments
@@ -332,7 +534,9 @@ impl Document {
                 let mut prev_point: Option<Point2> = None;
                 for i in 0..=steps {
                     let t = pol.t_min + i as f64 * dt;
-                    if let Ok(r) = grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)]) {
+                    if let Ok(r) =
+                        grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
+                    {
                         if r.is_finite() {
                             let x = r * t.cos();
                             let y = r * t.sin();
@@ -351,8 +555,14 @@ impl Document {
             GeoObject::ImplicitCurve(ic) => {
                 // Evaluate both sides and check if close to the relation
                 if let (Ok(lhs), Ok(rhs)) = (
-                    grafito_geometry::expr::evaluate(&ic.expr_lhs, &[("x".to_string(), world.x), ("y".to_string(), world.y)]),
-                    grafito_geometry::expr::evaluate(&ic.expr_rhs, &[("x".to_string(), world.x), ("y".to_string(), world.y)]),
+                    grafito_geometry::expr::evaluate(
+                        &ic.expr_lhs,
+                        &[("x".to_string(), world.x), ("y".to_string(), world.y)],
+                    ),
+                    grafito_geometry::expr::evaluate(
+                        &ic.expr_rhs,
+                        &[("x".to_string(), world.x), ("y".to_string(), world.y)],
+                    ),
                 ) {
                     let diff = (lhs - rhs).abs();
                     match ic.operator {
@@ -384,11 +594,17 @@ impl Document {
                 // Check if point is inside any bar
                 let bins = grafito_geometry::statistics::histogram(&h.data, h.bins);
                 let max_count = bins.iter().map(|(_, _, c)| *c).fold(0.0f64, f64::max);
-                if max_count <= 0.0 { return false; }
+                if max_count <= 0.0 {
+                    return false;
+                }
                 let y_scale = (h.y_max - h.y_min) / max_count;
                 for (left, right, count) in &bins {
                     let bar_height = h.y_min + count * y_scale;
-                    if world.x >= *left && world.x <= *right && world.y >= h.y_min && world.y <= bar_height {
+                    if world.x >= *left
+                        && world.x <= *right
+                        && world.y >= h.y_min
+                        && world.y <= bar_height
+                    {
                         return true;
                     }
                 }
@@ -396,21 +612,30 @@ impl Document {
             }
             GeoObject::BoxPlot(bp) => {
                 // Check if point is inside the box
-                if let Some((_, q1, _, q3, _, _)) = grafito_geometry::statistics::boxplot_stats(&bp.data) {
+                if let Some((_, q1, _, q3, _, _)) =
+                    grafito_geometry::statistics::boxplot_stats(&bp.data)
+                {
                     let half_w = bp.width_box * 0.5;
-                    world.x >= bp.position - half_w && world.x <= bp.position + half_w &&
-                    world.y >= q1 && world.y <= q3
+                    world.x >= bp.position - half_w
+                        && world.x <= bp.position + half_w
+                        && world.y >= q1
+                        && world.y <= q3
                 } else {
                     false
                 }
             }
             GeoObject::Fractal2D(fr) => {
                 // Bounding box check
-                world.x >= fr.x_min && world.x <= fr.x_max &&
-                world.y >= fr.y_min && world.y <= fr.y_max
+                world.x >= fr.x_min
+                    && world.x <= fr.x_max
+                    && world.y >= fr.y_min
+                    && world.y <= fr.y_max
             }
             // 3D objects and complex objects - use bounding box or return false
-            GeoObject::VectorField2D(_) | GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_) => false,
+            GeoObject::VectorField2D(_)
+            | GeoObject::PhasePortrait(_)
+            | GeoObject::ComplexGrid(_)
+            | GeoObject::ComplexMapping(_) => false,
             _ => false, // 3D objects require projection, skip for now
         }
     }
@@ -418,25 +643,42 @@ impl Document {
     pub fn rebuild_spatial_index(&mut self) {
         let mut items = Vec::new();
         for (id, obj) in &self.objects {
-            if !obj.is_visible() { continue; }
+            if !obj.is_visible() {
+                continue;
+            }
             let (min_x, min_y, max_x, max_y) = match obj {
-                GeoObject::Point(p) => (p.position.x - 0.1, p.position.y - 0.1, p.position.x + 0.1, p.position.y + 0.1),
+                GeoObject::Point(p) => (
+                    p.position.x - 0.1,
+                    p.position.y - 0.1,
+                    p.position.x + 0.1,
+                    p.position.y + 0.1,
+                ),
                 GeoObject::Line(l) => (
-                    l.start.x.min(l.end.x), l.start.y.min(l.end.y),
-                    l.start.x.max(l.end.x), l.start.y.max(l.end.y)
+                    l.start.x.min(l.end.x),
+                    l.start.y.min(l.end.y),
+                    l.start.x.max(l.end.x),
+                    l.start.y.max(l.end.y),
                 ),
                 GeoObject::Circle(c) => (
-                    c.center.x - c.radius, c.center.y - c.radius,
-                    c.center.x + c.radius, c.center.y + c.radius
+                    c.center.x - c.radius,
+                    c.center.y - c.radius,
+                    c.center.x + c.radius,
+                    c.center.y + c.radius,
                 ),
                 GeoObject::Polygon(poly) => {
-                    let mut min_x = f64::MAX; let mut min_y = f64::MAX;
-                    let mut max_x = f64::MIN; let mut max_y = f64::MIN;
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
                     for v in &poly.vertices {
-                        min_x = min_x.min(v.x); min_y = min_y.min(v.y);
-                        max_x = max_x.max(v.x); max_y = max_y.max(v.y);
+                        min_x = min_x.min(v.x);
+                        min_y = min_y.min(v.y);
+                        max_x = max_x.max(v.x);
+                        max_y = max_y.max(v.y);
                     }
-                    if poly.vertices.is_empty() { continue; }
+                    if poly.vertices.is_empty() {
+                        continue;
+                    }
                     (min_x, min_y, max_x, max_y)
                 }
                 GeoObject::Function(f) => {
@@ -449,42 +691,73 @@ impl Document {
                     let dx = (x_max - x_min) / steps as f64;
                     for i in 0..=steps {
                         let x = x_min + i as f64 * dx;
-                        if let Ok(y) = grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), x)]) {
+                        if let Ok(y) =
+                            grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), x)])
+                        {
                             if y.is_finite() {
                                 y_min = y_min.min(y);
                                 y_max = y_max.max(y);
                             }
                         }
                     }
-                    if y_min > y_max { continue; }
+                    if y_min > y_max {
+                        continue;
+                    }
                     (x_min, y_min, x_max, y_max)
                 }
                 GeoObject::Ellipse(el) => {
                     let max_r = el.rx.max(el.ry);
-                    (el.center.x - max_r, el.center.y - max_r, el.center.x + max_r, el.center.y + max_r)
+                    (
+                        el.center.x - max_r,
+                        el.center.y - max_r,
+                        el.center.x + max_r,
+                        el.center.y + max_r,
+                    )
                 }
                 GeoObject::Parabola(pb) => {
                     // Approximate bounding box
                     let range = 10.0;
                     if pb.vertical {
-                        (pb.vertex.x - range, pb.vertex.y, pb.vertex.x + range, pb.vertex.y + range)
+                        (
+                            pb.vertex.x - range,
+                            pb.vertex.y,
+                            pb.vertex.x + range,
+                            pb.vertex.y + range,
+                        )
                     } else {
-                        (pb.vertex.x, pb.vertex.y - range, pb.vertex.x + range, pb.vertex.y + range)
+                        (
+                            pb.vertex.x,
+                            pb.vertex.y - range,
+                            pb.vertex.x + range,
+                            pb.vertex.y + range,
+                        )
                     }
                 }
                 GeoObject::Hyperbola(hb) => {
                     let range = hb.a.max(hb.b) * 3.0;
-                    (hb.center.x - range, hb.center.y - range, hb.center.x + range, hb.center.y + range)
+                    (
+                        hb.center.x - range,
+                        hb.center.y - range,
+                        hb.center.x + range,
+                        hb.center.y + range,
+                    )
                 }
                 GeoObject::Text(txt) => {
                     let width = txt.content.len() as f64 * txt.font_size as f64 * 0.6;
                     let height = txt.font_size as f64;
-                    (txt.position.x, txt.position.y - height, txt.position.x + width, txt.position.y)
+                    (
+                        txt.position.x,
+                        txt.position.y - height,
+                        txt.position.x + width,
+                        txt.position.y,
+                    )
                 }
                 GeoObject::ParametricCurve2D(pc) => {
                     // Sample curve to compute bounding box
-                    let mut min_x = f64::MAX; let mut min_y = f64::MAX;
-                    let mut max_x = f64::MIN; let mut max_y = f64::MIN;
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
                     let steps = 100;
                     let dt = (pc.t_max - pc.t_min) / steps as f64;
                     for i in 0..=steps {
@@ -494,32 +767,44 @@ impl Document {
                             grafito_geometry::expr::evaluate(&pc.expr_y, &[("t".to_string(), t)]),
                         ) {
                             if x.is_finite() && y.is_finite() {
-                                min_x = min_x.min(x); min_y = min_y.min(y);
-                                max_x = max_x.max(x); max_y = max_y.max(y);
+                                min_x = min_x.min(x);
+                                min_y = min_y.min(y);
+                                max_x = max_x.max(x);
+                                max_y = max_y.max(y);
                             }
                         }
                     }
-                    if min_x > max_x { continue; }
+                    if min_x > max_x {
+                        continue;
+                    }
                     (min_x, min_y, max_x, max_y)
                 }
                 GeoObject::PolarCurve(pol) => {
                     // Sample curve to compute bounding box
-                    let mut min_x = f64::MAX; let mut min_y = f64::MAX;
-                    let mut max_x = f64::MIN; let mut max_y = f64::MIN;
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
                     let steps = 100;
                     let dt = (pol.t_max - pol.t_min) / steps as f64;
                     for i in 0..=steps {
                         let t = pol.t_min + i as f64 * dt;
-                        if let Ok(r) = grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)]) {
+                        if let Ok(r) =
+                            grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
+                        {
                             if r.is_finite() {
                                 let x = r * t.cos();
                                 let y = r * t.sin();
-                                min_x = min_x.min(x); min_y = min_y.min(y);
-                                max_x = max_x.max(x); max_y = max_y.max(y);
+                                min_x = min_x.min(x);
+                                min_y = min_y.min(y);
+                                max_x = max_x.max(x);
+                                max_y = max_y.max(y);
                             }
                         }
                     }
-                    if min_x > max_x { continue; }
+                    if min_x > max_x {
+                        continue;
+                    }
                     (min_x, min_y, max_x, max_y)
                 }
                 GeoObject::ImplicitCurve(_ic) => {
@@ -532,17 +817,25 @@ impl Document {
                     (x_min, y_min, x_max, y_max)
                 }
                 GeoObject::ScatterPlot(sp) => {
-                    if sp.xs.is_empty() || sp.ys.is_empty() { continue; }
-                    let mut min_x = f64::MAX; let mut min_y = f64::MAX;
-                    let mut max_x = f64::MIN; let mut max_y = f64::MIN;
+                    if sp.xs.is_empty() || sp.ys.is_empty() {
+                        continue;
+                    }
+                    let mut min_x = f64::MAX;
+                    let mut min_y = f64::MAX;
+                    let mut max_x = f64::MIN;
+                    let mut max_y = f64::MIN;
                     for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
-                        min_x = min_x.min(*x); min_y = min_y.min(*y);
-                        max_x = max_x.max(*x); max_y = max_y.max(*y);
+                        min_x = min_x.min(*x);
+                        min_y = min_y.min(*y);
+                        max_x = max_x.max(*x);
+                        max_y = max_y.max(*y);
                     }
                     (min_x, min_y, max_x, max_y)
                 }
                 GeoObject::RegressionLine(rl) => {
-                    if rl.xs.is_empty() { continue; }
+                    if rl.xs.is_empty() {
+                        continue;
+                    }
                     let x_min = rl.xs.iter().cloned().fold(f64::INFINITY, f64::min);
                     let x_max = rl.xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let y1 = rl.slope * x_min + rl.intercept;
@@ -552,21 +845,23 @@ impl Document {
                     (x_min, y_min, x_max, y_max)
                 }
                 GeoObject::Histogram(h) => {
-                    if h.data.is_empty() { continue; }
+                    if h.data.is_empty() {
+                        continue;
+                    }
                     let x_min = h.data.iter().cloned().fold(f64::INFINITY, f64::min);
                     let x_max = h.data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     (x_min, 0.0, x_max, h.data.len() as f64)
                 }
                 GeoObject::BoxPlot(bp) => {
-                    if bp.data.is_empty() { continue; }
+                    if bp.data.is_empty() {
+                        continue;
+                    }
                     let y_min = bp.data.iter().cloned().fold(f64::INFINITY, f64::min);
                     let y_max = bp.data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let half_w = bp.width_box * 0.5;
                     (bp.position - half_w, y_min, bp.position + half_w, y_max)
                 }
-                GeoObject::Fractal2D(fr) => {
-                    (fr.x_min, fr.y_min, fr.x_max, fr.y_max)
-                }
+                GeoObject::Fractal2D(fr) => (fr.x_min, fr.y_min, fr.x_max, fr.y_max),
                 GeoObject::VectorField2D(_vf) => {
                     // Use view bounds as approximation
                     let view = &self.view;
@@ -576,19 +871,27 @@ impl Document {
                     let y_max = 10.0 / view.scale;
                     (x_min, y_min, x_max, y_max)
                 }
-                GeoObject::ComplexGrid(cg) => {
-                    (cg.x_min, cg.y_min, cg.x_max, cg.y_max)
-                }
+                GeoObject::ComplexGrid(cg) => (cg.x_min, cg.y_min, cg.x_max, cg.y_max),
                 GeoObject::ComplexMapping(_) => {
                     // ComplexMapping doesn't have its own bounds, skip
                     continue;
                 }
+                GeoObject::PhasePortrait(pp) => (pp.x_min, pp.y_min, pp.x_max, pp.y_max),
                 // 3D objects are not indexed in 2D spatial index
-                GeoObject::Point3D(_) | GeoObject::Segment3D(_) | GeoObject::Sphere3D(_) |
-                GeoObject::Cube3D(_) | GeoObject::Pyramid3D(_) | GeoObject::Cone3D(_) |
-                GeoObject::Cylinder3D(_) | GeoObject::Torus3D(_) | GeoObject::MoebiusStrip(_) | 
-                GeoObject::Surface3D(_) | GeoObject::ParametricCurve3D(_) |
-                GeoObject::Attractor3D(_) | GeoObject::HyperSurface4D(_) | GeoObject::VectorField3D(_) => {
+                GeoObject::Point3D(_)
+                | GeoObject::Segment3D(_)
+                | GeoObject::Sphere3D(_)
+                | GeoObject::Cube3D(_)
+                | GeoObject::Pyramid3D(_)
+                | GeoObject::Cone3D(_)
+                | GeoObject::Cylinder3D(_)
+                | GeoObject::Torus3D(_)
+                | GeoObject::MoebiusStrip(_)
+                | GeoObject::Surface3D(_)
+                | GeoObject::ParametricCurve3D(_)
+                | GeoObject::Attractor3D(_)
+                | GeoObject::HyperSurface4D(_)
+                | GeoObject::VectorField3D(_) => {
                     continue;
                 }
             };
@@ -606,6 +909,7 @@ impl Document {
         self.spreadsheet.clear();
         self.spatial = crate::spatial::SpatialIndex::new();
         self.spatial_dirty = true;
+        self.constraints = ConstraintGraph::new();
     }
 
     pub fn set_variable(&mut self, name: String, value: f64) {
@@ -629,16 +933,32 @@ impl Document {
     }
 
     pub fn set_spreadsheet_cell(&mut self, row: usize, col: usize, value: String) {
-        while self.spreadsheet.len() <= row { self.spreadsheet.push(Vec::new()); }
-        while self.spreadsheet[row].len() <= col { self.spreadsheet[row].push(String::new()); }
+        while self.spreadsheet.len() <= row {
+            self.spreadsheet.push(Vec::new());
+        }
+        while self.spreadsheet[row].len() <= col {
+            self.spreadsheet[row].push(String::new());
+        }
         self.spreadsheet[row][col] = value;
     }
 
     pub fn eval_spreadsheet_cell(&self, row: usize, col: usize) -> Option<f64> {
-        if row >= self.spreadsheet.len() || col >= self.spreadsheet[row].len() { return None; }
+        if row >= self.spreadsheet.len() || col >= self.spreadsheet[row].len() {
+            return None;
+        }
         let expr = &self.spreadsheet[row][col];
-        if expr.is_empty() { return None; }
-        grafito_geometry::expr::evaluate(expr, &self.variables.iter().map(|(k,v)| (k.clone(), *v)).collect::<Vec<_>>()).ok()
+        if expr.is_empty() {
+            return None;
+        }
+        grafito_geometry::expr::evaluate(
+            expr,
+            &self
+                .variables
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect::<Vec<_>>(),
+        )
+        .ok()
     }
 
     pub fn spreadsheet_dim(&self) -> (usize, usize) {
@@ -690,4 +1010,34 @@ fn distance_point_to_polygon(p: Point2, vertices: &[Point2]) -> f64 {
         }
     }
     min_dist
+}
+
+fn doc_intersect(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
+    use grafito_geometry::intersections::{self, IntersectionResult};
+
+    match (obj_a, obj_b) {
+        (GeoObject::Line(a), GeoObject::Line(b)) => {
+            match intersections::line_line(a.start, a.end, b.start, b.end) {
+                IntersectionResult::One(p) => vec![p],
+                IntersectionResult::Two(p1, p2) => vec![p1, p2],
+                _ => vec![],
+            }
+        }
+        (GeoObject::Line(l), GeoObject::Circle(c))
+        | (GeoObject::Circle(c), GeoObject::Line(l)) => {
+            match intersections::line_circle(l.start, l.end, c.center, c.radius) {
+                IntersectionResult::One(p) => vec![p],
+                IntersectionResult::Two(p1, p2) => vec![p1, p2],
+                _ => vec![],
+            }
+        }
+        (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
+            match intersections::circle_circle(c1.center, c1.radius, c2.center, c2.radius) {
+                IntersectionResult::One(p) => vec![p],
+                IntersectionResult::Two(p1, p2) => vec![p1, p2],
+                _ => vec![],
+            }
+        }
+        _ => vec![],
+    }
 }

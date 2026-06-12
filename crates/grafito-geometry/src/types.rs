@@ -1,4 +1,4 @@
-use glam::{Vec2, Vec3, Mat4};
+use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// 2D point in world coordinates.
@@ -102,7 +102,7 @@ impl Default for ViewTransform {
     fn default() -> Self {
         Self {
             offset: Point2::new(0.0, 0.0),
-            scale: 1.0,
+            scale: 50.0,
             screen_size: Vec2::new(800.0, 600.0),
             x_log: false,
             y_log: false,
@@ -114,7 +114,7 @@ impl ViewTransform {
     pub fn new(screen_width: f32, screen_height: f32) -> Self {
         Self {
             offset: Point2::new(0.0, 0.0),
-            scale: 1.0,
+            scale: 50.0,
             screen_size: Vec2::new(screen_width, screen_height),
             x_log: false,
             y_log: false,
@@ -126,12 +126,20 @@ impl ViewTransform {
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
         let sx = if self.x_log {
-            if world.x <= 0.0 { f64::NEG_INFINITY } else { ox + world.x.log10() * self.scale }
+            if world.x <= 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                ox + world.x.log10() * self.scale
+            }
         } else {
             ox + world.x * self.scale
         };
         let sy = if self.y_log {
-            if world.y <= 0.0 { f64::NEG_INFINITY } else { oy - world.y.log10() * self.scale }
+            if world.y <= 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                oy - world.y.log10() * self.scale
+            }
         } else {
             oy - world.y * self.scale
         };
@@ -156,8 +164,12 @@ impl ViewTransform {
     }
 
     /// Toggle log mode for both axes (log-log, semi-log, or linear)
-    pub fn toggle_log_x(&mut self) { self.x_log = !self.x_log; }
-    pub fn toggle_log_y(&mut self) { self.y_log = !self.y_log; }
+    pub fn toggle_log_x(&mut self) {
+        self.x_log = !self.x_log;
+    }
+    pub fn toggle_log_y(&mut self) {
+        self.y_log = !self.y_log;
+    }
 
     pub fn pan(&mut self, delta_screen: Vec2) {
         self.offset.x += delta_screen.x as f64;
@@ -165,18 +177,29 @@ impl ViewTransform {
     }
 
     pub fn zoom(&mut self, factor: f32, anchor_screen: Vec2) {
+        if factor.is_nan() || factor.is_infinite() || factor <= 1e-4 {
+            return;
+        }
         let anchor_world = self.screen_to_world(anchor_screen);
-        self.scale = (self.scale * factor as f64).clamp(1e-20, 1e20);
+        self.scale = (self.scale * factor as f64).clamp(1e-15, 1e15);
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
         // Use log-aware coordinate transform, consistent with world_to_screen()
         let sx = if self.x_log {
-            if anchor_world.x <= 0.0 { f64::NEG_INFINITY } else { ox + anchor_world.x.log10() * self.scale }
+            if anchor_world.x <= 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                ox + anchor_world.x.log10() * self.scale
+            }
         } else {
             ox + anchor_world.x * self.scale
         };
         let sy = if self.y_log {
-            if anchor_world.y <= 0.0 { f64::NEG_INFINITY } else { oy - anchor_world.y.log10() * self.scale }
+            if anchor_world.y <= 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                oy - anchor_world.y.log10() * self.scale
+            }
         } else {
             oy - anchor_world.y * self.scale
         };

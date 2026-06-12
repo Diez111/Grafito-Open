@@ -31,7 +31,9 @@ impl ComplexExpr {
                 } else if name == "pi" {
                     Ok(Complex64::new(std::f64::consts::PI, 0.0))
                 } else {
-                    vars.get(name).copied().ok_or_else(|| format!("Unknown variable: {}", name))
+                    vars.get(name)
+                        .copied()
+                        .ok_or_else(|| format!("Unknown variable: {}", name))
                 }
             }
             ComplexExpr::Const(c) => Ok(*c),
@@ -40,7 +42,9 @@ impl ComplexExpr {
             ComplexExpr::Mul(a, b) => Ok(a.eval(vars)? * b.eval(vars)?),
             ComplexExpr::Div(a, b) => {
                 let den = b.eval(vars)?;
-                if den.norm() < 1e-15 { return Err("Division by zero".to_string()); }
+                if den.norm() < 1e-15 {
+                    return Err("Division by zero".to_string());
+                }
                 Ok(a.eval(vars)? / den)
             }
             ComplexExpr::Pow(a, b) => Ok(a.eval(vars)?.powc(b.eval(vars)?)),
@@ -59,11 +63,19 @@ impl ComplexExpr {
         match self {
             ComplexExpr::Var(name) => name == target,
             ComplexExpr::Const(_) => false,
-            ComplexExpr::Add(a, b) | ComplexExpr::Sub(a, b) | ComplexExpr::Mul(a, b) |
-            ComplexExpr::Div(a, b) | ComplexExpr::Pow(a, b) => a.has_var(target) || b.has_var(target),
-            ComplexExpr::Sin(a) | ComplexExpr::Cos(a) | ComplexExpr::Tan(a) |
-            ComplexExpr::Exp(a) | ComplexExpr::Ln(a) | ComplexExpr::Sqrt(a) |
-            ComplexExpr::Abs(a) | ComplexExpr::Neg(a) => a.has_var(target),
+            ComplexExpr::Add(a, b)
+            | ComplexExpr::Sub(a, b)
+            | ComplexExpr::Mul(a, b)
+            | ComplexExpr::Div(a, b)
+            | ComplexExpr::Pow(a, b) => a.has_var(target) || b.has_var(target),
+            ComplexExpr::Sin(a)
+            | ComplexExpr::Cos(a)
+            | ComplexExpr::Tan(a)
+            | ComplexExpr::Exp(a)
+            | ComplexExpr::Ln(a)
+            | ComplexExpr::Sqrt(a)
+            | ComplexExpr::Abs(a)
+            | ComplexExpr::Neg(a) => a.has_var(target),
         }
     }
 }
@@ -94,21 +106,23 @@ enum Token {
 fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
-    
+
     while let Some(&c) = chars.peek() {
         if c.is_whitespace() {
             chars.next();
-        } else if c.is_digit(10) || c == '.' {
+        } else if c.is_ascii_digit() || c == '.' {
             let mut num_str = String::new();
             while let Some(&c) = chars.peek() {
-                if c.is_digit(10) || c == '.' {
+                if c.is_ascii_digit() || c == '.' {
                     num_str.push(c);
                     chars.next();
                 } else {
                     break;
                 }
             }
-            tokens.push(Token::Number(num_str.parse().map_err(|_| "Invalid number")?));
+            tokens.push(Token::Number(
+                num_str.parse().map_err(|_| "Invalid number")?,
+            ));
         } else if c.is_alphabetic() {
             let mut id = String::new();
             while let Some(&c) = chars.peek() {
@@ -135,20 +149,27 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             chars.next();
         }
     }
-    
+
     // Insert implicit multiplications
     let mut i = 0;
     while i + 1 < tokens.len() {
-        let insert = match (&tokens[i], &tokens[i+1]) {
+        let insert = match (&tokens[i], &tokens[i + 1]) {
             (Token::Number(_), Token::Ident(_)) => true,
             (Token::Number(_), Token::LParen) => true,
             (Token::RParen, Token::Ident(_)) => true,
             (Token::RParen, Token::LParen) => true,
             (Token::Ident(_), Token::LParen) => {
                 // If it's a known function, do NOT insert '*'
-                let name = if let Token::Ident(n) = &tokens[i] { n.as_str() } else { "" };
-                !matches!(name, "sin" | "cos" | "tan" | "exp" | "ln" | "log" | "sqrt" | "abs")
-            },
+                let name = if let Token::Ident(n) = &tokens[i] {
+                    n.as_str()
+                } else {
+                    ""
+                };
+                !matches!(
+                    name,
+                    "sin" | "cos" | "tan" | "exp" | "ln" | "log" | "sqrt" | "abs"
+                )
+            }
             _ => false,
         };
         if insert {
@@ -157,7 +178,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
         }
         i += 1;
     }
-    
+
     Ok(tokens)
 }
 
@@ -212,7 +233,9 @@ fn parse_pow(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
 }
 
 fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
-    if *pos >= tokens.len() { return Err("Unexpected EOF".to_string()); }
+    if *pos >= tokens.len() {
+        return Err("Unexpected EOF".to_string());
+    }
     match &tokens[*pos] {
         Token::Number(n) => {
             *pos += 1;
@@ -269,7 +292,7 @@ pub fn eval_complex_batch(
     for (k, v) in vars {
         cmap.insert(k.clone(), Complex64::new(*v, 0.0));
     }
-    
+
     let mut res = Vec::new();
     for z in points {
         cmap.insert(base_symbol.to_string(), z);
