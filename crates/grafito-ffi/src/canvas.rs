@@ -133,7 +133,7 @@ impl CanvasRenderer {
                 desired_maximum_frame_latency: 2,
             },
         );
-        let renderer = Renderer::new(&device, format, false);
+        let renderer = Renderer::new(&device, format, 1);
         *self.instance.lock() = Some(instance);
         *self.surface.lock() = Some(surface);
         *self.device.lock() = Some(device);

@@ -242,4 +242,45 @@ mod tests {
         assert_eq!(doc.constraints.constraint_count(), 0);
         assert_eq!(doc.constraints.free_count(), 0);
     }
+
+    #[test]
+    fn test_implicit_curve_evaluation_and_caching() {
+        let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
+        let vars = std::collections::HashMap::new();
+        let view_bounds = (-3.0, 3.0, -3.0, 3.0);
+        let grid_size = 40;
+
+        // First call computes and caches.
+        let segs1 = {
+            let guard = implicit_curve::segments_or_compute(&ic, view_bounds, grid_size, &vars);
+            guard.clone()
+        };
+        assert!(
+            !segs1.is_empty(),
+            "folium of descartes should produce segments"
+        );
+
+        // Second call with identical parameters returns the cached value.
+        let segs2 = {
+            let guard = implicit_curve::segments_or_compute(&ic, view_bounds, grid_size, &vars);
+            guard.clone()
+        };
+        assert_eq!(segs1.len(), segs2.len());
+
+        // A different view invalidates and recomputes.
+        let segs3 = {
+            let guard =
+                implicit_curve::segments_or_compute(&ic, (-1.0, 1.0, -1.0, 1.0), grid_size, &vars);
+            guard.clone()
+        };
+        // May be empty if zoomed into a region without the curve, but cache key changed.
+        assert!(ic
+            .cached_key
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|k| k.view_bounds == (-1.0, 1.0, -1.0, 1.0))
+            .unwrap_or(false));
+        let _ = segs3;
+    }
 }

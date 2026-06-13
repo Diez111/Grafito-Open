@@ -301,21 +301,21 @@ impl GrafitoApp {
         }
 
         // Draw Axis Numbers
-        let precision = if major_step >= 1.0 {
-            0
-        } else if major_step >= 0.1 {
-            1
-        } else if major_step >= 0.01 {
-            2
-        } else {
-            4
-        };
-
         let format_num = |v: f64| -> String {
             if v.abs() < 1e-9 {
                 return "0".to_string();
             }
-            let mut s = format!("{:.*}", precision, v);
+            let mut s = if major_step < 0.001 {
+                format!("{:.5}", v)
+            } else if major_step < 0.01 {
+                format!("{:.4}", v)
+            } else if major_step < 0.1 {
+                format!("{:.3}", v)
+            } else if major_step < 1.0 {
+                format!("{:.2}", v)
+            } else {
+                format!("{:.1}", v)
+            };
             if s.contains('.') {
                 s = s.trim_end_matches('0').to_string();
                 s = s.trim_end_matches('.').to_string();
@@ -339,6 +339,7 @@ impl GrafitoApp {
         let start_x_num = ((center_x - view_range) / major_step).floor() * major_step;
         let end_x_num = ((center_x + view_range) / major_step).ceil() * major_step;
         let num_count_x = ((end_x_num - start_x_num) / major_step).round() as i64;
+        let mut prev_screen_pos: Option<Vec2> = None;
         if num_count_x <= 500 {
             for xi in 0..=num_count_x {
                 let x = start_x_num + xi as f64 * major_step;
@@ -359,8 +360,15 @@ impl GrafitoApp {
                     );
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(x, 0.0, 0.0), w, h) {
+                    let sp = Vec2::new(pos.0, pos.1);
+                    if let Some(prev) = prev_screen_pos {
+                        if (sp - prev).length() < 50.0 {
+                            continue;
+                        }
+                    }
+                    prev_screen_pos = Some(sp);
                     painter.text(
-                        origin + Vec2::new(pos.0, pos.1) + Vec2::new(0.0, 6.0),
+                        origin + sp + Vec2::new(0.0, 6.0),
                         egui::Align2::CENTER_TOP,
                         format_num(x),
                         font.clone(),
@@ -375,6 +383,7 @@ impl GrafitoApp {
         let start_y_num = ((center_y - view_range) / major_step).floor() * major_step;
         let end_y_num = ((center_y + view_range) / major_step).ceil() * major_step;
         let num_count_y = ((end_y_num - start_y_num) / major_step).round() as i64;
+        let mut prev_screen_pos: Option<Vec2> = None;
         if num_count_y <= 500 {
             for yi in 0..=num_count_y {
                 let y = start_y_num + yi as f64 * major_step;
@@ -395,8 +404,15 @@ impl GrafitoApp {
                     );
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(0.0, y, 0.0), w, h) {
+                    let sp = Vec2::new(pos.0, pos.1);
+                    if let Some(prev) = prev_screen_pos {
+                        if (sp - prev).length() < 40.0 {
+                            continue;
+                        }
+                    }
+                    prev_screen_pos = Some(sp);
                     painter.text(
-                        origin + Vec2::new(pos.0, pos.1) + Vec2::new(-6.0, 0.0),
+                        origin + sp + Vec2::new(-6.0, 0.0),
                         egui::Align2::RIGHT_CENTER,
                         format_num(y),
                         font.clone(),
@@ -410,6 +426,7 @@ impl GrafitoApp {
         let start_z_num = ((center_z - view_range) / major_step).floor() * major_step;
         let end_z_num = ((center_z + view_range) / major_step).ceil() * major_step;
         let num_count_z = ((end_z_num - start_z_num) / major_step).round() as i64;
+        let mut prev_screen_pos: Option<Vec2> = None;
         if num_count_z <= 500 {
             for zi in 0..=num_count_z {
                 let z = start_z_num + zi as f64 * major_step;
@@ -430,8 +447,15 @@ impl GrafitoApp {
                     );
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(0.0, 0.0, z), w, h) {
+                    let sp = Vec2::new(pos.0, pos.1);
+                    if let Some(prev) = prev_screen_pos {
+                        if (sp - prev).length() < 50.0 {
+                            continue;
+                        }
+                    }
+                    prev_screen_pos = Some(sp);
                     painter.text(
-                        origin + Vec2::new(pos.0, pos.1) + Vec2::new(8.0, 0.0),
+                        origin + sp + Vec2::new(8.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         format_num(z),
                         font.clone(),

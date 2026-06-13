@@ -13,6 +13,7 @@ fn main() {
             .with_inner_size([1280.0, 720.0])
             .with_decorations(true)
             .with_transparent(false),
+        multisampling: grafito_app::MSAA_SAMPLES,
         ..Default::default()
     };
     if let Err(e) = eframe::run_native(

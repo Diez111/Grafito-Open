@@ -21,7 +21,7 @@ pub struct PersistentBuffers {
 }
 
 pub struct CanvasCallback {
-    pub document: Document,
+    pub document: Arc<Document>,
     pub dark_mode: bool,
 }
 
@@ -49,8 +49,39 @@ impl CallbackTrait for CanvasCallback {
             let mvp = glam::Mat4::orthographic_rh(0.0, sw, sh, 0.0, -1.0, 1.0);
             renderer.update_mvp(queue, mvp);
 
+            log::debug!(
+                "CanvasCallback prepare: screen={}x{} objects={}",
+                sw,
+                sh,
+                self.document.object_count()
+            );
+
+            // Try to evaluate implicit curves on the GPU before building geometry.
+            // If a curve cannot be compiled to GPU bytecode, the geometry builder
+            // will fall back to the CPU evaluator through the per-object cache.
+            if let Some(compute) = renderer.implicit_compute.as_ref() {
+                for (_, obj) in self.document.objects_iter() {
+                    if let grafito_core::GeoObject::ImplicitCurve(ic) = obj {
+                        let _ = grafito_render::implicit_compute::maybe_compute_on_gpu(
+                            compute,
+                            device,
+                            queue,
+                            ic,
+                            self.document.view(),
+                            &self.document.variables,
+                        );
+                    }
+                }
+            }
+
             renderer.build_geometry(&self.document, self.dark_mode)
         };
+
+        log::debug!(
+            "CanvasCallback geometry: vertices={} indices={}",
+            vertices.len(),
+            indices.len()
+        );
 
         if vertices.is_empty() {
             return vec![];
@@ -138,6 +169,9 @@ impl CallbackTrait for CanvasCallback {
             return;
         };
 
+        // egui-wgpu already sets the viewport/scissor to the PaintCallback rect
+        // before invoking this callback, so we render directly into that region.
+        log::debug!("CanvasCallback paint: index_count={}", buffers.index_count);
         render_pass.set_pipeline(&renderer.pipeline);
         render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
         render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
@@ -147,7 +181,7 @@ impl CallbackTrait for CanvasCallback {
 }
 
 pub struct Canvas3DCallback {
-    pub document: Document,
+    pub document: Arc<Document>,
     pub camera: Camera3D,
     pub dark_mode: bool,
     pub screen_w: f32,
@@ -177,6 +211,13 @@ impl CallbackTrait for Canvas3DCallback {
                 glam::Mat4::orthographic_rh(0.0, self.screen_w, self.screen_h, 0.0, -1.0, 1.0);
             renderer.update_mvp(queue, mvp);
 
+            log::debug!(
+                "Canvas3DCallback prepare: screen={}x{} objects={}",
+                self.screen_w,
+                self.screen_h,
+                self.document.object_count()
+            );
+
             renderer.build_3d_geometry(
                 &self.document,
                 &self.camera,
@@ -185,6 +226,12 @@ impl CallbackTrait for Canvas3DCallback {
                 self.screen_h,
             )
         };
+
+        log::debug!(
+            "Canvas3DCallback geometry: vertices={} indices={}",
+            vertices.len(),
+            indices.len()
+        );
 
         if vertices.is_empty() {
             return vec![];
@@ -272,6 +319,12 @@ impl CallbackTrait for Canvas3DCallback {
             return;
         };
 
+        // egui-wgpu already sets the viewport/scissor to the PaintCallback rect
+        // before invoking this callback, so we render directly into that region.
+        log::debug!(
+            "Canvas3DCallback paint: index_count={}",
+            buffers.index_count
+        );
         render_pass.set_pipeline(&renderer.pipeline_3d);
         render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
         render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));

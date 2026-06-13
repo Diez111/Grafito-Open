@@ -880,7 +880,33 @@ impl GrafitoApp {
         );
     }
 
-    pub(crate) fn draw_objects(&self, painter: &egui::Painter, canvas_rect: Rect) {
+    pub(crate) fn draw_objects(&mut self, painter: &egui::Painter, canvas_rect: Rect) {
+        // Pre-compute (or reuse cached) implicit-curve geometry before the
+        // immutable draw pass. The cache lives inside each ImplicitCurveObj and
+        // is invalidated only when expression, view bounds or variables change.
+        {
+            let view = *self.document.view();
+            let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+            let world_br =
+                view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
+            let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+            let grid_size = grafito_core::implicit_curve::recommended_grid_size(
+                canvas_rect.width(),
+                canvas_rect.height(),
+            );
+            let variables = self.document.variables.clone();
+            for (_, obj) in self.document.objects_iter_mut() {
+                if let GeoObject::ImplicitCurve(ic) = obj {
+                    let _unused = grafito_core::implicit_curve::segments_or_compute(
+                        ic,
+                        view_bounds,
+                        grid_size,
+                        &variables,
+                    );
+                }
+            }
+        }
+
         for (_, obj) in self.document.objects_iter() {
             if !obj.is_visible() {
                 continue;
@@ -1911,135 +1937,32 @@ impl GrafitoApp {
                 }
             }
             GeoObject::ImplicitCurve(ic) => {
-                let grid_size = 100;
-                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
-                let world_br =
-                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
-                let dx = (world_br.x - world_tl.x) / grid_size as f64;
-                let dy = (world_br.y - world_tl.y) / grid_size as f64;
-
-                // Build the base values grid (lhs - rhs, or appropriate for operator)
-                let mut base_values = vec![vec![0.0f64; grid_size + 1]; grid_size + 1];
-                for (i, row) in base_values.iter_mut().enumerate() {
-                    for (j, cell) in row.iter_mut().enumerate() {
-                        let x = world_tl.x + i as f64 * dx;
-                        let y = world_tl.y + j as f64 * dy;
-                        let vars = vec![("x".to_string(), x), ("y".to_string(), y)];
-                        if let (Ok(lhs), Ok(rhs)) = (
-                            grafito_geometry::expr::evaluate(&ic.expr_lhs, &vars),
-                            grafito_geometry::expr::evaluate(&ic.expr_rhs, &vars),
-                        ) {
-                            let val = match ic.operator {
-                                grafito_core::RelationOperator::Eq => lhs - rhs,
-                                grafito_core::RelationOperator::Less => lhs - rhs,
-                                grafito_core::RelationOperator::Greater => rhs - lhs,
-                                grafito_core::RelationOperator::LessEq => lhs - rhs,
-                                grafito_core::RelationOperator::GreaterEq => rhs - lhs,
-                            };
-                            *cell = if val.is_finite() { val } else { f64::NAN };
-                        } else {
-                            *cell = f64::NAN;
-                        }
-                    }
-                }
-
-                // Determine levels to render
-                let levels: Vec<(f64, Color)> = if let Some(ref contour_levels) = ic.contour_levels
-                {
-                    let colors = ic.contour_colors.as_deref().unwrap_or(&[]);
-                    contour_levels
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, &lvl)| {
-                            let c = colors.get(idx).cloned().unwrap_or_else(|| {
-                                let t = idx as f64 / contour_levels.len().max(1) as f64;
+                let levels = ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                if !levels.is_empty() {
+                    let use_contour_colors = ic.contour_levels.is_some();
+                    let contour_count = levels.len();
+                    let palette = ic.contour_colors.as_deref().unwrap_or(&[]);
+                    for (idx, (_level, segs)) in levels.iter().enumerate() {
+                        let color = if use_contour_colors {
+                            palette.get(idx).cloned().unwrap_or_else(|| {
+                                let t = idx as f64 / contour_count.max(1) as f64;
                                 Color::new(
                                     (0.5 + t * 0.5) as f32,
                                     (0.2 + (1.0 - t) * 0.6) as f32,
                                     0.2,
                                     1.0,
                                 )
-                            });
-                            (lvl, c)
-                        })
-                        .collect()
-                } else {
-                    vec![(0.0, ic.color)]
-                };
-
-                // Marching squares for each level
-                for (level, level_color) in &levels {
-                    let level_offset = *level;
-                    let stroke = Stroke::new(ic.width, to_color32(*level_color));
-
-                    for i in 0..grid_size {
-                        for j in 0..grid_size {
-                            let v00 = base_values[i][j];
-                            let v10 = base_values[i + 1][j];
-                            let v01 = base_values[i][j + 1];
-                            let v11 = base_values[i + 1][j + 1];
-
-                            if v00.is_nan() || v10.is_nan() || v01.is_nan() || v11.is_nan() {
-                                continue;
-                            }
-
-                            let s00 = (v00 - level_offset) >= 0.0;
-                            let s10 = (v10 - level_offset) >= 0.0;
-                            let s01 = (v01 - level_offset) >= 0.0;
-                            let s11 = (v11 - level_offset) >= 0.0;
-
-                            let case = (s00 as u8)
-                                | ((s10 as u8) << 1)
-                                | ((s01 as u8) << 2)
-                                | ((s11 as u8) << 3);
-                            if case == 0 || case == 15 {
-                                continue;
-                            }
-
-                            let x0 = world_tl.x + i as f64 * dx;
-                            let y0 = world_tl.y + j as f64 * dy;
-                            let x1 = x0 + dx;
-                            let y1 = y0 + dy;
-
-                            let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
-                                let t = (va - level_offset)
-                                    / ((va - level_offset) - (vb - level_offset));
-                                pa + t * (pb - pa)
-                            };
-
-                            let mut points = Vec::new();
-                            if s00 != s10 {
-                                let x = interp(v00, v10, x0, x1);
-                                points.push((x, y0));
-                            }
-                            if s10 != s11 {
-                                let y = interp(v10, v11, y0, y1);
-                                points.push((x1, y));
-                            }
-                            if s01 != s11 {
-                                let x = interp(v01, v11, x0, x1);
-                                points.push((x, y1));
-                            }
-                            if s00 != s01 {
-                                let y = interp(v00, v01, y0, y1);
-                                points.push((x0, y));
-                            }
-
-                            if points.len() >= 2 {
-                                for k in (0..points.len()).step_by(2) {
-                                    if k + 1 < points.len() {
-                                        let p1 = view
-                                            .world_to_screen(Point2::new(points[k].0, points[k].1));
-                                        let p2 = view.world_to_screen(Point2::new(
-                                            points[k + 1].0,
-                                            points[k + 1].1,
-                                        ));
-                                        let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
-                                        let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
-                                        painter.line_segment([pos1, pos2], stroke);
-                                    }
-                                }
-                            }
+                            })
+                        } else {
+                            ic.color
+                        };
+                        let stroke = Stroke::new(ic.width, to_color32(color));
+                        for (a, b) in segs {
+                            let p1 = view.world_to_screen(*a);
+                            let p2 = view.world_to_screen(*b);
+                            let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
+                            let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
+                            painter.line_segment([pos1, pos2], stroke);
                         }
                     }
                 }
@@ -2169,7 +2092,11 @@ impl GrafitoApp {
                         vars.insert("z".to_string(), Complex64::new(x, y));
 
                         if let Ok(result) = expr.eval(&vars) {
-                            if result.re.is_finite() && result.im.is_finite() {
+                            if result.re.is_finite()
+                                && result.im.is_finite()
+                                && result.re.abs() < 1e6
+                                && result.im.abs() < 1e6
+                            {
                                 let screen =
                                     view.world_to_screen(Point2::new(result.re, result.im));
                                 let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
@@ -2198,7 +2125,11 @@ impl GrafitoApp {
                         vars.insert("z".to_string(), Complex64::new(x, y));
 
                         if let Ok(result) = expr.eval(&vars) {
-                            if result.re.is_finite() && result.im.is_finite() {
+                            if result.re.is_finite()
+                                && result.im.is_finite()
+                                && result.re.abs() < 1e6
+                                && result.im.abs() < 1e6
+                            {
                                 let screen =
                                     view.world_to_screen(Point2::new(result.re, result.im));
                                 let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);

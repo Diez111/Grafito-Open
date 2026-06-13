@@ -1,6 +1,9 @@
 use crate::id::ObjectId;
 use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::RwLock;
 
 /// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1242,7 +1245,22 @@ pub enum RelationOperator {
     GreaterEq,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// World-space line segments grouped by contour level.
+pub type ImplicitCurveSegments = Vec<(f64, Vec<(Point2, Point2)>)>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplicitCurveCacheKey {
+    pub expr_lhs: String,
+    pub expr_rhs: String,
+    pub operator: RelationOperator,
+    pub contour_levels_hash: u64,
+    pub contour_colors_hash: u64,
+    pub view_bounds: (f64, f64, f64, f64),
+    pub grid_size: usize,
+    pub variables_hash: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ImplicitCurveObj {
     pub id: ObjectId,
     pub label: String,
@@ -1254,7 +1272,50 @@ pub struct ImplicitCurveObj {
     pub width: f32,
     pub contour_levels: Option<Vec<f64>>,
     pub contour_colors: Option<Vec<Color>>,
+    /// Cached geometry: one segment list per contour level (world-space).
+    /// Wrapped in a lock so the GPU renderer can update it through a shared
+    /// document reference.
+    #[serde(skip)]
+    pub cached_segments: RwLock<ImplicitCurveSegments>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<ImplicitCurveCacheKey>>,
 }
+
+impl Clone for ImplicitCurveObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr_lhs: self.expr_lhs.clone(),
+            expr_rhs: self.expr_rhs.clone(),
+            operator: self.operator.clone(),
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            contour_levels: self.contour_levels.clone(),
+            contour_colors: self.contour_colors.clone(),
+            // A clone starts with an empty cache; it will be recomputed on demand.
+            cached_segments: RwLock::new(ImplicitCurveSegments::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for ImplicitCurveObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr_lhs == other.expr_lhs
+            && self.expr_rhs == other.expr_rhs
+            && self.operator == other.operator
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+            && self.contour_levels == other.contour_levels
+            && self.contour_colors == other.contour_colors
+    }
+}
+
 impl ImplicitCurveObj {
     pub fn new(expr_lhs: &str, expr_rhs: &str, operator: RelationOperator) -> Self {
         Self {
@@ -1268,11 +1329,66 @@ impl ImplicitCurveObj {
             width: 2.0,
             contour_levels: None,
             contour_colors: None,
+            cached_segments: RwLock::new(ImplicitCurveSegments::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
+    }
+
+    pub fn cache_key(
+        &self,
+        view_bounds: (f64, f64, f64, f64),
+        grid_size: usize,
+        variables: &HashMap<String, f64>,
+    ) -> ImplicitCurveCacheKey {
+        let mut hasher = DefaultHasher::new();
+        if let Some(levels) = &self.contour_levels {
+            for v in levels {
+                v.to_bits().hash(&mut hasher);
+            }
+        }
+        let contour_levels_hash = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        if let Some(colors) = &self.contour_colors {
+            for c in colors {
+                c.r.to_bits().hash(&mut hasher);
+                c.g.to_bits().hash(&mut hasher);
+                c.b.to_bits().hash(&mut hasher);
+                c.a.to_bits().hash(&mut hasher);
+            }
+        }
+        let contour_colors_hash = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        for (k, v) in variables.iter() {
+            k.hash(&mut hasher);
+            v.to_bits().hash(&mut hasher);
+        }
+        let variables_hash = hasher.finish();
+
+        ImplicitCurveCacheKey {
+            expr_lhs: self.expr_lhs.clone(),
+            expr_rhs: self.expr_rhs.clone(),
+            operator: self.operator.clone(),
+            contour_levels_hash,
+            contour_colors_hash,
+            view_bounds,
+            grid_size,
+            variables_hash,
+        }
+    }
+
+    /// Invalidate any cached geometry for this curve.
+    pub fn invalidate_cache(&self) {
+        self.cached_segments
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 

@@ -2590,9 +2590,10 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(20.0);
 
+            let graph_expr = expr_clean.replace(var, "x");
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(
-                FunctionObj::new(&expr_clean).with_label(&label),
+                FunctionObj::new(&graph_expr).with_label(&label),
             ));
 
             let mut complex_roots_found = false;

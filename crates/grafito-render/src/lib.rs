@@ -11,6 +11,8 @@ use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
+pub mod implicit_compute;
+
 #[cfg(test)]
 mod tests;
 
@@ -75,6 +77,7 @@ pub struct Renderer {
     pub mvp_bind_group_layout: wgpu::BindGroupLayout,
     pub mvp_buffer: wgpu::Buffer,
     pub mvp_bind_group: wgpu::BindGroup,
+    pub implicit_compute: Option<crate::implicit_compute::ImplicitComputePipeline>,
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
@@ -96,7 +99,7 @@ impl Renderer {
     pub fn new(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
-        enable_msaa: bool,
+        sample_count: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Grafito Shader"),
@@ -124,9 +127,9 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
-        let multisample = if enable_msaa {
+        let multisample = if sample_count > 1 {
             wgpu::MultisampleState {
-                count: 4,
+                count: sample_count,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             }
@@ -217,12 +220,17 @@ impl Renderer {
             }],
         });
 
+        let implicit_compute = Some(crate::implicit_compute::ImplicitComputePipeline::new(
+            device, 256,
+        ));
+
         Self {
             pipeline,
             pipeline_3d,
             mvp_bind_group_layout,
             mvp_buffer,
             mvp_bind_group,
+            implicit_compute,
         }
     }
 
@@ -668,7 +676,7 @@ impl Renderer {
                     let min_x = fun.domain_min.unwrap_or(world_tl.x);
                     let max_x = fun.domain_max.unwrap_or(world_br.x);
                     let screen_width = view_transform.screen_size.x as f64;
-                    let steps = (screen_width * 0.5).clamp(200.0, 3000.0) as usize;
+                    let steps = (screen_width * 2.0).clamp(1000.0, 10000.0) as usize;
                     let step = (max_x - min_x) / steps as f64;
                     let variables = &document.variables;
 
@@ -838,7 +846,7 @@ impl Renderer {
                     );
                 }
                 GeoObject::ParametricCurve2D(pc) => {
-                    let steps = 800;
+                    let steps = 4000;
                     let dt = (pc.t_max - pc.t_min) / steps as f64;
                     let mut prev: Option<[f32; 2]> = None;
                     for i in 0..=steps {
@@ -869,7 +877,7 @@ impl Renderer {
                     }
                 }
                 GeoObject::PolarCurve(pol) => {
-                    let steps = 800;
+                    let steps = 4000;
                     let dt = (pol.t_max - pol.t_min) / steps as f64;
                     let mut prev: Option<[f32; 2]> = None;
                     for i in 0..=steps {
@@ -901,35 +909,28 @@ impl Renderer {
                     }
                 }
                 GeoObject::ImplicitCurve(ic) => {
-                    let levels = if let Some(contour_data) = &ic.contour_levels {
-                        if contour_data.is_empty() {
-                            vec![0.0]
-                        } else {
-                            contour_data.clone()
-                        }
-                    } else {
-                        vec![0.0]
-                    };
-
-                    for level in levels {
-                        let pts = Self::marching_squares_contour(
-                            &ic.expr_lhs,
-                            &ic.expr_rhs,
-                            level,
-                            -10.0,
-                            10.0,
-                            -10.0,
-                            10.0,
-                            100,
-                        );
-                        for w in pts.windows(2) {
-                            let a = view_transform.world_to_screen(w[0]);
-                            let b = view_transform.world_to_screen(w[1]);
+                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
+                    let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                    let grid_size = grafito_core::implicit_curve::recommended_grid_size(
+                        view_transform.screen_size.x,
+                        view_transform.screen_size.y,
+                    );
+                    let levels = grafito_core::implicit_curve::segments_or_compute(
+                        ic,
+                        view_bounds,
+                        grid_size,
+                        &document.variables,
+                    );
+                    for (_level, segs) in levels.iter() {
+                        for (a, b) in segs {
+                            let sa = view_transform.world_to_screen(*a);
+                            let sb = view_transform.world_to_screen(*b);
                             Self::add_line_segment(
                                 &mut vertices,
                                 &mut indices,
-                                a,
-                                b,
+                                sa,
+                                sb,
                                 ic.width,
                                 ic.color,
                             );

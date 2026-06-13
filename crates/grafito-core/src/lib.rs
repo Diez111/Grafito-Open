@@ -3,6 +3,7 @@
 pub mod constraints;
 pub mod document;
 pub mod id;
+pub mod implicit_curve;
 pub mod macros;
 pub mod object;
 pub mod spatial;

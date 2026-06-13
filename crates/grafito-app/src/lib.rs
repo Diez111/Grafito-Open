@@ -22,6 +22,9 @@ use grafito_ui::Tool;
 
 const MAX_UNDO: usize = 50;
 
+/// MSAA sample count used by the GPU renderer and the eframe surface.
+pub const MSAA_SAMPLES: u16 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     D2,
@@ -74,23 +77,28 @@ pub struct GrafitoApp {
     pub color_favorites: [grafito_geometry::Color; 5],
     pub tool_ghost: Option<GeoObject>,
     pub tool_state: crate::tool_dispatcher::ToolState,
-    pub gpu_resources:
-        Option<std::sync::Arc<std::sync::RwLock<crate::gpu_canvas::GpuCanvasResources>>>,
     pub use_gpu: bool,
 }
 
 impl GrafitoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let gpu_resources = cc.wgpu_render_state.as_ref().map(|rs| {
-            let renderer = grafito_render::Renderer::new(&rs.device, rs.target_format, false);
-            std::sync::Arc::new(std::sync::RwLock::new(
-                crate::gpu_canvas::GpuCanvasResources {
-                    renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
-                    buffers_2d: None,
-                    buffers_3d: None,
-                },
-            ))
-        });
+        if let Some(render_state) = &cc.wgpu_render_state {
+            let renderer = grafito_render::Renderer::new(
+                &render_state.device,
+                render_state.target_format,
+                MSAA_SAMPLES as u32,
+            );
+            let resources = crate::gpu_canvas::GpuCanvasResources {
+                renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
+                buffers_2d: None,
+                buffers_3d: None,
+            };
+            render_state
+                .renderer
+                .write()
+                .callback_resources
+                .insert(resources);
+        }
         let mut document = Document::new();
         document.set_view(ViewTransform::new(1280.0, 720.0));
         document.view_mut().scale = 50.0; // ~13 units each side — matches GeoGebra default zoom
@@ -171,8 +179,7 @@ impl GrafitoApp {
             active_color_picker: None,
             tool_ghost: None,
             tool_state: crate::tool_dispatcher::ToolState::default(),
-            gpu_resources,
-            use_gpu: false,
+            use_gpu: true,
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
@@ -503,6 +510,8 @@ impl eframe::App for GrafitoApp {
                         ui.checkbox(&mut self.exam_mode, "Modo examen");
                         ui.checkbox(&mut self.document.view_mut().x_log, "Eje X log");
                         ui.checkbox(&mut self.document.view_mut().y_log, "Eje Y log");
+                        ui.separator();
+                        ui.checkbox(&mut self.use_gpu, "Renderizado GPU");
                     });
                     ui.menu_button("Herramientas", |ui| {
                         ui.checkbox(&mut self.keyboard_visible, "Teclado visible");
@@ -1993,12 +2002,33 @@ impl eframe::App for GrafitoApp {
                             self.zoom_to_fit();
                         }
 
-                        let mut painter = ui.painter().clone();
-                        painter.set_clip_rect(canvas_rect);
-                        self.draw_grid(&painter, canvas_rect);
-                        self.draw_axes(&painter, canvas_rect);
-                        self.draw_objects(&painter, canvas_rect);
-                        self.draw_tool_ghost(&painter, canvas_rect);
+                        // Keep the view's screen size in sync with the actual canvas rect
+                        // so that both CPU and GPU renderers project correctly.
+                        let canvas_size = canvas_rect.size();
+                        self.document.view_mut().screen_size =
+                            glam::Vec2::new(canvas_size.x, canvas_size.y);
+
+                        if self.use_gpu && canvas_size.x > 0.0 && canvas_size.y > 0.0 {
+                            let callback = egui_wgpu::Callback::new_paint_callback(
+                                canvas_rect,
+                                crate::gpu_canvas::CanvasCallback {
+                                    document: std::sync::Arc::new(self.document.clone()),
+                                    dark_mode: self.dark_mode,
+                                },
+                            );
+                            ui.painter().add(egui::epaint::Shape::Callback(callback));
+                        } else {
+                            let mut painter = ui.painter().clone();
+                            painter.set_clip_rect(canvas_rect);
+                            self.draw_grid(&painter, canvas_rect);
+                            self.draw_axes(&painter, canvas_rect);
+                            self.draw_objects(&painter, canvas_rect);
+                        }
+
+                        // Tool ghost and preview are transient overlays, render with CPU on top.
+                        let mut overlay_painter = ui.painter().clone();
+                        overlay_painter.set_clip_rect(canvas_rect);
+                        self.draw_tool_ghost(&overlay_painter, canvas_rect);
 
                         if let Some(preview) = &self.preview_object {
                             match preview {
@@ -2006,7 +2036,7 @@ impl eframe::App for GrafitoApp {
                                     let mut f = fun.clone();
                                     f.color = Color::new(0.5, 0.5, 0.5, 0.6);
                                     self.draw_object(
-                                        &painter,
+                                        &overlay_painter,
                                         canvas_rect,
                                         &GeoObject::Function(f),
                                     );
@@ -2014,7 +2044,11 @@ impl eframe::App for GrafitoApp {
                                 GeoObject::Point(p) => {
                                     let mut pt = p.clone();
                                     pt.color = Color::new(0.5, 0.5, 0.5, 0.6);
-                                    self.draw_object(&painter, canvas_rect, &GeoObject::Point(pt));
+                                    self.draw_object(
+                                        &overlay_painter,
+                                        canvas_rect,
+                                        &GeoObject::Point(pt),
+                                    );
                                 }
                                 _ => {}
                             }
@@ -2129,10 +2163,24 @@ impl eframe::App for GrafitoApp {
                         self.handle_3d_click(ui, &response, canvas_rect, w, h);
                         self.tool_ghost = None;
                     }
-                    self.draw_3d_grid(ui.painter(), canvas_rect, w, h);
-                    self.draw_3d_objects(ui.painter(), canvas_rect, w, h);
+                    if self.use_gpu {
+                        let callback = egui_wgpu::Callback::new_paint_callback(
+                            canvas_rect,
+                            crate::gpu_canvas::Canvas3DCallback {
+                                document: std::sync::Arc::new(self.document.clone()),
+                                camera: self.camera,
+                                dark_mode: self.dark_mode,
+                                screen_w: w,
+                                screen_h: h,
+                            },
+                        );
+                        ui.painter().add(egui::epaint::Shape::Callback(callback));
+                    } else {
+                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h);
+                        self.draw_3d_objects(ui.painter(), canvas_rect, w, h);
+                    }
 
-                    // Draw 3D tool ghost
+                    // Draw 3D tool ghost on top with CPU painter
                     if let Some(GeoObject::Point3D(ghost)) = &self.tool_ghost {
                         let painter = ui.painter();
                         let origin = canvas_rect.min;
