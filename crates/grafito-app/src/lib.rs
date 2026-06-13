@@ -1,7 +1,6 @@
 //! Grafito Desktop Application — Main entry point and eframe UI orchestrator.
 
 pub use grafito_command as commands;
-#[cfg(not(target_os = "android"))]
 pub mod export;
 pub mod gpu_canvas;
 pub mod render_2d;
@@ -10,9 +9,6 @@ pub mod tool_dispatcher;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(target_os = "android")]
-pub mod android;
 
 use egui::{Color32, Key, Pos2, Sense, Vec2};
 use grafito_core::{
@@ -217,7 +213,6 @@ impl GrafitoApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn save_to_file(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Grafito Document", &["json"])
@@ -234,7 +229,6 @@ impl GrafitoApp {
         }
     }
 
-    #[cfg(not(target_os = "android"))]
     fn load_from_file(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Grafito Document", &["json"])
@@ -256,12 +250,6 @@ impl GrafitoApp {
             }
         }
     }
-
-    #[cfg(target_os = "android")]
-    fn save_to_file(&mut self) {}
-
-    #[cfg(target_os = "android")]
-    fn load_from_file(&mut self) {}
 
     fn delete_selected(&mut self) {
         if let Some(id) = self.selected_object {

@@ -1,5 +1,4 @@
 target/
-local.properties
 **/*.rs.bk
 *.pdb
 .DS_Store

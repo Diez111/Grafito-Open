@@ -1,5 +1,5 @@
 //! Double-Double arithmetic — ~106 bits of precision using two f64.
-//! Pure Rust implementation, no C dependencies, works on all platforms including Android.
+//! Pure Rust implementation, no C dependencies, works on all platforms.
 //!
 //! A DoubleDouble represents a number as the unevaluated sum of two f64 values:
 //! `value = hi + lo` where `|lo| <= 0.5 * ulp(hi)`.
