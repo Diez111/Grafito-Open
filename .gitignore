@@ -10,8 +10,11 @@ local.properties
 
 # Local/agent/tool artifacts
 .cargo/
+!.cargo/config.toml
 .codex/
 .opencode/
+.commandcode/
+.megamemory/
 AGENTS.md
 GPUCache/
 crash_log.txt
@@ -21,5 +24,7 @@ graphify-out/
 scratch*
 test_*
 debug_patch2
+debug_cam.rs
+refactor.py
 update_ast.py
 update_preprocess.py
