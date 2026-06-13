@@ -1013,33 +1013,35 @@ impl Renderer {
                     let res = cg.density.max(20).min(200);
                     let dx = (cg.x_max - cg.x_min) / res as f64;
                     let dy = (cg.y_max - cg.y_min) / res as f64;
-                    for i in 0..res {
-                        let x = cg.x_min + i as f64 * dx;
-                        for j in 0..res {
-                            let y = cg.y_min + j as f64 * dy;
-                            let vars = vec![
-                                ("_re".to_string(), x),
-                                ("_im".to_string(), y),
-                            ];
-                            let re_expr = cg.expr.replace('z', "_re");
-                            let im_expr = cg.expr.replace('z', "_im");
-                            let re_val = grafito_geometry::expr::evaluate(&re_expr, &vars).unwrap_or(0.0);
-                            let im_val = grafito_geometry::expr::evaluate(&im_expr, &vars).unwrap_or(0.0);
-                            if re_val.is_finite() && im_val.is_finite() {
-                                let mag = (re_val * re_val + im_val * im_val).sqrt();
-                                let ang = im_val.atan2(re_val);
-                                let hue = (ang / std::f64::consts::TAU + 0.5) % 1.0;
-                                let sat = 0.8;
-                                let val = (mag / (mag + 1.0)).max(0.2);
-                                let color = hsv_to_rgb(hue as f32, sat, val as f32);
-                                let sx = view_transform.world_to_screen(Point2::new(x, y));
-                                Self::add_rect(
-                                    &mut vertices, &mut indices,
-                                    sx,
-                                    (dx * view_transform.scale).max(1.0) as f32,
-                                    (dy * view_transform.scale).max(1.0) as f32,
-                                    color,
-                                );
+                    if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
+                        let mut base_vars = std::collections::HashMap::new();
+                        for (k, v) in &document.variables {
+                            base_vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+                        }
+                        for i in 0..res {
+                            let x = cg.x_min + i as f64 * dx;
+                            for j in 0..res {
+                                let y = cg.y_min + j as f64 * dy;
+                                let mut vars = base_vars.clone();
+                                vars.insert("z".to_string(), num_complex::Complex64::new(x, y));
+                                if let Ok(fz) = parsed.eval(&vars) {
+                                    if fz.re.is_finite() && fz.im.is_finite() {
+                                        let mag = (fz.re * fz.re + fz.im * fz.im).sqrt();
+                                        let ang = fz.im.atan2(fz.re);
+                                        let hue = (ang / std::f64::consts::TAU + 0.5) % 1.0;
+                                        let sat = 0.8;
+                                        let val = (mag / (mag + 1.0)).max(0.2);
+                                        let color = hsv_to_rgb(hue as f32, sat, val as f32);
+                                        let sx = view_transform.world_to_screen(Point2::new(x, y));
+                                        Self::add_rect(
+                                            &mut vertices, &mut indices,
+                                            sx,
+                                            (dx * view_transform.scale).max(1.0) as f32,
+                                            (dy * view_transform.scale).max(1.0) as f32,
+                                            color,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }

@@ -1,5 +1,5 @@
 target/
-Cargo.lock
+local.properties
 **/*.rs.bk
 *.pdb
 .DS_Store
@@ -7,6 +7,15 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+
+# Local/agent/tool artifacts
+.cargo/
+.codex/
+.opencode/
+AGENTS.md
+GPUCache/
+crash_log.txt
+graphify-out/
 
 # Scratch & test files
 scratch*

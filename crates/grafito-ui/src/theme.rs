@@ -43,88 +43,89 @@ impl Theme {
         visuals.window_rounding = egui::Rounding::same(12.0);
         visuals.menu_rounding = egui::Rounding::same(8.0);
 
-        // GeoGebra-like flat but slightly elevated look
+        // Premium window aesthetics
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 4.0),
-            blur: 16.0,
+            offset: egui::vec2(0.0, 8.0),
+            blur: 24.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(if is_dark { 80 } else { 20 }),
+            color: Color32::from_black_alpha(if is_dark { 160 } else { 40 }),
         };
+        visuals.popup_shadow = visuals.window_shadow;
 
-        // Widget visuals
+        // Widget visuals - Modern soft rounding and subtle borders
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
 
         visuals.widgets.inactive.bg_fill = self.button_bg;
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::TRANSPARENT);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
 
         visuals.widgets.hovered.bg_fill = self.button_hover;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_black_alpha(if is_dark { 40 } else { 10 }));
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
 
         visuals.widgets.active.bg_fill = self.selection_bg;
-        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent.linear_multiply(0.5));
         visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.active.rounding = egui::Rounding::same(8.0);
 
         ctx.set_visuals(visuals);
 
-        // Increase spacing for a cleaner, breathable UI
+        // Spacing: Restore to original more compact sizes to avoid breaking layout
         ctx.style_mut(|s| {
             s.animation_time = 0.15;
-            s.spacing.item_spacing = egui::vec2(12.0, 8.0);
-            s.spacing.button_padding = egui::vec2(12.0, 6.0);
-            s.spacing.menu_margin = egui::Margin::same(8.0);
-            s.spacing.window_margin = egui::Margin::same(12.0);
-            s.spacing.indent = 24.0;
-            s.spacing.interact_size = egui::vec2(40.0, 28.0);
+            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.menu_margin = egui::Margin::same(6.0);
+            s.spacing.window_margin = egui::Margin::same(8.0);
+            s.spacing.indent = 20.0;
+            s.spacing.interact_size = egui::vec2(36.0, 24.0);
         });
     }
 }
 
 pub const DARK: Theme = Theme {
-    canvas_bg: Color32::from_rgb(30, 41, 59), // slate-800
-    canvas_grid_minor: Color32::from_rgb(51, 65, 85), // slate-700
-    panel_bg: Color32::from_rgb(15, 23, 42),  // slate-900
-    toolbar_bg: Color32::from_rgb(15, 23, 42),
-    text_primary: Color32::from_rgb(248, 250, 252), // slate-50
-    accent: Color32::from_rgb(59, 130, 246),        // blue-500
-    danger: Color32::from_rgb(239, 68, 68),         // red-500
-    success: Color32::from_rgb(34, 197, 94),        // green-500
-    selection_bg: Color32::from_rgb(30, 58, 138),   // blue-900
-    input_bg: Color32::from_rgb(30, 41, 59),
-    input_text: Color32::from_rgb(248, 250, 252),
-    button_bg: Color32::from_rgb(30, 41, 59),
-    button_hover: Color32::from_rgb(51, 65, 85),
-    axis_2d: Color32::from_rgb(148, 163, 184), // slate-400
-    object_point: Color32::from_rgb(96, 165, 250), // blue-400
-    object_line: Color32::from_rgb(203, 213, 225), // slate-300
-    object_function: Color32::from_rgb(52, 211, 153), // emerald-400
-    object_conic: Color32::from_rgb(248, 113, 113), // red-400
+    canvas_bg: Color32::from_rgb(18, 18, 20), // Premium very dark grey/black
+    canvas_grid_minor: Color32::from_rgb(34, 34, 38),
+    panel_bg: Color32::from_rgb(26, 26, 30),  // Deep subtle grey for panels
+    toolbar_bg: Color32::from_rgb(26, 26, 30),
+    text_primary: Color32::from_rgb(235, 235, 240),
+    accent: Color32::from_rgb(94, 139, 255),        // Vibrant modern blue
+    danger: Color32::from_rgb(255, 74, 90),         // Vibrant red
+    success: Color32::from_rgb(46, 212, 122),       // Vibrant green
+    selection_bg: Color32::from_rgba_premultiplied(94, 139, 255, 40),
+    input_bg: Color32::from_rgb(20, 20, 24),
+    input_text: Color32::from_rgb(240, 240, 245),
+    button_bg: Color32::from_rgb(34, 34, 38),
+    button_hover: Color32::from_rgb(48, 48, 54),
+    axis_2d: Color32::from_rgb(120, 120, 130),
+    object_point: Color32::from_rgb(112, 161, 255),
+    object_line: Color32::from_rgb(180, 180, 190),
+    object_function: Color32::from_rgb(46, 212, 122),
+    object_conic: Color32::from_rgb(255, 107, 129),
 };
 
 pub const LIGHT: Theme = Theme {
-    canvas_bg: Color32::WHITE,
-    canvas_grid_minor: Color32::from_rgb(230, 230, 230),
-    panel_bg: Color32::WHITE,
-    toolbar_bg: Color32::WHITE,
-    text_primary: Color32::from_rgb(32, 33, 36),
-    accent: Color32::from_rgb(101, 87, 210), // GeoGebra purple-blue
-    danger: Color32::from_rgb(220, 38, 38),
-    success: Color32::from_rgb(22, 163, 74),
-    selection_bg: Color32::from_rgb(238, 236, 251), // Light purple selection
-    input_bg: Color32::WHITE,
-    input_text: Color32::from_rgb(32, 33, 36),
-    button_bg: Color32::from_rgb(243, 243, 248),
-    button_hover: Color32::from_rgb(230, 230, 235),
-    axis_2d: Color32::from_rgb(100, 100, 100),
-    object_point: Color32::from_rgb(37, 99, 235),
-    object_line: Color32::from_rgb(71, 85, 105),
-    object_function: Color32::from_rgb(5, 150, 105),
-    object_conic: Color32::from_rgb(220, 38, 38), // red-600
+    canvas_bg: Color32::from_rgb(250, 250, 252), // Off-white modern background
+    canvas_grid_minor: Color32::from_rgb(232, 232, 236),
+    panel_bg: Color32::from_rgb(255, 255, 255),
+    toolbar_bg: Color32::from_rgb(255, 255, 255),
+    text_primary: Color32::from_rgb(40, 40, 45),
+    accent: Color32::from_rgb(38, 99, 255), // Deep modern blue
+    danger: Color32::from_rgb(235, 50, 65),
+    success: Color32::from_rgb(20, 175, 90),
+    selection_bg: Color32::from_rgba_premultiplied(38, 99, 255, 30),
+    input_bg: Color32::from_rgb(244, 244, 248),
+    input_text: Color32::from_rgb(30, 30, 35),
+    button_bg: Color32::from_rgb(244, 244, 248),
+    button_hover: Color32::from_rgb(232, 232, 238),
+    axis_2d: Color32::from_rgb(130, 130, 140),
+    object_point: Color32::from_rgb(38, 99, 255),
+    object_line: Color32::from_rgb(90, 90, 100),
+    object_function: Color32::from_rgb(20, 175, 90),
+    object_conic: Color32::from_rgb(235, 50, 65),
 };

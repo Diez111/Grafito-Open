@@ -1,7 +1,21 @@
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use grafito_render::Renderer;
+
+#[cfg(target_os = "android")]
+#[link(name = "android")]
+extern "C" {
+    fn ANativeWindow_release(window: *mut std::ffi::c_void);
+}
+
+/// Raw ANativeWindow pointer wrapped so it can be stored in an object sent over FFI.
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+struct NativeWindowPtr(*mut std::ffi::c_void);
+unsafe impl Send for NativeWindowPtr {}
+unsafe impl Sync for NativeWindowPtr {}
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CanvasError {
@@ -26,6 +40,8 @@ pub struct CanvasRenderer {
     height: Arc<Mutex<u32>>,
     running: Arc<AtomicBool>,
     render_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    native_window: Arc<Mutex<Option<NativeWindowPtr>>>,
+
 }
 
 #[uniffi::export]
@@ -50,6 +66,7 @@ impl CanvasRenderer {
             height: Arc::new(Mutex::new(height)),
             running: Arc::new(AtomicBool::new(false)),
             render_thread: Arc::new(Mutex::new(None)),
+            native_window: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -60,6 +77,7 @@ impl CanvasRenderer {
         });
         let a_native_window = NonNull::new(surface_ptr as *mut std::ffi::c_void)
             .ok_or_else(|| CanvasError::SurfaceError("Invalid surface pointer".into()))?;
+        *self.native_window.lock() = Some(NativeWindowPtr(a_native_window.as_ptr()));
         let raw_handle = raw_window_handle::RawWindowHandle::AndroidNdk(
             raw_window_handle::AndroidNdkWindowHandle::new(a_native_window.cast()),
         );
@@ -90,26 +108,29 @@ impl CanvasRenderer {
             None,
         )).map_err(|e| CanvasError::SurfaceError(format!("request_device: {:?}", e)))?;
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
-        let w = *self.width.lock().unwrap();
-        let h = *self.height.lock().unwrap();
+        let format = caps.formats.first()
+            .copied()
+            .ok_or_else(|| CanvasError::SurfaceError("No surface formats available".into()))?;
+        let alpha_mode = caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto);
+        let w = *self.width.lock();
+        let h = *self.height.lock();
         surface.configure(&device, &wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: w.max(1),
             height: h.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         });
         let renderer = Renderer::new(&device, format, false);
-        *self.instance.lock().unwrap() = Some(instance);
-        *self.surface.lock().unwrap() = Some(surface);
-        *self.device.lock().unwrap() = Some(device);
-        *self.queue.lock().unwrap() = Some(queue);
-        *self.renderer.lock().unwrap() = Some(renderer);
-        *self.surface_format.lock().unwrap() = format;
+        *self.instance.lock() = Some(instance);
+        *self.surface.lock() = Some(surface);
+        *self.device.lock() = Some(device);
+        *self.queue.lock() = Some(queue);
+        *self.renderer.lock() = Some(renderer);
+        *self.surface_format.lock() = format;
         log::info!("CanvasRenderer initialized ({}x{}, {:?})", w, h, format);
         Ok(())
     }
@@ -122,20 +143,20 @@ impl CanvasRenderer {
         let cam_arc = self.engine.get_camera();
         let dark_mode = self.engine.get_dark_mode();
         let view_mode = self.engine.get_view_mode();
-        let w = *self.width.lock().unwrap() as f32;
-        let h = *self.height.lock().unwrap() as f32;
+        let w = *self.width.lock() as f32;
+        let h = *self.height.lock() as f32;
         let is_3d = view_mode == "3D";
 
         log::info!("render_frame: view_mode={}, is_3d={}, screen={}x{}, dark_mode={}", 
                     view_mode, is_3d, w, h, dark_mode);
 
         // Get renderer ref briefly for build_geometry
-        let renderer_guard = self.renderer.lock().unwrap();
+        let renderer_guard = self.renderer.lock();
         let renderer = renderer_guard.as_ref().ok_or(CanvasError::NotInitialized)?;
 
         let (vertices, indices, mvp) = {
-            let mut doc_guard = doc_arc.lock().unwrap();
-            let mut cam_guard = cam_arc.lock().unwrap();
+            let mut doc_guard = doc_arc.lock();
+            let mut cam_guard = cam_arc.lock();
             
             // Fix aspect ratio and screen size on every frame
             cam_guard.aspect = (w / h).max(0.001);
@@ -158,10 +179,10 @@ impl CanvasRenderer {
         drop(renderer_guard);
 
         // ---- Block 2: GPU commands (device / queue / surface) ----
-        let dev_guard = self.device.lock().unwrap();
-        let q_guard = self.queue.lock().unwrap();
-        let s_guard = self.surface.lock().unwrap();
-        let r_guard = self.renderer.lock().unwrap();
+        let dev_guard = self.device.lock();
+        let q_guard = self.queue.lock();
+        let s_guard = self.surface.lock();
+        let r_guard = self.renderer.lock();
         let device = dev_guard.as_ref().ok_or(CanvasError::NotInitialized)?;
         let queue = q_guard.as_ref().ok_or(CanvasError::NotInitialized)?;
         let surface = s_guard.as_ref().ok_or(CanvasError::NotInitialized)?;
@@ -251,29 +272,34 @@ impl CanvasRenderer {
             let d = std::time::Duration::from_micros(16667);
             while s.running.load(Ordering::SeqCst) {
                 let t0 = std::time::Instant::now();
-                if let Err(e) = s.render_frame() {
-                    log::error!("Render error: {}", e);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.render_frame()));
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::error!("Render error: {}", e),
+                    Err(_) => {
+                        log::error!("Render thread panicked; stopping render loop");
+                        s.running.store(false, Ordering::SeqCst);
+                    }
                 }
                 let dt = t0.elapsed();
                 if dt < d { std::thread::sleep(d - dt); }
             }
         });
-        *self.render_thread.lock().unwrap() = Some(h);
+        *self.render_thread.lock() = Some(h);
     }
 
     pub fn stop_render_loop(self: &Arc<Self>) {
         self.running.store(false, Ordering::SeqCst);
-        if let Some(h) = self.render_thread.lock().unwrap().take() { let _ = h.join(); }
+        if let Some(h) = self.render_thread.lock().take() { let _ = h.join(); }
     }
 
     pub fn resize(self: &Arc<Self>, width: u32, height: u32) {
-        *self.width.lock().unwrap() = width;
-        *self.height.lock().unwrap() = height;
-        if let (Some(surface), Some(device)) = (
-            self.surface.lock().unwrap().as_ref(),
-            self.device.lock().unwrap().as_ref(),
-        ) {
-            let fmt = *self.surface_format.lock().unwrap();
+        *self.width.lock() = width;
+        *self.height.lock() = height;
+        let device = self.device.lock();
+        let surface = self.surface.lock();
+        if let (Some(device), Some(surface)) = (device.as_ref(), surface.as_ref()) {
+            let fmt = *self.surface_format.lock();
             surface.configure(device, &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: fmt,
@@ -289,13 +315,17 @@ impl CanvasRenderer {
 
     pub fn cleanup(self: &Arc<Self>) {
         self.stop_render_loop();
-        *self.renderer.lock().unwrap() = None;
-        *self.surface.lock().unwrap() = None;
-        *self.queue.lock().unwrap() = None;
-        *self.device.lock().unwrap() = None;
-        *self.instance.lock().unwrap() = None;
+        *self.renderer.lock() = None;
+        *self.surface.lock() = None;
+        *self.queue.lock() = None;
+        *self.device.lock() = None;
+        *self.instance.lock() = None;
+        #[cfg(target_os = "android")]
+        if let Some(window) = self.native_window.lock().take() {
+            unsafe { ANativeWindow_release(window.0) };
+        }
     }
 
-    pub fn get_width(self: &Arc<Self>) -> u32 { *self.width.lock().unwrap() }
-    pub fn get_height(self: &Arc<Self>) -> u32 { *self.height.lock().unwrap() }
+    pub fn get_width(self: &Arc<Self>) -> u32 { *self.width.lock() }
+    pub fn get_height(self: &Arc<Self>) -> u32 { *self.height.lock() }
 }

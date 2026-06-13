@@ -83,7 +83,7 @@ impl ComplexExpr {
 pub fn parse(input: &str) -> Result<ComplexExpr, String> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
-    let expr = parse_expr(&tokens, &mut pos)?;
+    let expr = parse_expr(&tokens, &mut pos, 0)?;
     if pos < tokens.len() {
         return Err(format!("Unexpected token at end: {:?}", tokens[pos]));
     }
@@ -182,21 +182,32 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
-fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
-    parse_add_sub(tokens, pos)
+const MAX_COMPLEX_DEPTH: usize = 256;
+
+fn check_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_COMPLEX_DEPTH {
+        Err("Complex expression is too deeply nested".to_string())
+    } else {
+        Ok(())
+    }
 }
 
-fn parse_add_sub(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
-    let mut node = parse_mul_div(tokens, pos)?;
+fn parse_expr(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
+    parse_add_sub(tokens, pos, depth)
+}
+
+fn parse_add_sub(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
+    check_depth(depth)?;
+    let mut node = parse_mul_div(tokens, pos, depth + 1)?;
     while *pos < tokens.len() {
         match tokens[*pos] {
             Token::Plus => {
                 *pos += 1;
-                node = ComplexExpr::Add(Box::new(node), Box::new(parse_mul_div(tokens, pos)?));
+                node = ComplexExpr::Add(Box::new(node), Box::new(parse_mul_div(tokens, pos, depth + 1)?));
             }
             Token::Minus => {
                 *pos += 1;
-                node = ComplexExpr::Sub(Box::new(node), Box::new(parse_mul_div(tokens, pos)?));
+                node = ComplexExpr::Sub(Box::new(node), Box::new(parse_mul_div(tokens, pos, depth + 1)?));
             }
             _ => break,
         }
@@ -204,17 +215,18 @@ fn parse_add_sub(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, Strin
     Ok(node)
 }
 
-fn parse_mul_div(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
-    let mut node = parse_pow(tokens, pos)?;
+fn parse_mul_div(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
+    check_depth(depth)?;
+    let mut node = parse_pow(tokens, pos, depth + 1)?;
     while *pos < tokens.len() {
         match tokens[*pos] {
             Token::Star => {
                 *pos += 1;
-                node = ComplexExpr::Mul(Box::new(node), Box::new(parse_pow(tokens, pos)?));
+                node = ComplexExpr::Mul(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
             }
             Token::Slash => {
                 *pos += 1;
-                node = ComplexExpr::Div(Box::new(node), Box::new(parse_pow(tokens, pos)?));
+                node = ComplexExpr::Div(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
             }
             _ => break,
         }
@@ -222,17 +234,18 @@ fn parse_mul_div(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, Strin
     Ok(node)
 }
 
-fn parse_pow(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
-    let mut node = parse_primary(tokens, pos)?;
+fn parse_pow(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
+    check_depth(depth)?;
+    let mut node = parse_primary(tokens, pos, depth + 1)?;
     if *pos < tokens.len() && tokens[*pos] == Token::Caret {
         *pos += 1;
         // Right-associative
-        node = ComplexExpr::Pow(Box::new(node), Box::new(parse_pow(tokens, pos)?));
+        node = ComplexExpr::Pow(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
     }
     Ok(node)
 }
 
-fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, String> {
+fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
     if *pos >= tokens.len() {
         return Err("Unexpected EOF".to_string());
     }
@@ -245,7 +258,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, Strin
             *pos += 1;
             if *pos < tokens.len() && tokens[*pos] == Token::LParen {
                 *pos += 1;
-                let arg = parse_expr(tokens, pos)?;
+                let arg = parse_expr(tokens, pos, depth + 1)?;
                 if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
                     return Err("Expected ')'".to_string());
                 }
@@ -266,11 +279,11 @@ fn parse_primary(tokens: &[Token], pos: &mut usize) -> Result<ComplexExpr, Strin
         }
         Token::Minus => {
             *pos += 1;
-            Ok(ComplexExpr::Neg(Box::new(parse_primary(tokens, pos)?)))
+            Ok(ComplexExpr::Neg(Box::new(parse_primary(tokens, pos, depth + 1)?)))
         }
         Token::LParen => {
             *pos += 1;
-            let expr = parse_expr(tokens, pos)?;
+            let expr = parse_expr(tokens, pos, depth + 1)?;
             if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
                 return Err("Expected ')'".to_string());
             }

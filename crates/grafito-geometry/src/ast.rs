@@ -1,7 +1,17 @@
 use std::fmt;
 
-/// Symbolic Expression AST for Grafito calculus engine.
-/// Supports differentiation, simplification, display and numeric evaluation.
+// Symbolic Expression AST for Grafito calculus engine.
+// Supports differentiation, simplification, display and numeric evaluation.
+
+// Reduce a large angle to the [0, 2π) range to avoid precision loss in sin/cos/tan.
+fn reduce_angle(a: f64) -> f64 {
+    if a.is_finite() {
+        a.rem_euclid(std::f64::consts::TAU)
+    } else {
+        a
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Const(f64),
@@ -369,12 +379,12 @@ impl Expr {
             }
             BesselJ(n, u) => Mul(
                 Box::new(Sub(
-                    Box::new(BesselJ(
-                        Box::new(Add(n.clone(), Box::new(Const(1.0)))),
-                        u.clone(),
-                    )),
                     Box::new(Div(
                         Box::new(Mul(n.clone(), Box::new(BesselJ(n.clone(), u.clone())))),
+                        u.clone(),
+                    )),
+                    Box::new(BesselJ(
+                        Box::new(Add(n.clone(), Box::new(Const(1.0)))),
                         u.clone(),
                     )),
                 )),
@@ -382,12 +392,12 @@ impl Expr {
             ),
             BesselY(n, u) => Mul(
                 Box::new(Sub(
-                    Box::new(BesselY(
-                        Box::new(Add(n.clone(), Box::new(Const(1.0)))),
-                        u.clone(),
-                    )),
                     Box::new(Div(
                         Box::new(Mul(n.clone(), Box::new(BesselY(n.clone(), u.clone())))),
+                        u.clone(),
+                    )),
+                    Box::new(BesselY(
+                        Box::new(Add(n.clone(), Box::new(Const(1.0)))),
                         u.clone(),
                     )),
                 )),
@@ -417,11 +427,20 @@ impl Expr {
             }
             Product(body, v, start, end) => {
                 // derivative of product: product * sum(expr'/expr)
-                Product(
-                    Box::new(body.diff(var)),
-                    v.clone(),
-                    start.clone(),
-                    end.clone(),
+                let body_ref = body.clone();
+                Mul(
+                    Box::new(Product(
+                        body_ref.clone(),
+                        v.clone(),
+                        start.clone(),
+                        end.clone(),
+                    )),
+                    Box::new(Sum(
+                        Box::new(Div(Box::new(body.diff(var)), body_ref)),
+                        v.clone(),
+                        start.clone(),
+                        end.clone(),
+                    )),
                 )
             }
             Piecewise(pieces, default) => Piecewise(
@@ -606,30 +625,9 @@ impl Expr {
             Pow(a, b) => a
                 .eval_2d(var1, val1, var2, val2)
                 .powf(b.eval_2d(var1, val1, var2, val2)),
-            Sin(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.sin()
-                }
-            }
-            Cos(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.cos()
-                }
-            }
-            Tan(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.tan()
-                }
-            }
+            Sin(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin(),
+            Cos(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos(),
+            Tan(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan(),
             Asin(u) => u.eval_2d(var1, val1, var2, val2).asin(),
             Acos(u) => u.eval_2d(var1, val1, var2, val2).acos(),
             Atan(u) => u.eval_2d(var1, val1, var2, val2).atan(),
@@ -665,30 +663,9 @@ impl Expr {
             Floor(u) => u.eval_2d(var1, val1, var2, val2).floor(),
             Ceil(u) => u.eval_2d(var1, val1, var2, val2).ceil(),
             Round(u) => u.eval_2d(var1, val1, var2, val2).round(),
-            Sec(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.cos()
-                }
-            }
-            Csc(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.sin()
-                }
-            }
-            Cot(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.tan()
-                }
-            }
+            Sec(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos(),
+            Csc(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin(),
+            Cot(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan(),
             Asinh(u) => u.eval_2d(var1, val1, var2, val2).asinh(),
             Acosh(u) => u.eval_2d(var1, val1, var2, val2).acosh(),
             Atanh(u) => u.eval_2d(var1, val1, var2, val2).atanh(),
@@ -783,30 +760,9 @@ impl Expr {
                 }
             }
             Pow(a, b) => a.eval_at(var, value).powf(b.eval_at(var, value)),
-            Sin(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.sin()
-                }
-            }
-            Cos(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.cos()
-                }
-            }
-            Tan(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.tan()
-                }
-            }
+            Sin(u) => reduce_angle(u.eval_at(var, value)).sin(),
+            Cos(u) => reduce_angle(u.eval_at(var, value)).cos(),
+            Tan(u) => reduce_angle(u.eval_at(var, value)).tan(),
             Asin(u) => u.eval_at(var, value).asin(),
             Acos(u) => u.eval_at(var, value).acos(),
             Atan(u) => u.eval_at(var, value).atan(),
@@ -842,30 +798,9 @@ impl Expr {
             Floor(u) => u.eval_at(var, value).floor(),
             Ceil(u) => u.eval_at(var, value).ceil(),
             Round(u) => u.eval_at(var, value).round(),
-            Sec(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.cos()
-                }
-            }
-            Csc(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.sin()
-                }
-            }
-            Cot(u) => {
-                let a = u.eval_at(var, value);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    1.0 / a.tan()
-                }
-            }
+            Sec(u) => 1.0 / reduce_angle(u.eval_at(var, value)).cos(),
+            Csc(u) => 1.0 / reduce_angle(u.eval_at(var, value)).sin(),
+            Cot(u) => 1.0 / reduce_angle(u.eval_at(var, value)).tan(),
             Asinh(u) => u.eval_at(var, value).asinh(),
             Acosh(u) => u.eval_at(var, value).acosh(),
             Atanh(u) => u.eval_at(var, value).atanh(),
@@ -2017,15 +1952,25 @@ impl fmt::Display for Expr {
 // Parser: text -> AST
 // ============================================================
 
+const MAX_AST_DEPTH: usize = 256;
+
 pub fn parse_ast(expr: &str) -> Result<Expr, String> {
     // Preprocess: replace common math notations
     let expr = preprocess(expr);
     let mut tokens = tokenize(&expr);
-    let result = parse_add_sub(&mut tokens)?;
+    let result = parse_add_sub(&mut tokens, 0)?;
     if !tokens.is_empty() {
         return Err(format!("Unexpected tokens remaining: {:?}", tokens));
     }
     Ok(result)
+}
+
+fn check_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_AST_DEPTH {
+        Err("Expression is too deeply nested".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn preprocess(expr: &str) -> String {
@@ -2137,18 +2082,19 @@ fn tokenize(expr: &str) -> Vec<String> {
     tokens
 }
 
-fn parse_add_sub(tokens: &mut Vec<String>) -> Result<Expr, String> {
-    let mut lhs = parse_mul_div(tokens)?;
+fn parse_add_sub(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
+    check_depth(depth)?;
+    let mut lhs = parse_mul_div(tokens, depth + 1)?;
     while !tokens.is_empty() {
         match tokens[0].as_str() {
             "+" => {
                 tokens.remove(0);
-                let rhs = parse_mul_div(tokens)?;
+                let rhs = parse_mul_div(tokens, depth + 1)?;
                 lhs = Expr::Add(Box::new(lhs), Box::new(rhs));
             }
             "-" => {
                 tokens.remove(0);
-                let rhs = parse_mul_div(tokens)?;
+                let rhs = parse_mul_div(tokens, depth + 1)?;
                 lhs = Expr::Sub(Box::new(lhs), Box::new(rhs));
             }
             _ => break,
@@ -2157,18 +2103,19 @@ fn parse_add_sub(tokens: &mut Vec<String>) -> Result<Expr, String> {
     Ok(lhs)
 }
 
-fn parse_mul_div(tokens: &mut Vec<String>) -> Result<Expr, String> {
-    let mut lhs = parse_unary(tokens)?;
+fn parse_mul_div(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
+    check_depth(depth)?;
+    let mut lhs = parse_unary(tokens, depth + 1)?;
     while !tokens.is_empty() {
         match tokens[0].as_str() {
             "*" => {
                 tokens.remove(0);
-                let rhs = parse_unary(tokens)?;
+                let rhs = parse_unary(tokens, depth + 1)?;
                 lhs = Expr::Mul(Box::new(lhs), Box::new(rhs));
             }
             "/" => {
                 tokens.remove(0);
-                let rhs = parse_unary(tokens)?;
+                let rhs = parse_unary(tokens, depth + 1)?;
                 lhs = Expr::Div(Box::new(lhs), Box::new(rhs));
             }
             _ => break,
@@ -2177,37 +2124,39 @@ fn parse_mul_div(tokens: &mut Vec<String>) -> Result<Expr, String> {
     Ok(lhs)
 }
 
-fn parse_unary(tokens: &mut Vec<String>) -> Result<Expr, String> {
+fn parse_unary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
+    check_depth(depth)?;
     if !tokens.is_empty() && tokens[0] == "-" {
         tokens.remove(0);
-        let inner = parse_pow(tokens)?;
+        let inner = parse_pow(tokens, depth + 1)?;
         return Ok(Expr::Neg(Box::new(inner)));
     }
     if !tokens.is_empty() && tokens[0] == "+" {
         tokens.remove(0);
     }
-    parse_pow(tokens)
+    parse_pow(tokens, depth + 1)
 }
 
-fn parse_pow(tokens: &mut Vec<String>) -> Result<Expr, String> {
-    let base = parse_primary(tokens)?;
+fn parse_pow(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
+    check_depth(depth)?;
+    let base = parse_primary(tokens, depth + 1)?;
     if !tokens.is_empty() && tokens[0] == "^" {
         tokens.remove(0);
         // Right-associative
-        let exp = parse_unary(tokens)?;
+        let exp = parse_unary(tokens, depth + 1)?;
         return Ok(Expr::Pow(Box::new(base), Box::new(exp)));
     }
     Ok(base)
 }
 
-fn parse_primary(tokens: &mut Vec<String>) -> Result<Expr, String> {
+fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
     if tokens.is_empty() {
         return Err("Unexpected end of expression".into());
     }
     let token = tokens.remove(0);
     // Parenthesized expression
     if token == "(" {
-        let inner = parse_add_sub(tokens)?;
+        let inner = parse_add_sub(tokens, depth + 1)?;
         if tokens.is_empty() || tokens[0] != ")" {
             return Err("Missing closing parenthesis".into());
         }
@@ -2223,10 +2172,10 @@ fn parse_primary(tokens: &mut Vec<String>) -> Result<Expr, String> {
         // Check if it's a function call (next token is "(")
         if !tokens.is_empty() && tokens[0] == "(" {
             tokens.remove(0); // consume "("
-            let mut args = vec![parse_add_sub(tokens)?];
+            let mut args = vec![parse_add_sub(tokens, depth + 1)?];
             while !tokens.is_empty() && tokens[0] == "," {
                 tokens.remove(0);
-                args.push(parse_add_sub(tokens)?);
+                args.push(parse_add_sub(tokens, depth + 1)?);
             }
             if tokens.is_empty() || tokens[0] != ")" {
                 return Err(format!(

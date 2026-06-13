@@ -62,7 +62,9 @@ pub fn geo_object_to_dto(obj: &GeoObject) -> ObjectDto {
         GeoObject::Polygon(poly) => {
             let perimeter = poly.vertices.windows(2)
                 .map(|w| w[0].distance(&w[1]))
-                .chain(std::iter::once(poly.vertices.last().unwrap().distance(&poly.vertices[0])))
+                .chain(std::iter::once(
+                    poly.vertices.last().map_or(0.0, |v| v.distance(&poly.vertices[0]))
+                ))
                 .sum::<f64>();
             let area = polygon_area(&poly.vertices);
             let props = vec![

@@ -27,6 +27,7 @@ log.workspace = true
 uuid.workspace = true
 pollster.workspace = true
 raw-window-handle.workspace = true
+parking_lot = "0.12"
 
 [[bin]]
 name = "uniffi-bindgen"

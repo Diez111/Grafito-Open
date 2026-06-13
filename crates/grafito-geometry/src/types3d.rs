@@ -234,14 +234,22 @@ impl Camera3D {
         Vec3::Y
     }
     pub fn right(&self) -> Vec3 {
-        (self.target - self.position()).cross(self.up()).normalize()
+        let forward = self.target - self.position();
+        let mut r = forward.cross(self.up());
+        if r.length_squared() < 1e-12 {
+            r = forward.cross(Vec3::X);
+            if r.length_squared() < 1e-12 {
+                r = Vec3::X;
+            }
+        }
+        r.normalize()
     }
 
     /// Project a 3D point to normalized device coordinates, then to screen.
     /// Returns (screen_x, screen_y, w) where w is used for clipping.
     pub fn project(&self, p: &Point3D, screen_w: f32, screen_h: f32) -> Option<(f32, f32)> {
         let clip = self.mvp() * p.to_vec3().extend(1.0);
-        if clip.w <= 0.0 {
+        if clip.w < self.near {
             return None;
         }
         let ndc_x = clip.x / clip.w;

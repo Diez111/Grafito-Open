@@ -1526,15 +1526,25 @@ pub struct HistogramObj {
 }
 impl HistogramObj {
     pub fn new(data: Vec<f64>, bins: usize) -> Self {
+        let (x_min, x_max, y_max) = if data.is_empty() {
+            (-5.0, 5.0, 5.0)
+        } else {
+            let lo = data.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let margin = if (hi - lo).abs() < 1e-12 { 0.5 } else { (hi - lo) * 0.05 };
+            let hist = grafito_geometry::statistics::histogram(&data, bins.max(1));
+            let max_count = hist.iter().map(|(_, _, c)| *c).fold(0.0, f64::max);
+            (lo - margin, hi + margin, max_count.max(1.0))
+        };
         Self {
             id: ObjectId::new(),
             label: String::new(),
             data,
             bins,
-            x_min: -5.0,
-            x_max: 5.0,
-            y_min: -5.0,
-            y_max: 5.0,
+            x_min,
+            x_max,
+            y_min: 0.0,
+            y_max,
             color: Color::BLACK,
             visible: true,
             width: 1.5,
@@ -1662,6 +1672,22 @@ pub struct RegressionLineObj {
 }
 impl RegressionLineObj {
     pub fn linear(xs: Vec<f64>, ys: Vec<f64>, slope: f64, intercept: f64, r2: f64) -> Self {
+        let (x_min, x_max) = if xs.is_empty() {
+            (-5.0, 5.0)
+        } else {
+            let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let margin = if (hi - lo).abs() < 1e-12 { 0.5 } else { (hi - lo) * 0.05 };
+            (lo - margin, hi + margin)
+        };
+        let (y_min, y_max) = if ys.is_empty() {
+            (-5.0, 5.0)
+        } else {
+            let lo = ys.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let margin = if (hi - lo).abs() < 1e-12 { 0.5 } else { (hi - lo) * 0.05 };
+            (lo - margin, hi + margin)
+        };
         Self {
             id: ObjectId::new(),
             label: String::new(),
@@ -1671,10 +1697,10 @@ impl RegressionLineObj {
             intercept,
             r_squared: r2,
             regression_type: "linear".to_string(),
-            x_min: -5.0,
-            x_max: 5.0,
-            y_min: -5.0,
-            y_max: 5.0,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
             color: Color::RED,
             visible: true,
             width: 2.0,

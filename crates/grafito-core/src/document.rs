@@ -4,6 +4,15 @@ use grafito_geometry::{Point2, Point3D, ViewTransform};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariableMeta {
+    pub position: Point2,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub visible: bool,
+}
+
 fn to_subscript(n: usize) -> String {
     let s = n.to_string();
     s.chars()
@@ -32,6 +41,7 @@ pub struct Document {
     selection: Vec<ObjectId>,
     next_label_number: HashMap<String, usize>,
     pub variables: HashMap<String, f64>,
+    pub variable_meta: HashMap<String, VariableMeta>,
     pub spreadsheet: Vec<Vec<String>>,
     #[serde(skip)]
     pub spatial: crate::spatial::SpatialIndex,
@@ -50,6 +60,7 @@ impl Default for Document {
             selection: Vec::new(),
             next_label_number: HashMap::new(),
             variables: HashMap::new(),
+            variable_meta: HashMap::new(),
             spreadsheet: Vec::new(),
             spatial: crate::spatial::SpatialIndex::new(),
             spatial_dirty: true,
@@ -110,7 +121,7 @@ impl Document {
                 GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_) => {
                     self.complex_base_symbol.clone()
                 }
-                _ => name.chars().next().unwrap().to_string(),
+                _ => name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
             };
             let n = self.next_label_number.entry(base_name.clone()).or_insert(1);
             let label = if *n == 1 {
@@ -906,6 +917,7 @@ impl Document {
         self.selection.clear();
         self.next_label_number.clear();
         self.variables.clear();
+        self.variable_meta.clear();
         self.spreadsheet.clear();
         self.spatial = crate::spatial::SpatialIndex::new();
         self.spatial_dirty = true;

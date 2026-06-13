@@ -127,7 +127,7 @@ impl ViewTransform {
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
         let sx = if self.x_log {
             if world.x <= 0.0 {
-                f64::NEG_INFINITY
+                ox - 1000.0 * self.scale
             } else {
                 ox + world.x.log10() * self.scale
             }
@@ -136,7 +136,7 @@ impl ViewTransform {
         };
         let sy = if self.y_log {
             if world.y <= 0.0 {
-                f64::NEG_INFINITY
+                oy + 1000.0 * self.scale
             } else {
                 oy - world.y.log10() * self.scale
             }
@@ -181,25 +181,20 @@ impl ViewTransform {
             return;
         }
         let anchor_world = self.screen_to_world(anchor_screen);
+        if (self.x_log && anchor_world.x <= 0.0) || (self.y_log && anchor_world.y <= 0.0) {
+            return;
+        }
         self.scale = (self.scale * factor as f64).clamp(1e-15, 1e15);
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
         // Use log-aware coordinate transform, consistent with world_to_screen()
         let sx = if self.x_log {
-            if anchor_world.x <= 0.0 {
-                f64::NEG_INFINITY
-            } else {
-                ox + anchor_world.x.log10() * self.scale
-            }
+            ox + anchor_world.x.log10() * self.scale
         } else {
             ox + anchor_world.x * self.scale
         };
         let sy = if self.y_log {
-            if anchor_world.y <= 0.0 {
-                f64::NEG_INFINITY
-            } else {
-                oy - anchor_world.y.log10() * self.scale
-            }
+            oy - anchor_world.y.log10() * self.scale
         } else {
             oy - anchor_world.y * self.scale
         };

@@ -35,8 +35,14 @@ impl CallbackTrait for CanvasCallback {
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let (vertices, indices) = {
-            let resources = callback_resources.get::<GpuCanvasResources>().unwrap();
-            let renderer = resources.renderer.read().unwrap();
+            let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
+                log::warn!("GpuCanvasResources not registered in prepare (2D)");
+                return vec![];
+            };
+            let Ok(renderer) = resources.renderer.read() else {
+                log::warn!("Renderer lock poisoned in prepare (2D)");
+                return vec![];
+            };
 
             let sw = self.document.view().screen_size.x;
             let sh = self.document.view().screen_size.y;
@@ -55,8 +61,11 @@ impl CallbackTrait for CanvasCallback {
         let vertex_size = vertex_data.len();
         let index_size = index_data.len();
 
-        let resources = callback_resources.get_mut::<GpuCanvasResources>().unwrap();
-        
+        let Some(resources) = callback_resources.get_mut::<GpuCanvasResources>() else {
+            log::warn!("GpuCanvasResources not registered in prepare (2D, buffers)");
+            return vec![];
+        };
+
         let buffers = resources.buffers_2d.get_or_insert_with(|| {
             let vb = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Canvas 2D Vertex Buffer"),
@@ -121,7 +130,9 @@ impl CallbackTrait for CanvasCallback {
             return;
         }
 
-        let renderer = resources.renderer.read().unwrap();
+        let Ok(renderer) = resources.renderer.read() else {
+            return;
+        };
 
         render_pass.set_pipeline(&renderer.pipeline);
         render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
@@ -149,8 +160,14 @@ impl CallbackTrait for Canvas3DCallback {
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let (vertices, indices) = {
-            let resources = callback_resources.get::<GpuCanvasResources>().unwrap();
-            let renderer = resources.renderer.read().unwrap();
+            let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
+                log::warn!("GpuCanvasResources not registered in prepare (3D)");
+                return vec![];
+            };
+            let Ok(renderer) = resources.renderer.read() else {
+                log::warn!("Renderer lock poisoned in prepare (3D)");
+                return vec![];
+            };
 
             let mvp = glam::Mat4::orthographic_rh(0.0, self.screen_w, self.screen_h, 0.0, -1.0, 1.0);
             renderer.update_mvp(queue, mvp);
@@ -167,8 +184,11 @@ impl CallbackTrait for Canvas3DCallback {
         let vertex_size = vertex_data.len();
         let index_size = index_data.len();
 
-        let resources = callback_resources.get_mut::<GpuCanvasResources>().unwrap();
-        
+        let Some(resources) = callback_resources.get_mut::<GpuCanvasResources>() else {
+            log::warn!("GpuCanvasResources not registered in prepare (3D, buffers)");
+            return vec![];
+        };
+
         let buffers = resources.buffers_3d.get_or_insert_with(|| {
             let vb = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Canvas 3D Vertex Buffer"),
@@ -233,7 +253,9 @@ impl CallbackTrait for Canvas3DCallback {
             return;
         }
 
-        let renderer = resources.renderer.read().unwrap();
+        let Ok(renderer) = resources.renderer.read() else {
+            return;
+        };
 
         render_pass.set_pipeline(&renderer.pipeline_3d);
         render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);

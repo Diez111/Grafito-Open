@@ -6,6 +6,7 @@ pub mod id;
 pub mod macros;
 pub mod object;
 pub mod spatial;
+pub mod validation;
 
 pub use constraints::*;
 pub use document::*;

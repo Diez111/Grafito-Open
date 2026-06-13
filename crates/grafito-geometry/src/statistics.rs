@@ -563,7 +563,7 @@ pub fn f_distribution_pdf(x: f64, d1: f64, d2: f64) -> f64 {
     let half_d1 = d1 / 2.0;
     let half_d2 = d2 / 2.0;
     let ln_coeff = half_d1 * d1.ln() + half_d2 * d2.ln() - gamma_ln(half_d1) - gamma_ln(half_d2)
-        + gamma_ln(half_d1 + half_d2);
+        - gamma_ln(half_d1 + half_d2);
     let ln_val = ln_coeff + (half_d1 - 1.0) * x.ln() - (half_d1 + half_d2) * (d1 * x + d2).ln();
     ln_val.exp()
 }
@@ -672,7 +672,7 @@ pub fn cauchy_pdf(x: f64, x0: f64, gamma: f64) -> f64 {
 }
 
 pub fn cauchy_cdf(x: f64, x0: f64, gamma: f64) -> f64 {
-    0.5 + (x - x0).atan() / (std::f64::consts::PI * gamma)
+    0.5 + ((x - x0) / gamma).atan() / std::f64::consts::PI
 }
 
 pub fn pareto_pdf(x: f64, xm: f64, alpha: f64) -> f64 {

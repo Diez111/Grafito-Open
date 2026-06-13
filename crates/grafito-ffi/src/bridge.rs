@@ -1,6 +1,7 @@
 //! GrafitoEngine — API principal expuesta via UniFFI
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use grafito_core::{Document, GeoObject, ObjectId};
 use grafito_geometry::{Camera3D, Color, Point2};
 use glam::Vec2;
@@ -52,11 +53,11 @@ impl GrafitoEngine {
     }
 
     pub fn get_snapshot(self: &Arc<Self>) -> DocumentSnapshot {
-        let doc = self.document.lock().unwrap();
-        let selected = self.selected_id.lock().unwrap();
-        let view_mode = self.view_mode.lock().unwrap();
-        let undo_stack = self.undo_stack.lock().unwrap();
-        let redo_stack = self.redo_stack.lock().unwrap();
+        let doc = self.document.lock();
+        let selected = self.selected_id.lock();
+        let view_mode = self.view_mode.lock();
+        let undo_stack = self.undo_stack.lock();
+        let redo_stack = self.redo_stack.lock();
 
         let objects: Vec<ObjectDto> = doc.objects_iter()
             .map(|(_, obj)| geo_object_to_dto(obj))
@@ -84,7 +85,7 @@ impl GrafitoEngine {
 
     pub fn process_command(self: &Arc<Self>, input: String) -> CommandResult {
         self.save_state();
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         let mut input_text = input;
         let outcome = crate::command_processor::process_input(&mut doc, &mut input_text);
         if outcome.success {
@@ -105,7 +106,7 @@ impl GrafitoEngine {
     pub fn delete_object(self: &Arc<Self>, id: String) -> bool {
         if let Some(obj_id) = parse_object_id(&id) {
             self.save_state();
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             doc.remove_object(obj_id).is_some()
         } else {
             false
@@ -114,7 +115,7 @@ impl GrafitoEngine {
 
     pub fn toggle_visibility(self: &Arc<Self>, id: String) -> bool {
         if let Some(obj_id) = parse_object_id(&id) {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             if let Some(obj) = doc.get_object_mut(obj_id) {
                 let current = obj.is_visible();
                 obj.set_visible(!current);
@@ -126,7 +127,7 @@ impl GrafitoEngine {
 
     pub fn set_object_label(self: &Arc<Self>, id: String, label: String) -> bool {
         if let Some(obj_id) = parse_object_id(&id) {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             if let Some(obj) = doc.get_object_mut(obj_id) {
                 obj.set_label(label);
                 return true;
@@ -137,7 +138,7 @@ impl GrafitoEngine {
 
     pub fn set_object_color(self: &Arc<Self>, id: String, r: f32, g: f32, b: f32) -> bool {
         if let Some(obj_id) = parse_object_id(&id) {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             if let Some(obj) = doc.get_object_mut(obj_id) {
                 obj.set_color(Color::new(r, g, b, 1.0));
                 return true;
@@ -147,14 +148,14 @@ impl GrafitoEngine {
     }
 
     pub fn set_variable(self: &Arc<Self>, name: String, value: f64) {
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         doc.set_variable(name, value);
     }
 
     pub fn undo(self: &Arc<Self>) -> bool {
-        let mut undo_stack = self.undo_stack.lock().unwrap();
-        let mut redo_stack = self.redo_stack.lock().unwrap();
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
+        let mut undo_stack = self.undo_stack.lock();
+        let mut redo_stack = self.redo_stack.lock();
         if let Some(prev_doc) = undo_stack.pop() {
             redo_stack.push(doc.clone());
             *doc = prev_doc;
@@ -165,9 +166,9 @@ impl GrafitoEngine {
     }
 
     pub fn redo(self: &Arc<Self>) -> bool {
-        let mut undo_stack = self.undo_stack.lock().unwrap();
-        let mut redo_stack = self.redo_stack.lock().unwrap();
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
+        let mut undo_stack = self.undo_stack.lock();
+        let mut redo_stack = self.redo_stack.lock();
         if let Some(next_doc) = redo_stack.pop() {
             undo_stack.push(doc.clone());
             *doc = next_doc;
@@ -179,18 +180,18 @@ impl GrafitoEngine {
 
     pub fn clear(self: &Arc<Self>) {
         self.save_state();
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         doc.clear();
-        self.selected_id.lock().unwrap().take();
+        self.selected_id.lock().take();
     }
 
     pub fn select_object(self: &Arc<Self>, id: Option<String>) {
-        let mut selected = self.selected_id.lock().unwrap();
+        let mut selected = self.selected_id.lock();
         *selected = id.and_then(|s| parse_object_id(&s));
     }
 
     pub fn pick_object_at(self: &Arc<Self>, screen_x: f32, screen_y: f32) -> Option<String> {
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         let screen = Vec2::new(screen_x, screen_y);
         let world = doc.view().screen_to_world(screen);
         let tolerance = 10.0 / doc.view().scale;
@@ -200,61 +201,61 @@ impl GrafitoEngine {
     pub fn create_canvas_renderer(self: &Arc<Self>) -> Arc<CanvasRenderer> {
         CanvasRenderer::new(
             self.clone(),
-            *self.screen_width.lock().unwrap() as u32,
-            *self.screen_height.lock().unwrap() as u32,
+            *self.screen_width.lock() as u32,
+            *self.screen_height.lock() as u32,
         )
     }
 
     pub fn update_screen_size(self: &Arc<Self>, width: f32, height: f32) {
-        *self.screen_width.lock().unwrap() = width;
-        *self.screen_height.lock().unwrap() = height;
-        self.document.lock().unwrap().view_mut().screen_size = glam::Vec2::new(width, height);
-        self.camera.lock().unwrap().aspect = width / height.max(1.0);
+        *self.screen_width.lock() = width;
+        *self.screen_height.lock() = height;
+        self.document.lock().view_mut().screen_size = glam::Vec2::new(width, height);
+        self.camera.lock().aspect = width / height.max(1.0);
     }
 
     pub fn set_view_mode(self: &Arc<Self>, mode: String) {
-        *self.view_mode.lock().unwrap() = mode;
+        *self.view_mode.lock() = mode;
     }
 
     pub fn set_tool(self: &Arc<Self>, tool: ToolDto) {
-        *self.current_tool.lock().unwrap() = tool;
+        *self.current_tool.lock() = tool;
     }
 
     pub fn get_tool(self: &Arc<Self>) -> ToolDto {
-        self.current_tool.lock().unwrap().clone()
+        self.current_tool.lock().clone()
     }
 
     pub fn set_dark_mode(self: &Arc<Self>, dark: bool) {
-        *self.dark_mode.lock().unwrap() = dark;
+        *self.dark_mode.lock() = dark;
     }
 
     pub fn is_dark_mode(self: &Arc<Self>) -> bool {
-        *self.dark_mode.lock().unwrap()
+        *self.dark_mode.lock()
     }
 
     pub fn canvas_pan(self: &Arc<Self>, dx: f32, dy: f32) {
         if self.get_view_mode() == "3D" {
-            let mut cam = self.camera.lock().unwrap();
+            let mut cam = self.camera.lock();
             cam.orbit(dx * 0.005, dy * 0.005);
         } else {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             doc.view_mut().pan(glam::Vec2::new(dx, dy));
         }
     }
 
     pub fn canvas_zoom(self: &Arc<Self>, factor: f32, center_x: f32, center_y: f32) {
         if self.get_view_mode() == "3D" {
-            let mut cam = self.camera.lock().unwrap();
+            let mut cam = self.camera.lock();
             cam.zoom(factor);
         } else {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             let anchor = Vec2::new(center_x, center_y);
             doc.view_mut().zoom(factor, anchor);
         }
     }
 
     pub fn canvas_tap(self: &Arc<Self>, x: f32, y: f32) -> CommandResult {
-        let tool = self.current_tool.lock().unwrap().clone();
+        let tool = self.current_tool.lock().clone();
         
         // Save state BEFORE acquiring the document lock to prevent a Mutex deadlock
         match tool {
@@ -262,7 +263,7 @@ impl GrafitoEngine {
             _ => self.save_state(),
         }
 
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         let world = doc.view().screen_to_world(Vec2::new(x, y));
         
         match tool {
@@ -283,7 +284,7 @@ impl GrafitoEngine {
                 }
             }
             ToolDto::Line => {
-                let mut pts = self.pending_points.lock().unwrap();
+                let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 2 {
                     let id = doc.add_object(GeoObject::Line(grafito_core::LineObj::new(pts[0], pts[1])));
@@ -294,7 +295,7 @@ impl GrafitoEngine {
                 }
             }
             ToolDto::Circle => {
-                let mut pts = self.pending_points.lock().unwrap();
+                let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 2 {
                     let r = pts[0].distance(&pts[1]);
@@ -306,7 +307,7 @@ impl GrafitoEngine {
                 }
             }
             ToolDto::Polygon => {
-                let mut pts = self.pending_points.lock().unwrap();
+                let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() >= 3 && world.distance(&pts[0]) < (20.0 / doc.view().scale) {
                     let mut final_pts = pts.clone();
@@ -321,29 +322,29 @@ impl GrafitoEngine {
             ToolDto::Fractal => {
                 let mut cmd = "Mandelbrot[]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Fractal created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::Attractor => {
                 let mut cmd = "Lorenz[]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Attractor created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::Histogram => {
                 let mut cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Histogram created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::ScatterPlot => {
                 let mut cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Scatter Plot created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::Tangent => {
-                let mut pts = self.pending_points.lock().unwrap();
+                let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 3 {
                     let r = pts[0].distance(&pts[1]);
@@ -356,7 +357,7 @@ impl GrafitoEngine {
                 }
             }
             ToolDto::Perpendicular => {
-                let mut pts = self.pending_points.lock().unwrap();
+                let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 2 {
                     let mut cmd = format!("PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]", pts[0].x, pts[0].y, pts[1].x, pts[1].y);
@@ -370,19 +371,19 @@ impl GrafitoEngine {
             ToolDto::DomainColoring => {
                 let mut cmd = "DomainColoring[z^2 + 1, -2, 2, -2, 2]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Domain coloring created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::HeatMap => {
                 let mut cmd = "HeatMap[sin(x)*cos(y), -3, 3, -3, 3]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Heat map created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             ToolDto::ComplexGrid => {
                 let mut cmd = "ComplexGrid[z^3 - 1, -2, 2, -2, 2]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
-                *self.current_tool.lock().unwrap() = ToolDto::Select;
+                *self.current_tool.lock() = ToolDto::Select;
                 CommandResult { success: outcome.success, message: outcome.message.or(Some("Complex grid created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
             }
             _ => CommandResult {
@@ -395,7 +396,7 @@ impl GrafitoEngine {
 
     pub fn canvas_drag_point(self: &Arc<Self>, object_id: String, x: f32, y: f32) -> bool {
         if let Some(id) = parse_object_id(&object_id) {
-            let mut doc = self.document.lock().unwrap();
+            let mut doc = self.document.lock();
             let world = doc.view().screen_to_world(Vec2::new(x, y));
             if doc.is_free_object(&id) {
                 doc.move_point(id, world);
@@ -408,24 +409,24 @@ impl GrafitoEngine {
     }
 
     pub fn zoom_to_fit(self: &Arc<Self>) {
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         let view = doc.view_mut();
         view.offset = Point2::new(0.0, 0.0);
         view.scale = 1.0;
     }
 
     pub fn camera_orbit(self: &Arc<Self>, delta_azimuth: f32, delta_elevation: f32) {
-        let mut camera = self.camera.lock().unwrap();
+        let mut camera = self.camera.lock();
         camera.orbit(delta_azimuth, delta_elevation);
     }
 
     pub fn camera_dolly(self: &Arc<Self>, delta: f32) {
-        let mut camera = self.camera.lock().unwrap();
+        let mut camera = self.camera.lock();
         camera.distance = (camera.distance - delta).clamp(1.0, 100.0);
     }
 
     pub fn get_spreadsheet(self: &Arc<Self>) -> SpreadsheetDto {
-        let doc = self.document.lock().unwrap();
+        let doc = self.document.lock();
         let (rows, cols) = doc.spreadsheet_dim();
         let mut cells = Vec::new();
         for r in 0..rows {
@@ -444,7 +445,7 @@ impl GrafitoEngine {
     }
 
     pub fn set_cell(self: &Arc<Self>, row: u32, col: u32, value: String) {
-        let mut doc = self.document.lock().unwrap();
+        let mut doc = self.document.lock();
         doc.set_spreadsheet_cell(row as usize, col as usize, value);
     }
 
@@ -476,13 +477,13 @@ impl GrafitoEngine {
     }
 
     pub fn save_to_file(self: &Arc<Self>, path: String) -> bool {
-        let doc = self.document.lock().unwrap();
+        let doc = self.document.lock();
         persist::save_document(&doc, &path)
     }
 
     pub fn load_from_file(self: &Arc<Self>, path: String) -> bool {
         if let Some(doc) = persist::load_document(&path) {
-            *self.document.lock().unwrap() = doc;
+            *self.document.lock() = doc;
             true
         } else {
             false
@@ -495,11 +496,11 @@ impl GrafitoEngine {
 
 impl GrafitoEngine {
     pub fn get_view_mode(&self) -> String {
-        self.view_mode.lock().unwrap().clone()
+        self.view_mode.lock().clone()
     }
 
     pub fn get_dark_mode(&self) -> bool {
-        *self.dark_mode.lock().unwrap()
+        *self.dark_mode.lock()
     }
 
     pub fn get_document(&self) -> Arc<Mutex<Document>> {
@@ -511,9 +512,9 @@ impl GrafitoEngine {
     }
 
     fn save_state(&self) {
-        let doc = self.document.lock().unwrap();
-        let mut undo_stack = self.undo_stack.lock().unwrap();
-        let mut redo_stack = self.redo_stack.lock().unwrap();
+        let doc = self.document.lock();
+        let mut undo_stack = self.undo_stack.lock();
+        let mut redo_stack = self.redo_stack.lock();
         undo_stack.push(doc.clone());
         if undo_stack.len() > MAX_UNDO { undo_stack.remove(0); }
         redo_stack.clear();

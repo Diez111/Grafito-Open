@@ -29,8 +29,16 @@ pub fn save_document(doc: &Document, path: &str) -> bool {
 pub fn load_document(path: &str) -> Option<Document> {
     match fs::read_to_string(path) {
         Ok(json) => {
+            if let Err(e) = grafito_core::validation::validate_document_json(&json) {
+                log::error!("Document validation failed for {}: {}", path, e);
+                return None;
+            }
             match serde_json::from_str::<Document>(&json) {
                 Ok(doc) => {
+                    if let Err(e) = grafito_core::validation::validate_document(&doc) {
+                        log::error!("Document validation failed for {}: {}", path, e);
+                        return None;
+                    }
                     log::info!("Document loaded from {}", path);
                     Some(doc)
                 }

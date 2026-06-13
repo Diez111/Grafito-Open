@@ -59,7 +59,37 @@ pub fn gamma(x: f64) -> f64 {
 /// # Returns
 /// ln(Γ(x))
 pub fn ln_gamma(x: f64) -> f64 {
-    gamma(x).ln()
+    if x <= 0.0 {
+        return f64::NAN;
+    }
+    // Use the Lanczos approximation directly on ln(Γ(x)).
+    if x < 0.5 {
+        // Reflection formula.
+        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - ln_gamma(1.0 - x);
+    }
+
+    let g = 7.0;
+    #[allow(clippy::inconsistent_digit_grouping)]
+    let c = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+
+    let x = x - 1.0;
+    let mut sum = c[0];
+    for (i, &ci) in c.iter().enumerate().skip(1) {
+        sum += ci / (x + i as f64);
+    }
+
+    let t = x + g + 0.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + sum.ln()
 }
 
 /// Compute the Beta function B(a, b).
@@ -74,12 +104,18 @@ pub fn ln_gamma(x: f64) -> f64 {
 /// # Returns
 /// B(a, b)
 pub fn beta(a: f64, b: f64) -> f64 {
-    gamma(a) * gamma(b) / gamma(a + b)
+    if a <= 0.0 || b <= 0.0 {
+        return f64::NAN;
+    }
+    (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)).exp()
 }
 
 /// Compute the Bessel function of the first kind J_n(x) using series expansion.
 ///
 /// J_n(x) = Σ_{m=0}^∞ (-1)^m / (m! Γ(m+n+1)) * (x/2)^(2m+n)
+///
+/// **Warning**: This series expansion is only accurate for small values of x (x < ~15.0).
+/// For larger x, it will suffer from catastrophic cancellation and return incorrect results or NaN.
 ///
 /// # Arguments
 /// * `n` - Order (integer)
@@ -88,6 +124,11 @@ pub fn beta(a: f64, b: f64) -> f64 {
 /// # Returns
 /// J_n(x)
 pub fn bessel_j(n: i32, x: f64) -> f64 {
+    if n < 0 {
+        // For integer orders: J_{-n}(x) = (-1)^n J_n(x)
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        return sign * bessel_j(-n, x);
+    }
     let n = n as f64;
     let mut sum = 0.0;
     let mut term = (x / 2.0).powf(n) / gamma(n + 1.0);
@@ -109,33 +150,77 @@ pub fn bessel_j(n: i32, x: f64) -> f64 {
 ///
 /// For integer n, use the limit form.
 ///
+/// **Warning**: This implementation relies on the series expansion of J_n(x) and Y_0(x),
+/// which is only accurate for small x (x < ~10.0). For larger x, it diverges.
+///
 /// # Arguments
 /// * `n` - Order (integer)
 /// * `x` - Input value (must be positive)
 ///
 /// # Returns
 /// Y_n(x)
+fn bessel_y0(x: f64) -> f64 {
+    // Series expansion for Y_0(x) for x > 0.
+    let j0 = bessel_j(0, x);
+    let gamma_euler = 0.5772156649015329;
+    let z = x * x / 4.0;
+    let mut sum = 0.0;
+    let mut harmonic = 0.0;
+    let mut fact2 = 1.0; // (k!)^2
+    let mut z_pow = z;
+    let mut sign = 1.0; // (-1)^(k-1)
+    for k in 1..100 {
+        harmonic += 1.0 / k as f64;
+        fact2 *= (k * k) as f64;
+        let term = sign * harmonic * z_pow / fact2;
+        sum += term;
+        if term.abs() < 1e-15 {
+            break;
+        }
+        sign = -sign;
+        z_pow *= z;
+    }
+    (2.0 / std::f64::consts::PI) * (j0 * ((x / 2.0).ln() + gamma_euler) + sum)
+}
+
+fn bessel_y1_numerical(x: f64) -> f64 {
+    // Y_1(x) = -d/dx Y_0(x) computed via central difference.
+    let h = 1e-7 * x.max(1e-6);
+    let y0_plus = bessel_y0(x + h);
+    let y0_minus = bessel_y0(x - h);
+    -(y0_plus - y0_minus) / (2.0 * h)
+}
+
 pub fn bessel_y(n: i32, x: f64) -> f64 {
     if x <= 0.0 {
         return f64::NAN;
     }
 
-    // For integer n, use asymptotic expansion or numerical differentiation
-    // Here we use a simple approximation for small n
-    let epsilon = 1e-8;
+    // Use identities for negative integer orders.
+    if n < 0 {
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        return sign * bessel_y(-n, x);
+    }
 
-    let j_n_plus = bessel_j(n, x + epsilon);
-    let j_n_minus = bessel_j(n, x - epsilon);
-    let j_n = bessel_j(n, x);
+    let y0 = bessel_y0(x);
+    if n == 0 {
+        return y0;
+    }
 
-    // Numerical approximation using derivative
-    let derivative = (j_n_plus - j_n_minus) / (2.0 * epsilon);
+    let y1 = bessel_y1_numerical(x);
+    if n == 1 {
+        return y1;
+    }
 
-    // Y_n ≈ (2/π) * (ln(x/2) + γ) * J_n - (1/π) * Σ ...
-    // Simplified approximation for demonstration
-    let gamma_euler = 0.5772156649015329;
-    (2.0 / std::f64::consts::PI) * ((x / 2.0).ln() + gamma_euler) * j_n
-        - (1.0 / std::f64::consts::PI) * derivative
+    // Forward recurrence: Y_{m+1}(x) = (2m/x) Y_m(x) - Y_{m-1}(x).
+    let mut y_m1 = y0;
+    let mut y_0 = y1;
+    for m in 1..n {
+        let y_p1 = (2.0 * m as f64 / x) * y_0 - y_m1;
+        y_m1 = y_0;
+        y_0 = y_p1;
+    }
+    y_0
 }
 
 /// Compute the modified Bessel function of the first kind I_n(x).
@@ -149,6 +234,10 @@ pub fn bessel_y(n: i32, x: f64) -> f64 {
 /// # Returns
 /// I_n(x)
 pub fn bessel_i(n: i32, x: f64) -> f64 {
+    if n < 0 {
+        // For integer orders: I_{-n}(x) = I_n(x)
+        return bessel_i(-n, x);
+    }
     let n = n as f64;
     let mut sum = 0.0;
     let mut term = (x / 2.0).powf(n) / gamma(n + 1.0);

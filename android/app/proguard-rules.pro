@@ -1,0 +1,2 @@
+-keep class uniffi.grafito_ffi.** { *; }
+-keep class ai.grafito.app.bridge.** { *; }

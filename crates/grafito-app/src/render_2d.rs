@@ -9,7 +9,7 @@ use grafito_geometry::{Color, Point2};
 use grafito_ui::Tool;
 
 fn to_color32(c: Color) -> Color32 {
-    Color32::from_rgba_premultiplied(
+    Color32::from_rgba_unmultiplied(
         (c.r * 255.0) as u8,
         (c.g * 255.0) as u8,
         (c.b * 255.0) as u8,
@@ -119,7 +119,17 @@ impl GrafitoApp {
                 .screen_to_world(GlamVec2::new(local.x, local.y));
 
             if self.snap_to_grid {
-                world = Point2::new(world.x.round(), world.y.round());
+                let pixels_per_unit = self.document.view().scale;
+                let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+                let magnitude = target_world_step.log10().floor();
+                let base = 10f64.powf(magnitude);
+                let factor = target_world_step / base;
+                let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
+                
+                world = Point2::new(
+                    (world.x / major_step).round() * major_step,
+                    (world.y / major_step).round() * major_step
+                );
             }
 
             // ── Point tool: drag-release to place (avoids click sensitivity bug) ──
@@ -240,6 +250,19 @@ impl GrafitoApp {
                         self.selected_object = None;
                         self.current_tool = Tool::Select;
                     }
+                    Tool::Locus | Tool::Midpoint | Tool::Slider | Tool::Button
+                    | Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope
+                    | Tool::Image => {
+                        let mut state = self.tool_state.clone();
+                        let result = crate::tool_dispatcher::dispatch_tool(
+                            self.current_tool, &mut state, &mut self.document, world);
+                        self.tool_state = state;
+                        if result.reset_tool { self.current_tool = Tool::Select; }
+                        if let Some(msg) = result.message { self.cas_result = msg; }
+                        for obj in result.objects {
+                            self.document.add_object(obj);
+                        }
+                    }
                 }
             }
 
@@ -291,32 +314,48 @@ impl GrafitoApp {
                     };
                     self.document
                         .view_mut()
-                        .zoom(factor.clamp(0.1, 10.0), GlamVec2::new(local.x, local.y));
+                        .zoom(factor.clamp(0.8, 1.25), GlamVec2::new(local.x, local.y));
                 }
             }
 
-            // ── Tool ghost preview ───────────────────────────────────────────
+            // ── Tool ghost preview (unified: reads tool_state.pending, not pending_points) ──
             self.tool_ghost = None;
+            let pts = &self.tool_state.pending;
             match self.current_tool {
-                Tool::Point => {
+                Tool::Point | Tool::Point3D => {
                     self.tool_ghost = Some(GeoObject::Point(PointObj::new(world)));
                 }
-                Tool::Line => {
-                    if let Some(first) = self.pending_points.first() {
+                Tool::Line | Tool::Distance | Tool::Perpendicular | Tool::Midpoint => {
+                    if let Some(first) = pts.first() {
                         self.tool_ghost = Some(GeoObject::Line(LineObj::new(*first, world)));
                     }
                 }
-                Tool::Circle => {
-                    if let Some(center) = self.pending_points.first() {
+                Tool::Circle | Tool::Tangent => {
+                    if let Some(center) = pts.first() {
                         let radius = center.distance(&world);
                         self.tool_ghost = Some(GeoObject::Circle(CircleObj::new(*center, radius)));
                     }
                 }
                 Tool::Polygon => {
-                    if let Some(last) = self.pending_points.last() {
+                    if let Some(last) = pts.last() {
                         self.tool_ghost = Some(GeoObject::Line(LineObj::new(*last, world)));
                     }
                 }
+                Tool::Angle if pts.len() == 1 => {
+                    self.tool_ghost = Some(GeoObject::Line(LineObj::new(pts[0], world)));
+                }
+                Tool::Angle if pts.len() == 2 => {
+                    self.tool_ghost = Some(GeoObject::Line(LineObj::new(pts[1], world)));
+                }
+                Tool::Slider => {
+                    let pos = world;
+                    let bar = LineObj::new(
+                        Point2::new(pos.x - 1.5, pos.y),
+                        Point2::new(pos.x + 1.5, pos.y),
+                    );
+                    self.tool_ghost = Some(GeoObject::Line(bar));
+                }
+                Tool::Locus => {}
                 _ => {}
             }
 
@@ -979,7 +1018,7 @@ impl GrafitoApp {
                             let mut best_y = if let Some(y1) = y1_opt {
                                 y1
                             } else {
-                                y2_opt.unwrap()
+                                y2_opt.unwrap_or(0.0)
                             };
 
                             if let Ok(ast) = &prepared {

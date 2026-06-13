@@ -8,6 +8,7 @@ mod android_jni {
         _thiz: jni::objects::JObject,
         surface: jni::objects::JObject,
     ) -> jni::sys::jlong {
+        #[link(name = "android")]
         extern "C" {
             fn ANativeWindow_fromSurface(
                 env: *mut std::ffi::c_void,
@@ -20,6 +21,9 @@ mod android_jni {
                 env.get_native_interface() as *mut _,
                 surface.into_raw(),
             );
+            if ptr.is_null() {
+                return 0;
+            }
             ptr as jni::sys::jlong
         }
     }

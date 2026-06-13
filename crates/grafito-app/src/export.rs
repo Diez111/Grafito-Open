@@ -3,6 +3,19 @@
 use anyhow::{Context, Result};
 use grafito_core::Document;
 
+fn escape_xml(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&apos;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
 /// Save document to a JSON file.
 pub fn save_document(doc: &Document, path: &str) -> Result<()> {
     let json = serde_json::to_string_pretty(doc).context("Failed to serialize document")?;
@@ -13,7 +26,11 @@ pub fn save_document(doc: &Document, path: &str) -> Result<()> {
 /// Load document from a JSON file.
 pub fn load_document(path: &str) -> Result<Document> {
     let json = std::fs::read_to_string(path).context("Failed to read file")?;
+    grafito_core::validation::validate_document_json(&json)
+        .map_err(|e| anyhow::anyhow!("Document validation failed: {}", e))?;
     let doc: Document = serde_json::from_str(&json).context("Failed to parse document")?;
+    grafito_core::validation::validate_document(&doc)
+        .map_err(|e| anyhow::anyhow!("Document validation failed: {}", e))?;
     Ok(doc)
 }
 
@@ -116,7 +133,7 @@ pub fn export_svg(doc: &Document, width: f64, height: f64) -> String {
                     s.y,
                     rgb,
                     txt.font_size,
-                    txt.content
+                    escape_xml(&txt.content)
                 ));
             }
             _ => {}

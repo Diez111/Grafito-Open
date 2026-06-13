@@ -456,6 +456,22 @@ fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
 }
 
 fn eval_single_point(expr: &str, x_value: f64) -> Option<f64> {
+    const MAX_EXPR_LEN: usize = 5000;
+    const MAX_PAREN_DEPTH: usize = 64;
+    if expr.len() > MAX_EXPR_LEN {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    for c in expr.chars() {
+        if c == '(' {
+            depth += 1;
+            if depth > MAX_PAREN_DEPTH as i32 {
+                return None;
+            }
+        } else if c == ')' {
+            depth -= 1;
+        }
+    }
     // Quick magnitude check — avoids full preprocess_expr recursion risk
     let mut ctx = setup_math_context();
     let _ = ctx.set_value("x".to_string(), Value::Float(x_value));
@@ -487,7 +503,8 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
         return None;
     }
     if num_terms == 0 {
-        return Some("0".to_string());
+        let identity = if is_product { "1" } else { "0" };
+        return Some(identity.to_string());
     }
 
     let step: i64 = if end >= start { 1 } else { -1 };
@@ -546,12 +563,17 @@ fn find_matching_close(s: &str, open: usize) -> Option<usize> {
 fn expand_sum_product(expr: &str) -> String {
     let mut s = expr.to_string();
     let mut new_len;
-    while let Some(expanded) = expand_sum_product_once(&s) {
-        new_len = expanded.len();
-        if new_len == s.len() {
+    const MAX_EXPANDED_LEN: usize = 50_000;
+    while s.len() <= MAX_EXPANDED_LEN {
+        if let Some(expanded) = expand_sum_product_once(&s) {
+            new_len = expanded.len();
+            if new_len == s.len() {
+                break;
+            }
+            s = expanded;
+        } else {
             break;
         }
-        s = expanded;
     }
     s
 }
@@ -793,15 +815,16 @@ pub fn eval_batch_1d(
     let expr_clean = expr.trim();
     if expr_clean.starts_with("deriv(") && expr_clean.ends_with(')') {
         let inner = &expr_clean[6..expr_clean.len() - 1];
-        let h = 1e-5;
+        let eps = f64::EPSILON.sqrt();
         let xs_vec: Vec<f64> = xs.collect();
-        let xs1: Vec<f64> = xs_vec.iter().map(|&x| x + h).collect();
-        let xs2: Vec<f64> = xs_vec.iter().map(|&x| x - h).collect();
+        let hs: Vec<f64> = xs_vec.iter().map(|&x| eps * x.abs().max(1.0)).collect();
+        let xs1: Vec<f64> = xs_vec.iter().zip(&hs).map(|(&x, &h)| x + h).collect();
+        let xs2: Vec<f64> = xs_vec.iter().zip(&hs).map(|(&x, &h)| x - h).collect();
         let res1 = eval_batch_1d(inner, var_name, xs1.into_iter(), vars)?;
         let res2 = eval_batch_1d(inner, var_name, xs2.into_iter(), vars)?;
 
         let mut results = Vec::with_capacity(res1.len());
-        for (y1, y2) in res1.into_iter().zip(res2) {
+        for ((y1, y2), h) in res1.into_iter().zip(res2).zip(hs) {
             if let (Some(y1), Some(y2)) = (y1, y2) {
                 results.push(Some((y1 - y2) / (2.0 * h)));
             } else {

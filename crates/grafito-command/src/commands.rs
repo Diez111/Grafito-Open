@@ -793,11 +793,18 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 return result;
             }
             "Script" if !cmd.args.is_empty() => {
+                const MAX_SCRIPT_COMMANDS: usize = 100;
                 let commands: Vec<String> = cmd.args[0]
                     .split(';')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
+                    .take(MAX_SCRIPT_COMMANDS)
                     .collect();
+                if commands.len() == MAX_SCRIPT_COMMANDS && cmd.args[0].split(';').filter(|s| !s.trim().is_empty()).count() > MAX_SCRIPT_COMMANDS {
+                    result = Some("Script contains too many commands".into());
+                    input_text.clear();
+                    return result;
+                }
                 let mut output = String::new();
                 for c in &commands {
                     let mut temp = c.clone();

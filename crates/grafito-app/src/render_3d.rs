@@ -17,7 +17,7 @@ fn project_segment(
     let mut clip_a = mvp * a.to_vec3().extend(1.0);
     let mut clip_b = mvp * b.to_vec3().extend(1.0);
 
-    let near = 0.01f32;
+    let near = camera.near;
 
     if clip_a.w < near && clip_b.w < near {
         return None;
