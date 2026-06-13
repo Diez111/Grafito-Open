@@ -64,7 +64,10 @@ impl Theme {
         visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
 
         visuals.widgets.hovered.bg_fill = self.button_hover;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, Color32::from_black_alpha(if is_dark { 40 } else { 10 }));
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(
+            1.0,
+            Color32::from_black_alpha(if is_dark { 40 } else { 10 }),
+        );
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
 
@@ -91,12 +94,12 @@ impl Theme {
 pub const DARK: Theme = Theme {
     canvas_bg: Color32::from_rgb(18, 18, 20), // Premium very dark grey/black
     canvas_grid_minor: Color32::from_rgb(34, 34, 38),
-    panel_bg: Color32::from_rgb(26, 26, 30),  // Deep subtle grey for panels
+    panel_bg: Color32::from_rgb(26, 26, 30), // Deep subtle grey for panels
     toolbar_bg: Color32::from_rgb(26, 26, 30),
     text_primary: Color32::from_rgb(235, 235, 240),
-    accent: Color32::from_rgb(94, 139, 255),        // Vibrant modern blue
-    danger: Color32::from_rgb(255, 74, 90),         // Vibrant red
-    success: Color32::from_rgb(46, 212, 122),       // Vibrant green
+    accent: Color32::from_rgb(94, 139, 255), // Vibrant modern blue
+    danger: Color32::from_rgb(255, 74, 90),  // Vibrant red
+    success: Color32::from_rgb(46, 212, 122), // Vibrant green
     selection_bg: Color32::from_rgba_premultiplied(94, 139, 255, 40),
     input_bg: Color32::from_rgb(20, 20, 24),
     input_text: Color32::from_rgb(240, 240, 245),

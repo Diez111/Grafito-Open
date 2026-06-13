@@ -121,7 +121,11 @@ impl Document {
                 GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_) => {
                     self.complex_base_symbol.clone()
                 }
-                _ => name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()),
+                _ => name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
             };
             let n = self.next_label_number.entry(base_name.clone()).or_insert(1);
             let label = if *n == 1 {
@@ -184,7 +188,8 @@ impl Document {
         inputs: &[ObjectId],
     ) -> (ObjectId, usize) {
         let id = self.add_object(obj);
-        let cons_id = self.constraints
+        let cons_id = self
+            .constraints
             .add_constraint(constraint_name, inputs.to_vec(), vec![id]);
         (id, cons_id)
     }
@@ -216,7 +221,11 @@ impl Document {
     }
 
     /// Move a free 3D point and return IDs of all affected objects.
-    pub fn move_point3d(&mut self, id: ObjectId, new_pos: grafito_geometry::Point3D) -> Vec<ObjectId> {
+    pub fn move_point3d(
+        &mut self,
+        id: ObjectId,
+        new_pos: grafito_geometry::Point3D,
+    ) -> Vec<ObjectId> {
         if !self.constraints.is_free(&id) {
             return vec![];
         }
@@ -248,96 +257,108 @@ impl Document {
 
     pub fn re_evaluate_constraints(&mut self, order: &[usize]) {
         for cons_id in order {
-            let cons_info = self.constraints.get_constraint(*cons_id).map(|c| {
-                (c.name.clone(), c.inputs.clone(), c.outputs.clone(), c.id)
-            });
+            let cons_info = self
+                .constraints
+                .get_constraint(*cons_id)
+                .map(|c| (c.name.clone(), c.inputs.clone(), c.outputs.clone(), c.id));
             if let Some((name, inputs, outputs, cons_id)) = cons_info {
                 match name.as_str() {
-                    "Midpoint"
-                        if inputs.len() >= 2 && !outputs.is_empty() => {
-                            let a = self.get_object(inputs[0]).cloned();
-                            let b = self.get_object(inputs[1]).cloned();
-                            if let (Some(GeoObject::Point(a)), Some(GeoObject::Point(b))) = (&a, &b) {
-                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
-                                    out.position = grafito_geometry::Point2::new(
-                                        (a.position.x + b.position.x) * 0.5,
-                                        (a.position.y + b.position.y) * 0.5,
-                                    );
-                                }
+                    "Midpoint" if inputs.len() >= 2 && !outputs.is_empty() => {
+                        let a = self.get_object(inputs[0]).cloned();
+                        let b = self.get_object(inputs[1]).cloned();
+                        if let (Some(GeoObject::Point(a)), Some(GeoObject::Point(b))) = (&a, &b) {
+                            if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                out.position = grafito_geometry::Point2::new(
+                                    (a.position.x + b.position.x) * 0.5,
+                                    (a.position.y + b.position.y) * 0.5,
+                                );
                             }
                         }
-                    "Translate"
-                        if !inputs.is_empty() && !outputs.is_empty() => {
-                            let obj = self.get_object(inputs[0]).cloned();
-                            let dx = self.get_constraint_param(cons_id, "_tr_dx");
-                            let dy = self.get_constraint_param(cons_id, "_tr_dy");
-                            if let Some(GeoObject::Point(p)) = &obj {
-                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
-                                    out.position = grafito_geometry::Point2::new(
-                                        p.position.x + dx, p.position.y + dy);
-                                }
+                    }
+                    "Translate" if !inputs.is_empty() && !outputs.is_empty() => {
+                        let obj = self.get_object(inputs[0]).cloned();
+                        let dx = self.get_constraint_param(cons_id, "_tr_dx");
+                        let dy = self.get_constraint_param(cons_id, "_tr_dy");
+                        if let Some(GeoObject::Point(p)) = &obj {
+                            if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                out.position = grafito_geometry::Point2::new(
+                                    p.position.x + dx,
+                                    p.position.y + dy,
+                                );
                             }
                         }
-                    "Rotate"
-                        if inputs.len() >= 2 && !outputs.is_empty() => {
-                            let obj = self.get_object(inputs[0]).cloned();
-                            let angle = self.get_constraint_param(cons_id, "_rot_a");
-                            let angle_rad = angle.to_radians();
-                            if let Some(GeoObject::Point(p)) = &obj {
-                                if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
-                                    out.position = grafito_geometry::Point2::new(
-                                        p.position.x * angle_rad.cos() - p.position.y * angle_rad.sin(),
-                                        p.position.x * angle_rad.sin() + p.position.y * angle_rad.cos(),
-                                    );
-                                }
+                    }
+                    "Rotate" if inputs.len() >= 2 && !outputs.is_empty() => {
+                        let obj = self.get_object(inputs[0]).cloned();
+                        let angle = self.get_constraint_param(cons_id, "_rot_a");
+                        let angle_rad = angle.to_radians();
+                        if let Some(GeoObject::Point(p)) = &obj {
+                            if let Some(GeoObject::Point(out)) = self.get_object_mut(outputs[0]) {
+                                out.position = grafito_geometry::Point2::new(
+                                    p.position.x * angle_rad.cos() - p.position.y * angle_rad.sin(),
+                                    p.position.x * angle_rad.sin() + p.position.y * angle_rad.cos(),
+                                );
                             }
                         }
-                    "Intersect"
-                        if inputs.len() >= 2 => {
-                            let a = self.get_object(inputs[0]).cloned();
-                            let b = self.get_object(inputs[1]).cloned();
-                            if let (Some(a), Some(b)) = (&a, &b) {
-                                let pts = doc_intersect(a, b);
-                                for (i, out_id) in outputs.iter().enumerate() {
-                                    if let Some(GeoObject::Point(out)) = self.get_object_mut(*out_id) {
-                                        if let Some(pt) = pts.get(i) {
-                                            out.position = *pt;
-                                        }
+                    }
+                    "Intersect" if inputs.len() >= 2 => {
+                        let a = self.get_object(inputs[0]).cloned();
+                        let b = self.get_object(inputs[1]).cloned();
+                        if let (Some(a), Some(b)) = (&a, &b) {
+                            let pts = doc_intersect(a, b);
+                            for (i, out_id) in outputs.iter().enumerate() {
+                                if let Some(GeoObject::Point(out)) = self.get_object_mut(*out_id) {
+                                    if let Some(pt) = pts.get(i) {
+                                        out.position = *pt;
                                     }
                                 }
                             }
                         }
+                    }
                     "Extrude" if !inputs.is_empty() => {
                         let height = self.get_constraint_param(cons_id, "_ext_h");
-                        if height.abs() < 1e-12 { return; }
+                        if height.abs() < 1e-12 {
+                            return;
+                        }
                         if let Some(GeoObject::Polygon(poly)) = self.get_object(inputs[0]) {
                             let verts = poly.vertices.clone();
-                            if verts.len() < 3 { return; }
+                            if verts.len() < 3 {
+                                return;
+                            }
                             let base_y = 0.0;
                             let top_y = height;
                             let mut seg_idx = 0;
                             for i in 0..verts.len() {
                                 let v = verts[i];
-                                let vn = verts[(i+1)%verts.len()];
+                                let vn = verts[(i + 1) % verts.len()];
                                 let b = Point3D::new(v.x, base_y, v.y);
                                 let t = Point3D::new(v.x, top_y, v.y);
                                 let bn = Point3D::new(vn.x, base_y, vn.y);
                                 let tn = Point3D::new(vn.x, top_y, vn.y);
                                 if seg_idx < outputs.len() {
-                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
-                                        s.a = b; s.b = t;
+                                    if let Some(GeoObject::Segment3D(s)) =
+                                        self.get_object_mut(outputs[seg_idx])
+                                    {
+                                        s.a = b;
+                                        s.b = t;
                                     }
                                 }
                                 seg_idx += 1;
                                 if seg_idx < outputs.len() {
-                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
-                                        s.a = b; s.b = bn;
+                                    if let Some(GeoObject::Segment3D(s)) =
+                                        self.get_object_mut(outputs[seg_idx])
+                                    {
+                                        s.a = b;
+                                        s.b = bn;
                                     }
                                 }
                                 seg_idx += 1;
                                 if seg_idx < outputs.len() {
-                                    if let Some(GeoObject::Segment3D(s)) = self.get_object_mut(outputs[seg_idx]) {
-                                        s.a = t; s.b = tn;
+                                    if let Some(GeoObject::Segment3D(s)) =
+                                        self.get_object_mut(outputs[seg_idx])
+                                    {
+                                        s.a = t;
+                                        s.b = tn;
                                     }
                                 }
                                 seg_idx += 1;
@@ -351,7 +372,10 @@ impl Document {
     }
 
     fn get_constraint_param(&self, cons_id: usize, key: &str) -> f64 {
-        self.variables.get(&format!("{}_{}", key, cons_id)).copied().unwrap_or(0.0)
+        self.variables
+            .get(&format!("{}_{}", key, cons_id))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     pub fn set_constraint_param(&mut self, cons_id: usize, key: &str, value: f64) {
@@ -1035,8 +1059,7 @@ fn doc_intersect(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
                 _ => vec![],
             }
         }
-        (GeoObject::Line(l), GeoObject::Circle(c))
-        | (GeoObject::Circle(c), GeoObject::Line(l)) => {
+        (GeoObject::Line(l), GeoObject::Circle(c)) | (GeoObject::Circle(c), GeoObject::Line(l)) => {
             match intersections::line_circle(l.start, l.end, c.center, c.radius) {
                 IntersectionResult::One(p) => vec![p],
                 IntersectionResult::Two(p1, p2) => vec![p1, p2],

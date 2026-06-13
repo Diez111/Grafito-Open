@@ -124,11 +124,17 @@ impl GrafitoApp {
                 let magnitude = target_world_step.log10().floor();
                 let base = 10f64.powf(magnitude);
                 let factor = target_world_step / base;
-                let major_step = if factor < 2.0 { 1.0 * base } else if factor < 5.0 { 2.0 * base } else { 5.0 * base };
-                
+                let major_step = if factor < 2.0 {
+                    1.0 * base
+                } else if factor < 5.0 {
+                    2.0 * base
+                } else {
+                    5.0 * base
+                };
+
                 world = Point2::new(
                     (world.x / major_step).round() * major_step,
-                    (world.y / major_step).round() * major_step
+                    (world.y / major_step).round() * major_step,
                 );
             }
 
@@ -213,7 +219,10 @@ impl GrafitoApp {
                         if self.pending_points.len() == 2 {
                             let p1 = self.pending_points[0];
                             let p2 = self.pending_points[1];
-                            let mut cmd = format!("Tangent[({:.2}, {:.2}), 1, ({:.2}, {:.2})]", p1.x, p1.y, p2.x, p2.y);
+                            let mut cmd = format!(
+                                "Tangent[({:.2}, {:.2}), 1, ({:.2}, {:.2})]",
+                                p1.x, p1.y, p2.x, p2.y
+                            );
                             crate::commands::process_input(&mut self.document, &mut cmd);
                             self.pending_points.clear();
                             self.tool_ghost = None;
@@ -225,7 +234,10 @@ impl GrafitoApp {
                         if self.pending_points.len() == 2 {
                             let p1 = self.pending_points[0];
                             let p2 = self.pending_points[1];
-                            let mut cmd = format!("PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]", p1.x, p1.y, p2.x, p2.y);
+                            let mut cmd = format!(
+                                "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
+                                p1.x, p1.y, p2.x, p2.y
+                            );
                             crate::commands::process_input(&mut self.document, &mut cmd);
                             self.pending_points.clear();
                             self.tool_ghost = None;
@@ -250,15 +262,29 @@ impl GrafitoApp {
                         self.selected_object = None;
                         self.current_tool = Tool::Select;
                     }
-                    Tool::Locus | Tool::Midpoint | Tool::Slider | Tool::Button
-                    | Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope
+                    Tool::Locus
+                    | Tool::Midpoint
+                    | Tool::Slider
+                    | Tool::Button
+                    | Tool::Distance
+                    | Tool::Angle
+                    | Tool::Area
+                    | Tool::Slope
                     | Tool::Image => {
                         let mut state = self.tool_state.clone();
                         let result = crate::tool_dispatcher::dispatch_tool(
-                            self.current_tool, &mut state, &mut self.document, world);
+                            self.current_tool,
+                            &mut state,
+                            &mut self.document,
+                            world,
+                        );
                         self.tool_state = state;
-                        if result.reset_tool { self.current_tool = Tool::Select; }
-                        if let Some(msg) = result.message { self.cas_result = msg; }
+                        if result.reset_tool {
+                            self.current_tool = Tool::Select;
+                        }
+                        if let Some(msg) = result.message {
+                            self.cas_result = msg;
+                        }
                         for obj in result.objects {
                             self.document.add_object(obj);
                         }
@@ -284,7 +310,8 @@ impl GrafitoApp {
 
             // ── Drag: move selected point or pan in Select mode ──────────────────
             if response.dragged() && self.current_tool == Tool::Select {
-                let moving_point = self.selected_object
+                let moving_point = self
+                    .selected_object
                     .map(|id| self.document.is_free_object(&id))
                     .unwrap_or(false);
                 if moving_point {

@@ -565,35 +565,91 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
         }
         Tool::Locus => {
             painter.circle_filled(c, 2.0, text_color);
-            painter.text(c, egui::Align2::CENTER_CENTER, "⌒", egui::FontId::new(18.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "⌒",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Midpoint => {
             painter.circle_filled(c, 3.0, text_color);
-            painter.text(c, egui::Align2::CENTER_CENTER, "M", egui::FontId::new(14.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "M",
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Distance => {
-            painter.text(c, egui::Align2::CENTER_CENTER, "↔", egui::FontId::new(20.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "↔",
+                egui::FontId::new(20.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Angle => {
-            painter.text(c, egui::Align2::CENTER_CENTER, "∠", egui::FontId::new(20.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "∠",
+                egui::FontId::new(20.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Area => {
-            painter.text(c, egui::Align2::CENTER_CENTER, "⬜", egui::FontId::new(18.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "⬜",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Slope => {
-            painter.text(c, egui::Align2::CENTER_CENTER, "m", egui::FontId::new(16.0, egui::FontFamily::Proportional), text_color);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "m",
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Slider => {
-            painter.line_segment([c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)], stroke);
+            painter.line_segment(
+                [c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)],
+                stroke,
+            );
             painter.circle_filled(c + egui::vec2(4.0, 0.0), 4.0, text_color);
         }
         Tool::Button => {
-            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)), 3.0, stroke);
-            painter.text(c, egui::Align2::CENTER_CENTER, "OK", egui::FontId::new(10.0, egui::FontFamily::Proportional), text_color);
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)),
+                3.0,
+                stroke,
+            );
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "OK",
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                text_color,
+            );
         }
         Tool::Image => {
-            painter.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)), 2.0, stroke);
-            painter.line_segment([c - egui::vec2(4.0, -4.0), c + egui::vec2(4.0, 4.0)], stroke);
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)),
+                2.0,
+                stroke,
+            );
+            painter.line_segment(
+                [c - egui::vec2(4.0, -4.0), c + egui::vec2(4.0, 4.0)],
+                stroke,
+            );
         }
     }
 

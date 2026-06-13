@@ -40,10 +40,18 @@ pub fn dispatch_tool(
     world: Point2,
 ) -> ToolResult {
     match tool {
-        Tool::Select => ToolResult { objects: vec![], message: None, reset_tool: false },
+        Tool::Select => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
         Tool::Point => {
             let obj = GeoObject::Point(grafito_core::PointObj::new(world));
-            ToolResult { objects: vec![obj], message: None, reset_tool: false }
+            ToolResult {
+                objects: vec![obj],
+                message: None,
+                reset_tool: false,
+            }
         }
         Tool::Line => handle_multi_point(state, world, 2, |pts| {
             GeoObject::Line(grafito_core::LineObj::new(pts[0], pts[1]))
@@ -53,33 +61,65 @@ pub fn dispatch_tool(
             GeoObject::Circle(grafito_core::CircleObj::new(pts[0], r))
         }),
         Tool::Polygon => handle_polygon(state, document, world),
-        Tool::Function => ToolResult { objects: vec![], message: None, reset_tool: false },
-        Tool::Point3D => ToolResult { objects: vec![], message: None, reset_tool: false },
-        Tool::Sphere3D => ToolResult { objects: vec![], message: None, reset_tool: false },
-        Tool::Cube3D => ToolResult { objects: vec![], message: None, reset_tool: false },
+        Tool::Function => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
+        Tool::Point3D => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
+        Tool::Sphere3D => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
+        Tool::Cube3D => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
         Tool::Attractor => {
             let cmd = "Lorenz[]".to_string();
             let mut c = cmd;
             grafito_command::commands::process_input(document, &mut c);
-            ToolResult { objects: vec![], message: Some("Lorenz attractor created".into()), reset_tool: true }
+            ToolResult {
+                objects: vec![],
+                message: Some("Lorenz attractor created".into()),
+                reset_tool: true,
+            }
         }
         Tool::Fractal => {
             let cmd = "Mandelbrot[]".to_string();
             let mut c = cmd;
             grafito_command::commands::process_input(document, &mut c);
-            ToolResult { objects: vec![], message: Some("Mandelbrot fractal created".into()), reset_tool: true }
+            ToolResult {
+                objects: vec![],
+                message: Some("Mandelbrot fractal created".into()),
+                reset_tool: true,
+            }
         }
         Tool::Histogram => {
             let cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
             let mut c = cmd;
             grafito_command::commands::process_input(document, &mut c);
-            ToolResult { objects: vec![], message: Some("Histogram created".into()), reset_tool: true }
+            ToolResult {
+                objects: vec![],
+                message: Some("Histogram created".into()),
+                reset_tool: true,
+            }
         }
         Tool::ScatterPlot => {
             let cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
             let mut c = cmd;
             grafito_command::commands::process_input(document, &mut c);
-            ToolResult { objects: vec![], message: Some("Scatter plot created".into()), reset_tool: true }
+            ToolResult {
+                objects: vec![],
+                message: Some("Scatter plot created".into()),
+                reset_tool: true,
+            }
         }
         Tool::Tangent => handle_tangent(state, document, world),
         Tool::Perpendicular => handle_perpendicular(state, document, world),
@@ -97,17 +137,36 @@ pub fn dispatch_tool(
             // Crear slider: usa el sistema de variables + VariableMeta
             let name = format!("v{}", document.variables.len());
             document.set_variable(name.clone(), 0.0);
-            document.variable_meta.insert(name.clone(), grafito_core::VariableMeta {
-                position: world, min: -5.0, max: 5.0, step: 0.1, visible: true,
-            });
-            ToolResult { objects: vec![], message: Some(format!("Slider '{}' created", name)), reset_tool: true }
+            document.variable_meta.insert(
+                name.clone(),
+                grafito_core::VariableMeta {
+                    position: world,
+                    min: -5.0,
+                    max: 5.0,
+                    step: 0.1,
+                    visible: true,
+                },
+            );
+            ToolResult {
+                objects: vec![],
+                message: Some(format!("Slider '{}' created", name)),
+                reset_tool: true,
+            }
         }
         Tool::Button => {
             let label = format!("btn{}", document.objects_iter().count());
             let obj = GeoObject::Text(grafito_core::TextObj::new(&label, world));
-            ToolResult { objects: vec![obj], message: None, reset_tool: true }
+            ToolResult {
+                objects: vec![obj],
+                message: None,
+                reset_tool: true,
+            }
         }
-        Tool::Image => ToolResult { objects: vec![], message: None, reset_tool: false },
+        Tool::Image => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
         Tool::DomainColoring | Tool::HeatMap | Tool::ComplexGrid => {
             let cmd = match tool {
                 Tool::DomainColoring => "DomainColoring[z^2+1, -2, 2, -2, 2]".to_string(),
@@ -116,7 +175,11 @@ pub fn dispatch_tool(
             };
             let mut c = cmd;
             grafito_command::commands::process_input(document, &mut c);
-            ToolResult { objects: vec![], message: Some("Visualization created".into()), reset_tool: true }
+            ToolResult {
+                objects: vec![],
+                message: Some("Visualization created".into()),
+                reset_tool: true,
+            }
         }
     }
 }
@@ -132,9 +195,22 @@ fn handle_multi_point(
         let pts = state.pending[..needed].to_vec();
         let obj = create(&pts);
         state.pending.clear();
-        ToolResult { objects: vec![obj], message: None, reset_tool: false }
+        ToolResult {
+            objects: vec![obj],
+            message: None,
+            reset_tool: false,
+        }
     } else {
-        ToolResult { objects: vec![], message: Some(format!("{}° point ({} of {})", needed, state.pending.len(), needed)), reset_tool: false }
+        ToolResult {
+            objects: vec![],
+            message: Some(format!(
+                "{}° point ({} of {})",
+                needed,
+                state.pending.len(),
+                needed
+            )),
+            reset_tool: false,
+        }
     }
 }
 
@@ -148,19 +224,39 @@ fn handle_polygon(state: &mut ToolState, document: &mut Document, world: Point2)
             let verts = state.pending.clone();
             state.pending.clear();
             let obj = GeoObject::Polygon(grafito_core::PolygonObj::new(verts));
-            return ToolResult { objects: vec![obj], message: None, reset_tool: false };
+            return ToolResult {
+                objects: vec![obj],
+                message: None,
+                reset_tool: false,
+            };
         }
     }
-    ToolResult { objects: vec![], message: Some(format!("Point {} added", state.pending.len())), reset_tool: false }
+    ToolResult {
+        objects: vec![],
+        message: Some(format!("Point {} added", state.pending.len())),
+        reset_tool: false,
+    }
 }
 
 fn handle_locus(state: &mut ToolState, _world: Point2) -> ToolResult {
     if state.driver.is_none() {
-        ToolResult { objects: vec![], message: Some("Select moving point".into()), reset_tool: false }
+        ToolResult {
+            objects: vec![],
+            message: Some("Select moving point".into()),
+            reset_tool: false,
+        }
     } else if state.driven.is_none() {
-        ToolResult { objects: vec![], message: Some("Select dependent point".into()), reset_tool: false }
+        ToolResult {
+            objects: vec![],
+            message: Some("Select dependent point".into()),
+            reset_tool: false,
+        }
     } else {
-        ToolResult { objects: vec![], message: Some("Locus computed".into()), reset_tool: true }
+        ToolResult {
+            objects: vec![],
+            message: Some("Locus computed".into()),
+            reset_tool: true,
+        }
     }
 }
 
@@ -173,7 +269,8 @@ fn handle_measure(
     state.pending.push(_world);
     match measure_type {
         "Distance" if state.pending.len() == 2 => {
-            let a = state.pending[0]; let b = state.pending[1];
+            let a = state.pending[0];
+            let b = state.pending[1];
             let d = a.distance(&b);
             let mid = Point2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
             // Visual: dotted measurement line
@@ -185,10 +282,16 @@ fn handle_measure(
             let txt = grafito_core::TextObj::new(format!("{:.3}", d), mid);
             document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
-            ToolResult { objects: vec![], message: Some(format!("Distance = {:.3}", d)), reset_tool: false }
+            ToolResult {
+                objects: vec![],
+                message: Some(format!("Distance = {:.3}", d)),
+                reset_tool: false,
+            }
         }
         "Angle" if state.pending.len() == 3 => {
-            let a = state.pending[0]; let b = state.pending[1]; let c = state.pending[2];
+            let a = state.pending[0];
+            let b = state.pending[1];
+            let c = state.pending[2];
             // Visual: two rays from vertex
             let mut ray1 = grafito_core::LineObj::new(b, a);
             ray1.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
@@ -202,15 +305,23 @@ fn handle_measure(
             let v1 = (a.x - b.x, a.y - b.y);
             let v2 = (c.x - b.x, c.y - b.y);
             let dot = v1.0 * v2.0 + v1.1 * v2.1;
-            let m1 = (v1.0*v1.0 + v1.1*v1.1).sqrt();
-            let m2 = (v2.0*v2.0 + v2.1*v2.1).sqrt();
-            let angle = if m1 < 1e-12 || m2 < 1e-12 { 0.0 } else { (dot/(m1*m2)).acos().to_degrees() };
+            let m1 = (v1.0 * v1.0 + v1.1 * v1.1).sqrt();
+            let m2 = (v2.0 * v2.0 + v2.1 * v2.1).sqrt();
+            let angle = if m1 < 1e-12 || m2 < 1e-12 {
+                0.0
+            } else {
+                (dot / (m1 * m2)).acos().to_degrees()
+            };
             // Label at vertex offset
             let lbl_pos = Point2::new(b.x + 0.3, b.y + 0.3);
             let txt = grafito_core::TextObj::new(format!("{:.1}°", angle), lbl_pos);
             document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
-            ToolResult { objects: vec![], message: Some(format!("Angle = {:.1}°", angle)), reset_tool: false }
+            ToolResult {
+                objects: vec![],
+                message: Some(format!("Angle = {:.1}°", angle)),
+                reset_tool: false,
+            }
         }
         "Area" if state.pending.len() == 1 => {
             // Area: click on a polygon or circle
@@ -224,8 +335,10 @@ fn handle_measure(
                         }
                         grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
                             let a = polygon_area(&poly.vertices);
-                            let cx = poly.vertices.iter().map(|v| v.x).sum::<f64>() / poly.vertices.len() as f64;
-                            let cy = poly.vertices.iter().map(|v| v.y).sum::<f64>() / poly.vertices.len() as f64;
+                            let cx = poly.vertices.iter().map(|v| v.x).sum::<f64>()
+                                / poly.vertices.len() as f64;
+                            let cy = poly.vertices.iter().map(|v| v.y).sum::<f64>()
+                                / poly.vertices.len() as f64;
                             (a, Point2::new(cx, cy))
                         }
                         _ => (0.0, state.pending[0]),
@@ -234,11 +347,19 @@ fn handle_measure(
                         let txt = grafito_core::TextObj::new(format!("Area = {:.3}", area), center);
                         document.add_object(grafito_core::GeoObject::Text(txt));
                         state.pending.clear();
-                        return ToolResult { objects: vec![], message: Some(format!("Area = {:.3}", area)), reset_tool: true };
+                        return ToolResult {
+                            objects: vec![],
+                            message: Some(format!("Area = {:.3}", area)),
+                            reset_tool: true,
+                        };
                     }
                 }
             }
-            ToolResult { objects: vec![], message: Some("Click on a polygon or circle".into()), reset_tool: false }
+            ToolResult {
+                objects: vec![],
+                message: Some("Click on a polygon or circle".into()),
+                reset_tool: false,
+            }
         }
         "Slope" if state.pending.len() == 1 => {
             let tolerance = 10.0 / document.view().scale;
@@ -250,25 +371,52 @@ fn handle_measure(
                     } else {
                         (l.end.y - l.start.y) / (l.end.x - l.start.x)
                     };
-                    let mid = Point2::new((l.start.x + l.end.x) * 0.5, (l.start.y + l.end.y) * 0.5 + 0.3);
-                    let s = if slope.is_infinite() { "∞".to_string() } else { format!("{:.3}", slope) };
+                    let mid = Point2::new(
+                        (l.start.x + l.end.x) * 0.5,
+                        (l.start.y + l.end.y) * 0.5 + 0.3,
+                    );
+                    let s = if slope.is_infinite() {
+                        "∞".to_string()
+                    } else {
+                        format!("{:.3}", slope)
+                    };
                     let txt = grafito_core::TextObj::new(format!("m = {}", s), mid);
                     document.add_object(grafito_core::GeoObject::Text(txt));
                     state.pending.clear();
-                    return ToolResult { objects: vec![], message: Some(format!("Slope = {}", s)), reset_tool: true };
+                    return ToolResult {
+                        objects: vec![],
+                        message: Some(format!("Slope = {}", s)),
+                        reset_tool: true,
+                    };
                 }
             }
-            ToolResult { objects: vec![], message: Some("Click on a line".into()), reset_tool: false }
+            ToolResult {
+                objects: vec![],
+                message: Some("Click on a line".into()),
+                reset_tool: false,
+            }
         }
         _ => ToolResult {
-            objects: vec![], reset_tool: false,
-            message: Some(format!("Click {} point(s)", if state.pending.len() == 1 { "2nd" } else if measure_type == "Angle" { "3rd" } else { "on object" })),
+            objects: vec![],
+            reset_tool: false,
+            message: Some(format!(
+                "Click {} point(s)",
+                if state.pending.len() == 1 {
+                    "2nd"
+                } else if measure_type == "Angle" {
+                    "3rd"
+                } else {
+                    "on object"
+                }
+            )),
         },
     }
 }
 
 fn polygon_area(vertices: &[Point2]) -> f64 {
-    if vertices.len() < 3 { return 0.0; }
+    if vertices.len() < 3 {
+        return 0.0;
+    }
     let mut area = 0.0;
     let n = vertices.len();
     for i in 0..n {
@@ -284,26 +432,52 @@ fn handle_tangent(state: &mut ToolState, document: &mut Document, world: Point2)
     if state.pending.len() >= 3 {
         let pts = state.pending[..3].to_vec();
         let r = pts[0].distance(&pts[1]);
-        let cmd = format!("Tangent[({:.2},{:.2}), {:.3}, ({:.2},{:.2})]", pts[0].x, pts[0].y, r, pts[2].x, pts[2].y);
+        let cmd = format!(
+            "Tangent[({:.2},{:.2}), {:.3}, ({:.2},{:.2})]",
+            pts[0].x, pts[0].y, r, pts[2].x, pts[2].y
+        );
         let mut c = cmd;
         grafito_command::commands::process_input(document, &mut c);
         state.pending.clear();
-        ToolResult { objects: vec![], message: Some("Tangents created".into()), reset_tool: true }
+        ToolResult {
+            objects: vec![],
+            message: Some("Tangents created".into()),
+            reset_tool: true,
+        }
     } else {
-        ToolResult { objects: vec![], message: Some(format!("{}° point", state.pending.len() + 1)), reset_tool: false }
+        ToolResult {
+            objects: vec![],
+            message: Some(format!("{}° point", state.pending.len() + 1)),
+            reset_tool: false,
+        }
     }
 }
 
-fn handle_perpendicular(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+fn handle_perpendicular(
+    state: &mut ToolState,
+    document: &mut Document,
+    world: Point2,
+) -> ToolResult {
     state.pending.push(world);
     if state.pending.len() >= 2 {
         let pts = state.pending[..2].to_vec();
-        let cmd = format!("PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]", pts[0].x, pts[0].y, pts[1].x, pts[1].y);
+        let cmd = format!(
+            "PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]",
+            pts[0].x, pts[0].y, pts[1].x, pts[1].y
+        );
         let mut c = cmd;
         grafito_command::commands::process_input(document, &mut c);
         state.pending.clear();
-        ToolResult { objects: vec![], message: Some("Perpendicular bisector created".into()), reset_tool: true }
+        ToolResult {
+            objects: vec![],
+            message: Some("Perpendicular bisector created".into()),
+            reset_tool: true,
+        }
     } else {
-        ToolResult { objects: vec![], message: Some("Select 2nd point".into()), reset_tool: false }
+        ToolResult {
+            objects: vec![],
+            message: Some("Select 2nd point".into()),
+            reset_tool: false,
+        }
     }
 }

@@ -1584,116 +1584,111 @@ impl Expr {
 
     pub fn integrate(&self, var: &str) -> Option<Expr> {
         use Expr::*;
-        Some(match self {
-            Const(c) => {
-                if *c == 0.0 {
-                    Const(0.0)
-                } else {
-                    Mul(Box::new(Const(*c)), Box::new(Var(var.to_string())))
+        Some(
+            match self {
+                Const(c) => {
+                    if *c == 0.0 {
+                        Const(0.0)
+                    } else {
+                        Mul(Box::new(Const(*c)), Box::new(Var(var.to_string())))
+                    }
                 }
-            }
-            Var(v) if v == var => Mul(
-                Box::new(Pow(
-                    Box::new(Var(var.to_string())),
-                    Box::new(Const(2.0)),
-                )),
-                Box::new(Const(0.5)),
-            ),
-            Neg(a) => Neg(Box::new(a.integrate(var)?)),
-            Add(a, b) => Add(
-                Box::new(a.integrate(var)?),
-                Box::new(b.integrate(var)?),
-            ),
-            Sub(a, b) => Sub(
-                Box::new(a.integrate(var)?),
-                Box::new(b.integrate(var)?),
-            ),
-            Mul(a, b) => {
-                let a_free = !a.contains_var(var);
-                let b_free = !b.contains_var(var);
-                if a_free {
-                    Mul(a.clone(), Box::new(b.integrate(var)?))
-                } else if b_free {
-                    Mul(Box::new(a.integrate(var)?), b.clone())
-                } else if let Pow(base, exp) = a.as_ref() {
+                Var(v) if v == var => Mul(
+                    Box::new(Pow(Box::new(Var(var.to_string())), Box::new(Const(2.0)))),
+                    Box::new(Const(0.5)),
+                ),
+                Neg(a) => Neg(Box::new(a.integrate(var)?)),
+                Add(a, b) => Add(Box::new(a.integrate(var)?), Box::new(b.integrate(var)?)),
+                Sub(a, b) => Sub(Box::new(a.integrate(var)?), Box::new(b.integrate(var)?)),
+                Mul(a, b) => {
+                    let a_free = !a.contains_var(var);
+                    let b_free = !b.contains_var(var);
+                    if a_free {
+                        Mul(a.clone(), Box::new(b.integrate(var)?))
+                    } else if b_free {
+                        Mul(Box::new(a.integrate(var)?), b.clone())
+                    } else if let Pow(base, exp) = a.as_ref() {
+                        if let Var(v) = base.as_ref() {
+                            if v == var {
+                                if let Const(n) = exp.as_ref() {
+                                    if (*n + 1.0).abs() > 1e-12 {
+                                        let new_exp = n + 1.0;
+                                        let factor = 1.0 / new_exp;
+                                        return Some(Mul(
+                                            Box::new(Const(factor)),
+                                            Box::new(Pow(
+                                                Box::new(Var(var.to_string())),
+                                                Box::new(Const(new_exp)),
+                                            )),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        integrate_parts(self, var)?
+                    } else {
+                        integrate_parts(self, var)?
+                    }
+                }
+                Pow(base, exp) => {
                     if let Var(v) = base.as_ref() {
                         if v == var {
                             if let Const(n) = exp.as_ref() {
-                                if (*n + 1.0).abs() > 1e-12 {
+                                if (*n + 1.0).abs() < 1e-12 {
+                                    Ln(Box::new(Abs(Box::new(Var(var.to_string())))))
+                                } else {
                                     let new_exp = n + 1.0;
                                     let factor = 1.0 / new_exp;
-                                    return Some(Mul(
+                                    Mul(
                                         Box::new(Const(factor)),
                                         Box::new(Pow(
                                             Box::new(Var(var.to_string())),
                                             Box::new(Const(new_exp)),
                                         )),
-                                    ));
+                                    )
                                 }
-                            }
-                        }
-                    }
-                    integrate_parts(self, var)?
-                } else {
-                    integrate_parts(self, var)?
-                }
-            }
-            Pow(base, exp) => {
-                if let Var(v) = base.as_ref() {
-                    if v == var {
-                        if let Const(n) = exp.as_ref() {
-                            if (*n + 1.0).abs() < 1e-12 {
-                                Ln(Box::new(Abs(Box::new(Var(var.to_string())))))
                             } else {
-                                let new_exp = n + 1.0;
-                                let factor = 1.0 / new_exp;
-                                Mul(
-                                    Box::new(Const(factor)),
-                                    Box::new(Pow(
-                                        Box::new(Var(var.to_string())),
-                                        Box::new(Const(new_exp)),
-                                    )),
-                                )
+                                integrate_parts(self, var)?
                             }
+                        } else if let Const(_) = exp.as_ref() {
+                            Mul(base.clone(), Box::new(self.integrate(var)?))
                         } else {
                             integrate_parts(self, var)?
                         }
-                    } else if let Const(_) = exp.as_ref() {
-                        Mul(base.clone(), Box::new(self.integrate(var)?))
-                    } else {
-                        integrate_parts(self, var)?
-                    }
-                } else if let Const(c) = exp.as_ref() {
-                    if *c == 0.0 {
-                        Var(var.to_string())
-                    } else if base.contains_var(var) {
-                        integrate_parts(self, var)?
-                    } else {
-                        Mul(
-                            Box::new(Pow(base.clone(), exp.clone())),
-                            Box::new(Var(var.to_string())),
-                        )
-                    }
-                } else {
-                    integrate_parts(self, var)?
-                }
-            }
-            Div(num, den) => {
-                if let Var(v) = den.as_ref() {
-                    if v == var {
-                        if let Const(_) = num.as_ref() {
+                    } else if let Const(c) = exp.as_ref() {
+                        if *c == 0.0 {
+                            Var(var.to_string())
+                        } else if base.contains_var(var) {
+                            integrate_parts(self, var)?
+                        } else {
                             Mul(
-                                Box::new(num.as_ref().clone()),
-                                Box::new(Ln(Box::new(Abs(Box::new(Var(var.to_string())))))),
+                                Box::new(Pow(base.clone(), exp.clone())),
+                                Box::new(Var(var.to_string())),
                             )
-                        } else if let Const(c) = num.as_ref() {
-                            if *c == 1.0 {
-                                Ln(Box::new(Abs(Box::new(Var(var.to_string())))))
-                            } else {
+                        }
+                    } else {
+                        integrate_parts(self, var)?
+                    }
+                }
+                Div(num, den) => {
+                    if let Var(v) = den.as_ref() {
+                        if v == var {
+                            if let Const(_) = num.as_ref() {
                                 Mul(
-                                    Box::new(Const(*c)),
+                                    Box::new(num.as_ref().clone()),
                                     Box::new(Ln(Box::new(Abs(Box::new(Var(var.to_string())))))),
                                 )
+                            } else if let Const(c) = num.as_ref() {
+                                if *c == 1.0 {
+                                    Ln(Box::new(Abs(Box::new(Var(var.to_string())))))
+                                } else {
+                                    Mul(
+                                        Box::new(Const(*c)),
+                                        Box::new(Ln(Box::new(Abs(Box::new(Var(var.to_string())))))),
+                                    )
+                                }
+                            } else {
+                                integrate_parts(self, var)?
                             }
                         } else {
                             integrate_parts(self, var)?
@@ -1701,99 +1696,89 @@ impl Expr {
                     } else {
                         integrate_parts(self, var)?
                     }
-                } else {
-                    integrate_parts(self, var)?
                 }
-            }
-            Sin(arg) => {
-                if let Mul(coeff, inner) = arg.as_ref() {
-                    if let (Const(c), Var(v)) = (coeff.as_ref(), inner.as_ref()) {
-                        if v == var {
-                            return Some(Mul(
-                                Box::new(Const(-1.0 / c)),
-                                Box::new(Cos(arg.clone())),
-                            ));
+                Sin(arg) => {
+                    if let Mul(coeff, inner) = arg.as_ref() {
+                        if let (Const(c), Var(v)) = (coeff.as_ref(), inner.as_ref()) {
+                            if v == var {
+                                return Some(Mul(
+                                    Box::new(Const(-1.0 / c)),
+                                    Box::new(Cos(arg.clone())),
+                                ));
+                            }
                         }
                     }
-                }
-                if arg.is_linear_in(var) {
-                    let (a, _) = arg.linear_coeff(var);
-                    Mul(
-                        Box::new(Const(-1.0 / a)),
-                        Box::new(Cos(arg.clone())),
-                    )
-                } else {
-                    integrate_parts(self, var)?
-                }
-            }
-            Cos(arg) => {
-                if let Mul(coeff, inner) = arg.as_ref() {
-                    if let (Const(c), Var(v)) = (coeff.as_ref(), inner.as_ref()) {
-                        if v == var {
-                            return Some(Mul(
-                                Box::new(Const(1.0 / c)),
-                                Box::new(Sin(arg.clone())),
-                            ));
-                        }
-                    }
-                }
-                if arg.is_linear_in(var) {
-                    let (a, _) = arg.linear_coeff(var);
-                    Mul(
-                        Box::new(Const(1.0 / a)),
-                        Box::new(Sin(arg.clone())),
-                    )
-                } else {
-                    integrate_parts(self, var)?
-                }
-            }
-            Tan(arg) => {
-                if arg.is_linear_in(var) {
-                    let (a, _) = arg.linear_coeff(var);
-                    Mul(
-                        Box::new(Const(-1.0 / a)),
-                        Box::new(Ln(Box::new(Abs(Box::new(Cos(arg.clone())))))),
-                    )
-                } else {
-                    integrate_parts(self, var)?
-                }
-            }
-            Exp(arg) => {
-                if let Var(v) = arg.as_ref() {
-                    if v == var {
-                        return Some(Exp(Box::new(Var(var.to_string()))));
-                    }
-                }
-                if arg.is_linear_in(var) {
-                    let (a, _) = arg.linear_coeff(var);
-                    if (a - 1.0).abs() < 1e-12 {
-                        Exp(arg.clone())
+                    if arg.is_linear_in(var) {
+                        let (a, _) = arg.linear_coeff(var);
+                        Mul(Box::new(Const(-1.0 / a)), Box::new(Cos(arg.clone())))
                     } else {
-                        Mul(
-                            Box::new(Const(1.0 / a)),
-                            Box::new(Exp(arg.clone())),
-                        )
+                        integrate_parts(self, var)?
                     }
-                } else {
+                }
+                Cos(arg) => {
+                    if let Mul(coeff, inner) = arg.as_ref() {
+                        if let (Const(c), Var(v)) = (coeff.as_ref(), inner.as_ref()) {
+                            if v == var {
+                                return Some(Mul(
+                                    Box::new(Const(1.0 / c)),
+                                    Box::new(Sin(arg.clone())),
+                                ));
+                            }
+                        }
+                    }
+                    if arg.is_linear_in(var) {
+                        let (a, _) = arg.linear_coeff(var);
+                        Mul(Box::new(Const(1.0 / a)), Box::new(Sin(arg.clone())))
+                    } else {
+                        integrate_parts(self, var)?
+                    }
+                }
+                Tan(arg) => {
+                    if arg.is_linear_in(var) {
+                        let (a, _) = arg.linear_coeff(var);
+                        Mul(
+                            Box::new(Const(-1.0 / a)),
+                            Box::new(Ln(Box::new(Abs(Box::new(Cos(arg.clone())))))),
+                        )
+                    } else {
+                        integrate_parts(self, var)?
+                    }
+                }
+                Exp(arg) => {
+                    if let Var(v) = arg.as_ref() {
+                        if v == var {
+                            return Some(Exp(Box::new(Var(var.to_string()))));
+                        }
+                    }
+                    if arg.is_linear_in(var) {
+                        let (a, _) = arg.linear_coeff(var);
+                        if (a - 1.0).abs() < 1e-12 {
+                            Exp(arg.clone())
+                        } else {
+                            Mul(Box::new(Const(1.0 / a)), Box::new(Exp(arg.clone())))
+                        }
+                    } else {
+                        integrate_parts(self, var)?
+                    }
+                }
+                Ln(arg) => {
+                    if let Var(v) = arg.as_ref() {
+                        if v == var {
+                            return Some(Sub(
+                                Box::new(Mul(
+                                    Box::new(Var(var.to_string())),
+                                    Box::new(Ln(Box::new(Var(var.to_string())))),
+                                )),
+                                Box::new(Var(var.to_string())),
+                            ));
+                        }
+                    }
                     integrate_parts(self, var)?
                 }
+                _ => integrate_parts(self, var)?,
             }
-            Ln(arg) => {
-                if let Var(v) = arg.as_ref() {
-                    if v == var {
-                        return Some(Sub(
-                            Box::new(Mul(
-                                Box::new(Var(var.to_string())),
-                                Box::new(Ln(Box::new(Var(var.to_string())))),
-                            )),
-                            Box::new(Var(var.to_string())),
-                        ));
-                    }
-                }
-                integrate_parts(self, var)?
-            }
-            _ => integrate_parts(self, var)?,
-        }.simplify())
+            .simplify(),
+        )
     }
 
     fn contains_var(&self, var: &str) -> bool {
@@ -1801,23 +1786,30 @@ impl Expr {
         match self {
             Var(v) => v == var,
             Const(_) => false,
-            Neg(a) | Sin(a) | Cos(a) | Tan(a) | Asin(a) | Acos(a) | Atan(a)
-            | Exp(a) | Ln(a) | Log(a) | Sqrt(a) | Abs(a)
-            | Sinh(a) | Cosh(a) | Tanh(a) | Asinh(a) | Acosh(a) | Atanh(a)
-            | Sec(a) | Csc(a) | Cot(a) | Floor(a) | Ceil(a) | Round(a)
-            | Sign(a) | Heaviside(a) | Cbrt(a) | Re(a) | Im(a) | Arg(a) | Conj(a)
-            | Erf(a) | Erfc(a) | Gamma(a) | LnGamma(a) | Digamma(a) => a.contains_var(var),
-            Add(a, b) | Sub(a, b) | Mul(a, b) | Div(a, b) | Pow(a, b)
-            | Atan2(a, b) | Modulo(a, b) | Min(a, b) | Max(a, b)
-            | Beta(a, b) | BesselJ(a, b) | BesselY(a, b) | BesselI(a, b) => {
-                a.contains_var(var) || b.contains_var(var)
-            }
-            Clamp(a, b, c) => {
-                a.contains_var(var) || b.contains_var(var) || c.contains_var(var)
-            }
+            Neg(a) | Sin(a) | Cos(a) | Tan(a) | Asin(a) | Acos(a) | Atan(a) | Exp(a) | Ln(a)
+            | Log(a) | Sqrt(a) | Abs(a) | Sinh(a) | Cosh(a) | Tanh(a) | Asinh(a) | Acosh(a)
+            | Atanh(a) | Sec(a) | Csc(a) | Cot(a) | Floor(a) | Ceil(a) | Round(a) | Sign(a)
+            | Heaviside(a) | Cbrt(a) | Re(a) | Im(a) | Arg(a) | Conj(a) | Erf(a) | Erfc(a)
+            | Gamma(a) | LnGamma(a) | Digamma(a) => a.contains_var(var),
+            Add(a, b)
+            | Sub(a, b)
+            | Mul(a, b)
+            | Div(a, b)
+            | Pow(a, b)
+            | Atan2(a, b)
+            | Modulo(a, b)
+            | Min(a, b)
+            | Max(a, b)
+            | Beta(a, b)
+            | BesselJ(a, b)
+            | BesselY(a, b)
+            | BesselI(a, b) => a.contains_var(var) || b.contains_var(var),
+            Clamp(a, b, c) => a.contains_var(var) || b.contains_var(var) || c.contains_var(var),
             Sum(body, _, _, _) | Product(body, _, _, _) => body.contains_var(var),
             Piecewise(cases, default) => {
-                cases.iter().any(|(c, v)| c.contains_var(var) || v.contains_var(var))
+                cases
+                    .iter()
+                    .any(|(c, v)| c.contains_var(var) || v.contains_var(var))
                     || default.contains_var(var)
             }
         }
@@ -1905,10 +1897,7 @@ fn integrate_parts(expr: &Expr, var: &str) -> Option<Expr> {
                                             Box::new(Const(1.0 / (np1 * np1))),
                                             Box::new(x_np1),
                                         );
-                                        return Some(Sub(
-                                            Box::new(term1),
-                                            Box::new(term2),
-                                        ));
+                                        return Some(Sub(Box::new(term1), Box::new(term2)));
                                     }
                                 }
                             }
@@ -1919,20 +1908,14 @@ fn integrate_parts(expr: &Expr, var: &str) -> Option<Expr> {
             if let Pow(base, _) = a.as_ref() {
                 if let Var(v) = base.as_ref() {
                     if v == var && !b.contains_var(var) {
-                        return Some(Mul(
-                            Box::new(a.integrate(var)?),
-                            b.clone(),
-                        ));
+                        return Some(Mul(Box::new(a.integrate(var)?), b.clone()));
                     }
                 }
             }
             if let Pow(base, _) = b.as_ref() {
                 if let Var(v) = base.as_ref() {
                     if v == var && !a.contains_var(var) {
-                        return Some(Mul(
-                            a.clone(),
-                            Box::new(b.integrate(var)?),
-                        ));
+                        return Some(Mul(a.clone(), Box::new(b.integrate(var)?)));
                     }
                 }
             }

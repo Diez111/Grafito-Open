@@ -59,10 +59,7 @@ pub fn export_svg(doc: &Document, width: f64, height: f64) -> String {
                 let screen = view.world_to_screen(p.position);
                 svg.push_str(&format!(
                     r#"<circle cx="{:.1}" cy="{:.1}" r="{}" fill="{}"/>"#,
-                    screen.x,
-                    screen.y,
-                    p.size,
-                    rgb
+                    screen.x, screen.y, p.size, rgb
                 ));
             }
             grafito_core::GeoObject::Line(l) => {

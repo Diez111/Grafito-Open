@@ -407,25 +407,39 @@ impl Renderer {
                         camera.project(&s.b, screen_w, screen_h),
                     ) {
                         Self::add_line_segment(
-                            &mut vertices, &mut indices,
+                            &mut vertices,
+                            &mut indices,
                             glam::Vec2::new(a.0, a.1),
                             glam::Vec2::new(b.0, b.1),
-                            s.width, s.color,
+                            s.width,
+                            s.color,
                         );
                     }
                 }
                 GeoObject::Sphere3D(s) => {
                     Self::add_wireframe_sphere(
-                        &mut vertices, &mut indices,
-                        camera, &s.center, s.radius, s.width, s.color,
-                        screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &s.center,
+                        s.radius,
+                        s.width,
+                        s.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Cube3D(c) => {
                     Self::add_wireframe_cube(
-                        &mut vertices, &mut indices,
-                        camera, &c.center, c.size, c.width, c.color,
-                        screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &c.center,
+                        c.size,
+                        c.width,
+                        c.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 _ => {}
@@ -658,7 +672,9 @@ impl Renderer {
                     let step = (max_x - min_x) / steps as f64;
                     let variables = &document.variables;
 
-                    let parsed_ast = grafito_geometry::expr::prepare_function_ast(&fun.expr, variables, &["x"]).ok();
+                    let parsed_ast =
+                        grafito_geometry::expr::prepare_function_ast(&fun.expr, variables, &["x"])
+                            .ok();
 
                     let samples: Vec<(f64, Option<f64>)> = (0..=steps)
                         .into_par_iter()
@@ -666,11 +682,17 @@ impl Renderer {
                             let x = min_x + i as f64 * step;
                             let y = if let Some(ast) = &parsed_ast {
                                 let res = ast.eval_at("x", x);
-                                if res.is_finite() && res.abs() < 1e6 { Some(res) } else { None }
+                                if res.is_finite() && res.abs() < 1e6 {
+                                    Some(res)
+                                } else {
+                                    None
+                                }
                             } else {
-                                grafito_geometry::expr::eval_function_with_vars(&fun.expr, x, variables)
-                                    .ok()
-                                    .filter(|v| v.is_finite() && v.abs() < 1e6)
+                                grafito_geometry::expr::eval_function_with_vars(
+                                    &fun.expr, x, variables,
+                                )
+                                .ok()
+                                .filter(|v| v.is_finite() && v.abs() < 1e6)
                             };
                             (x, y)
                         })
@@ -830,9 +852,12 @@ impl Renderer {
                                 if let Some(p) = prev {
                                     if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
                                         Self::add_line_segment(
-                                            &mut vertices, &mut indices,
+                                            &mut vertices,
+                                            &mut indices,
                                             glam::Vec2::new(p[0], p[1]),
-                                            s, pc.width, pc.color,
+                                            s,
+                                            pc.width,
+                                            pc.color,
                                         );
                                     }
                                 }
@@ -849,7 +874,9 @@ impl Renderer {
                     let mut prev: Option<[f32; 2]> = None;
                     for i in 0..=steps {
                         let t = pol.t_min + i as f64 * dt;
-                        if let Ok(r) = grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)]) {
+                        if let Ok(r) =
+                            grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
+                        {
                             if r.is_finite() {
                                 let x = r * t.cos();
                                 let y = r * t.sin();
@@ -857,9 +884,12 @@ impl Renderer {
                                 if let Some(p) = prev {
                                     if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
                                         Self::add_line_segment(
-                                            &mut vertices, &mut indices,
+                                            &mut vertices,
+                                            &mut indices,
                                             glam::Vec2::new(p[0], p[1]),
-                                            s, pol.width, pol.color,
+                                            s,
+                                            pol.width,
+                                            pol.color,
                                         );
                                     }
                                 }
@@ -875,15 +905,25 @@ impl Renderer {
                         if !contour_data.is_empty() {
                             for level in contour_data {
                                 let pts = Self::marching_squares_contour(
-                                    &ic.expr_lhs, &ic.expr_rhs, *level,
-                                    -10.0, 10.0, -10.0, 10.0, 100,
+                                    &ic.expr_lhs,
+                                    &ic.expr_rhs,
+                                    *level,
+                                    -10.0,
+                                    10.0,
+                                    -10.0,
+                                    10.0,
+                                    100,
                                 );
                                 for w in pts.windows(2) {
                                     let a = view_transform.world_to_screen(w[0]);
                                     let b = view_transform.world_to_screen(w[1]);
                                     Self::add_line_segment(
-                                        &mut vertices, &mut indices,
-                                        a, b, ic.width, ic.color,
+                                        &mut vertices,
+                                        &mut indices,
+                                        a,
+                                        b,
+                                        ic.width,
+                                        ic.color,
                                     );
                                 }
                             }
@@ -909,8 +949,12 @@ impl Renderer {
                     for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
                         let s = view_transform.world_to_screen(Point2::new(*x, *y));
                         Self::add_rect(
-                            &mut vertices, &mut indices,
-                            s, sp.point_size, sp.point_size, sp.color,
+                            &mut vertices,
+                            &mut indices,
+                            s,
+                            sp.point_size,
+                            sp.point_size,
+                            sp.color,
                         );
                     }
                 }
@@ -919,7 +963,9 @@ impl Renderer {
                         grafito_geometry::statistics::boxplot_stats(&bp.data)
                     {
                         let half_w = bp.width_box * 0.5;
-                        let x = view_transform.world_to_screen(Point2::new(bp.position, 0.0)).x;
+                        let x = view_transform
+                            .world_to_screen(Point2::new(bp.position, 0.0))
+                            .x;
                         let y_min = view_transform.world_to_screen(Point2::new(0.0, min)).y;
                         let y_q1 = view_transform.world_to_screen(Point2::new(0.0, q1)).y;
                         let y_q3 = view_transform.world_to_screen(Point2::new(0.0, q3)).y;
@@ -927,12 +973,40 @@ impl Renderer {
                         let hw = (half_w * view_transform.scale) as f32;
                         let bx = x - hw;
                         let bw = hw * 2.0;
-                        Self::add_rect(&mut vertices, &mut indices, glam::Vec2::new(bx, y_q3), bw, (y_q1 - y_q3).abs(), bp.color);
-                        Self::add_line_segment(&mut vertices, &mut indices, glam::Vec2::new(x, y_q3), glam::Vec2::new(x, y_max), bp.width, bp.color);
-                        Self::add_line_segment(&mut vertices, &mut indices, glam::Vec2::new(x, y_q1), glam::Vec2::new(x, y_min), bp.width, bp.color);
+                        Self::add_rect(
+                            &mut vertices,
+                            &mut indices,
+                            glam::Vec2::new(bx, y_q3),
+                            bw,
+                            (y_q1 - y_q3).abs(),
+                            bp.color,
+                        );
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            glam::Vec2::new(x, y_q3),
+                            glam::Vec2::new(x, y_max),
+                            bp.width,
+                            bp.color,
+                        );
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            glam::Vec2::new(x, y_q1),
+                            glam::Vec2::new(x, y_min),
+                            bp.width,
+                            bp.color,
+                        );
                         for o in &outliers {
                             let oy = view_transform.world_to_screen(Point2::new(0.0, *o)).y;
-                            Self::add_rect(&mut vertices, &mut indices, glam::Vec2::new(x - 2.0, oy - 2.0), 4.0, 4.0, bp.color);
+                            Self::add_rect(
+                                &mut vertices,
+                                &mut indices,
+                                glam::Vec2::new(x - 2.0, oy - 2.0),
+                                4.0,
+                                4.0,
+                                bp.color,
+                            );
                         }
                     }
                 }
@@ -946,31 +1020,58 @@ impl Renderer {
                     Self::add_line_segment(&mut vertices, &mut indices, a, b, rl.width, rl.color);
                     for (x, y) in rl.xs.iter().zip(rl.ys.iter()) {
                         let s = view_transform.world_to_screen(Point2::new(*x, *y));
-                        Self::add_rect(&mut vertices, &mut indices, s, 4.0, 4.0, Color::new(0.0, 0.0, 1.0, 1.0));
+                        Self::add_rect(
+                            &mut vertices,
+                            &mut indices,
+                            s,
+                            4.0,
+                            4.0,
+                            Color::new(0.0, 0.0, 1.0, 1.0),
+                        );
                     }
                 }
                 GeoObject::Fractal2D(fr) => {
                     let width = 200u32;
-                    let height = (width as f64 * (fr.y_max - fr.y_min) / (fr.x_max - fr.x_min)) as u32;
+                    let height =
+                        (width as f64 * (fr.y_max - fr.y_min) / (fr.x_max - fr.x_min)) as u32;
                     let max_dim = width.max(height);
                     if max_dim <= 2048 {
                         let fractal = match fr.fractal_type.as_str() {
                             "julia" => grafito_geometry::fractals::FractalType::julia_dendrite(),
-                            "burning_ship" => grafito_geometry::fractals::FractalType::burning_ship(),
+                            "burning_ship" => {
+                                grafito_geometry::fractals::FractalType::burning_ship()
+                            }
                             _ => grafito_geometry::fractals::FractalType::mandelbrot(),
                         };
                         let pixels = grafito_geometry::fractals::compute_fractal(
-                            &fractal, fr.x_min, fr.x_max, fr.y_min, fr.y_max, width as usize, height as usize,
+                            &fractal,
+                            fr.x_min,
+                            fr.x_max,
+                            fr.y_min,
+                            fr.y_max,
+                            width as usize,
+                            height as usize,
                         );
                         let dx = (fr.x_max - fr.x_min) / width as f64;
                         let dy = (fr.y_max - fr.y_min) / height as f64;
                         for p in &pixels {
-                            let (r, g, b, a) = grafito_geometry::fractals::fractal_color_hsv(p.iter, p.max_iter, p.smooth_value);
+                            let (r, g, b, a) = grafito_geometry::fractals::fractal_color_hsv(
+                                p.iter,
+                                p.max_iter,
+                                p.smooth_value,
+                            );
                             let color = Color::new(r, g, b, a);
                             let sx = view_transform.world_to_screen(Point2::new(p.x, p.y));
                             let px_w = (dx * view_transform.scale) as f32;
                             let px_h = (dy * view_transform.scale) as f32;
-                            Self::add_rect(&mut vertices, &mut indices, sx, px_w.max(1.0), px_h.max(1.0), color);
+                            Self::add_rect(
+                                &mut vertices,
+                                &mut indices,
+                                sx,
+                                px_w.max(1.0),
+                                px_h.max(1.0),
+                                color,
+                            );
                         }
                     }
                 }
@@ -982,15 +1083,17 @@ impl Renderer {
                         for j in 0..=d {
                             let y = -10.0 + j as f64 * dx;
                             if let (Ok(u), Ok(v)) = (
-                                grafito_geometry::expr::evaluate(&vf.expr_u, &[
-                                    ("x".to_string(), x), ("y".to_string(), y),
-                                ]),
-                                grafito_geometry::expr::evaluate(&vf.expr_v, &[
-                                    ("x".to_string(), x), ("y".to_string(), y),
-                                ]),
+                                grafito_geometry::expr::evaluate(
+                                    &vf.expr_u,
+                                    &[("x".to_string(), x), ("y".to_string(), y)],
+                                ),
+                                grafito_geometry::expr::evaluate(
+                                    &vf.expr_v,
+                                    &[("x".to_string(), x), ("y".to_string(), y)],
+                                ),
                             ) {
                                 if u.is_finite() && v.is_finite() {
-                                    let mag = (u*u + v*v).sqrt();
+                                    let mag = (u * u + v * v).sqrt();
                                     if mag > 0.001 {
                                         let nx = u / mag;
                                         let ny = v / mag;
@@ -1000,8 +1103,12 @@ impl Renderer {
                                         let s = view_transform.world_to_screen(start);
                                         let e = view_transform.world_to_screen(end);
                                         Self::add_line_segment(
-                                            &mut vertices, &mut indices,
-                                            s, e, 1.5, vf.color,
+                                            &mut vertices,
+                                            &mut indices,
+                                            s,
+                                            e,
+                                            1.5,
+                                            vf.color,
                                         );
                                     }
                                 }
@@ -1034,7 +1141,8 @@ impl Renderer {
                                         let color = hsv_to_rgb(hue as f32, sat, val as f32);
                                         let sx = view_transform.world_to_screen(Point2::new(x, y));
                                         Self::add_rect(
-                                            &mut vertices, &mut indices,
+                                            &mut vertices,
+                                            &mut indices,
                                             sx,
                                             (dx * view_transform.scale).max(1.0) as f32,
                                             (dy * view_transform.scale).max(1.0) as f32,
@@ -1050,14 +1158,16 @@ impl Renderer {
                     if let Some(target_obj) = document.get_object(cm.target) {
                         let mut sample_pts: Vec<Point2> = Vec::new();
                         match target_obj {
-                            GeoObject::Polygon(poly) => sample_pts.extend(poly.vertices.iter().copied()),
+                            GeoObject::Polygon(poly) => {
+                                sample_pts.extend(poly.vertices.iter().copied())
+                            }
                             GeoObject::Point(p) => sample_pts.push(p.position),
                             GeoObject::Line(l) => {
                                 for i in 0..=20 {
                                     let t = i as f64 / 20.0;
                                     sample_pts.push(Point2::new(
-                                        l.start.x + t*(l.end.x-l.start.x),
-                                        l.start.y + t*(l.end.y-l.start.y),
+                                        l.start.x + t * (l.end.x - l.start.x),
+                                        l.start.y + t * (l.end.y - l.start.y),
                                     ));
                                 }
                             }
@@ -1065,8 +1175,8 @@ impl Renderer {
                                 for i in 0..32 {
                                     let a = i as f64 / 32.0 * std::f64::consts::TAU;
                                     sample_pts.push(Point2::new(
-                                        c.center.x + c.radius*a.cos(),
-                                        c.center.y + c.radius*a.sin(),
+                                        c.center.x + c.radius * a.cos(),
+                                        c.center.y + c.radius * a.sin(),
                                     ));
                                 }
                             }
@@ -1075,8 +1185,13 @@ impl Renderer {
                                 let x_max = f.domain_max.unwrap_or(10.0);
                                 for i in 0..=50 {
                                     let x = x_min + i as f64 / 50.0 * (x_max - x_min);
-                                    if let Ok(y) = grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), x)]) {
-                                        if y.is_finite() { sample_pts.push(Point2::new(x, y)); }
+                                    if let Ok(y) = grafito_geometry::expr::evaluate(
+                                        &f.expr,
+                                        &[("x".to_string(), x)],
+                                    ) {
+                                        if y.is_finite() {
+                                            sample_pts.push(Point2::new(x, y));
+                                        }
                                     }
                                 }
                             }
@@ -1094,8 +1209,17 @@ impl Renderer {
                                             let tw = Point2::new(fz.re, fz.im);
                                             let ts = view_transform.world_to_screen(tw);
                                             if let Some(ps) = prev {
-                                                if (ts.x - ps.x).abs() < 300.0 && (ts.y - ps.y).abs() < 300.0 {
-                                                    Self::add_line_segment(&mut vertices, &mut indices, ps, ts, 1.5, cm.color);
+                                                if (ts.x - ps.x).abs() < 300.0
+                                                    && (ts.y - ps.y).abs() < 300.0
+                                                {
+                                                    Self::add_line_segment(
+                                                        &mut vertices,
+                                                        &mut indices,
+                                                        ps,
+                                                        ts,
+                                                        1.5,
+                                                        cm.color,
+                                                    );
                                                 }
                                             }
                                             prev = Some(ts);
@@ -1115,17 +1239,30 @@ impl Renderer {
                         for j in 0..=d {
                             let y = pp.y_min + j as f64 * dy;
                             if let (Ok(u), Ok(v)) = (
-                                grafito_geometry::expr::evaluate(&pp.expr_dx, &[("x".to_string(), x), ("y".to_string(), y)]),
-                                grafito_geometry::expr::evaluate(&pp.expr_dy, &[("x".to_string(), x), ("y".to_string(), y)]),
+                                grafito_geometry::expr::evaluate(
+                                    &pp.expr_dx,
+                                    &[("x".to_string(), x), ("y".to_string(), y)],
+                                ),
+                                grafito_geometry::expr::evaluate(
+                                    &pp.expr_dy,
+                                    &[("x".to_string(), x), ("y".to_string(), y)],
+                                ),
                             ) {
                                 if u.is_finite() && v.is_finite() {
-                                    let mag = (u*u + v*v).sqrt();
+                                    let mag = (u * u + v * v).sqrt();
                                     if mag > 0.001 {
                                         let start = Point2::new(x, y);
-                                        let end = Point2::new(x + u/mag * 0.5, y + v/mag * 0.5);
+                                        let end = Point2::new(x + u / mag * 0.5, y + v / mag * 0.5);
                                         let s = view_transform.world_to_screen(start);
                                         let e = view_transform.world_to_screen(end);
-                                        Self::add_line_segment(&mut vertices, &mut indices, s, e, 1.5, pp.color);
+                                        Self::add_line_segment(
+                                            &mut vertices,
+                                            &mut indices,
+                                            s,
+                                            e,
+                                            1.5,
+                                            pp.color,
+                                        );
                                     }
                                 }
                             }
@@ -1164,7 +1301,11 @@ impl Renderer {
                     let vars = vec![("x".to_string(), x), ("y".to_string(), y)];
                     let lhs = grafito_geometry::expr::evaluate(expr_lhs, &vars).unwrap_or(f64::NAN);
                     let rhs = grafito_geometry::expr::evaluate(expr_rhs, &vars).unwrap_or(f64::NAN);
-                    if lhs.is_nan() || rhs.is_nan() { f64::NAN } else { lhs - rhs }
+                    if lhs.is_nan() || rhs.is_nan() {
+                        f64::NAN
+                    } else {
+                        lhs - rhs
+                    }
                 };
 
                 let v00 = f(x0, y0);
@@ -1194,18 +1335,12 @@ impl Renderer {
                     3 | 12 => segments.extend_from_slice(&[(mid_right, mid_left)]),
                     4 | 11 => segments.extend_from_slice(&[(mid_top, mid_right)]),
                     5 => {
-                        segments.extend_from_slice(&[
-                            (mid_bottom, mid_left),
-                            (mid_top, mid_right),
-                        ]);
+                        segments.extend_from_slice(&[(mid_bottom, mid_left), (mid_top, mid_right)]);
                     }
                     6 | 9 => segments.extend_from_slice(&[(mid_top, mid_bottom)]),
                     7 | 8 => segments.extend_from_slice(&[(mid_top, mid_left)]),
                     10 => {
-                        segments.extend_from_slice(&[
-                            (mid_right, mid_bottom),
-                            (mid_left, mid_top),
-                        ]);
+                        segments.extend_from_slice(&[(mid_right, mid_bottom), (mid_left, mid_top)]);
                     }
                     _ => {}
                 }
@@ -1225,20 +1360,20 @@ impl Renderer {
         points
     }
 
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
-    let c = v * s;
-    let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = match (h * 6.0) as i32 % 6 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    Color::new(r + m, g + m, b + m, 1.0)
-}
+    fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
+        let c = v * s;
+        let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+        let m = v - c;
+        let (r, g, b) = match (h * 6.0) as i32 % 6 {
+            0 => (c, x, 0.0),
+            1 => (x, c, 0.0),
+            2 => (0.0, c, x),
+            3 => (0.0, x, c),
+            4 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+        Color::new(r + m, g + m, b + m, 1.0)
+    }
 
     fn build_grid(
         &self,
@@ -1306,31 +1441,53 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                 s = s.trim_end_matches('0').to_string();
                 s = s.trim_end_matches('.').to_string();
             }
-            if s.is_empty() || s == "-" { "0".to_string() } else { s }
+            if s.is_empty() || s == "-" {
+                "0".to_string()
+            } else {
+                s
+            }
         };
 
         for xi in min_x..=max_x {
-            if xi == 0 { continue; }
+            if xi == 0 {
+                continue;
+            }
             let x = xi as f64 * major_step;
             let a = view.world_to_screen(Point2::new(x, min_y as f64 * major_step));
             let b = view.world_to_screen(Point2::new(x, max_y as f64 * major_step));
             Self::add_line_segment(vertices, indices, a, b, 1.0, color);
-            
+
             // Draw text label on X axis
             let pos = view.world_to_screen(Point2::new(x, 0.0));
-            Self::add_text_screen(vertices, indices, &format_num(x), pos + glam::Vec2::new(-8.0, 5.0), 12.0, color);
+            Self::add_text_screen(
+                vertices,
+                indices,
+                &format_num(x),
+                pos + glam::Vec2::new(-8.0, 5.0),
+                12.0,
+                color,
+            );
         }
 
         for yi in min_y..=max_y {
-            if yi == 0 { continue; }
+            if yi == 0 {
+                continue;
+            }
             let y = yi as f64 * major_step;
             let a = view.world_to_screen(Point2::new(min_x as f64 * major_step, y));
             let b = view.world_to_screen(Point2::new(max_x as f64 * major_step, y));
             Self::add_line_segment(vertices, indices, a, b, 1.0, color);
-            
+
             // Draw text label on Y axis
             let pos = view.world_to_screen(Point2::new(0.0, y));
-            Self::add_text_screen(vertices, indices, &format_num(y), pos + glam::Vec2::new(5.0, -8.0), 12.0, color);
+            Self::add_text_screen(
+                vertices,
+                indices,
+                &format_num(y),
+                pos + glam::Vec2::new(5.0, -8.0),
+                12.0,
+                color,
+            );
         }
     }
 
@@ -1417,85 +1574,277 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
 
         for c in text.chars() {
             let segments: &[(f32, f32, f32, f32)] = match c {
-                '0' => &[(0.,0., 1.,0.), (1.,0., 1.,2.), (1.,2., 0.,2.), (0.,2., 0.,0.)],
-                '1' => &[(0.5,0., 0.5,2.), (0.15,0.5, 0.5,0.), (0.2,2., 0.8,2.)],
-                '2' => &[(0.,0., 1.,0.), (1.,0., 1.,1.), (1.,1., 0.,1.), (0.,1., 0.,2.), (0.,2., 1.,2.)],
-                '3' => &[(0.,0., 1.,0.), (1.,0., 1.,2.), (1.,2., 0.,2.), (0.,1., 1.,1.)],
-                '4' => &[(0.,0., 0.,1.), (0.,1., 1.,1.), (1.,0., 1.,2.)],
-                '5' => &[(1.,0., 0.,0.), (0.,0., 0.,1.), (0.,1., 1.,1.), (1.,1., 1.,2.), (1.,2., 0.,2.)],
-                '6' => &[(1.,0., 0.,0.), (0.,0., 0.,2.), (0.,2., 1.,2.), (1.,2., 1.,1.), (1.,1., 0.,1.)],
-                '7' => &[(0.,0., 1.,0.), (1.,0., 0.2,2.)],
-                '8' => &[(0.,0., 1.,0.), (1.,0., 1.,2.), (1.,2., 0.,2.), (0.,2., 0.,0.), (0.,1., 1.,1.)],
-                '9' => &[(1.,2., 1.,0.), (1.,0., 0.,0.), (0.,0., 0.,1.), (0.,1., 1.,1.)],
-                '-' => &[(0.2,1., 0.8,1.)],
-                '.' => &[(0.45,1.8, 0.55,1.8), (0.55,1.8, 0.55,2.0), (0.55,2.0, 0.45,2.0), (0.45,2.0, 0.45,1.8)],
+                '0' => &[
+                    (0., 0., 1., 0.),
+                    (1., 0., 1., 2.),
+                    (1., 2., 0., 2.),
+                    (0., 2., 0., 0.),
+                ],
+                '1' => &[(0.5, 0., 0.5, 2.), (0.15, 0.5, 0.5, 0.), (0.2, 2., 0.8, 2.)],
+                '2' => &[
+                    (0., 0., 1., 0.),
+                    (1., 0., 1., 1.),
+                    (1., 1., 0., 1.),
+                    (0., 1., 0., 2.),
+                    (0., 2., 1., 2.),
+                ],
+                '3' => &[
+                    (0., 0., 1., 0.),
+                    (1., 0., 1., 2.),
+                    (1., 2., 0., 2.),
+                    (0., 1., 1., 1.),
+                ],
+                '4' => &[(0., 0., 0., 1.), (0., 1., 1., 1.), (1., 0., 1., 2.)],
+                '5' => &[
+                    (1., 0., 0., 0.),
+                    (0., 0., 0., 1.),
+                    (0., 1., 1., 1.),
+                    (1., 1., 1., 2.),
+                    (1., 2., 0., 2.),
+                ],
+                '6' => &[
+                    (1., 0., 0., 0.),
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (1., 2., 1., 1.),
+                    (1., 1., 0., 1.),
+                ],
+                '7' => &[(0., 0., 1., 0.), (1., 0., 0.2, 2.)],
+                '8' => &[
+                    (0., 0., 1., 0.),
+                    (1., 0., 1., 2.),
+                    (1., 2., 0., 2.),
+                    (0., 2., 0., 0.),
+                    (0., 1., 1., 1.),
+                ],
+                '9' => &[
+                    (1., 2., 1., 0.),
+                    (1., 0., 0., 0.),
+                    (0., 0., 0., 1.),
+                    (0., 1., 1., 1.),
+                ],
+                '-' => &[(0.2, 1., 0.8, 1.)],
+                '.' => &[
+                    (0.45, 1.8, 0.55, 1.8),
+                    (0.55, 1.8, 0.55, 2.0),
+                    (0.55, 2.0, 0.45, 2.0),
+                    (0.45, 2.0, 0.45, 1.8),
+                ],
                 // Uppercase letters
-                'A' => &[(0.,2., 0.5,0.), (0.5,0., 1.,2.), (0.2,1., 0.8,1.)],
-                'B' => &[(0.,0., 0.,2.), (0.,2., 0.8,2.), (0.8,2., 1.,1.5), (1.,1.5, 0.8,1.), (0.8,1., 0.,1.), (0.,1., 0.8,1.), (0.8,1., 1.,0.5), (1.,0.5, 0.8,0.), (0.8,0., 0.,0.)],
-                'C' => &[(1.,2., 0.,2.), (0.,2., 0.,0.), (0.,0., 1.,0.)],
-                'D' => &[(0.,0., 0.,2.), (0.,2., 0.6,2.), (0.6,2., 1.,1.), (1.,1., 0.6,0.), (0.6,0., 0.,0.)],
-                'E' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (0.,1., 0.7,1.), (0.,0., 1.,0.)],
-                'F' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (0.,1., 0.7,1.)],
-                'G' => &[(1.,2., 0.,2.), (0.,2., 0.,0.), (0.,0., 1.,0.), (1.,0., 1.,1.), (1.,1., 0.5,1.)],
-                'H' => &[(0.,0., 0.,2.), (0.,1., 1.,1.), (1.,0., 1.,2.)],
-                'I' => &[(0.5,0., 0.5,2.), (0.,0., 1.,0.), (0.,2., 1.,2.)],
-                'J' => &[(0.5,0., 0.5,1.6), (0.5,1.6, 0.2,2.), (0.,2., 0.5,2.)],
-                'K' => &[(0.,0., 0.,2.), (0.,1., 1.,2.), (0.,1., 1.,0.)],
-                'L' => &[(0.,0., 0.,2.), (0.,0., 1.,0.)],
-                'M' => &[(0.,2., 0.,0.), (0.,0., 0.5,1.), (0.5,1., 1.,0.), (1.,0., 1.,2.)],
-                'N' => &[(0.,2., 0.,0.), (0.,0., 1.,2.), (1.,2., 1.,0.)],
-                'O' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (1.,2., 1.,0.), (1.,0., 0.,0.)],
-                'P' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (1.,2., 1.,1.), (1.,1., 0.,1.)],
-                'Q' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (1.,2., 1.,0.), (1.,0., 0.,0.), (0.5,0.5, 1.,0.)],
-                'R' => &[(0.,0., 0.,2.), (0.,2., 1.,2.), (1.,2., 1.,1.), (1.,1., 0.,1.), (0.,1., 1.,0.)],
-                'S' => &[(1.,2., 0.,2.), (0.,2., 0.,1.), (0.,1., 1.,1.), (1.,1., 1.,0.), (1.,0., 0.,0.)],
-                'T' => &[(0.,2., 1.,2.), (0.5,2., 0.5,0.)],
-                'U' => &[(0.,2., 0.,0.), (0.,0., 1.,0.), (1.,0., 1.,2.)],
-                'V' => &[(0.,2., 0.5,0.), (0.5,0., 1.,2.)],
-                'W' => &[(0.,2., 0.,0.), (0.,0., 0.5,1.), (0.5,1., 1.,0.), (1.,0., 1.,2.)],
-                'X' => &[(0.,0., 1.,2.), (0.,2., 1.,0.)],
-                'Y' => &[(0.,2., 0.5,1.), (1.,2., 0.5,1.), (0.5,1., 0.5,0.)],
-                'Z' => &[(0.,2., 1.,2.), (1.,2., 0.,0.), (0.,0., 1.,0.)],
+                'A' => &[(0., 2., 0.5, 0.), (0.5, 0., 1., 2.), (0.2, 1., 0.8, 1.)],
+                'B' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 0.8, 2.),
+                    (0.8, 2., 1., 1.5),
+                    (1., 1.5, 0.8, 1.),
+                    (0.8, 1., 0., 1.),
+                    (0., 1., 0.8, 1.),
+                    (0.8, 1., 1., 0.5),
+                    (1., 0.5, 0.8, 0.),
+                    (0.8, 0., 0., 0.),
+                ],
+                'C' => &[(1., 2., 0., 2.), (0., 2., 0., 0.), (0., 0., 1., 0.)],
+                'D' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 0.6, 2.),
+                    (0.6, 2., 1., 1.),
+                    (1., 1., 0.6, 0.),
+                    (0.6, 0., 0., 0.),
+                ],
+                'E' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (0., 1., 0.7, 1.),
+                    (0., 0., 1., 0.),
+                ],
+                'F' => &[(0., 0., 0., 2.), (0., 2., 1., 2.), (0., 1., 0.7, 1.)],
+                'G' => &[
+                    (1., 2., 0., 2.),
+                    (0., 2., 0., 0.),
+                    (0., 0., 1., 0.),
+                    (1., 0., 1., 1.),
+                    (1., 1., 0.5, 1.),
+                ],
+                'H' => &[(0., 0., 0., 2.), (0., 1., 1., 1.), (1., 0., 1., 2.)],
+                'I' => &[(0.5, 0., 0.5, 2.), (0., 0., 1., 0.), (0., 2., 1., 2.)],
+                'J' => &[(0.5, 0., 0.5, 1.6), (0.5, 1.6, 0.2, 2.), (0., 2., 0.5, 2.)],
+                'K' => &[(0., 0., 0., 2.), (0., 1., 1., 2.), (0., 1., 1., 0.)],
+                'L' => &[(0., 0., 0., 2.), (0., 0., 1., 0.)],
+                'M' => &[
+                    (0., 2., 0., 0.),
+                    (0., 0., 0.5, 1.),
+                    (0.5, 1., 1., 0.),
+                    (1., 0., 1., 2.),
+                ],
+                'N' => &[(0., 2., 0., 0.), (0., 0., 1., 2.), (1., 2., 1., 0.)],
+                'O' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (1., 2., 1., 0.),
+                    (1., 0., 0., 0.),
+                ],
+                'P' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (1., 2., 1., 1.),
+                    (1., 1., 0., 1.),
+                ],
+                'Q' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (1., 2., 1., 0.),
+                    (1., 0., 0., 0.),
+                    (0.5, 0.5, 1., 0.),
+                ],
+                'R' => &[
+                    (0., 0., 0., 2.),
+                    (0., 2., 1., 2.),
+                    (1., 2., 1., 1.),
+                    (1., 1., 0., 1.),
+                    (0., 1., 1., 0.),
+                ],
+                'S' => &[
+                    (1., 2., 0., 2.),
+                    (0., 2., 0., 1.),
+                    (0., 1., 1., 1.),
+                    (1., 1., 1., 0.),
+                    (1., 0., 0., 0.),
+                ],
+                'T' => &[(0., 2., 1., 2.), (0.5, 2., 0.5, 0.)],
+                'U' => &[(0., 2., 0., 0.), (0., 0., 1., 0.), (1., 0., 1., 2.)],
+                'V' => &[(0., 2., 0.5, 0.), (0.5, 0., 1., 2.)],
+                'W' => &[
+                    (0., 2., 0., 0.),
+                    (0., 0., 0.5, 1.),
+                    (0.5, 1., 1., 0.),
+                    (1., 0., 1., 2.),
+                ],
+                'X' => &[(0., 0., 1., 2.), (0., 2., 1., 0.)],
+                'Y' => &[(0., 2., 0.5, 1.), (1., 2., 0.5, 1.), (0.5, 1., 0.5, 0.)],
+                'Z' => &[(0., 2., 1., 2.), (1., 2., 0., 0.), (0., 0., 1., 0.)],
                 // Lowercase letters
-                'a' => &[(0.,0.5, 0.,1.5), (0.,1.5, 1.,1.5), (1.,1.5, 1.,0.), (0.,0., 1.,0.)],
-                'b' => &[(0.,0., 0.,2.), (0.,1.5, 0.8,1.5), (0.8,1.5, 1.,0.8), (1.,0.8, 0.8,0.), (0.8,0., 0.,0.)],
-                'c' => &[(1.,1.5, 0.,1.5), (0.,1.5, 0.,0.), (0.,0., 1.,0.)],
-                'd' => &[(1.,0., 1.,2.), (1.,1.5, 0.2,1.5), (0.2,1.5, 0.,0.8), (0.,0.8, 0.2,0.), (0.2,0., 1.,0.)],
-                'e' => &[(1.,1.5, 0.,1.5), (0.,1.5, 0.,0.5), (0.,0.5, 0.5,0.5), (0.,0., 1.,0.)],
-                'f' => &[(0.3,2., 0.7,2.), (0.5,2., 0.5,0.), (0.,1., 0.5,1.)],
-                'g' => &[(0.,0.5, 1.,0.5), (1.,0.5, 1.,-0.5), (1.,-0.5, 0.,-0.5), (0.,-0.5, 0.,1.5), (0.,1.5, 1.,1.5)],
-                'h' => &[(0.,0., 0.,2.), (0.,1., 0.8,1.), (0.8,1., 1.,0.), (1.,0., 1.,0.8)],
-                'i' => &[(0.5,0., 0.5,1.5), (0.3,2., 0.7,2.)],
-                'j' => &[(0.5,0., 0.5,1.5), (0.5,1.5, 0.2,2.), (0.3,2., 0.7,2.)],
-                'k' => &[(0.,0., 0.,2.), (0.,0.8, 0.8,1.5), (0.,0.8, 1.,0.)],
-                'l' => &[(0.5,0., 0.5,2.)],
-                'm' => &[(0.,0., 0.,1.5), (0.,1.5, 0.3,0.), (0.3,0., 0.6,1.5), (0.6,1.5, 0.8,0.), (0.8,0., 1.,1.5), (1.,1.5, 1.,0.)],
-                'n' => &[(0.,0., 0.,1.5), (0.,1.5, 0.8,0.), (0.8,0., 1.,1.5), (1.,1.5, 1.,0.)],
-                'o' => &[(0.,0., 0.,1.5), (0.,1.5, 1.,1.5), (1.,1.5, 1.,0.), (1.,0., 0.,0.)],
-                'p' => &[(0.,-0.5, 0.,1.5), (0.,1.5, 0.8,1.5), (0.8,1.5, 1.,0.8), (1.,0.8, 0.8,0.), (0.8,0., 0.,0.)],
-                'q' => &[(1.,-0.5, 1.,1.5), (0.2,1.5, 1.,1.5), (1.,1.5, 1.,0.8), (1.,0.8, 0.8,0.), (0.8,0., 0.2,0.), (0.2,0., 0.,0.8)],
-                'r' => &[(0.,0., 0.,1.5), (0.,1.5, 0.8,1.5), (0.8,1.5, 0.8,0.8)],
-                's' => &[(1.,1.5, 0.,1.5), (0.,1.5, 0.,0.8), (0.,0.8, 1.,0.8), (1.,0.8, 1.,0.), (1.,0., 0.,0.)],
-                't' => &[(0.5,0., 0.5,2.), (0.,1., 0.8,1.)],
-                'u' => &[(0.,1.5, 0.,0.), (0.,0., 1.,0.), (1.,0., 1.,1.5)],
-                'v' => &[(0.,1.5, 0.5,0.), (0.5,0., 1.,1.5)],
-                'w' => &[(0.,1.5, 0.25,0.), (0.25,0., 0.5,0.8), (0.5,0.8, 0.75,0.), (0.75,0., 1.,1.5)],
-                'x' => &[(0.,0., 1.,1.5), (0.,1.5, 1.,0.)],
-                'y' => &[(0.,1.5, 0.5,0.), (0.5,0., 1.,1.5), (0.,-0.5, 0.5,-0.5)],
-                'z' => &[(0.,1.5, 1.,1.5), (1.,1.5, 0.,0.), (0.,0., 1.,0.)],
+                'a' => &[
+                    (0., 0.5, 0., 1.5),
+                    (0., 1.5, 1., 1.5),
+                    (1., 1.5, 1., 0.),
+                    (0., 0., 1., 0.),
+                ],
+                'b' => &[
+                    (0., 0., 0., 2.),
+                    (0., 1.5, 0.8, 1.5),
+                    (0.8, 1.5, 1., 0.8),
+                    (1., 0.8, 0.8, 0.),
+                    (0.8, 0., 0., 0.),
+                ],
+                'c' => &[(1., 1.5, 0., 1.5), (0., 1.5, 0., 0.), (0., 0., 1., 0.)],
+                'd' => &[
+                    (1., 0., 1., 2.),
+                    (1., 1.5, 0.2, 1.5),
+                    (0.2, 1.5, 0., 0.8),
+                    (0., 0.8, 0.2, 0.),
+                    (0.2, 0., 1., 0.),
+                ],
+                'e' => &[
+                    (1., 1.5, 0., 1.5),
+                    (0., 1.5, 0., 0.5),
+                    (0., 0.5, 0.5, 0.5),
+                    (0., 0., 1., 0.),
+                ],
+                'f' => &[(0.3, 2., 0.7, 2.), (0.5, 2., 0.5, 0.), (0., 1., 0.5, 1.)],
+                'g' => &[
+                    (0., 0.5, 1., 0.5),
+                    (1., 0.5, 1., -0.5),
+                    (1., -0.5, 0., -0.5),
+                    (0., -0.5, 0., 1.5),
+                    (0., 1.5, 1., 1.5),
+                ],
+                'h' => &[
+                    (0., 0., 0., 2.),
+                    (0., 1., 0.8, 1.),
+                    (0.8, 1., 1., 0.),
+                    (1., 0., 1., 0.8),
+                ],
+                'i' => &[(0.5, 0., 0.5, 1.5), (0.3, 2., 0.7, 2.)],
+                'j' => &[(0.5, 0., 0.5, 1.5), (0.5, 1.5, 0.2, 2.), (0.3, 2., 0.7, 2.)],
+                'k' => &[(0., 0., 0., 2.), (0., 0.8, 0.8, 1.5), (0., 0.8, 1., 0.)],
+                'l' => &[(0.5, 0., 0.5, 2.)],
+                'm' => &[
+                    (0., 0., 0., 1.5),
+                    (0., 1.5, 0.3, 0.),
+                    (0.3, 0., 0.6, 1.5),
+                    (0.6, 1.5, 0.8, 0.),
+                    (0.8, 0., 1., 1.5),
+                    (1., 1.5, 1., 0.),
+                ],
+                'n' => &[
+                    (0., 0., 0., 1.5),
+                    (0., 1.5, 0.8, 0.),
+                    (0.8, 0., 1., 1.5),
+                    (1., 1.5, 1., 0.),
+                ],
+                'o' => &[
+                    (0., 0., 0., 1.5),
+                    (0., 1.5, 1., 1.5),
+                    (1., 1.5, 1., 0.),
+                    (1., 0., 0., 0.),
+                ],
+                'p' => &[
+                    (0., -0.5, 0., 1.5),
+                    (0., 1.5, 0.8, 1.5),
+                    (0.8, 1.5, 1., 0.8),
+                    (1., 0.8, 0.8, 0.),
+                    (0.8, 0., 0., 0.),
+                ],
+                'q' => &[
+                    (1., -0.5, 1., 1.5),
+                    (0.2, 1.5, 1., 1.5),
+                    (1., 1.5, 1., 0.8),
+                    (1., 0.8, 0.8, 0.),
+                    (0.8, 0., 0.2, 0.),
+                    (0.2, 0., 0., 0.8),
+                ],
+                'r' => &[(0., 0., 0., 1.5), (0., 1.5, 0.8, 1.5), (0.8, 1.5, 0.8, 0.8)],
+                's' => &[
+                    (1., 1.5, 0., 1.5),
+                    (0., 1.5, 0., 0.8),
+                    (0., 0.8, 1., 0.8),
+                    (1., 0.8, 1., 0.),
+                    (1., 0., 0., 0.),
+                ],
+                't' => &[(0.5, 0., 0.5, 2.), (0., 1., 0.8, 1.)],
+                'u' => &[(0., 1.5, 0., 0.), (0., 0., 1., 0.), (1., 0., 1., 1.5)],
+                'v' => &[(0., 1.5, 0.5, 0.), (0.5, 0., 1., 1.5)],
+                'w' => &[
+                    (0., 1.5, 0.25, 0.),
+                    (0.25, 0., 0.5, 0.8),
+                    (0.5, 0.8, 0.75, 0.),
+                    (0.75, 0., 1., 1.5),
+                ],
+                'x' => &[(0., 0., 1., 1.5), (0., 1.5, 1., 0.)],
+                'y' => &[
+                    (0., 1.5, 0.5, 0.),
+                    (0.5, 0., 1., 1.5),
+                    (0., -0.5, 0.5, -0.5),
+                ],
+                'z' => &[(0., 1.5, 1., 1.5), (1., 1.5, 0., 0.), (0., 0., 1., 0.)],
                 // Symbols
-                '+' => &[(0.5,0.3, 0.5,1.7), (0.,1., 1.,1.)],
-                '=' => &[(0.,0.5, 1.,0.5), (0.,1.5, 1.,1.5)],
-                '*' => &[(0.2,0.3, 0.8,1.7), (0.5,0., 0.5,2.), (0.,0.7, 1.,1.4), (0.,1.4, 1.,0.7)],
-                '/' => &[(1.,0.3, 0.,1.7)],
-                '(' => &[(0.7,2., 0.2,1.), (0.2,1., 0.7,0.)],
-                ')' => &[(0.3,2., 0.8,1.), (0.8,1., 0.3,0.)],
-                '[' => &[(0.8,2., 0.2,2.), (0.2,2., 0.2,0.), (0.2,0., 0.8,0.)],
-                ']' => &[(0.2,2., 0.8,2.), (0.8,2., 0.8,0.), (0.8,0., 0.2,0.)],
+                '+' => &[(0.5, 0.3, 0.5, 1.7), (0., 1., 1., 1.)],
+                '=' => &[(0., 0.5, 1., 0.5), (0., 1.5, 1., 1.5)],
+                '*' => &[
+                    (0.2, 0.3, 0.8, 1.7),
+                    (0.5, 0., 0.5, 2.),
+                    (0., 0.7, 1., 1.4),
+                    (0., 1.4, 1., 0.7),
+                ],
+                '/' => &[(1., 0.3, 0., 1.7)],
+                '(' => &[(0.7, 2., 0.2, 1.), (0.2, 1., 0.7, 0.)],
+                ')' => &[(0.3, 2., 0.8, 1.), (0.8, 1., 0.3, 0.)],
+                '[' => &[(0.8, 2., 0.2, 2.), (0.2, 2., 0.2, 0.), (0.2, 0., 0.8, 0.)],
+                ']' => &[(0.2, 2., 0.8, 2.), (0.8, 2., 0.8, 0.), (0.8, 0., 0.2, 0.)],
                 ' ' => &[],
                 _ => &[],
             };
-            
+
             for &(x1, y1, x2, y2) in segments {
                 let a = pos + glam::Vec2::new(x1 * char_w, y1 * char_w);
                 let b = pos + glam::Vec2::new(x2 * char_w, y2 * char_w);
@@ -1669,59 +2018,193 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                 }
                 GeoObject::Sphere3D(s) => {
                     if let Some(fc) = s.fill_color {
-                        Self::add_solid_sphere(&mut vertices, &mut indices, camera, &s.center, s.radius, fc, screen_w, screen_h);
+                        Self::add_solid_sphere(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &s.center,
+                            s.radius,
+                            fc,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                     Self::add_wireframe_sphere(
-                        &mut vertices, &mut indices, camera, &s.center, s.radius, s.width, s.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &s.center,
+                        s.radius,
+                        s.width,
+                        s.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Cube3D(c) => {
                     if let Some(fc) = c.fill_color {
-                        Self::add_solid_cube(&mut vertices, &mut indices, camera, &c.center, c.size, fc, screen_w, screen_h);
+                        Self::add_solid_cube(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &c.center,
+                            c.size,
+                            fc,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                     Self::add_wireframe_cube(
-                        &mut vertices, &mut indices, camera, &c.center, c.size, c.width, c.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &c.center,
+                        c.size,
+                        c.width,
+                        c.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Pyramid3D(p) => {
                     if let Some(fc) = p.fill_color {
-                        Self::add_solid_pyramid(&mut vertices, &mut indices, camera, &p.base_center, &p.apex, p.base_size, fc, screen_w, screen_h);
+                        Self::add_solid_pyramid(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &p.base_center,
+                            &p.apex,
+                            p.base_size,
+                            fc,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                     Self::add_wireframe_pyramid(
-                        &mut vertices, &mut indices, camera, &p.base_center, &p.apex, p.base_size, p.width, p.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &p.base_center,
+                        &p.apex,
+                        p.base_size,
+                        p.width,
+                        p.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Cone3D(co) => {
                     if let Some(fc) = co.fill_color {
-                        Self::add_solid_cone(&mut vertices, &mut indices, camera, &co.base_center, &co.apex, co.radius, fc, screen_w, screen_h);
+                        Self::add_solid_cone(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &co.base_center,
+                            &co.apex,
+                            co.radius,
+                            fc,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                     Self::add_wireframe_cone(
-                        &mut vertices, &mut indices, camera, &co.base_center, &co.apex, co.radius, co.width, co.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &co.base_center,
+                        &co.apex,
+                        co.radius,
+                        co.width,
+                        co.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Cylinder3D(cy) => {
                     if let Some(fc) = cy.fill_color {
-                        Self::add_solid_cylinder(&mut vertices, &mut indices, camera, &cy.base_center, &cy.top_center, cy.radius, fc, screen_w, screen_h);
+                        Self::add_solid_cylinder(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &cy.base_center,
+                            &cy.top_center,
+                            cy.radius,
+                            fc,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                     Self::add_wireframe_cylinder(
-                        &mut vertices, &mut indices, camera, &cy.base_center, &cy.top_center, cy.radius, cy.width, cy.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &cy.base_center,
+                        &cy.top_center,
+                        cy.radius,
+                        cy.width,
+                        cy.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Surface3D(su) => {
                     Self::add_surface_mesh(
-                        &mut vertices, &mut indices, camera, su, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        su,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::Torus3D(to) => {
-                    Self::add_solid_torus(&mut vertices, &mut indices, camera, &to.center, to.r_major, to.r_minor, to.color, screen_w, screen_h);
+                    Self::add_solid_torus(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &to.center,
+                        to.r_major,
+                        to.r_minor,
+                        to.color,
+                        screen_w,
+                        screen_h,
+                    );
                     Self::add_wireframe_torus(
-                        &mut vertices, &mut indices, camera, &to.center, to.r_major, to.r_minor, to.width, to.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &to.center,
+                        to.r_major,
+                        to.r_minor,
+                        to.width,
+                        to.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::MoebiusStrip(mb) => {
-                    Self::add_solid_moebius(&mut vertices, &mut indices, camera, &mb.center, mb.radius, mb.width_r, mb.color, screen_w, screen_h);
+                    Self::add_solid_moebius(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &mb.center,
+                        mb.radius,
+                        mb.width_r,
+                        mb.color,
+                        screen_w,
+                        screen_h,
+                    );
                     Self::add_wireframe_moebius(
-                        &mut vertices, &mut indices, camera, &mb.center, mb.radius, mb.width_r, mb.width, mb.color, screen_w, screen_h,
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &mb.center,
+                        mb.radius,
+                        mb.width_r,
+                        mb.width,
+                        mb.color,
+                        screen_w,
+                        screen_h,
                     );
                 }
                 GeoObject::ParametricCurve3D(pc) => {
@@ -1739,9 +2222,15 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                                 let p = Point3D::new(x, y, z);
                                 if let Some(prev_p) = prev {
                                     Self::add_line_3d(
-                                        &mut vertices, &mut indices,
-                                        camera, &prev_p, &p,
-                                        pc.width, pc.color, screen_w, screen_h,
+                                        &mut vertices,
+                                        &mut indices,
+                                        camera,
+                                        &prev_p,
+                                        &p,
+                                        pc.width,
+                                        pc.color,
+                                        screen_w,
+                                        screen_h,
                                     );
                                 }
                                 prev = Some(p);
@@ -1765,14 +2254,19 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                         _ => AttractorType::lorenz(),
                     };
                     let points = integrate_attractor(
-                        &att_type, at.x0, at.y0, at.z0,
-                        at.dt, at.steps, at.skip,
+                        &att_type, at.x0, at.y0, at.z0, at.dt, at.steps, at.skip,
                     );
                     for w in points.windows(2) {
                         Self::add_line_3d(
-                            &mut vertices, &mut indices,
-                            camera, &w[0], &w[1],
-                            at.width, at.color, screen_w, screen_h,
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &w[0],
+                            &w[1],
+                            at.width,
+                            at.color,
+                            screen_w,
+                            screen_h,
                         );
                     }
                 }
@@ -1788,19 +2282,47 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                             for k in 0..=d {
                                 let z = vf.z_min + k as f64 * dz;
                                 if let (Ok(u), Ok(v), Ok(w)) = (
-                                    grafito_geometry::expr::evaluate(&vf.expr_u, &[("x".to_string(), x), ("y".to_string(), y), ("z".to_string(), z)]),
-                                    grafito_geometry::expr::evaluate(&vf.expr_v, &[("x".to_string(), x), ("y".to_string(), y), ("z".to_string(), z)]),
-                                    grafito_geometry::expr::evaluate(&vf.expr_w, &[("x".to_string(), x), ("y".to_string(), y), ("z".to_string(), z)]),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_u,
+                                        &[
+                                            ("x".to_string(), x),
+                                            ("y".to_string(), y),
+                                            ("z".to_string(), z),
+                                        ],
+                                    ),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_v,
+                                        &[
+                                            ("x".to_string(), x),
+                                            ("y".to_string(), y),
+                                            ("z".to_string(), z),
+                                        ],
+                                    ),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_w,
+                                        &[
+                                            ("x".to_string(), x),
+                                            ("y".to_string(), y),
+                                            ("z".to_string(), z),
+                                        ],
+                                    ),
                                 ) {
                                     if u.is_finite() && v.is_finite() && w.is_finite() {
-                                        let mag = (u*u + v*v + w*w).sqrt();
+                                        let mag = (u * u + v * v + w * w).sqrt();
                                         if mag > 0.001 {
                                             let start = Point3D::new(x, y, z);
-                                            let end = Point3D::new(x + u/mag, y + v/mag, z + w/mag);
+                                            let end =
+                                                Point3D::new(x + u / mag, y + v / mag, z + w / mag);
                                             Self::add_line_3d(
-                                                &mut vertices, &mut indices,
-                                                camera, &start, &end,
-                                                1.5, vf.color, screen_w, screen_h,
+                                                &mut vertices,
+                                                &mut indices,
+                                                camera,
+                                                &start,
+                                                &end,
+                                                1.5,
+                                                vf.color,
+                                                screen_w,
+                                                screen_h,
                                             );
                                         }
                                     }
@@ -1817,16 +2339,21 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                             for j in 0..res {
                                 let u = -1.0 + 2.0 * i as f64 / res as f64;
                                 let v = -1.0 + 2.0 * j as f64 / res as f64;
-                                let x = u * (1.0 - v*v / 2.0).cos();
-                                let y = v * (1.0 - u*u / 2.0).cos();
-                                let z = u * v * hs.rotation_angles.first().copied().unwrap_or(0.0).sin();
+                                let x = u * (1.0 - v * v / 2.0).cos();
+                                let y = v * (1.0 - u * u / 2.0).cos();
+                                let z = u
+                                    * v
+                                    * hs.rotation_angles.first().copied().unwrap_or(0.0).sin();
                                 let p = Point3D::new(x * 3.0, y * 3.0, z * 3.0);
                                 let sp = camera.project(&p, screen_w, screen_h);
                                 if let Some(screen_p) = sp {
                                     Self::add_rect(
-                                        &mut vertices, &mut indices,
+                                        &mut vertices,
+                                        &mut indices,
                                         glam::Vec2::new(screen_p.0, screen_p.1),
-                                        2.0, 2.0, hs.color,
+                                        2.0,
+                                        2.0,
+                                        hs.color,
                                     );
                                 }
                             }
@@ -1912,12 +2439,29 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                     let p1 = Point3D::new(x, 0.0, start_z);
                     let p2 = Point3D::new(x, 0.0, end_z);
                     Self::add_line_3d(
-                        vertices, indices, camera, &p1, &p2, 1.5, major_color, screen_w, screen_h,
+                        vertices,
+                        indices,
+                        camera,
+                        &p1,
+                        &p2,
+                        1.5,
+                        major_color,
+                        screen_w,
+                        screen_h,
                     );
-                    
+
                     if x.abs() > 1e-5 {
-                        if let Some((sx, sy)) = camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h) {
-                            Self::add_text_screen(vertices, indices, &format!("{}", x), glam::Vec2::new(sx + 5.0, sy + 5.0), 12.0, major_color);
+                        if let Some((sx, sy)) =
+                            camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
+                        {
+                            Self::add_text_screen(
+                                vertices,
+                                indices,
+                                &format!("{}", x),
+                                glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                12.0,
+                                major_color,
+                            );
                         }
                     }
                 }
@@ -1927,12 +2471,29 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                     let p1 = Point3D::new(start_x, 0.0, z);
                     let p2 = Point3D::new(end_x, 0.0, z);
                     Self::add_line_3d(
-                        vertices, indices, camera, &p1, &p2, 1.5, major_color, screen_w, screen_h,
+                        vertices,
+                        indices,
+                        camera,
+                        &p1,
+                        &p2,
+                        1.5,
+                        major_color,
+                        screen_w,
+                        screen_h,
                     );
-                    
+
                     if z.abs() > 1e-5 {
-                        if let Some((sx, sy)) = camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h) {
-                            Self::add_text_screen(vertices, indices, &format!("{}", z), glam::Vec2::new(sx + 5.0, sy + 5.0), 12.0, major_color);
+                        if let Some((sx, sy)) =
+                            camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
+                        {
+                            Self::add_text_screen(
+                                vertices,
+                                indices,
+                                &format!("{}", z),
+                                glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                12.0,
+                                major_color,
+                            );
                         }
                     }
                 }
@@ -1954,10 +2515,19 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                 Self::add_line_3d(
                     vertices, indices, camera, &p1, &p2, width, color, screen_w, screen_h,
                 );
-                
+
                 if is_major && x.abs() > 1e-5 {
-                    if let Some((sx, sy)) = camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h) {
-                        Self::add_text_screen(vertices, indices, &format!("{}", x), glam::Vec2::new(sx + 5.0, sy + 5.0), 12.0, major_color);
+                    if let Some((sx, sy)) =
+                        camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
+                    {
+                        Self::add_text_screen(
+                            vertices,
+                            indices,
+                            &format!("{}", x),
+                            glam::Vec2::new(sx + 5.0, sy + 5.0),
+                            12.0,
+                            major_color,
+                        );
                     }
                 }
             }
@@ -1976,10 +2546,19 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                 Self::add_line_3d(
                     vertices, indices, camera, &p1, &p2, width, color, screen_w, screen_h,
                 );
-                
+
                 if is_major && z.abs() > 1e-5 {
-                    if let Some((sx, sy)) = camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h) {
-                        Self::add_text_screen(vertices, indices, &format!("{}", z), glam::Vec2::new(sx + 5.0, sy + 5.0), 12.0, major_color);
+                    if let Some((sx, sy)) =
+                        camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
+                    {
+                        Self::add_text_screen(
+                            vertices,
+                            indices,
+                            &format!("{}", z),
+                            glam::Vec2::new(sx + 5.0, sy + 5.0),
+                            12.0,
+                            major_color,
+                        );
                     }
                 }
             }
@@ -2339,10 +2918,18 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
                 let y = (r_major + r_minor * v.cos()) * u.sin() + center.y;
                 let z = r_minor * v.sin() + center.z;
                 Self::add_line_3d_circle_segment(
-                    vertices, indices, camera,
+                    vertices,
+                    indices,
+                    camera,
                     Point3D::new(x, y, z),
-                    center, r_major, u, u_next,
-                    width, color, screen_w, screen_h,
+                    center,
+                    r_major,
+                    u,
+                    u_next,
+                    width,
+                    color,
+                    screen_w,
+                    screen_h,
                 );
             }
         }
@@ -2364,7 +2951,14 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     ) {
         if let Some(ps) = camera.project(&p, screen_w, screen_h) {
             let s = glam::Vec2::new(ps.0, ps.1);
-            Self::add_rect(vertices, indices, s, width.max(0.5) * 2.0, width.max(0.5) * 2.0, color);
+            Self::add_rect(
+                vertices,
+                indices,
+                s,
+                width.max(0.5) * 2.0,
+                width.max(0.5) * 2.0,
+                color,
+            );
         }
     }
 
@@ -2391,8 +2985,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
             let p = Point3D::new(x, y, z);
             if let Some(prev_p) = prev {
                 Self::add_line_3d(
-                    vertices, indices, camera,
-                    &prev_p, &p, line_width, color, screen_w, screen_h,
+                    vertices, indices, camera, &prev_p, &p, line_width, color, screen_w, screen_h,
                 );
             }
             prev = Some(p);
@@ -2417,24 +3010,43 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         let y_step = (y_max - y_min) / steps as f64;
 
         let empty_vars = std::collections::HashMap::new();
-        let parsed_ast = grafito_geometry::expr::prepare_function_ast(&surface.expr, &empty_vars, &["x", "y"]).ok();
+        let parsed_ast =
+            grafito_geometry::expr::prepare_function_ast(&surface.expr, &empty_vars, &["x", "y"])
+                .ok();
 
-        let grid: Vec<Vec<Option<Point3D>>> = (0..=steps).into_par_iter().map(|i| {
-            let x = x_min + i as f64 * x_step;
-            (0..=steps).map(|j| {
-                let y = y_min + j as f64 * y_step;
-                let z_val = if let Some(ast) = &parsed_ast {
-                    let res = ast.eval_2d("x", x, "y", y);
-                    if res.is_finite() && res.abs() < 100.0 { Some(res) } else { None }
-                } else {
-                    let vars_vec = vec![("x".to_string(), x), ("y".to_string(), y)];
-                    if let Ok(z) = grafito_geometry::expr::evaluate(&surface.expr, &vars_vec) {
-                        if z.is_finite() && z.abs() < 100.0 { Some(z) } else { None }
-                    } else { None }
-                };
-                z_val.map(|z| Point3D::new(x, z, y))
-            }).collect()
-        }).collect();
+        let grid: Vec<Vec<Option<Point3D>>> = (0..=steps)
+            .into_par_iter()
+            .map(|i| {
+                let x = x_min + i as f64 * x_step;
+                (0..=steps)
+                    .map(|j| {
+                        let y = y_min + j as f64 * y_step;
+                        let z_val = if let Some(ast) = &parsed_ast {
+                            let res = ast.eval_2d("x", x, "y", y);
+                            if res.is_finite() && res.abs() < 100.0 {
+                                Some(res)
+                            } else {
+                                None
+                            }
+                        } else {
+                            let vars_vec = vec![("x".to_string(), x), ("y".to_string(), y)];
+                            if let Ok(z) =
+                                grafito_geometry::expr::evaluate(&surface.expr, &vars_vec)
+                            {
+                                if z.is_finite() && z.abs() < 100.0 {
+                                    Some(z)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        z_val.map(|z| Point3D::new(x, z, y))
+                    })
+                    .collect()
+            })
+            .collect();
 
         for i in 0..=steps {
             for j in 0..=steps {
@@ -2483,19 +3095,29 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     fn icosphere(subdivisions: usize) -> (Vec<(f64, f64, f64)>, Vec<u32>) {
         let t = (1.0 + 5.0f64.sqrt()) / 2.0;
         let mut verts = vec![
-            (-1.0,  t, 0.0), (1.0,  t, 0.0), (-1.0, -t, 0.0), (1.0, -t, 0.0),
-            (0.0, -1.0,  t), (0.0, 1.0,  t), (0.0, -1.0, -t), (0.0, 1.0, -t),
-            ( t, 0.0, -1.0), ( t, 0.0, 1.0), (-t, 0.0, -1.0), (-t, 0.0, 1.0),
+            (-1.0, t, 0.0),
+            (1.0, t, 0.0),
+            (-1.0, -t, 0.0),
+            (1.0, -t, 0.0),
+            (0.0, -1.0, t),
+            (0.0, 1.0, t),
+            (0.0, -1.0, -t),
+            (0.0, 1.0, -t),
+            (t, 0.0, -1.0),
+            (t, 0.0, 1.0),
+            (-t, 0.0, -1.0),
+            (-t, 0.0, 1.0),
         ];
         for v in &mut verts {
-            let mag = (v.0*v.0 + v.1*v.1 + v.2*v.2).sqrt();
-            v.0 /= mag; v.1 /= mag; v.2 /= mag;
+            let mag = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt();
+            v.0 /= mag;
+            v.1 /= mag;
+            v.2 /= mag;
         }
         let mut indices: Vec<u32> = vec![
-            0,11,5, 0,5,1, 0,1,7, 0,7,10, 0,10,11,
-            1,5,9, 5,11,4, 11,10,2, 10,7,6, 7,1,8,
-            3,9,4, 3,4,2, 3,2,6, 3,6,8, 3,8,9,
-            4,9,5, 2,4,11, 6,2,10, 8,6,7, 9,8,1,
+            0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7,
+            6, 7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10,
+            8, 6, 7, 9, 8, 1,
         ];
         for _ in 0..subdivisions {
             let mut new_indices = Vec::new();
@@ -2503,17 +3125,22 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
             let mut get_mid = |v1: u32, v2: u32| -> u32 {
                 let key = if v1 < v2 { (v1, v2) } else { (v2, v1) };
                 *midpoints.entry(key).or_insert_with(|| {
-                    let a = verts[v1 as usize]; let b = verts[v2 as usize];
-                    let x = (a.0+b.0)/2.0; let y = (a.1+b.1)/2.0; let z = (a.2+b.2)/2.0;
-                    let mag = (x*x + y*y + z*z).sqrt();
-                    verts.push((x/mag, y/mag, z/mag));
+                    let a = verts[v1 as usize];
+                    let b = verts[v2 as usize];
+                    let x = (a.0 + b.0) / 2.0;
+                    let y = (a.1 + b.1) / 2.0;
+                    let z = (a.2 + b.2) / 2.0;
+                    let mag = (x * x + y * y + z * z).sqrt();
+                    verts.push((x / mag, y / mag, z / mag));
                     (verts.len() - 1) as u32
                 })
             };
             for tri in indices.chunks(3) {
                 let (a, b, c) = (tri[0], tri[1], tri[2]);
-                let m1 = get_mid(a, b); let m2 = get_mid(b, c); let m3 = get_mid(c, a);
-                new_indices.extend_from_slice(&[a,m1,m3, m1,b,m2, m3,m2,c, m1,m2,m3]);
+                let m1 = get_mid(a, b);
+                let m2 = get_mid(b, c);
+                let m3 = get_mid(c, a);
+                new_indices.extend_from_slice(&[a, m1, m3, m1, b, m2, m3, m2, c, m1, m2, m3]);
             }
             indices = new_indices;
         }
@@ -2524,11 +3151,15 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
         camera: &Camera3D,
-        p0: &Point3D, n0: glam::Vec3,
-        p1: &Point3D, n1: glam::Vec3,
-        p2: &Point3D, n2: glam::Vec3,
+        p0: &Point3D,
+        n0: glam::Vec3,
+        p1: &Point3D,
+        n1: glam::Vec3,
+        p2: &Point3D,
+        n2: glam::Vec3,
         fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         let c0 = calculate_lighting(fill_color, n0, light_dir);
@@ -2548,30 +3179,56 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     }
 
     fn add_solid_sphere(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        center: &Point3D, radius: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        center: &Point3D,
+        radius: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let level = 2;
         let (mesh_positions, mesh_indices) = Self::icosphere(level);
         let _light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         for tri in mesh_indices.chunks(3) {
-            let i0 = tri[0] as usize; let i1 = tri[1] as usize; let i2 = tri[2] as usize;
-            let v0 = mesh_positions[i0]; let v1 = mesh_positions[i1]; let v2 = mesh_positions[i2];
-            let p0 = Point3D::new(center.x + v0.0 * radius, center.y + v0.1 * radius, center.z + v0.2 * radius);
-            let p1 = Point3D::new(center.x + v1.0 * radius, center.y + v1.1 * radius, center.z + v1.2 * radius);
-            let p2 = Point3D::new(center.x + v2.0 * radius, center.y + v2.1 * radius, center.z + v2.2 * radius);
+            let i0 = tri[0] as usize;
+            let i1 = tri[1] as usize;
+            let i2 = tri[2] as usize;
+            let v0 = mesh_positions[i0];
+            let v1 = mesh_positions[i1];
+            let v2 = mesh_positions[i2];
+            let p0 = Point3D::new(
+                center.x + v0.0 * radius,
+                center.y + v0.1 * radius,
+                center.z + v0.2 * radius,
+            );
+            let p1 = Point3D::new(
+                center.x + v1.0 * radius,
+                center.y + v1.1 * radius,
+                center.z + v1.2 * radius,
+            );
+            let p2 = Point3D::new(
+                center.x + v2.0 * radius,
+                center.y + v2.1 * radius,
+                center.z + v2.2 * radius,
+            );
             let n = glam::Vec3::new(v0.0 as f32, v0.1 as f32, v0.2 as f32);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &p0, n, &p1, n, &p2, n, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices, indices, camera, &p0, n, &p1, n, &p2, n, fill_color, screen_w, screen_h,
+            );
         }
     }
 
     fn add_solid_cube(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        center: &Point3D, size: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        center: &Point3D,
+        size: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let h = size * 0.5;
         let corners = [
@@ -2585,24 +3242,55 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
             Point3D::new(center.x - h, center.y + h, center.z + h),
         ];
         let faces: [(usize, usize, usize, usize, glam::Vec3); 6] = [
-            (0,1,2,3, glam::Vec3::new(0.0, 0.0, -1.0)),
-            (4,5,6,7, glam::Vec3::new(0.0, 0.0, 1.0)),
-            (0,1,5,4, glam::Vec3::new(0.0, -1.0, 0.0)),
-            (2,3,7,6, glam::Vec3::new(0.0, 1.0, 0.0)),
-            (0,3,7,4, glam::Vec3::new(-1.0, 0.0, 0.0)),
-            (1,2,6,5, glam::Vec3::new(1.0, 0.0, 0.0)),
+            (0, 1, 2, 3, glam::Vec3::new(0.0, 0.0, -1.0)),
+            (4, 5, 6, 7, glam::Vec3::new(0.0, 0.0, 1.0)),
+            (0, 1, 5, 4, glam::Vec3::new(0.0, -1.0, 0.0)),
+            (2, 3, 7, 6, glam::Vec3::new(0.0, 1.0, 0.0)),
+            (0, 3, 7, 4, glam::Vec3::new(-1.0, 0.0, 0.0)),
+            (1, 2, 6, 5, glam::Vec3::new(1.0, 0.0, 0.0)),
         ];
         for (a, b, c, d, n) in &faces {
-            Self::add_solid_triangle_3d(vertices, indices, camera, &corners[*a], *n, &corners[*b], *n, &corners[*c], *n, fill_color, screen_w, screen_h);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &corners[*a], *n, &corners[*c], *n, &corners[*d], *n, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &corners[*a],
+                *n,
+                &corners[*b],
+                *n,
+                &corners[*c],
+                *n,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &corners[*a],
+                *n,
+                &corners[*c],
+                *n,
+                &corners[*d],
+                *n,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
         }
     }
 
     fn add_solid_pyramid(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        base_center: &Point3D, apex: &Point3D, base_size: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        base_center: &Point3D,
+        apex: &Point3D,
+        base_size: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let h = base_size * 0.5;
         let base = [
@@ -2615,73 +3303,178 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         for i in 0..4 {
             let j = (i + 1) % 4;
             let n = Self::face_normal(&base[i], &base[j], &apex);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &base[i], n, &base[j], n, &apex, n, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices, indices, camera, &base[i], n, &base[j], n, &apex, n, fill_color,
+                screen_w, screen_h,
+            );
         }
         let n_base = glam::Vec3::new(0.0, -1.0, 0.0);
-        Self::add_solid_triangle_3d(vertices, indices, camera, &base[0], n_base, &base[1], n_base, &base[2], n_base, fill_color, screen_w, screen_h);
-        Self::add_solid_triangle_3d(vertices, indices, camera, &base[0], n_base, &base[2], n_base, &base[3], n_base, fill_color, screen_w, screen_h);
+        Self::add_solid_triangle_3d(
+            vertices, indices, camera, &base[0], n_base, &base[1], n_base, &base[2], n_base,
+            fill_color, screen_w, screen_h,
+        );
+        Self::add_solid_triangle_3d(
+            vertices, indices, camera, &base[0], n_base, &base[2], n_base, &base[3], n_base,
+            fill_color, screen_w, screen_h,
+        );
     }
 
     fn add_solid_cone(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        base_center: &Point3D, apex: &Point3D, radius: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        base_center: &Point3D,
+        apex: &Point3D,
+        radius: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let segs = 32;
         let mut circle = Vec::new();
         for i in 0..segs {
             let a = i as f64 / segs as f64 * std::f64::consts::TAU;
-            circle.push(Point3D::new(base_center.x + radius * a.cos(), base_center.y, base_center.z + radius * a.sin()));
+            circle.push(Point3D::new(
+                base_center.x + radius * a.cos(),
+                base_center.y,
+                base_center.z + radius * a.sin(),
+            ));
         }
         for i in 0..segs {
             let j = (i + 1) % segs;
             let n = Self::face_normal(&circle[i], &circle[j], apex);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &circle[i], n, &circle[j], n, apex, n, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices, indices, camera, &circle[i], n, &circle[j], n, apex, n, fill_color,
+                screen_w, screen_h,
+            );
         }
         let n_base = glam::Vec3::new(0.0, -1.0, 0.0);
         for i in 0..segs {
             let j = (i + 1) % segs;
-            Self::add_solid_triangle_3d(vertices, indices, camera, &circle[i], n_base, &circle[j], n_base, base_center, n_base, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &circle[i],
+                n_base,
+                &circle[j],
+                n_base,
+                base_center,
+                n_base,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
         }
     }
 
     fn add_solid_cylinder(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        base_center: &Point3D, top_center: &Point3D, radius: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        base_center: &Point3D,
+        top_center: &Point3D,
+        radius: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
         let segs = 32;
         let mut b_circle = Vec::new();
         let mut t_circle = Vec::new();
         for i in 0..segs {
             let a = i as f64 / segs as f64 * std::f64::consts::TAU;
-            b_circle.push(Point3D::new(base_center.x + radius * a.cos(), base_center.y, base_center.z + radius * a.sin()));
-            t_circle.push(Point3D::new(top_center.x + radius * a.cos(), top_center.y, top_center.z + radius * a.sin()));
+            b_circle.push(Point3D::new(
+                base_center.x + radius * a.cos(),
+                base_center.y,
+                base_center.z + radius * a.sin(),
+            ));
+            t_circle.push(Point3D::new(
+                top_center.x + radius * a.cos(),
+                top_center.y,
+                top_center.z + radius * a.sin(),
+            ));
         }
         for i in 0..segs {
             let j = (i + 1) % segs;
             let n = Self::face_normal(&b_circle[i], &t_circle[i], &b_circle[j]);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &b_circle[i], n, &t_circle[i], n, &b_circle[j], n, fill_color, screen_w, screen_h);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &t_circle[i], n, &t_circle[j], n, &b_circle[j], n, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &b_circle[i],
+                n,
+                &t_circle[i],
+                n,
+                &b_circle[j],
+                n,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &t_circle[i],
+                n,
+                &t_circle[j],
+                n,
+                &b_circle[j],
+                n,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
         }
         let n_bot = glam::Vec3::new(0.0, -1.0, 0.0);
         let n_top = glam::Vec3::new(0.0, 1.0, 0.0);
         for i in 0..segs {
             let j = (i + 1) % segs;
-            Self::add_solid_triangle_3d(vertices, indices, camera, &b_circle[i], n_bot, &b_circle[j], n_bot, base_center, n_bot, fill_color, screen_w, screen_h);
-            Self::add_solid_triangle_3d(vertices, indices, camera, &t_circle[i], n_top, &t_circle[j], n_top, top_center, n_top, fill_color, screen_w, screen_h);
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &b_circle[i],
+                n_bot,
+                &b_circle[j],
+                n_bot,
+                base_center,
+                n_bot,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
+            Self::add_solid_triangle_3d(
+                vertices,
+                indices,
+                camera,
+                &t_circle[i],
+                n_top,
+                &t_circle[j],
+                n_top,
+                top_center,
+                n_top,
+                fill_color,
+                screen_w,
+                screen_h,
+            );
         }
     }
 
     fn add_solid_torus(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        center: &Point3D, r_major: f64, r_minor: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        center: &Point3D,
+        r_major: f64,
+        r_minor: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
-        let u_steps = 32usize; let v_steps = 16usize;
+        let u_steps = 32usize;
+        let v_steps = 16usize;
         let mut grid: Vec<Vec<(Point3D, glam::Vec3)>> = Vec::new();
         for i in 0..=u_steps {
             let u = i as f64 / u_steps as f64 * std::f64::consts::TAU;
@@ -2701,43 +3494,73 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
         let _light_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         for i in 0..u_steps {
             for j in 0..v_steps {
-                let (p00, n00) = grid[i][j]; let (p10, n10) = grid[i+1][j];
-                let (p01, n01) = grid[i][j+1]; let (p11, n11) = grid[i+1][j+1];
-                Self::add_solid_triangle_3d(vertices, indices, camera, &p00, n00, &p10, n10, &p11, n11, fill_color, screen_w, screen_h);
-                Self::add_solid_triangle_3d(vertices, indices, camera, &p00, n00, &p11, n11, &p01, n01, fill_color, screen_w, screen_h);
+                let (p00, n00) = grid[i][j];
+                let (p10, n10) = grid[i + 1][j];
+                let (p01, n01) = grid[i][j + 1];
+                let (p11, n11) = grid[i + 1][j + 1];
+                Self::add_solid_triangle_3d(
+                    vertices, indices, camera, &p00, n00, &p10, n10, &p11, n11, fill_color,
+                    screen_w, screen_h,
+                );
+                Self::add_solid_triangle_3d(
+                    vertices, indices, camera, &p00, n00, &p11, n11, &p01, n01, fill_color,
+                    screen_w, screen_h,
+                );
             }
         }
     }
 
     fn add_solid_moebius(
-        vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
         camera: &Camera3D,
-        center: &Point3D, radius: f64, width_r: f64, fill_color: Color,
-        screen_w: f32, screen_h: f32,
+        center: &Point3D,
+        radius: f64,
+        width_r: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
     ) {
-        let u_steps = 64usize; let v_steps = 8usize;
+        let u_steps = 64usize;
+        let v_steps = 8usize;
         let mut grid: Vec<Vec<(Point3D, glam::Vec3)>> = Vec::new();
         for i in 0..=u_steps {
             let u = i as f64 / u_steps as f64 * std::f64::consts::TAU;
             let mut row = Vec::new();
             for j in 0..=v_steps {
                 let v = (j as f64 / v_steps as f64 - 0.5) * 2.0 * width_r;
-                let cu = u.cos(); let su = u.sin(); let cu2 = (u * 0.5).cos(); let su2 = (u * 0.5).sin();
+                let cu = u.cos();
+                let su = u.sin();
+                let cu2 = (u * 0.5).cos();
+                let su2 = (u * 0.5).sin();
                 let x = (radius + v * cu2) * cu + center.x;
                 let y = v * su2 + center.y;
                 let z = (radius + v * cu2) * su + center.z;
-                let nx = cu * cu2; let ny = su2; let nz = su * cu2;
-                let mag = (nx*nx + ny*ny + nz*nz).sqrt().max(0.001);
-                row.push((Point3D::new(x, y, z), glam::Vec3::new((nx / mag) as f32, (ny / mag) as f32, (nz / mag) as f32)));
+                let nx = cu * cu2;
+                let ny = su2;
+                let nz = su * cu2;
+                let mag = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
+                row.push((
+                    Point3D::new(x, y, z),
+                    glam::Vec3::new((nx / mag) as f32, (ny / mag) as f32, (nz / mag) as f32),
+                ));
             }
             grid.push(row);
         }
         for i in 0..u_steps {
             for j in 0..v_steps {
-                let (p00, n00) = grid[i][j]; let (p10, n10) = grid[i+1][j];
-                let (p01, n01) = grid[i][j+1]; let (p11, n11) = grid[i+1][j+1];
-                Self::add_solid_triangle_3d(vertices, indices, camera, &p00, n00, &p10, n10, &p11, n11, fill_color, screen_w, screen_h);
-                Self::add_solid_triangle_3d(vertices, indices, camera, &p00, n00, &p11, n11, &p01, n01, fill_color, screen_w, screen_h);
+                let (p00, n00) = grid[i][j];
+                let (p10, n10) = grid[i + 1][j];
+                let (p01, n01) = grid[i][j + 1];
+                let (p11, n11) = grid[i + 1][j + 1];
+                Self::add_solid_triangle_3d(
+                    vertices, indices, camera, &p00, n00, &p10, n10, &p11, n11, fill_color,
+                    screen_w, screen_h,
+                );
+                Self::add_solid_triangle_3d(
+                    vertices, indices, camera, &p00, n00, &p11, n11, &p01, n01, fill_color,
+                    screen_w, screen_h,
+                );
             }
         }
     }

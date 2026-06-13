@@ -17,10 +17,8 @@ mod android_jni {
         }
 
         unsafe {
-            let ptr = ANativeWindow_fromSurface(
-                env.get_native_interface() as *mut _,
-                surface.into_raw(),
-            );
+            let ptr =
+                ANativeWindow_fromSurface(env.get_native_interface() as *mut _, surface.into_raw());
             if ptr.is_null() {
                 return 0;
             }

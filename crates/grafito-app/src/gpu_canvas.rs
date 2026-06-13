@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use std::sync::RwLock;
-use egui_wgpu::CallbackTrait;
 use egui::epaint::PaintCallbackInfo;
+use egui_wgpu::CallbackTrait;
 use grafito_core::Document;
 use grafito_geometry::Camera3D;
 use grafito_render::Renderer;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 pub struct GpuCanvasResources {
     pub renderer: Arc<RwLock<Renderer>>,
@@ -123,8 +123,12 @@ impl CallbackTrait for CanvasCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let Some(resources) = callback_resources.get::<GpuCanvasResources>() else { return; };
-        let Some(buffers) = &resources.buffers_2d else { return; };
+        let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
+            return;
+        };
+        let Some(buffers) = &resources.buffers_2d else {
+            return;
+        };
 
         if buffers.index_count == 0 {
             return;
@@ -169,10 +173,17 @@ impl CallbackTrait for Canvas3DCallback {
                 return vec![];
             };
 
-            let mvp = glam::Mat4::orthographic_rh(0.0, self.screen_w, self.screen_h, 0.0, -1.0, 1.0);
+            let mvp =
+                glam::Mat4::orthographic_rh(0.0, self.screen_w, self.screen_h, 0.0, -1.0, 1.0);
             renderer.update_mvp(queue, mvp);
 
-            renderer.build_3d_geometry(&self.document, &self.camera, self.dark_mode, self.screen_w, self.screen_h)
+            renderer.build_3d_geometry(
+                &self.document,
+                &self.camera,
+                self.dark_mode,
+                self.screen_w,
+                self.screen_h,
+            )
         };
 
         if vertices.is_empty() {
@@ -246,8 +257,12 @@ impl CallbackTrait for Canvas3DCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
-        let Some(resources) = callback_resources.get::<GpuCanvasResources>() else { return; };
-        let Some(buffers) = &resources.buffers_3d else { return; };
+        let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
+            return;
+        };
+        let Some(buffers) = &resources.buffers_3d else {
+            return;
+        };
 
         if buffers.index_count == 0 {
             return;

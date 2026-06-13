@@ -22,7 +22,9 @@ mod tests {
 
         assert!(result.is_none());
         assert!(input.is_empty());
-        assert!(doc.objects_iter().any(|(_, obj)| matches!(obj, GeoObject::Function(_))));
+        assert!(doc
+            .objects_iter()
+            .any(|(_, obj)| matches!(obj, GeoObject::Function(_))));
     }
 
     #[test]
@@ -33,8 +35,12 @@ mod tests {
         let result = process_input(&mut doc, &mut input).expect("solve should return text");
 
         assert!(result.contains("Graficado"));
-        assert!(doc.objects_iter().any(|(_, obj)| matches!(obj, GeoObject::Function(_))));
-        assert!(doc.objects_iter().any(|(_, obj)| matches!(obj, GeoObject::Point(_))));
+        assert!(doc
+            .objects_iter()
+            .any(|(_, obj)| matches!(obj, GeoObject::Function(_))));
+        assert!(doc
+            .objects_iter()
+            .any(|(_, obj)| matches!(obj, GeoObject::Point(_))));
     }
 
     #[test]
@@ -45,7 +51,9 @@ mod tests {
         let result = process_input(&mut doc, &mut input).expect("histogram should return text");
 
         assert!(result.contains("Histogram"));
-        assert!(doc.objects_iter().any(|(_, obj)| matches!(obj, GeoObject::Histogram(_))));
+        assert!(doc
+            .objects_iter()
+            .any(|(_, obj)| matches!(obj, GeoObject::Histogram(_))));
     }
 
     #[test]
@@ -56,7 +64,9 @@ mod tests {
         let result = process_input(&mut doc, &mut input);
 
         assert!(result.is_some());
-        assert!(doc.objects_iter().any(|(_, obj)| matches!(obj, GeoObject::PhasePortrait(_))));
+        assert!(doc
+            .objects_iter()
+            .any(|(_, obj)| matches!(obj, GeoObject::PhasePortrait(_))));
     }
 
     #[test]
@@ -82,7 +92,10 @@ mod tests {
         let mut input = "SetValue[A, (3, 0)]".to_string();
         process_input(&mut doc, &mut input);
         // The midpoint should still exist and have been updated
-        assert!(doc.get_object(m).is_some(), "Midpoint should still exist after SetValue");
+        assert!(
+            doc.get_object(m).is_some(),
+            "Midpoint should still exist after SetValue"
+        );
     }
 
     #[test]
@@ -94,11 +107,14 @@ mod tests {
         process_input(&mut doc, &mut input);
         let mut input = "Midpoint[A, B]".to_string();
         process_input(&mut doc, &mut input);
-        let midpoint = doc.objects_iter().find(|(_, obj)| {
-            matches!(obj, GeoObject::Point(p) if p.label.starts_with('M'))
-        });
+        let midpoint = doc
+            .objects_iter()
+            .find(|(_, obj)| matches!(obj, GeoObject::Point(p) if p.label.starts_with('M')));
         assert!(midpoint.is_some(), "Midpoint[A, B] should create midpoint");
         // Verify constraint was registered
-        assert!(doc.constraints.constraint_count() >= 1, "Should have at least one constraint");
+        assert!(
+            doc.constraints.constraint_count() >= 1,
+            "Should have at least one constraint"
+        );
     }
 }

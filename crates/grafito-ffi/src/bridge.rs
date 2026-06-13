@@ -1,14 +1,14 @@
 //! GrafitoEngine — API principal expuesta via UniFFI
 
-use parking_lot::Mutex;
-use std::sync::Arc;
+use crate::canvas::CanvasRenderer;
+use crate::converters::{geo_object_to_dto, id_to_string};
+use crate::dto::*;
+use crate::persist;
+use glam::Vec2;
 use grafito_core::{Document, GeoObject, ObjectId};
 use grafito_geometry::{Camera3D, Color, Point2};
-use glam::Vec2;
-use crate::canvas::CanvasRenderer;
-use crate::dto::*;
-use crate::converters::{geo_object_to_dto, id_to_string};
-use crate::persist;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 const MAX_UNDO: usize = 50;
 
@@ -59,11 +59,13 @@ impl GrafitoEngine {
         let undo_stack = self.undo_stack.lock();
         let redo_stack = self.redo_stack.lock();
 
-        let objects: Vec<ObjectDto> = doc.objects_iter()
+        let objects: Vec<ObjectDto> = doc
+            .objects_iter()
             .map(|(_, obj)| geo_object_to_dto(obj))
             .collect();
 
-        let variables: Vec<VariableDto> = doc.variables()
+        let variables: Vec<VariableDto> = doc
+            .variables()
             .iter()
             .map(|(name, value)| VariableDto {
                 name: name.clone(),
@@ -256,7 +258,7 @@ impl GrafitoEngine {
 
     pub fn canvas_tap(self: &Arc<Self>, x: f32, y: f32) -> CommandResult {
         let tool = self.current_tool.lock().clone();
-        
+
         // Save state BEFORE acquiring the document lock to prevent a Mutex deadlock
         match tool {
             ToolDto::Select => {} // Don't save state on select
@@ -265,33 +267,54 @@ impl GrafitoEngine {
 
         let mut doc = self.document.lock();
         let world = doc.view().screen_to_world(Vec2::new(x, y));
-        
+
         match tool {
             ToolDto::Point => {
                 let id = doc.add_object(GeoObject::Point(grafito_core::PointObj::new(world)));
-                CommandResult { success: true, message: Some("Point created".to_string()), new_object_id: Some(id_to_string(id)) }
+                CommandResult {
+                    success: true,
+                    message: Some("Point created".to_string()),
+                    new_object_id: Some(id_to_string(id)),
+                }
             }
             ToolDto::Select => {
                 let tolerance = 10.0 / doc.view().scale;
                 if let Some(obj_id) = doc.pick_object(world, tolerance) {
                     drop(doc);
                     self.select_object(Some(id_to_string(obj_id)));
-                    CommandResult { success: true, message: Some("Object selected".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Object selected".to_string()),
+                        new_object_id: None,
+                    }
                 } else {
                     drop(doc);
                     self.select_object(None);
-                    CommandResult { success: true, message: Some("Selection cleared".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Selection cleared".to_string()),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::Line => {
                 let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 2 {
-                    let id = doc.add_object(GeoObject::Line(grafito_core::LineObj::new(pts[0], pts[1])));
+                    let id =
+                        doc.add_object(GeoObject::Line(grafito_core::LineObj::new(pts[0], pts[1])));
                     pts.clear();
-                    CommandResult { success: true, message: Some("Line created".to_string()), new_object_id: Some(id_to_string(id)) }
+                    CommandResult {
+                        success: true,
+                        message: Some("Line created".to_string()),
+                        new_object_id: Some(id_to_string(id)),
+                    }
                 } else {
-                    CommandResult { success: true, message: Some("Select second point".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Select second point".to_string()),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::Circle => {
@@ -299,11 +322,20 @@ impl GrafitoEngine {
                 pts.push(world);
                 if pts.len() == 2 {
                     let r = pts[0].distance(&pts[1]);
-                    let id = doc.add_object(GeoObject::Circle(grafito_core::CircleObj::new(pts[0], r)));
+                    let id =
+                        doc.add_object(GeoObject::Circle(grafito_core::CircleObj::new(pts[0], r)));
                     pts.clear();
-                    CommandResult { success: true, message: Some("Circle created".to_string()), new_object_id: Some(id_to_string(id)) }
+                    CommandResult {
+                        success: true,
+                        message: Some("Circle created".to_string()),
+                        new_object_id: Some(id_to_string(id)),
+                    }
                 } else {
-                    CommandResult { success: true, message: Some("Select edge point".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Select edge point".to_string()),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::Polygon => {
@@ -312,85 +344,146 @@ impl GrafitoEngine {
                 if pts.len() >= 3 && world.distance(&pts[0]) < (20.0 / doc.view().scale) {
                     let mut final_pts = pts.clone();
                     final_pts.pop(); // remove the last click that closed it
-                    let id = doc.add_object(GeoObject::Polygon(grafito_core::PolygonObj::new(final_pts)));
+                    let id = doc
+                        .add_object(GeoObject::Polygon(grafito_core::PolygonObj::new(final_pts)));
                     pts.clear();
-                    CommandResult { success: true, message: Some("Polygon created".to_string()), new_object_id: Some(id_to_string(id)) }
+                    CommandResult {
+                        success: true,
+                        message: Some("Polygon created".to_string()),
+                        new_object_id: Some(id_to_string(id)),
+                    }
                 } else {
-                    CommandResult { success: true, message: Some(format!("Point {} added", pts.len())), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some(format!("Point {} added", pts.len())),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::Fractal => {
                 let mut cmd = "Mandelbrot[]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Fractal created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Fractal created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::Attractor => {
                 let mut cmd = "Lorenz[]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Attractor created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Attractor created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::Histogram => {
                 let mut cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Histogram created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Histogram created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::ScatterPlot => {
                 let mut cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Scatter Plot created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Scatter Plot created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::Tangent => {
                 let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 3 {
                     let r = pts[0].distance(&pts[1]);
-                    let mut cmd = format!("Tangent[({:.2},{:.2}), {:.3}, ({:.2},{:.2})]", pts[0].x, pts[0].y, r, pts[2].x, pts[2].y);
+                    let mut cmd = format!(
+                        "Tangent[({:.2},{:.2}), {:.3}, ({:.2},{:.2})]",
+                        pts[0].x, pts[0].y, r, pts[2].x, pts[2].y
+                    );
                     crate::command_processor::process_input(&mut doc, &mut cmd);
                     pts.clear();
-                    CommandResult { success: true, message: Some("Tangents created".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Tangents created".to_string()),
+                        new_object_id: None,
+                    }
                 } else {
-                    CommandResult { success: true, message: Some(format!("{} point(s) selected", pts.len())), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some(format!("{} point(s) selected", pts.len())),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::Perpendicular => {
                 let mut pts = self.pending_points.lock();
                 pts.push(world);
                 if pts.len() == 2 {
-                    let mut cmd = format!("PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]", pts[0].x, pts[0].y, pts[1].x, pts[1].y);
+                    let mut cmd = format!(
+                        "PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]",
+                        pts[0].x, pts[0].y, pts[1].x, pts[1].y
+                    );
                     let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                     pts.clear();
-                    CommandResult { success: outcome.success, message: outcome.message.or(Some("Bisector created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                    CommandResult {
+                        success: outcome.success,
+                        message: outcome.message.or(Some("Bisector created".to_string())),
+                        new_object_id: outcome.new_object_id.map(id_to_string),
+                    }
                 } else {
-                    CommandResult { success: true, message: Some("Select second point".to_string()), new_object_id: None }
+                    CommandResult {
+                        success: true,
+                        message: Some("Select second point".to_string()),
+                        new_object_id: None,
+                    }
                 }
             }
             ToolDto::DomainColoring => {
                 let mut cmd = "DomainColoring[z^2 + 1, -2, 2, -2, 2]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Domain coloring created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome
+                        .message
+                        .or(Some("Domain coloring created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::HeatMap => {
                 let mut cmd = "HeatMap[sin(x)*cos(y), -3, 3, -3, 3]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Heat map created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Heat map created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             ToolDto::ComplexGrid => {
                 let mut cmd = "ComplexGrid[z^3 - 1, -2, 2, -2, 2]".to_string();
                 let outcome = crate::command_processor::process_input(&mut doc, &mut cmd);
                 *self.current_tool.lock() = ToolDto::Select;
-                CommandResult { success: outcome.success, message: outcome.message.or(Some("Complex grid created".to_string())), new_object_id: outcome.new_object_id.map(id_to_string) }
+                CommandResult {
+                    success: outcome.success,
+                    message: outcome.message.or(Some("Complex grid created".to_string())),
+                    new_object_id: outcome.new_object_id.map(id_to_string),
+                }
             }
             _ => CommandResult {
                 success: false,
                 message: Some("Tool handled via command or not implemented".to_string()),
                 new_object_id: None,
-            }
+            },
         }
     }
 
@@ -441,7 +534,11 @@ impl GrafitoEngine {
                 });
             }
         }
-        SpreadsheetDto { rows: rows as u32, cols: cols as u32, cells }
+        SpreadsheetDto {
+            rows: rows as u32,
+            cols: cols as u32,
+            cells,
+        }
     }
 
     pub fn set_cell(self: &Arc<Self>, row: u32, col: u32, value: String) {
@@ -471,7 +568,9 @@ impl GrafitoEngine {
         all.into_iter()
             .filter(|(n, _, _)| n.to_lowercase().contains(&ql))
             .map(|(n, c, s)| PaletteCommandDto {
-                name: n.to_string(), category: c.to_string(), syntax_hint: s.to_string(),
+                name: n.to_string(),
+                category: c.to_string(),
+                syntax_hint: s.to_string(),
             })
             .collect()
     }
@@ -489,7 +588,6 @@ impl GrafitoEngine {
             false
         }
     }
-
 }
 
 // ── Internal methods (not exposed to FFI) ──────────────────────
@@ -516,7 +614,9 @@ impl GrafitoEngine {
         let mut undo_stack = self.undo_stack.lock();
         let mut redo_stack = self.redo_stack.lock();
         undo_stack.push(doc.clone());
-        if undo_stack.len() > MAX_UNDO { undo_stack.remove(0); }
+        if undo_stack.len() > MAX_UNDO {
+            undo_stack.remove(0);
+        }
         redo_stack.clear();
     }
 }

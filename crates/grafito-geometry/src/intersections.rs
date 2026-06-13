@@ -103,19 +103,11 @@ pub fn circle_circle(c1: Point2, r1: f64, c2: Point2, r2: f64) -> IntersectionRe
     let rx = -dy * (h / d);
     let ry = dx * (h / d);
 
-    IntersectionResult::Two(
-        Point2::new(px + rx, py + ry),
-        Point2::new(px - rx, py - ry),
-    )
+    IntersectionResult::Two(Point2::new(px + rx, py + ry), Point2::new(px - rx, py - ry))
 }
 
 /// Intersection of two segments.
-pub fn segment_segment(
-    a1: Point2,
-    a2: Point2,
-    b1: Point2,
-    b2: Point2,
-) -> IntersectionResult {
+pub fn segment_segment(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> IntersectionResult {
     let result = line_line(a1, a2, b1, b2);
     match result {
         IntersectionResult::One(p) => {
@@ -133,10 +125,7 @@ pub fn segment_segment(
                     a1.x + t_start * (a2.x - a1.x),
                     a1.y + t_start * (a2.y - a1.y),
                 );
-                let p2 = Point2::new(
-                    a1.x + t_end * (a2.x - a1.x),
-                    a1.y + t_end * (a2.y - a1.y),
-                );
+                let p2 = Point2::new(a1.x + t_end * (a2.x - a1.x), a1.y + t_end * (a2.y - a1.y));
                 IntersectionResult::Two(p1, p2)
             } else {
                 IntersectionResult::None
@@ -178,30 +167,33 @@ pub fn function_line(
     x_min: f64,
     x_max: f64,
 ) -> Vec<Point2> {
-    find_roots(&|x| {
-        let fy = crate::expr::evaluate(expr, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
-        if fy.is_nan() {
-            return f64::NAN;
-        }
-        fy - (slope * x + intercept)
-    }, x_min, x_max)
+    find_roots(
+        &|x| {
+            let fy = crate::expr::evaluate(expr, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            if fy.is_nan() {
+                return f64::NAN;
+            }
+            fy - (slope * x + intercept)
+        },
+        x_min,
+        x_max,
+    )
 }
 
 /// Intersection of two functions f(x) and g(x).
-pub fn function_function(
-    expr_f: &str,
-    expr_g: &str,
-    x_min: f64,
-    x_max: f64,
-) -> Vec<Point2> {
-    find_roots(&|x| {
-        let fy = crate::expr::evaluate(expr_f, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
-        let gy = crate::expr::evaluate(expr_g, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
-        if fy.is_nan() || gy.is_nan() {
-            return f64::NAN;
-        }
-        fy - gy
-    }, x_min, x_max)
+pub fn function_function(expr_f: &str, expr_g: &str, x_min: f64, x_max: f64) -> Vec<Point2> {
+    find_roots(
+        &|x| {
+            let fy = crate::expr::evaluate(expr_f, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            let gy = crate::expr::evaluate(expr_g, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            if fy.is_nan() || gy.is_nan() {
+                return f64::NAN;
+            }
+            fy - gy
+        },
+        x_min,
+        x_max,
+    )
 }
 
 fn find_roots(f: &dyn Fn(f64) -> f64, x_min: f64, x_max: f64) -> Vec<Point2> {
@@ -220,7 +212,8 @@ fn find_roots(f: &dyn Fn(f64) -> f64, x_min: f64, x_max: f64) -> Vec<Point2> {
         if prev_y * y <= 0.0 {
             let root_x = newton(f, x - dx * 0.5, 30);
             if root_x.is_finite() && root_x >= x_min && root_x <= x_max {
-                let root_y = crate::expr::evaluate("x", &[("x".to_string(), root_x)]).unwrap_or(0.0);
+                let root_y =
+                    crate::expr::evaluate("x", &[("x".to_string(), root_x)]).unwrap_or(0.0);
                 let fy_at_root = f(root_x);
                 if fy_at_root.abs() < 1e-6 {
                     let is_duplicate = roots.iter().any(|r: &Point2| (r.x - root_x).abs() < 1e-6);
@@ -254,7 +247,11 @@ fn newton(f: &dyn Fn(f64) -> f64, initial: f64, max_iter: usize) -> f64 {
         }
         x = new_x;
     }
-    if f(x).abs() < 1e-6 { x } else { f64::NAN }
+    if f(x).abs() < 1e-6 {
+        x
+    } else {
+        f64::NAN
+    }
 }
 
 #[cfg(test)]

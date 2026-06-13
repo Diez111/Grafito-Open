@@ -203,11 +203,17 @@ fn parse_add_sub(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
         match tokens[*pos] {
             Token::Plus => {
                 *pos += 1;
-                node = ComplexExpr::Add(Box::new(node), Box::new(parse_mul_div(tokens, pos, depth + 1)?));
+                node = ComplexExpr::Add(
+                    Box::new(node),
+                    Box::new(parse_mul_div(tokens, pos, depth + 1)?),
+                );
             }
             Token::Minus => {
                 *pos += 1;
-                node = ComplexExpr::Sub(Box::new(node), Box::new(parse_mul_div(tokens, pos, depth + 1)?));
+                node = ComplexExpr::Sub(
+                    Box::new(node),
+                    Box::new(parse_mul_div(tokens, pos, depth + 1)?),
+                );
             }
             _ => break,
         }
@@ -222,11 +228,13 @@ fn parse_mul_div(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
         match tokens[*pos] {
             Token::Star => {
                 *pos += 1;
-                node = ComplexExpr::Mul(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
+                node =
+                    ComplexExpr::Mul(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
             }
             Token::Slash => {
                 *pos += 1;
-                node = ComplexExpr::Div(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
+                node =
+                    ComplexExpr::Div(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
             }
             _ => break,
         }
@@ -279,7 +287,11 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
         }
         Token::Minus => {
             *pos += 1;
-            Ok(ComplexExpr::Neg(Box::new(parse_primary(tokens, pos, depth + 1)?)))
+            Ok(ComplexExpr::Neg(Box::new(parse_primary(
+                tokens,
+                pos,
+                depth + 1,
+            )?)))
         }
         Token::LParen => {
             *pos += 1;

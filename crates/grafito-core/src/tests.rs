@@ -194,7 +194,7 @@ mod tests {
         // Move A to (2, 2) - should mark M as affected
         let affected = doc.move_point(a, Point2::new(2.0, 2.0));
         assert!(affected.contains(&a)); // A itself is affected
-        // The midpoint object ID should also be in the affected list
+                                        // The midpoint object ID should also be in the affected list
         assert!(affected.len() >= 2);
     }
 

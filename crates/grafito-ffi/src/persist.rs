@@ -6,18 +6,16 @@ use std::fs;
 /// Guarda documento a archivo JSON
 pub fn save_document(doc: &Document, path: &str) -> bool {
     match serde_json::to_string_pretty(doc) {
-        Ok(json) => {
-            match fs::write(path, json) {
-                Ok(_) => {
-                    log::info!("Document saved to {}", path);
-                    true
-                }
-                Err(e) => {
-                    log::error!("Failed to write file {}: {}", path, e);
-                    false
-                }
+        Ok(json) => match fs::write(path, json) {
+            Ok(_) => {
+                log::info!("Document saved to {}", path);
+                true
             }
-        }
+            Err(e) => {
+                log::error!("Failed to write file {}: {}", path, e);
+                false
+            }
+        },
         Err(e) => {
             log::error!("Failed to serialize document: {}", e);
             false

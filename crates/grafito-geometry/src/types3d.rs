@@ -223,7 +223,12 @@ impl Camera3D {
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
-        Mat4::perspective_rh(self.fov.to_radians(), self.aspect.max(0.001), self.near, self.far)
+        Mat4::perspective_rh(
+            self.fov.to_radians(),
+            self.aspect.max(0.001),
+            self.near,
+            self.far,
+        )
     }
 
     pub fn mvp(&self) -> Mat4 {

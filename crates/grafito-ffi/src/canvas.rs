@@ -1,8 +1,8 @@
+use grafito_render::Renderer;
+use parking_lot::Mutex;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use parking_lot::Mutex;
 use std::sync::Arc;
-use grafito_render::Renderer;
 
 #[cfg(target_os = "android")]
 #[link(name = "android")]
@@ -41,7 +41,6 @@ pub struct CanvasRenderer {
     running: Arc<AtomicBool>,
     render_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     native_window: Arc<Mutex<Option<NativeWindowPtr>>>,
-
 }
 
 #[uniffi::export]
@@ -85,19 +84,19 @@ impl CanvasRenderer {
             raw_window_handle::AndroidDisplayHandle::new(),
         );
         let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: raw_display,
-                raw_window_handle: raw_handle,
-            })
-            .map_err(|e| CanvasError::SurfaceError(format!("create_surface: {:?}", e)))?
+            instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: raw_display,
+                    raw_window_handle: raw_handle,
+                })
+                .map_err(|e| CanvasError::SurfaceError(format!("create_surface: {:?}", e)))?
         };
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            }
-        )).ok_or_else(|| CanvasError::SurfaceError("No suitable adapter found".into()))?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .ok_or_else(|| CanvasError::SurfaceError("No suitable adapter found".into()))?;
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Grafito Android"),
@@ -106,24 +105,34 @@ impl CanvasRenderer {
                 memory_hints: wgpu::MemoryHints::default(),
             },
             None,
-        )).map_err(|e| CanvasError::SurfaceError(format!("request_device: {:?}", e)))?;
+        ))
+        .map_err(|e| CanvasError::SurfaceError(format!("request_device: {:?}", e)))?;
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats.first()
+        let format = caps
+            .formats
+            .first()
             .copied()
             .ok_or_else(|| CanvasError::SurfaceError("No surface formats available".into()))?;
-        let alpha_mode = caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto);
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
         let w = *self.width.lock();
         let h = *self.height.lock();
-        surface.configure(&device, &wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: w.max(1),
-            height: h.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        });
+        surface.configure(
+            &device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: w.max(1),
+                height: h.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            },
+        );
         let renderer = Renderer::new(&device, format, false);
         *self.instance.lock() = Some(instance);
         *self.surface.lock() = Some(surface);
@@ -137,7 +146,7 @@ impl CanvasRenderer {
 
     pub fn render_frame(self: &Arc<Self>) -> Result<(), CanvasError> {
         log::info!("=== render_frame CALLED ===");
-        
+
         // ---- Block 1: build geometry (only doc + camera locks) ----
         let doc_arc = self.engine.get_document();
         let cam_arc = self.engine.get_camera();
@@ -147,8 +156,14 @@ impl CanvasRenderer {
         let h = *self.height.lock() as f32;
         let is_3d = view_mode == "3D";
 
-        log::info!("render_frame: view_mode={}, is_3d={}, screen={}x{}, dark_mode={}", 
-                    view_mode, is_3d, w, h, dark_mode);
+        log::info!(
+            "render_frame: view_mode={}, is_3d={}, screen={}x{}, dark_mode={}",
+            view_mode,
+            is_3d,
+            w,
+            h,
+            dark_mode
+        );
 
         // Get renderer ref briefly for build_geometry
         let renderer_guard = self.renderer.lock();
@@ -157,22 +172,22 @@ impl CanvasRenderer {
         let (vertices, indices, mvp) = {
             let mut doc_guard = doc_arc.lock();
             let mut cam_guard = cam_arc.lock();
-            
+
             // Fix aspect ratio and screen size on every frame
             cam_guard.aspect = (w / h).max(0.001);
             doc_guard.view_mut().screen_size = glam::Vec2::new(w, h);
-            
+
             log::info!("Document screen_size: {:?}", doc_guard.view().screen_size);
             log::info!("Object count: {}", doc_guard.objects_iter().count());
-            
+
             let (v, i) = if is_3d {
                 renderer.build_3d_geometry(&doc_guard, &cam_guard, dark_mode, w, h)
             } else {
                 renderer.build_geometry(&doc_guard, dark_mode)
             };
-            
+
             log::info!("Generated {} vertices, {} indices", v.len(), i.len());
-            
+
             let m = glam::Mat4::orthographic_rh(0.0, w, h, 0.0, -1.0, 1.0);
             (v, i, m)
         };
@@ -190,14 +205,27 @@ impl CanvasRenderer {
 
         renderer.update_mvp(queue, mvp);
 
-        let output = surface.get_current_texture()
+        let output = surface
+            .get_current_texture()
             .map_err(|e| CanvasError::SurfaceError(format!("get_current_texture: {:?}", e)))?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let bg = if dark_mode {
-            wgpu::Color { r: 0.12, g: 0.12, b: 0.12, a: 1.0 }
+            wgpu::Color {
+                r: 0.12,
+                g: 0.12,
+                b: 0.12,
+                a: 1.0,
+            }
         } else {
-            wgpu::Color { r: 0.96, g: 0.96, b: 0.96, a: 1.0 }
+            wgpu::Color {
+                r: 0.96,
+                g: 0.96,
+                b: 0.96,
+                a: 1.0,
+            }
         };
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -235,7 +263,11 @@ impl CanvasRenderer {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                let p = if is_3d { &renderer.pipeline_3d } else { &renderer.pipeline };
+                let p = if is_3d {
+                    &renderer.pipeline_3d
+                } else {
+                    &renderer.pipeline
+                };
                 pass.set_pipeline(p);
                 pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
@@ -272,7 +304,8 @@ impl CanvasRenderer {
             let d = std::time::Duration::from_micros(16667);
             while s.running.load(Ordering::SeqCst) {
                 let t0 = std::time::Instant::now();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.render_frame()));
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.render_frame()));
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => log::error!("Render error: {}", e),
@@ -282,7 +315,9 @@ impl CanvasRenderer {
                     }
                 }
                 let dt = t0.elapsed();
-                if dt < d { std::thread::sleep(d - dt); }
+                if dt < d {
+                    std::thread::sleep(d - dt);
+                }
             }
         });
         *self.render_thread.lock() = Some(h);
@@ -290,7 +325,9 @@ impl CanvasRenderer {
 
     pub fn stop_render_loop(self: &Arc<Self>) {
         self.running.store(false, Ordering::SeqCst);
-        if let Some(h) = self.render_thread.lock().take() { let _ = h.join(); }
+        if let Some(h) = self.render_thread.lock().take() {
+            let _ = h.join();
+        }
     }
 
     pub fn resize(self: &Arc<Self>, width: u32, height: u32) {
@@ -300,16 +337,19 @@ impl CanvasRenderer {
         let surface = self.surface.lock();
         if let (Some(device), Some(surface)) = (device.as_ref(), surface.as_ref()) {
             let fmt = *self.surface_format.lock();
-            surface.configure(device, &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: fmt,
-                width: width.max(1),
-                height: height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            });
+            surface.configure(
+                device,
+                &wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: fmt,
+                    width: width.max(1),
+                    height: height.max(1),
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                },
+            );
         }
     }
 
@@ -326,6 +366,10 @@ impl CanvasRenderer {
         }
     }
 
-    pub fn get_width(self: &Arc<Self>) -> u32 { *self.width.lock() }
-    pub fn get_height(self: &Arc<Self>) -> u32 { *self.height.lock() }
+    pub fn get_width(self: &Arc<Self>) -> u32 {
+        *self.width.lock()
+    }
+    pub fn get_height(self: &Arc<Self>) -> u32 {
+        *self.height.lock()
+    }
 }

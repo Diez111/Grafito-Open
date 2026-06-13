@@ -310,7 +310,7 @@ impl GrafitoApp {
         } else {
             4
         };
-        
+
         let format_num = |v: f64| -> String {
             if v.abs() < 1e-9 {
                 return "0".to_string();
@@ -320,7 +320,11 @@ impl GrafitoApp {
                 s = s.trim_end_matches('0').to_string();
                 s = s.trim_end_matches('.').to_string();
             }
-            if s.is_empty() || s == "-" { "0".to_string() } else { s }
+            if s.is_empty() || s == "-" {
+                "0".to_string()
+            } else {
+                s
+            }
         };
 
         let text_color = if self.dark_mode {

@@ -2,9 +2,9 @@ use grafito_core::{
     Attractor3DObj, BoxPlotObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj, Document,
     EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
     HyperbolaObj, ImplicitCurveObj, LineObj, MoebiusStripObj, ObjectId, ParabolaObj,
-    PhasePortraitObj, ParametricCurve2DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, RegressionLineObj,
-    RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj, Torus3DObj,
-    VectorField2DObj, VectorField3DObj,
+    ParametricCurve2DObj, PhasePortraitObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
+    RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj,
+    Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::matrices::{taylor_series, Matrix};
@@ -772,17 +772,23 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         let bn = Point3D::new(vn.x, base_y, vn.y);
                         let tn = Point3D::new(vn.x, top_y, vn.y);
                         if let Some(poly_id) = id_opt {
-                            let (_, c1) = document.add_constructed_object(GeoObject::Segment3D(
-                                Segment3DObj::new(b, t).with_label("E"),
-                            ), "Extrude", &[poly_id]);
+                            let (_, c1) = document.add_constructed_object(
+                                GeoObject::Segment3D(Segment3DObj::new(b, t).with_label("E")),
+                                "Extrude",
+                                &[poly_id],
+                            );
                             document.set_constraint_param(c1, "_ext_h", height);
-                            let (_, c2) = document.add_constructed_object(GeoObject::Segment3D(
-                                Segment3DObj::new(b, bn).with_label("E"),
-                            ), "Extrude", &[poly_id]);
+                            let (_, c2) = document.add_constructed_object(
+                                GeoObject::Segment3D(Segment3DObj::new(b, bn).with_label("E")),
+                                "Extrude",
+                                &[poly_id],
+                            );
                             document.set_constraint_param(c2, "_ext_h", height);
-                            let (_, c3) = document.add_constructed_object(GeoObject::Segment3D(
-                                Segment3DObj::new(t, tn).with_label("E"),
-                            ), "Extrude", &[poly_id]);
+                            let (_, c3) = document.add_constructed_object(
+                                GeoObject::Segment3D(Segment3DObj::new(t, tn).with_label("E")),
+                                "Extrude",
+                                &[poly_id],
+                            );
                             document.set_constraint_param(c3, "_ext_h", height);
                         }
                     }
@@ -800,7 +806,13 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .filter(|s| !s.is_empty())
                     .take(MAX_SCRIPT_COMMANDS)
                     .collect();
-                if commands.len() == MAX_SCRIPT_COMMANDS && cmd.args[0].split(';').filter(|s| !s.trim().is_empty()).count() > MAX_SCRIPT_COMMANDS {
+                if commands.len() == MAX_SCRIPT_COMMANDS
+                    && cmd.args[0]
+                        .split(';')
+                        .filter(|s| !s.trim().is_empty())
+                        .count()
+                        > MAX_SCRIPT_COMMANDS
+                {
                     result = Some("Script contains too many commands".into());
                     input_text.clear();
                     return result;
@@ -1760,7 +1772,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let mut pp = PhasePortraitObj::new(
                     cmd.args[0].trim(),
                     cmd.args[1].trim(),
-                    -10.0, 10.0, -10.0, 10.0,
+                    -10.0,
+                    10.0,
+                    -10.0,
+                    10.0,
                 );
                 pp.density = 25;
                 pp.color = Color::new(0.2, 0.2, 0.8, 1.0);
@@ -2014,8 +2029,7 @@ fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
                 _ => vec![],
             }
         }
-        (GeoObject::Line(l), GeoObject::Circle(c))
-        | (GeoObject::Circle(c), GeoObject::Line(l)) => {
+        (GeoObject::Line(l), GeoObject::Circle(c)) | (GeoObject::Circle(c), GeoObject::Line(l)) => {
             match intersections::line_circle(l.start, l.end, c.center, c.radius) {
                 IntersectionResult::One(p) => vec![p],
                 IntersectionResult::Two(p1, p2) => vec![p1, p2],

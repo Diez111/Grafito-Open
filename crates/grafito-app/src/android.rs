@@ -10,7 +10,7 @@ pub extern "C" fn android_main(app: AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
-            .with_tag("Grafito")
+            .with_tag("Grafito"),
     );
 
     log::info!("Starting Grafito on Android");
@@ -38,33 +38,31 @@ pub extern "C" fn android_main(app: AndroidApp) {
             configure_touch_ui(&cc.egui_ctx);
             Ok(Box::new(crate::GrafitoApp::new(cc)))
         }),
-    ).expect("Failed to run Grafito");
+    )
+    .expect("Failed to run Grafito");
 }
 
 fn configure_touch_ui(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    
+
     // Increase touch target sizes
     style.spacing.interact_size = egui::vec2(44.0, 44.0);
     style.spacing.button_padding = egui::vec2(16.0, 12.0);
     style.spacing.item_spacing = egui::vec2(12.0, 12.0);
-    
+
     // Larger fonts for mobile
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        egui::FontId::proportional(18.0)
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::proportional(18.0)
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Small,
-        egui::FontId::proportional(14.0)
-    );
-    
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(18.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(18.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(14.0));
+
     ctx.set_style(style);
-    
+
     // Configure for touch
     ctx.options_mut(|opt| {
         opt.zoom_with_keyboard = false;

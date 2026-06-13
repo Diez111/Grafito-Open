@@ -53,13 +53,12 @@ pub fn integrate_definite(expr: &str, var: &str, a: f64, b: f64) -> Result<Strin
     let preprocessed = expr.replace(" ", "");
     if let Ok(ast) = crate::ast::parse_ast(&preprocessed) {
         if let Some(integrated) = ast.integrate(var) {
-            let fa = crate::expr::eval_function(&integrated.to_expr_string(), a).unwrap_or(f64::NAN);
-            let fb = crate::expr::eval_function(&integrated.to_expr_string(), b).unwrap_or(f64::NAN);
+            let fa =
+                crate::expr::eval_function(&integrated.to_expr_string(), a).unwrap_or(f64::NAN);
+            let fb =
+                crate::expr::eval_function(&integrated.to_expr_string(), b).unwrap_or(f64::NAN);
             if fa.is_finite() && fb.is_finite() {
-                return Ok(format!(
-                    "∫[{a},{b}] {expr} d{var} = {:.8}",
-                    fb - fa
-                ));
+                return Ok(format!("∫[{a},{b}] {expr} d{var} = {:.8}", fb - fa));
             }
         }
     }
@@ -154,7 +153,10 @@ pub fn solve(expr: &str, var: &str) -> Result<String, String> {
             if roots.is_empty() {
                 return Ok("No real roots found".to_string());
             }
-            let s: Vec<String> = roots.iter().map(|r| format!("{} = {:.8}", var, r)).collect();
+            let s: Vec<String> = roots
+                .iter()
+                .map(|r| format!("{} = {:.8}", var, r))
+                .collect();
             return Ok(s.join(", "));
         }
     }
@@ -172,13 +174,23 @@ fn solve_polynomial_ast(ast: &crate::ast::Expr, var: &str) -> Option<Vec<f64>> {
     Some(roots)
 }
 
-fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) -> Option<Vec<f64>> {
+fn collect_polynomial_coeffs(
+    ast: &crate::ast::Expr,
+    var: &str,
+    max_deg: usize,
+) -> Option<Vec<f64>> {
     use crate::ast::Expr::{self, *};
     let mut coeffs = vec![0.0; max_deg + 1];
     fn collect_terms(expr: &Expr, var: &str, coeffs: &mut Vec<f64>) -> bool {
         match expr {
-            Const(c) => { coeffs[0] += c; true }
-            Var(v) if v == var => { coeffs[1] += 1.0; true }
+            Const(c) => {
+                coeffs[0] += c;
+                true
+            }
+            Var(v) if v == var => {
+                coeffs[1] += 1.0;
+                true
+            }
             Neg(a) => {
                 let mut sub = vec![0.0; coeffs.len()];
                 if collect_terms(a, var, &mut sub) {
@@ -186,7 +198,9 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
                         coeffs[i] -= sub[i];
                     }
                     true
-                } else { false }
+                } else {
+                    false
+                }
             }
             Add(a, b) => {
                 let mut sub = vec![0.0; coeffs.len()];
@@ -195,7 +209,9 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
                         coeffs[i] += sub[i];
                     }
                     true
-                } else { false }
+                } else {
+                    false
+                }
             }
             Sub(a, b) => {
                 let mut sub = vec![0.0; coeffs.len()];
@@ -204,7 +220,9 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
                         coeffs[i] -= sub[i];
                     }
                     true
-                } else { false }
+                } else {
+                    false
+                }
             }
             Mul(a, b) => {
                 if let Const(c) = a.as_ref() {
@@ -214,7 +232,9 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
                             coeffs[i] += c * sub[i];
                         }
                         true
-                    } else { false }
+                    } else {
+                        false
+                    }
                 } else if let Const(c) = b.as_ref() {
                     let mut sub = vec![0.0; coeffs.len()];
                     if collect_terms(a, var, &mut sub) {
@@ -222,8 +242,12 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
                             coeffs[i] += c * sub[i];
                         }
                         true
-                    } else { false }
-                } else { false }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             }
             Pow(base, exp) => {
                 if let (Var(v), Const(n)) = (base.as_ref(), exp.as_ref()) {
@@ -242,7 +266,9 @@ fn collect_polynomial_coeffs(ast: &crate::ast::Expr, var: &str, max_deg: usize) 
     }
     if collect_terms(ast, var, &mut coeffs) {
         Some(coeffs)
-    } else { None }
+    } else {
+        None
+    }
 }
 
 fn solve_polynomial_real(coeffs: &[f64]) -> Vec<f64> {
@@ -279,10 +305,7 @@ fn solve_quadratic(coeffs: &[f64]) -> Vec<f64> {
         vec![-b / (2.0 * a)]
     } else {
         let sqrt_d = discriminant.sqrt();
-        vec![
-            (-b - sqrt_d) / (2.0 * a),
-            (-b + sqrt_d) / (2.0 * a),
-        ]
+        vec![(-b - sqrt_d) / (2.0 * a), (-b + sqrt_d) / (2.0 * a)]
     }
 }
 
@@ -400,7 +423,11 @@ mod tests {
     #[test]
     fn test_integrate_power() {
         let result = integrate("x^2", "x").unwrap();
-        assert!(result.contains("x ^ 3") || result.contains("x^3"), "Got: {}", result);
+        assert!(
+            result.contains("x ^ 3") || result.contains("x^3"),
+            "Got: {}",
+            result
+        );
     }
 
     #[test]

@@ -202,35 +202,29 @@ fn validate_geo_object(obj: &GeoObject) -> Result<(), String> {
             validate_expr(&o.expr_lhs)?;
             validate_expr(&o.expr_rhs)?;
         }
-        GeoObject::Attractor3D(o) => {
-            if o.steps > MAX_ATTRACTOR_STEPS {
-                return Err(format!(
-                    "Attractor3D steps {} exceeds maximum {}",
-                    o.steps, MAX_ATTRACTOR_STEPS
-                ));
-            }
+        GeoObject::Attractor3D(o) if o.steps > MAX_ATTRACTOR_STEPS => {
+            return Err(format!(
+                "Attractor3D steps {} exceeds maximum {}",
+                o.steps, MAX_ATTRACTOR_STEPS
+            ));
         }
-        GeoObject::Fractal2D(o) => {
-            if o.resolution > MAX_FRACTAL_RESOLUTION {
-                return Err(format!(
-                    "Fractal2D resolution {} exceeds maximum {}",
-                    o.resolution, MAX_FRACTAL_RESOLUTION
-                ));
-            }
-            if o.max_iter > MAX_FRACTAL_ITER {
-                return Err(format!(
-                    "Fractal2D max_iter {} exceeds maximum {}",
-                    o.max_iter, MAX_FRACTAL_ITER
-                ));
-            }
+        GeoObject::Fractal2D(o) if o.resolution > MAX_FRACTAL_RESOLUTION => {
+            return Err(format!(
+                "Fractal2D resolution {} exceeds maximum {}",
+                o.resolution, MAX_FRACTAL_RESOLUTION
+            ));
         }
-        GeoObject::HyperSurface4D(o) => {
-            if o.resolution > MAX_HYPERSURFACE_RES {
-                return Err(format!(
-                    "HyperSurface4D resolution {} exceeds maximum {}",
-                    o.resolution, MAX_HYPERSURFACE_RES
-                ));
-            }
+        GeoObject::Fractal2D(o) if o.max_iter > MAX_FRACTAL_ITER => {
+            return Err(format!(
+                "Fractal2D max_iter {} exceeds maximum {}",
+                o.max_iter, MAX_FRACTAL_ITER
+            ));
+        }
+        GeoObject::HyperSurface4D(o) if o.resolution > MAX_HYPERSURFACE_RES => {
+            return Err(format!(
+                "HyperSurface4D resolution {} exceeds maximum {}",
+                o.resolution, MAX_HYPERSURFACE_RES
+            ));
         }
         GeoObject::PhasePortrait(o) => {
             validate_expr(&o.expr_dx)?;
@@ -242,33 +236,29 @@ fn validate_geo_object(obj: &GeoObject) -> Result<(), String> {
                 ));
             }
         }
-        GeoObject::Histogram(o) => {
-            if o.data.len() > MAX_ARRAY_LENGTH {
-                return Err(format!(
-                    "Histogram data length {} exceeds maximum {}",
-                    o.data.len(),
-                    MAX_ARRAY_LENGTH
-                ));
-            }
+        GeoObject::Histogram(o) if o.data.len() > MAX_ARRAY_LENGTH => {
+            return Err(format!(
+                "Histogram data length {} exceeds maximum {}",
+                o.data.len(),
+                MAX_ARRAY_LENGTH
+            ));
         }
-        GeoObject::ScatterPlot(o) => {
-            if o.xs.len() > MAX_ARRAY_LENGTH || o.ys.len() > MAX_ARRAY_LENGTH {
-                return Err("ScatterPlot data length exceeds maximum".to_string());
-            }
+        GeoObject::ScatterPlot(o)
+            if o.xs.len() > MAX_ARRAY_LENGTH || o.ys.len() > MAX_ARRAY_LENGTH =>
+        {
+            return Err("ScatterPlot data length exceeds maximum".to_string());
         }
-        GeoObject::BoxPlot(o) => {
-            if o.data.len() > MAX_ARRAY_LENGTH {
-                return Err(format!(
-                    "BoxPlot data length {} exceeds maximum {}",
-                    o.data.len(),
-                    MAX_ARRAY_LENGTH
-                ));
-            }
+        GeoObject::BoxPlot(o) if o.data.len() > MAX_ARRAY_LENGTH => {
+            return Err(format!(
+                "BoxPlot data length {} exceeds maximum {}",
+                o.data.len(),
+                MAX_ARRAY_LENGTH
+            ));
         }
-        GeoObject::RegressionLine(o) => {
-            if o.xs.len() > MAX_ARRAY_LENGTH || o.ys.len() > MAX_ARRAY_LENGTH {
-                return Err("RegressionLine data length exceeds maximum".to_string());
-            }
+        GeoObject::RegressionLine(o)
+            if o.xs.len() > MAX_ARRAY_LENGTH || o.ys.len() > MAX_ARRAY_LENGTH =>
+        {
+            return Err("RegressionLine data length exceeds maximum".to_string());
         }
         _ => {}
     }

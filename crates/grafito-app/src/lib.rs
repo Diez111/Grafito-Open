@@ -3,9 +3,9 @@
 pub use grafito_command as commands;
 #[cfg(not(target_os = "android"))]
 pub mod export;
+pub mod gpu_canvas;
 pub mod render_2d;
 pub mod render_3d;
-pub mod gpu_canvas;
 pub mod tool_dispatcher;
 
 #[cfg(target_os = "android")]
@@ -72,7 +72,8 @@ pub struct GrafitoApp {
     pub color_favorites: [grafito_geometry::Color; 5],
     pub tool_ghost: Option<GeoObject>,
     pub tool_state: crate::tool_dispatcher::ToolState,
-    pub gpu_resources: Option<std::sync::Arc<std::sync::RwLock<crate::gpu_canvas::GpuCanvasResources>>>,
+    pub gpu_resources:
+        Option<std::sync::Arc<std::sync::RwLock<crate::gpu_canvas::GpuCanvasResources>>>,
     pub use_gpu: bool,
 }
 
@@ -80,11 +81,13 @@ impl GrafitoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let gpu_resources = cc.wgpu_render_state.as_ref().map(|rs| {
             let renderer = grafito_render::Renderer::new(&rs.device, rs.target_format, false);
-            std::sync::Arc::new(std::sync::RwLock::new(crate::gpu_canvas::GpuCanvasResources {
-                renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
-                buffers_2d: None,
-                buffers_3d: None,
-            }))
+            std::sync::Arc::new(std::sync::RwLock::new(
+                crate::gpu_canvas::GpuCanvasResources {
+                    renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
+                    buffers_2d: None,
+                    buffers_3d: None,
+                },
+            ))
         });
         let mut document = Document::new();
         document.set_view(ViewTransform::new(1280.0, 720.0));
@@ -297,7 +300,7 @@ impl GrafitoApp {
 
 fn configure_modern_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    
+
     // Smooth corners everywhere
     style.visuals.window_rounding = 8.0.into();
     style.visuals.menu_rounding = 8.0.into();
@@ -310,7 +313,7 @@ fn configure_modern_style(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 6.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
-    
+
     style.visuals.window_shadow = egui::epaint::Shadow {
         offset: egui::vec2(0.0, 8.0),
         blur: 16.0,
@@ -404,41 +407,90 @@ impl eframe::App for GrafitoApp {
             });
         }
 
-type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
+        type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
 
         let is_dark = self.dark_mode;
-        let accent = Color32::from_rgb(53, 132, 228);  // GNOME blue
-        let bar_fill = if is_dark { Color32::from_rgb(36, 36, 36) } else { Color32::WHITE };
-        let side_fill = if is_dark { Color32::from_rgb(30, 30, 38) } else { Color32::from_rgb(250, 250, 252) };
-        let alg_fill = if is_dark { Color32::from_rgb(24, 26, 34) } else { Color32::from_rgb(248, 249, 252) };
-        let sep_col = if is_dark { Color32::from_rgb(55, 55, 60) } else { Color32::from_rgb(175, 175, 180) };
-        let txt_col = if is_dark { Color32::WHITE } else { Color32::from_rgb(26, 26, 26) };
-        let txt_dim = if is_dark { Color32::from_gray(140) } else { Color32::from_gray(110) };
+        let accent = Color32::from_rgb(53, 132, 228); // GNOME blue
+        let bar_fill = if is_dark {
+            Color32::from_rgb(36, 36, 36)
+        } else {
+            Color32::WHITE
+        };
+        let side_fill = if is_dark {
+            Color32::from_rgb(30, 30, 38)
+        } else {
+            Color32::from_rgb(250, 250, 252)
+        };
+        let alg_fill = if is_dark {
+            Color32::from_rgb(24, 26, 34)
+        } else {
+            Color32::from_rgb(248, 249, 252)
+        };
+        let sep_col = if is_dark {
+            Color32::from_rgb(55, 55, 60)
+        } else {
+            Color32::from_rgb(175, 175, 180)
+        };
+        let txt_col = if is_dark {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(26, 26, 26)
+        };
+        let txt_dim = if is_dark {
+            Color32::from_gray(140)
+        } else {
+            Color32::from_gray(110)
+        };
 
         // ── MENU BAR + QUICK CONTROLS ──
         egui::TopBottomPanel::top("menu_bar")
             .exact_height(32.0)
-            .frame(egui::Frame::none().fill(bar_fill).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(bar_fill)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
             .show(ctx, |ui| {
                 egui::menu::bar(ui, |ui| {
                     ui.menu_button("Archivo", |ui| {
-                        if ui.button("Nuevo").clicked() { self.document.clear(); }
-                        if ui.button("Abrir (Ctrl+O)").clicked() { self.load_from_file(); }
-                        if ui.button("Guardar (Ctrl+S)").clicked() { self.save_to_file(); }
+                        if ui.button("Nuevo").clicked() {
+                            self.document.clear();
+                        }
+                        if ui.button("Abrir (Ctrl+O)").clicked() {
+                            self.load_from_file();
+                        }
+                        if ui.button("Guardar (Ctrl+S)").clicked() {
+                            self.save_to_file();
+                        }
                         ui.separator();
-                        if ui.button("Salir").clicked() { std::process::exit(0); }
+                        if ui.button("Salir").clicked() {
+                            std::process::exit(0);
+                        }
                     });
                     ui.menu_button("Editar", |ui| {
-                        if ui.button("Deshacer (Ctrl+Z)").clicked() { self.undo(); }
-                        if ui.button("Rehacer (Ctrl+Y)").clicked() { self.redo(); }
-                        if ui.button("Eliminar (Supr)").clicked() { self.delete_selected(); }
+                        if ui.button("Deshacer (Ctrl+Z)").clicked() {
+                            self.undo();
+                        }
+                        if ui.button("Rehacer (Ctrl+Y)").clicked() {
+                            self.redo();
+                        }
+                        if ui.button("Eliminar (Supr)").clicked() {
+                            self.delete_selected();
+                        }
                     });
                     ui.menu_button("Vista", |ui| {
                         ui.checkbox(&mut self.show_grid, "Mostrar cuadrícula");
-                        ui.checkbox(&mut self.dark_mode, "Modo oscuro").clicked().then(|| {
-                            if self.dark_mode { THEME_DARK.apply(ui.ctx()); } else { THEME_LIGHT.apply(ui.ctx()); }
-                        });
-                        ui.checkbox(&mut self.snap_to_grid, "Ajustar a cuadrícula").changed();
+                        ui.checkbox(&mut self.dark_mode, "Modo oscuro")
+                            .clicked()
+                            .then(|| {
+                                if self.dark_mode {
+                                    THEME_DARK.apply(ui.ctx());
+                                } else {
+                                    THEME_LIGHT.apply(ui.ctx());
+                                }
+                            });
+                        ui.checkbox(&mut self.snap_to_grid, "Ajustar a cuadrícula")
+                            .changed();
                         ui.separator();
                         let mut is_3d = self.current_view == ViewMode::D3;
                         if ui.checkbox(&mut is_3d, "Vista 3D").changed() {
@@ -455,11 +507,30 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                         if ui.button("Acerca de Grafito v0.9.0-alpha").clicked() {}
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new("Grafito").color(accent).strong().size(14.0));
+                        ui.label(
+                            egui::RichText::new("Grafito")
+                                .color(accent)
+                                .strong()
+                                .size(14.0),
+                        );
                         ui.add_space(4.0);
-                        if ui.add(egui::Button::new(if self.dark_mode { "Tema Claro" } else { "Tema Oscuro" }).frame(false)).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(if self.dark_mode {
+                                    "Tema Claro"
+                                } else {
+                                    "Tema Oscuro"
+                                })
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
                             self.dark_mode = !self.dark_mode;
-                            if self.dark_mode { THEME_DARK.apply(ui.ctx()); } else { THEME_LIGHT.apply(ui.ctx()); }
+                            if self.dark_mode {
+                                THEME_DARK.apply(ui.ctx());
+                            } else {
+                                THEME_LIGHT.apply(ui.ctx());
+                            }
                         }
                     });
                 });
@@ -470,7 +541,11 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
             .exact_height(38.0)
             .frame(egui::Frame::none().fill(side_fill))
             .show(ctx, |ui| {
-                grafito_ui::toolbar::toolbar(ui, &mut self.current_tool, self.current_view == ViewMode::D3);
+                grafito_ui::toolbar::toolbar(
+                    ui,
+                    &mut self.current_tool,
+                    self.current_view == ViewMode::D3,
+                );
             });
 
         // ── LEFT SIDEBAR (56px, labeled tabs) ──
@@ -484,16 +559,29 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
         egui::SidePanel::left("icon_bar")
             .exact_width(52.0)
             .resizable(false)
-            .frame(egui::Frame::none().fill(side_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+            .frame(
+                egui::Frame::none()
+                    .fill(side_fill)
+                    .stroke(egui::Stroke::new(1.0, sep_col)),
+            )
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(6.0);
                     for (i, (label, icon, tip)) in tabs.iter().enumerate() {
                         let active = self.sidebar_tab == i;
-                        let bg = if active { Color32::from_rgba_unmultiplied(53, 132, 228, 50) } else { Color32::TRANSPARENT };
-                        let ic = if active { accent } else { Color32::from_gray(130) };
-                        
-                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(46.0, 48.0), egui::Sense::click());
+                        let bg = if active {
+                            Color32::from_rgba_unmultiplied(53, 132, 228, 50)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        let ic = if active {
+                            accent
+                        } else {
+                            Color32::from_gray(130)
+                        };
+
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(46.0, 48.0), egui::Sense::click());
                         if ui.is_rect_visible(rect) {
                             ui.painter().rect_filled(rect, 6.0, bg);
                             // Draw the icon
@@ -502,7 +590,7 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                                 egui::Align2::CENTER_CENTER,
                                 *icon,
                                 egui::FontId::proportional(16.0),
-                                ic
+                                ic,
                             );
                             // Draw the text
                             ui.painter().text(
@@ -510,10 +598,10 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                                 egui::Align2::CENTER_CENTER,
                                 *label,
                                 egui::FontId::proportional(9.0),
-                                ic
+                                ic,
                             );
                         }
-                        
+
                         if resp.clicked() {
                             self.sidebar_tab = i;
                             if i == 3 {
@@ -781,7 +869,7 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                     });
                     ui.add_space(4.0);
                     ui.separator();
-                    
+
                     egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, 4.0)).show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             if ui.button("Derivar").clicked() { self.input_text = "Derivative[".to_string(); }
@@ -798,17 +886,17 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                         if ui.add_sized([28.0, 24.0], egui::Button::new("▶")).clicked() {
                             execute_cas = true;
                         }
-                        
+
                         let r = ui.add_sized(
                             [ui.available_width(), 24.0],
                             egui::TextEdit::singleline(&mut self.input_text)
                                 .hint_text("Comando CAS...")
                         );
-                        
+
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             execute_cas = true;
                         }
-                        
+
                         if execute_cas && !self.input_text.is_empty() {
                             self.save_state();
                             let mut cmd = self.input_text.clone();
@@ -820,7 +908,7 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                             self.input_text.clear();
                         }
                     });
-                    
+
                     // Show CAS history
                     egui::ScrollArea::vertical().max_height(ui.available_height() - 8.0).show(ui, |ui| {
                         egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
@@ -848,39 +936,71 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
         } else if self.sidebar_tab == 4 {
             // ── VIEW/SETTINGS PANEL (tab 4) ──
             egui::SidePanel::left("view_panel")
-                .default_width(220.0).min_width(160.0).resizable(true)
-                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .default_width(220.0)
+                .min_width(160.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::none()
+                        .fill(alg_fill)
+                        .stroke(egui::Stroke::new(1.0, sep_col)),
+                )
                 .show(ctx, |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Vista").color(accent).strong().size(16.0));
+                        ui.label(
+                            egui::RichText::new("Vista")
+                                .color(accent)
+                                .strong()
+                                .size(16.0),
+                        );
                     });
                     ui.add_space(4.0);
                     ui.separator();
-                    
+
                     egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                        ui.label(egui::RichText::new("General").color(txt_dim).size(11.0).strong());
+                        ui.label(
+                            egui::RichText::new("General")
+                                .color(txt_dim)
+                                .size(11.0)
+                                .strong(),
+                        );
                         ui.add_space(4.0);
                         ui.checkbox(&mut self.show_grid, "Mostrar cuadrícula");
-                        ui.checkbox(&mut self.dark_mode, "Modo oscuro").changed().then(|| {
-                            if self.dark_mode { THEME_DARK.apply(ui.ctx()); } else { THEME_LIGHT.apply(ui.ctx()); }
-                        });
+                        ui.checkbox(&mut self.dark_mode, "Modo oscuro")
+                            .changed()
+                            .then(|| {
+                                if self.dark_mode {
+                                    THEME_DARK.apply(ui.ctx());
+                                } else {
+                                    THEME_LIGHT.apply(ui.ctx());
+                                }
+                            });
                         ui.checkbox(&mut self.snap_to_grid, "Ajustar a cuadrícula");
                         ui.checkbox(&mut self.exam_mode, "Modo examen");
                         let mut is_3d = self.current_view == ViewMode::D3;
                         if ui.checkbox(&mut is_3d, "Vista 3D").changed() {
                             self.current_view = if is_3d { ViewMode::D3 } else { ViewMode::D2 };
                         }
-                        
+
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Ejes").color(txt_dim).size(11.0).strong());
+                        ui.label(
+                            egui::RichText::new("Ejes")
+                                .color(txt_dim)
+                                .size(11.0)
+                                .strong(),
+                        );
                         ui.add_space(4.0);
                         ui.checkbox(&mut self.document.view_mut().x_log, "Eje X logarítmico");
                         ui.checkbox(&mut self.document.view_mut().y_log, "Eje Y logarítmico");
-                        
+
                         ui.add_space(12.0);
-                        ui.label(egui::RichText::new("Exportación").color(txt_dim).size(11.0).strong());
+                        ui.label(
+                            egui::RichText::new("Exportación")
+                                .color(txt_dim)
+                                .size(11.0)
+                                .strong(),
+                        );
                         ui.add_space(4.0);
                         if ui.button("Exportar SVG").clicked() {
                             let svg = crate::export::export_svg(&self.document, 800.0, 600.0);
@@ -892,75 +1012,119 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                 });
         } else if self.sidebar_tab == 3 {
             egui::SidePanel::left("spreadsheet_panel")
-                .default_width(260.0).min_width(180.0).resizable(true)
-                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .default_width(260.0)
+                .min_width(180.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::none()
+                        .fill(alg_fill)
+                        .stroke(egui::Stroke::new(1.0, sep_col)),
+                )
                 .show(ctx, |ui| {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Hoja de Cálculo").color(accent).strong().size(16.0));
+                        ui.label(
+                            egui::RichText::new("Hoja de Cálculo")
+                                .color(accent)
+                                .strong()
+                                .size(16.0),
+                        );
                     });
                     ui.add_space(4.0);
                     ui.separator();
-                    
+
                     let (mut rows, mut cols) = self.document.spreadsheet_dim();
                     // Assure at least 15 rows and 6 columns for nice UI, but expand infinitely if needed
                     rows = rows.max(15);
                     cols = cols.max(6);
-                    
+
                     egui::ScrollArea::both().show(ui, |ui| {
                         egui::Frame::none()
                             .stroke(egui::Stroke::new(1.0, sep_col))
                             .show(ui, |ui| {
-                                egui::Grid::new("mini_sheet").striped(true).min_col_width(60.0).spacing(egui::vec2(0.0, 0.0)).show(ui, |ui| {
-                                    // Header row
-                                    ui.add_sized([28.0, 28.0], egui::Label::new(""));
-                                    for c in 0..cols {
-                                        ui.horizontal_centered(|ui| {
-                                            ui.add_space(8.0);
-                                            let col_name = if c < 26 {
-                                                format!("{}", (b'A' + c as u8) as char)
-                                            } else {
-                                                format!("{}{}", (b'A' + (c/26 - 1) as u8) as char, (b'A' + (c%26) as u8) as char)
-                                            };
-                                            ui.label(egui::RichText::new(col_name).size(12.0).strong().color(accent));
-                                        });
-                                    }
-                                    ui.end_row();
-                                    
-                                    // Data rows
-                                    for r in 0..rows {
-                                        ui.horizontal_centered(|ui| {
-                                            ui.add_space(8.0);
-                                            ui.label(egui::RichText::new(format!("{}", r+1)).size(11.0).color(txt_dim));
-                                        });
+                                egui::Grid::new("mini_sheet")
+                                    .striped(true)
+                                    .min_col_width(60.0)
+                                    .spacing(egui::vec2(0.0, 0.0))
+                                    .show(ui, |ui| {
+                                        // Header row
+                                        ui.add_sized([28.0, 28.0], egui::Label::new(""));
                                         for c in 0..cols {
-                                            let mut val = self.document.get_spreadsheet_cell(r, c);
-                                            
-                                            let cell_frame = egui::Frame::none()
-                                                .stroke(egui::Stroke::new(0.5, sep_col))
-                                                .inner_margin(egui::Margin::symmetric(4.0, 4.0));
-                                                
-                                            cell_frame.show(ui, |ui| {
-                                                let r2 = ui.add_sized([60.0, 20.0],
-                                                    egui::TextEdit::singleline(&mut val)
-                                                    .font(egui::FontId::proportional(12.0))
-                                                    .frame(false)); // No pill frame!
-                                                    
-                                                if r2.changed() {
-                                                    self.document.set_spreadsheet_cell(r, c, val);
-                                                    if let Some(ev) = self.document.eval_spreadsheet_cell(r, c) {
-                                                        self.document.set_variable(format!("{}{}", (b'A'+c as u8) as char, r+1), ev);
-                                                    }
-                                                }
+                                            ui.horizontal_centered(|ui| {
+                                                ui.add_space(8.0);
+                                                let col_name = if c < 26 {
+                                                    format!("{}", (b'A' + c as u8) as char)
+                                                } else {
+                                                    format!(
+                                                        "{}{}",
+                                                        (b'A' + (c / 26 - 1) as u8) as char,
+                                                        (b'A' + (c % 26) as u8) as char
+                                                    )
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(col_name)
+                                                        .size(12.0)
+                                                        .strong()
+                                                        .color(accent),
+                                                );
                                             });
                                         }
                                         ui.end_row();
-                                    }
-                                });
+
+                                        // Data rows
+                                        for r in 0..rows {
+                                            ui.horizontal_centered(|ui| {
+                                                ui.add_space(8.0);
+                                                ui.label(
+                                                    egui::RichText::new(format!("{}", r + 1))
+                                                        .size(11.0)
+                                                        .color(txt_dim),
+                                                );
+                                            });
+                                            for c in 0..cols {
+                                                let mut val =
+                                                    self.document.get_spreadsheet_cell(r, c);
+
+                                                let cell_frame = egui::Frame::none()
+                                                    .stroke(egui::Stroke::new(0.5, sep_col))
+                                                    .inner_margin(egui::Margin::symmetric(
+                                                        4.0, 4.0,
+                                                    ));
+
+                                                cell_frame.show(ui, |ui| {
+                                                    let r2 = ui.add_sized(
+                                                        [60.0, 20.0],
+                                                        egui::TextEdit::singleline(&mut val)
+                                                            .font(egui::FontId::proportional(12.0))
+                                                            .frame(false),
+                                                    ); // No pill frame!
+
+                                                    if r2.changed() {
+                                                        self.document
+                                                            .set_spreadsheet_cell(r, c, val);
+                                                        if let Some(ev) = self
+                                                            .document
+                                                            .eval_spreadsheet_cell(r, c)
+                                                        {
+                                                            self.document.set_variable(
+                                                                format!(
+                                                                    "{}{}",
+                                                                    (b'A' + c as u8) as char,
+                                                                    r + 1
+                                                                ),
+                                                                ev,
+                                                            );
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
                             });
                     });
-                    
+
                     ui.add_space(8.0);
                     if ui.button("Abrir hoja completa →").clicked() {
                         self.show_spreadsheet = !self.show_spreadsheet;
@@ -968,87 +1132,163 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                 });
         } else if self.sidebar_tab == 2 {
             egui::SidePanel::left("table_panel")
-                .default_width(240.0).min_width(180.0).resizable(true)
-                .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+                .default_width(240.0)
+                .min_width(180.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::none()
+                        .fill(alg_fill)
+                        .stroke(egui::Stroke::new(1.0, sep_col)),
+                )
                 .show(ctx, |ui| {
                     let functions: Vec<FuncInfo> = self
-                        .document.objects_iter()
-                        .filter_map(|(_, obj)| {
-                            match obj {
-                                GeoObject::Function(f) => Some((f.label.clone(), f.expr.clone(), "f(x)".to_string(), f.domain_min, f.domain_max)),
-                                GeoObject::ParametricCurve2D(pc) => Some((pc.label.clone(), format!("x={}, y={}", pc.expr_x, pc.expr_y), "(x,y)".to_string(), Some(pc.t_min), Some(pc.t_max))),
-                                GeoObject::PolarCurve(pc) => Some((pc.label.clone(), pc.expr_r.clone(), "r(θ)".to_string(), Some(pc.t_min), Some(pc.t_max))),
-                                _ => None,
-                            }
-                        }).collect();
+                        .document
+                        .objects_iter()
+                        .filter_map(|(_, obj)| match obj {
+                            GeoObject::Function(f) => Some((
+                                f.label.clone(),
+                                f.expr.clone(),
+                                "f(x)".to_string(),
+                                f.domain_min,
+                                f.domain_max,
+                            )),
+                            GeoObject::ParametricCurve2D(pc) => Some((
+                                pc.label.clone(),
+                                format!("x={}, y={}", pc.expr_x, pc.expr_y),
+                                "(x,y)".to_string(),
+                                Some(pc.t_min),
+                                Some(pc.t_max),
+                            )),
+                            GeoObject::PolarCurve(pc) => Some((
+                                pc.label.clone(),
+                                pc.expr_r.clone(),
+                                "r(θ)".to_string(),
+                                Some(pc.t_min),
+                                Some(pc.t_max),
+                            )),
+                            _ => None,
+                        })
+                        .collect();
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Tabla de Valores").color(accent).strong().size(16.0));
+                        ui.label(
+                            egui::RichText::new("Tabla de Valores")
+                                .color(accent)
+                                .strong()
+                                .size(16.0),
+                        );
                     });
                     ui.add_space(4.0);
                     ui.separator();
 
                     if functions.is_empty() {
                         egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                            ui.label(egui::RichText::new("Sin funciones\nEscribe f(x)=... en la entrada").size(12.0).color(txt_dim));
+                            ui.label(
+                                egui::RichText::new(
+                                    "Sin funciones\nEscribe f(x)=... en la entrada",
+                                )
+                                .size(12.0)
+                                .color(txt_dim),
+                            );
                         });
                     } else {
-                        if self.table_func_idx >= functions.len() { self.table_func_idx = 0; }
+                        if self.table_func_idx >= functions.len() {
+                            self.table_func_idx = 0;
+                        }
                         let (_, expr, ftype, dmin, dmax) = &functions[self.table_func_idx];
-                        let var = match ftype.as_str() { "(x,y)" | "r(θ)" => "t", _ => "x" };
-                        let name_labels: Vec<String> = functions.iter().map(|(l,_,_,_,_)| l.clone()).collect();
-                        
+                        let var = match ftype.as_str() {
+                            "(x,y)" | "r(θ)" => "t",
+                            _ => "x",
+                        };
+                        let name_labels: Vec<String> =
+                            functions.iter().map(|(l, _, _, _, _)| l.clone()).collect();
+
                         egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Función:").strong());
-                                let selected = name_labels.get(self.table_func_idx).cloned().unwrap_or_default();
+                                let selected = name_labels
+                                    .get(self.table_func_idx)
+                                    .cloned()
+                                    .unwrap_or_default();
                                 egui::ComboBox::from_id_salt("func_dropdown")
                                     .selected_text(&selected)
                                     .width(120.0)
                                     .show_ui(ui, |ui| {
                                         for (i, name) in name_labels.iter().enumerate() {
-                                            if ui.selectable_label(self.table_func_idx == i, name).clicked() {
+                                            if ui
+                                                .selectable_label(self.table_func_idx == i, name)
+                                                .clicked()
+                                            {
                                                 self.table_func_idx = i;
                                             }
                                         }
                                     });
                             });
-                            
+
                             ui.add_space(8.0);
-                            egui::Grid::new("table_config_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-                                ui.label("Desde:"); 
-                                ui.add_sized([80.0, 18.0], egui::TextEdit::singleline(&mut self.table_x_min).font(egui::FontId::proportional(12.0)));
-                                ui.end_row();
-                                
-                                ui.label("Hasta:"); 
-                                ui.add_sized([80.0, 18.0], egui::TextEdit::singleline(&mut self.table_x_max).font(egui::FontId::proportional(12.0)));
-                                ui.end_row();
-                                
-                                ui.label("Paso:"); 
-                                ui.horizontal(|ui| {
-                                    ui.add_sized([50.0, 18.0], egui::TextEdit::singleline(&mut self.table_step).font(egui::FontId::proportional(12.0)));
-                                    if ui.button("📍").on_hover_text("Agregar puntos al canvas").clicked() {
-                                        let x_min: f64 = self.table_x_min.parse().unwrap_or(-5.0);
-                                        let x_max: f64 = self.table_x_max.parse().unwrap_or(5.0);
-                                        let step: f64 = self.table_step.parse().unwrap_or(1.0);
-                                        let is_polar = ftype == "r(θ)";
-                                        let mut x = x_min;
-                                        while x <= x_max + 1e-9 {
-                                            let vars = vec![(var.to_string(), x)];
-                                            if let Ok(y) = grafito_geometry::expr::evaluate(expr, &vars) {
-                                                if y.is_finite() {
-                                                    let pt = if is_polar { Point2::new(y * x.cos(), y * x.sin()) } else { Point2::new(x, y) };
-                                                    self.document.add_object(GeoObject::Point(PointObj::new(pt)));
+                            egui::Grid::new("table_config_grid")
+                                .num_columns(2)
+                                .spacing([16.0, 8.0])
+                                .show(ui, |ui| {
+                                    ui.label("Desde:");
+                                    ui.add_sized(
+                                        [80.0, 18.0],
+                                        egui::TextEdit::singleline(&mut self.table_x_min)
+                                            .font(egui::FontId::proportional(12.0)),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("Hasta:");
+                                    ui.add_sized(
+                                        [80.0, 18.0],
+                                        egui::TextEdit::singleline(&mut self.table_x_max)
+                                            .font(egui::FontId::proportional(12.0)),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("Paso:");
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [50.0, 18.0],
+                                            egui::TextEdit::singleline(&mut self.table_step)
+                                                .font(egui::FontId::proportional(12.0)),
+                                        );
+                                        if ui
+                                            .button("📍")
+                                            .on_hover_text("Agregar puntos al canvas")
+                                            .clicked()
+                                        {
+                                            let x_min: f64 =
+                                                self.table_x_min.parse().unwrap_or(-5.0);
+                                            let x_max: f64 =
+                                                self.table_x_max.parse().unwrap_or(5.0);
+                                            let step: f64 = self.table_step.parse().unwrap_or(1.0);
+                                            let is_polar = ftype == "r(θ)";
+                                            let mut x = x_min;
+                                            while x <= x_max + 1e-9 {
+                                                let vars = vec![(var.to_string(), x)];
+                                                if let Ok(y) =
+                                                    grafito_geometry::expr::evaluate(expr, &vars)
+                                                {
+                                                    if y.is_finite() {
+                                                        let pt = if is_polar {
+                                                            Point2::new(y * x.cos(), y * x.sin())
+                                                        } else {
+                                                            Point2::new(x, y)
+                                                        };
+                                                        self.document.add_object(GeoObject::Point(
+                                                            PointObj::new(pt),
+                                                        ));
+                                                    }
                                                 }
+                                                x += step;
                                             }
-                                            x += step;
                                         }
-                                    }
+                                    });
+                                    ui.end_row();
                                 });
-                                ui.end_row();
-                            });
                         });
                         ui.separator();
 
@@ -1057,31 +1297,55 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                         let x_max: f64 = dmax.unwrap_or(self.table_x_max.parse().unwrap_or(5.0));
                         let step: f64 = self.table_step.parse().unwrap_or(1.0);
                         let max_rows = 50;
-                        egui::ScrollArea::vertical().max_height(ui.available_height() - 8.0).show(ui, |ui| {
-                            egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                                egui::Grid::new("tbl_grid").striped(true).min_col_width(80.0).spacing([16.0, 8.0]).show(ui, |ui| {
-                                    ui.label(egui::RichText::new(var).strong().color(accent));
-                                    ui.label(egui::RichText::new(&functions[self.table_func_idx].0).strong().color(accent));
-                                    ui.end_row();
-                                    
-                                    let mut x = x_min;
-                                    let mut count = 0;
-                                    while x <= x_max + 1e-9 && count < max_rows {
-                                        let vars = vec![(var.to_string(), x)];
-                                        if let Ok(y) = grafito_geometry::expr::evaluate(expr, &vars) {
-                                            if y.is_finite() {
-                                                ui.label(egui::RichText::new(format!("{:.3}", x)).size(12.0));
-                                                let out = format!("{:.4}", y);
-                                                ui.label(egui::RichText::new(out).size(12.0));
-                                                ui.end_row();
+                        egui::ScrollArea::vertical()
+                            .max_height(ui.available_height() - 8.0)
+                            .show(ui, |ui| {
+                                egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
+                                    egui::Grid::new("tbl_grid")
+                                        .striped(true)
+                                        .min_col_width(80.0)
+                                        .spacing([16.0, 8.0])
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(var).strong().color(accent),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    &functions[self.table_func_idx].0,
+                                                )
+                                                .strong()
+                                                .color(accent),
+                                            );
+                                            ui.end_row();
+
+                                            let mut x = x_min;
+                                            let mut count = 0;
+                                            while x <= x_max + 1e-9 && count < max_rows {
+                                                let vars = vec![(var.to_string(), x)];
+                                                if let Ok(y) =
+                                                    grafito_geometry::expr::evaluate(expr, &vars)
+                                                {
+                                                    if y.is_finite() {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "{:.3}",
+                                                                x
+                                                            ))
+                                                            .size(12.0),
+                                                        );
+                                                        let out = format!("{:.4}", y);
+                                                        ui.label(
+                                                            egui::RichText::new(out).size(12.0),
+                                                        );
+                                                        ui.end_row();
+                                                    }
+                                                }
+                                                x += step;
+                                                count += 1;
                                             }
-                                        }
-                                        x += step;
-                                        count += 1;
-                                    }
+                                        });
                                 });
                             });
-                        });
                     }
                 });
         } else {
@@ -1110,22 +1374,36 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
             let mut should_exec = false;
             egui::TopBottomPanel::bottom("input_bar")
                 .exact_height(32.0)
-                .frame(egui::Frame::none()
-                    .fill(if is_dark { Color32::from_rgb(32, 32, 40) } else { Color32::from_rgb(245, 246, 250) })
-                    .stroke(egui::Stroke::new(1.0, sep_col))
-                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+                .frame(
+                    egui::Frame::none()
+                        .fill(if is_dark {
+                            Color32::from_rgb(32, 32, 40)
+                        } else {
+                            Color32::from_rgb(245, 246, 250)
+                        })
+                        .stroke(egui::Stroke::new(1.0, sep_col))
+                        .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+                )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
-                        let r = ui.add_sized([ui.available_width() - 40.0, 22.0],
+                        let r = ui.add_sized(
+                            [ui.available_width() - 40.0, 22.0],
                             egui::TextEdit::singleline(&mut self.input_text)
                                 .hint_text("Entrada... (ej: sin(x), A=(1,2), Derivative[x^2,x])")
                                 .frame(false)
-                                .text_color(txt_col));
+                                .text_color(txt_col),
+                        );
                         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             should_exec = true;
                         }
-                        if ui.add_sized([28.0, 22.0], egui::Button::new(egui::RichText::new("▶").color(accent))).clicked() {
+                        if ui
+                            .add_sized(
+                                [28.0, 22.0],
+                                egui::Button::new(egui::RichText::new("▶").color(accent)),
+                            )
+                            .clicked()
+                        {
                             should_exec = true;
                         }
                     });
@@ -1133,10 +1411,14 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
             if should_exec && !self.input_text.is_empty() {
                 self.save_state();
                 let mut cmd = self.input_text.clone();
-                self.cas_result = commands::process_input(&mut self.document, &mut cmd).unwrap_or_default();
+                self.cas_result =
+                    commands::process_input(&mut self.document, &mut cmd).unwrap_or_default();
                 if !self.cas_result.is_empty() {
-                    if self.cas_history.len() > 20 { self.cas_history.remove(0); }
-                    self.cas_history.push(format!("> {}\n  {}", self.input_text, self.cas_result));
+                    if self.cas_history.len() > 20 {
+                        self.cas_history.remove(0);
+                    }
+                    self.cas_history
+                        .push(format!("> {}\n  {}", self.input_text, self.cas_result));
                 }
                 self.input_text.clear();
             }
@@ -1145,10 +1427,16 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
         // ── STATUS BAR ──
         egui::TopBottomPanel::bottom("status_bar")
             .exact_height(22.0)
-            .frame(egui::Frame::none()
-                .fill(if is_dark { Color32::from_rgb(28, 28, 34) } else { Color32::from_rgb(240, 241, 245) })
-                .stroke(egui::Stroke::new(1.0, sep_col))
-                .inner_margin(egui::Margin::symmetric(10.0, 1.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(if is_dark {
+                        Color32::from_rgb(28, 28, 34)
+                    } else {
+                        Color32::from_rgb(240, 241, 245)
+                    })
+                    .stroke(egui::Stroke::new(1.0, sep_col))
+                    .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let coord_text = if let Some(pos) = ui.ctx().pointer_hover_pos() {
@@ -1160,7 +1448,9 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                     ui.label(egui::RichText::new(coord_text).size(11.0).color(txt_dim));
                     ui.add_space(16.0);
                     let hint = match self.current_tool {
-                        Tool::Select => "↖ Seleccionar: clic para elegir, arrastrar para mover punto",
+                        Tool::Select => {
+                            "↖ Seleccionar: clic para elegir, arrastrar para mover punto"
+                        }
                         Tool::Point => "· Punto: clic para crear",
                         Tool::Line => "╱ Recta: clic en dos puntos",
                         Tool::Circle => "○ Círculo: clic centro, clic borde",
@@ -1176,7 +1466,14 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                         ui.label(egui::RichText::new(hint).size(11.0).color(txt_dim));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(egui::RichText::new(format!("{} objetos", self.document.object_count())).size(11.0).color(txt_dim));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} objetos",
+                                self.document.object_count()
+                            ))
+                            .size(11.0)
+                            .color(txt_dim),
+                        );
                     });
                 });
             });
@@ -1184,82 +1481,279 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
         // ─── 4. MATH KEYBOARD — docked bottom panel (central area only) ──────────────
         if self.keyboard_visible {
             egui::TopBottomPanel::bottom("math_keyboard")
-            .min_height(180.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(if is_dark {
-                        Color32::from_rgb(28, 28, 36)
-                    } else {
-                        Color32::from_rgb(244, 245, 250)
-                    })
-                    .stroke(egui::Stroke::new(1.0, sep_col)),
-            )
-            .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal_centered(|ui| {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                        // Tab bar
-                        ui.horizontal(|ui| {
-                            for (i, lbl) in ["123", "f(x)", "ABC", "3D"].iter().enumerate() {
-                                let active = self.keyboard_tab == i;
-                                let c = if active {
-                                    accent
-                                } else {
-                                    Color32::from_gray(110)
-                                };
-                                let fbg = if active {
-                                    Color32::from_rgba_unmultiplied(100, 80, 200, 30)
-                                } else {
-                                    Color32::TRANSPARENT
-                                };
-                                let r = egui::Frame::none()
-                                    .fill(fbg)
-                                    .rounding(6.0)
-                                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(*lbl).size(12.0).color(c).strong(),
-                                        );
-                                    })
-                                    .response;
-                                if ui
-                                    .interact(r.rect, ui.id().with(i), egui::Sense::click())
-                                    .clicked()
-                                {
-                                    self.keyboard_tab = i;
-                                }
-                                ui.add_space(4.0);
-                            }
-                        });
-                        ui.add_space(5.0);
-
-                        let avail_w = ui.available_width();
-                        let sp = 4.0_f32;
-                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(24.0, 65.0);
-                        let total_w = (btn_w * 8.0) + (sp * 7.0);
-                        let pad = ((avail_w - total_w) / 2.0).max(0.0);
-
-                        macro_rules! kb {
-                            ($ui:expr, $t:expr, $i:expr) => {{
-                                let (r, resp) = $ui.allocate_exact_size(
-                                    egui::vec2(btn_w, 32.0),
-                                    egui::Sense::click(),
-                                );
-                                if $ui.is_rect_visible(r) {
-                                    let bg = if resp.hovered() {
-                                        if is_dark {
-                                            Color32::from_gray(70)
-                                        } else {
-                                            Color32::from_gray(215)
-                                        }
+                .min_height(180.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(if is_dark {
+                            Color32::from_rgb(28, 28, 36)
+                        } else {
+                            Color32::from_rgb(244, 245, 250)
+                        })
+                        .stroke(egui::Stroke::new(1.0, sep_col)),
+                )
+                .show(ctx, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal_centered(|ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            // Tab bar
+                            ui.horizontal(|ui| {
+                                for (i, lbl) in ["123", "f(x)", "ABC", "3D"].iter().enumerate() {
+                                    let active = self.keyboard_tab == i;
+                                    let c = if active {
+                                        accent
                                     } else {
-                                        if is_dark {
-                                            Color32::from_gray(48)
-                                        } else {
-                                            Color32::WHITE
-                                        }
+                                        Color32::from_gray(110)
                                     };
-                                    $ui.painter().rect(
+                                    let fbg = if active {
+                                        Color32::from_rgba_unmultiplied(100, 80, 200, 30)
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    };
+                                    let r = egui::Frame::none()
+                                        .fill(fbg)
+                                        .rounding(6.0)
+                                        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(*lbl)
+                                                    .size(12.0)
+                                                    .color(c)
+                                                    .strong(),
+                                            );
+                                        })
+                                        .response;
+                                    if ui
+                                        .interact(r.rect, ui.id().with(i), egui::Sense::click())
+                                        .clicked()
+                                    {
+                                        self.keyboard_tab = i;
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                            });
+                            ui.add_space(5.0);
+
+                            let avail_w = ui.available_width();
+                            let sp = 4.0_f32;
+                            let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(24.0, 65.0);
+                            let total_w = (btn_w * 8.0) + (sp * 7.0);
+                            let pad = ((avail_w - total_w) / 2.0).max(0.0);
+
+                            macro_rules! kb {
+                                ($ui:expr, $t:expr, $i:expr) => {{
+                                    let (r, resp) = $ui.allocate_exact_size(
+                                        egui::vec2(btn_w, 32.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if $ui.is_rect_visible(r) {
+                                        let bg = if resp.hovered() {
+                                            if is_dark {
+                                                Color32::from_gray(70)
+                                            } else {
+                                                Color32::from_gray(215)
+                                            }
+                                        } else {
+                                            if is_dark {
+                                                Color32::from_gray(48)
+                                            } else {
+                                                Color32::WHITE
+                                            }
+                                        };
+                                        $ui.painter().rect(
+                                            r,
+                                            4.0,
+                                            bg,
+                                            egui::Stroke::new(
+                                                1.0,
+                                                Color32::from_gray(if is_dark { 65 } else { 210 }),
+                                            ),
+                                        );
+                                        $ui.painter().text(
+                                            r.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            $t,
+                                            egui::FontId::proportional(
+                                                (btn_w * 0.4).clamp(10.0, 15.0),
+                                            ),
+                                            if is_dark {
+                                                Color32::WHITE
+                                            } else {
+                                                Color32::BLACK
+                                            },
+                                        );
+                                    }
+                                    if resp.clicked() {
+                                        self.input_text.push_str($i);
+                                    }
+                                }};
+                            }
+
+                            let key_rows: &[&[(&str, &str)]] = match self.keyboard_tab {
+                                0 => &[
+                                    &[
+                                        ("x", "x"),
+                                        ("y", "y"),
+                                        ("π", "π"),
+                                        ("e", "e"),
+                                        ("7", "7"),
+                                        ("8", "8"),
+                                        ("9", "9"),
+                                        ("/", "/"),
+                                    ],
+                                    &[
+                                        ("x²", "^2"),
+                                        ("v/", "sqrt("),
+                                        ("^", "^"),
+                                        ("|", "abs("),
+                                        ("4", "4"),
+                                        ("5", "5"),
+                                        ("6", "6"),
+                                        ("*", "*"),
+                                    ],
+                                    &[
+                                        ("<", "<"),
+                                        (">", ">"),
+                                        ("(", "("),
+                                        (")", ")"),
+                                        ("1", "1"),
+                                        ("2", "2"),
+                                        ("3", "3"),
+                                        ("-", "-"),
+                                    ],
+                                ],
+                                1 => &[
+                                    &[
+                                        ("sin", "sin("),
+                                        ("cos", "cos("),
+                                        ("tan", "tan("),
+                                        ("asin", "asin("),
+                                        ("acos", "acos("),
+                                        ("atan", "atan("),
+                                        ("log", "log("),
+                                        ("ln", "ln("),
+                                    ],
+                                    &[
+                                        ("sec", "sec("),
+                                        ("csc", "csc("),
+                                        ("cot", "cot("),
+                                        ("!", "!"),
+                                        ("deg", "deg"),
+                                        ("rad", "rad"),
+                                        ("f", "f"),
+                                        ("g", "g"),
+                                    ],
+                                    &[
+                                        ("<", "<"),
+                                        (">", ">"),
+                                        ("(", "("),
+                                        (")", ")"),
+                                        ("1", "1"),
+                                        ("2", "2"),
+                                        ("3", "3"),
+                                        ("-", "-"),
+                                    ],
+                                ],
+                                2 => &[
+                                    &[
+                                        ("q", "q"),
+                                        ("w", "w"),
+                                        ("e", "e"),
+                                        ("r", "r"),
+                                        ("t", "t"),
+                                        ("y", "y"),
+                                        ("u", "u"),
+                                        ("i", "i"),
+                                    ],
+                                    &[
+                                        ("a", "a"),
+                                        ("s", "s"),
+                                        ("d", "d"),
+                                        ("f", "f"),
+                                        ("g", "g"),
+                                        ("h", "h"),
+                                        ("j", "j"),
+                                        ("k", "k"),
+                                    ],
+                                    &[
+                                        ("z", "z"),
+                                        ("x", "x"),
+                                        ("c", "c"),
+                                        ("v", "v"),
+                                        ("b", "b"),
+                                        ("n", "n"),
+                                        ("m", "m"),
+                                        (",", ""),
+                                    ],
+                                ],
+                                _ => &[
+                                    &[
+                                        ("Lor", "Lorenz[10, 28, 2.66]"),
+                                        ("Roe", "Rossler[0.2, 0.2, 5.7]"),
+                                        ("Aiz", "Aizawa[0.95, 0.7, 0.6, 3.5, 0.25, 0.1]"),
+                                        ("Rab", "Dadras[3, 2.7, 1.7, 2, 9]"),
+                                        ("Sph", "Sphere[0,0,0,5]"),
+                                        ("Cub", "Cube[0,0,0,5]"),
+                                        ("P3D", "Point3D[1,1,1]"),
+                                        ("S3D", "Segment3D[0,0,0,1,1,1]"),
+                                    ],
+                                    &[
+                                        ("Hal", "Halvorsen[2.0]"),
+                                        ("Tho", "Thomas[0.208186]"),
+                                        ("Che", "Chen[35, 3, 28]"),
+                                        ("Spr", "Chua[15.6, 28, -1.14, -0.71]"),
+                                        ("Cyl", "Cylinder[0,0,0,2,5]"),
+                                        ("Con", "Cone[0,0,0,3,5]"),
+                                        ("Tor", "Torus[0,0,0,4,1]"),
+                                        ("Moe", "Moebius[2,1]"),
+                                    ],
+                                    &[
+                                        ("<", "<"),
+                                        (">", ">"),
+                                        ("(", "("),
+                                        (")", ")"),
+                                        ("[", "["),
+                                        ("]", "]"),
+                                        ("{", "{"),
+                                        ("}", "}"),
+                                    ],
+                                ],
+                            };
+                            for row in key_rows {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(pad);
+                                    for (t, i) in *row {
+                                        kb!(ui, *t, *i);
+                                        ui.add_space(sp);
+                                    }
+                                });
+                                ui.add_space(sp);
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_space(pad);
+                                kb!(ui, "ans", "ans");
+                                ui.add_space(sp);
+                                kb!(ui, ".", ".");
+                                ui.add_space(sp);
+                                kb!(ui, "0", "0");
+                                ui.add_space(sp);
+                                kb!(ui, "(", "(");
+                                ui.add_space(sp);
+                                kb!(ui, ")", ")");
+                                ui.add_space(sp);
+                                kb!(ui, "=", "=");
+                                ui.add_space(sp);
+                                // Backspace
+                                {
+                                    let (r, resp) = ui.allocate_exact_size(
+                                        egui::vec2(btn_w, 32.0),
+                                        egui::Sense::click(),
+                                    );
+                                    let bg = if resp.hovered() {
+                                        Color32::from_rgb(220, 60, 60)
+                                    } else {
+                                        Color32::from_gray(if is_dark { 48 } else { 230 })
+                                    };
+                                    ui.painter().rect(
                                         r,
                                         4.0,
                                         bg,
@@ -1268,247 +1762,55 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                                             Color32::from_gray(if is_dark { 65 } else { 210 }),
                                         ),
                                     );
-                                    $ui.painter().text(
+                                    ui.painter().text(
                                         r.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        $t,
-                                        egui::FontId::proportional((btn_w * 0.4).clamp(10.0, 15.0)),
+                                        "Del",
+                                        egui::FontId::proportional(14.0),
                                         if is_dark {
                                             Color32::WHITE
                                         } else {
                                             Color32::BLACK
                                         },
                                     );
+                                    if resp.clicked() {
+                                        self.input_text.pop();
+                                    }
                                 }
-                                if resp.clicked() {
-                                    self.input_text.push_str($i);
-                                }
-                            }};
-                        }
-
-                        let key_rows: &[&[(&str, &str)]] = match self.keyboard_tab {
-                            0 => &[
-                                &[
-                                    ("x", "x"),
-                                    ("y", "y"),
-                                    ("π", "π"),
-                                    ("e", "e"),
-                                    ("7", "7"),
-                                    ("8", "8"),
-                                    ("9", "9"),
-                                    ("/", "/"),
-                                ],
-                                &[
-                                    ("x²", "^2"),
-                                    ("v/", "sqrt("),
-                                    ("^", "^"),
-                                    ("|", "abs("),
-                                    ("4", "4"),
-                                    ("5", "5"),
-                                    ("6", "6"),
-                                    ("*", "*"),
-                                ],
-                                &[
-                                    ("<", "<"),
-                                    (">", ">"),
-                                    ("(", "("),
-                                    (")", ")"),
-                                    ("1", "1"),
-                                    ("2", "2"),
-                                    ("3", "3"),
-                                    ("-", "-"),
-                                ],
-                            ],
-                            1 => &[
-                                &[
-                                    ("sin", "sin("),
-                                    ("cos", "cos("),
-                                    ("tan", "tan("),
-                                    ("asin", "asin("),
-                                    ("acos", "acos("),
-                                    ("atan", "atan("),
-                                    ("log", "log("),
-                                    ("ln", "ln("),
-                                ],
-                                &[
-                                    ("sec", "sec("),
-                                    ("csc", "csc("),
-                                    ("cot", "cot("),
-                                    ("!", "!"),
-                                    ("deg", "deg"),
-                                    ("rad", "rad"),
-                                    ("f", "f"),
-                                    ("g", "g"),
-                                ],
-                                &[
-                                    ("<", "<"),
-                                    (">", ">"),
-                                    ("(", "("),
-                                    (")", ")"),
-                                    ("1", "1"),
-                                    ("2", "2"),
-                                    ("3", "3"),
-                                    ("-", "-"),
-                                ],
-                            ],
-                            2 => &[
-                                &[
-                                    ("q", "q"),
-                                    ("w", "w"),
-                                    ("e", "e"),
-                                    ("r", "r"),
-                                    ("t", "t"),
-                                    ("y", "y"),
-                                    ("u", "u"),
-                                    ("i", "i"),
-                                ],
-                                &[
-                                    ("a", "a"),
-                                    ("s", "s"),
-                                    ("d", "d"),
-                                    ("f", "f"),
-                                    ("g", "g"),
-                                    ("h", "h"),
-                                    ("j", "j"),
-                                    ("k", "k"),
-                                ],
-                                &[
-                                    ("z", "z"),
-                                    ("x", "x"),
-                                    ("c", "c"),
-                                    ("v", "v"),
-                                    ("b", "b"),
-                                    ("n", "n"),
-                                    ("m", "m"),
-                                    (",", ""),
-                                ],
-                            ],
-                            _ => &[
-                                &[
-                                    ("Lor", "Lorenz[10, 28, 2.66]"),
-                                    ("Roe", "Rossler[0.2, 0.2, 5.7]"),
-                                    ("Aiz", "Aizawa[0.95, 0.7, 0.6, 3.5, 0.25, 0.1]"),
-                                    ("Rab", "Dadras[3, 2.7, 1.7, 2, 9]"),
-                                    ("Sph", "Sphere[0,0,0,5]"),
-                                    ("Cub", "Cube[0,0,0,5]"),
-                                    ("P3D", "Point3D[1,1,1]"),
-                                    ("S3D", "Segment3D[0,0,0,1,1,1]"),
-                                ],
-                                &[
-                                    ("Hal", "Halvorsen[2.0]"),
-                                    ("Tho", "Thomas[0.208186]"),
-                                    ("Che", "Chen[35, 3, 28]"),
-                                    ("Spr", "Chua[15.6, 28, -1.14, -0.71]"),
-                                    ("Cyl", "Cylinder[0,0,0,2,5]"),
-                                    ("Con", "Cone[0,0,0,3,5]"),
-                                    ("Tor", "Torus[0,0,0,4,1]"),
-                                    ("Moe", "Moebius[2,1]"),
-                                ],
-                                &[
-                                    ("<", "<"),
-                                    (">", ">"),
-                                    ("(", "("),
-                                    (")", ")"),
-                                    ("[", "["),
-                                    ("]", "]"),
-                                    ("{", "{"),
-                                    ("}", "}"),
-                                ],
-                            ],
-                        };
-                        for row in key_rows {
-                            ui.horizontal(|ui| {
-                                ui.add_space(pad);
-                                for (t, i) in *row {
-                                    kb!(ui, *t, *i);
-                                    ui.add_space(sp);
+                                ui.add_space(sp);
+                                // Enter
+                                {
+                                    let (r, resp) = ui.allocate_exact_size(
+                                        egui::vec2(btn_w, 32.0),
+                                        egui::Sense::click(),
+                                    );
+                                    let bg = if resp.hovered() {
+                                        Color32::from_rgb(120, 100, 240)
+                                    } else {
+                                        Color32::from_rgb(100, 80, 200)
+                                    };
+                                    ui.painter().rect(r, 4.0, bg, egui::Stroke::NONE);
+                                    ui.painter().text(
+                                        r.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "Enter",
+                                        egui::FontId::proportional(13.0),
+                                        Color32::WHITE,
+                                    );
+                                    if resp.clicked() {
+                                        self.save_state();
+                                        self.cas_result = commands::process_input(
+                                            &mut self.document,
+                                            &mut self.input_text,
+                                        )
+                                        .unwrap_or_default();
+                                    }
                                 }
                             });
-                            ui.add_space(sp);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.add_space(pad);
-                            kb!(ui, "ans", "ans");
-                            ui.add_space(sp);
-                            kb!(ui, ".", ".");
-                            ui.add_space(sp);
-                            kb!(ui, "0", "0");
-                            ui.add_space(sp);
-                            kb!(ui, "(", "(");
-                            ui.add_space(sp);
-                            kb!(ui, ")", ")");
-                            ui.add_space(sp);
-                            kb!(ui, "=", "=");
-                            ui.add_space(sp);
-                            // Backspace
-                            {
-                                let (r, resp) = ui.allocate_exact_size(
-                                    egui::vec2(btn_w, 32.0),
-                                    egui::Sense::click(),
-                                );
-                                let bg = if resp.hovered() {
-                                    Color32::from_rgb(220, 60, 60)
-                                } else {
-                                    Color32::from_gray(if is_dark { 48 } else { 230 })
-                                };
-                                ui.painter().rect(
-                                    r,
-                                    4.0,
-                                    bg,
-                                    egui::Stroke::new(
-                                        1.0,
-                                        Color32::from_gray(if is_dark { 65 } else { 210 }),
-                                    ),
-                                );
-                                ui.painter().text(
-                                    r.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "Del",
-                                    egui::FontId::proportional(14.0),
-                                    if is_dark {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::BLACK
-                                    },
-                                );
-                                if resp.clicked() {
-                                    self.input_text.pop();
-                                }
-                            }
-                            ui.add_space(sp);
-                            // Enter
-                            {
-                                let (r, resp) = ui.allocate_exact_size(
-                                    egui::vec2(btn_w, 32.0),
-                                    egui::Sense::click(),
-                                );
-                                let bg = if resp.hovered() {
-                                    Color32::from_rgb(120, 100, 240)
-                                } else {
-                                    Color32::from_rgb(100, 80, 200)
-                                };
-                                ui.painter().rect(r, 4.0, bg, egui::Stroke::NONE);
-                                ui.painter().text(
-                                    r.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "Enter",
-                                    egui::FontId::proportional(13.0),
-                                    Color32::WHITE,
-                                );
-                                if resp.clicked() {
-                                    self.save_state();
-                                    self.cas_result = commands::process_input(
-                                        &mut self.document,
-                                        &mut self.input_text,
-                                    )
-                                    .unwrap_or_default();
-                                }
-                            }
+                            ui.add_space(12.0);
                         });
-                        ui.add_space(12.0);
                     });
                 });
-            });
         }
 
         // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
@@ -1620,13 +1922,19 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                     .show(ctx, |ui| {
                         if self.exam_mode {
                             egui::TopBottomPanel::top("exam_banner")
-                                .frame(egui::Frame::none().fill(Color32::from_rgb(220, 53, 69)).inner_margin(8.0))
+                                .frame(
+                                    egui::Frame::none()
+                                        .fill(Color32::from_rgb(220, 53, 69))
+                                        .inner_margin(8.0),
+                                )
                                 .show_inside(ui, |ui| {
                                     ui.vertical_centered(|ui| {
-                                        ui.label(egui::RichText::new("⚠ MODO EXAMEN ACTIVO")
-                                            .color(Color32::WHITE)
-                                            .size(18.0)
-                                            .strong());
+                                        ui.label(
+                                            egui::RichText::new("⚠ MODO EXAMEN ACTIVO")
+                                                .color(Color32::WHITE)
+                                                .size(18.0)
+                                                .strong(),
+                                        );
                                     });
                                 });
                         }
@@ -1698,7 +2006,8 @@ type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
                     let w = canvas_rect.width();
                     let h = canvas_rect.height();
                     self.camera.aspect = w / h.max(1.0);
-                    let ctx_resp = ui.interact(canvas_rect, ui.id().with("ctx3d"), Sense::click_and_drag());
+                    let ctx_resp =
+                        ui.interact(canvas_rect, ui.id().with("ctx3d"), Sense::click_and_drag());
                     if ctx_resp.clicked_by(egui::PointerButton::Secondary) {
                         ctx_resp.context_menu(|ui| {
                             if ui.button("Borrar selección").clicked() {
@@ -1826,7 +2135,11 @@ struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { dark_mode: false, show_grid: true, snap_to_grid: false }
+        Self {
+            dark_mode: false,
+            show_grid: true,
+            snap_to_grid: false,
+        }
     }
 }
 

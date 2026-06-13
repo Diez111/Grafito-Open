@@ -562,7 +562,9 @@ pub fn f_distribution_pdf(x: f64, d1: f64, d2: f64) -> f64 {
     }
     let half_d1 = d1 / 2.0;
     let half_d2 = d2 / 2.0;
-    let ln_coeff = half_d1 * d1.ln() + half_d2 * d2.ln() - gamma_ln(half_d1) - gamma_ln(half_d2)
+    let ln_coeff = half_d1 * d1.ln() + half_d2 * d2.ln()
+        - gamma_ln(half_d1)
+        - gamma_ln(half_d2)
         - gamma_ln(half_d1 + half_d2);
     let ln_val = ln_coeff + (half_d1 - 1.0) * x.ln() - (half_d1 + half_d2) * (d1 * x + d2).ln();
     ln_val.exp()
