@@ -98,6 +98,16 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             syntax_hint: "Midpoint[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
+            name: "Line",
+            category: "Construct",
+            syntax_hint: "Line[(x1,y1), (x2,y2)]",
+        },
+        PaletteCommand {
+            name: "Segment",
+            category: "Construct",
+            syntax_hint: "Segment[(x1,y1), (x2,y2)]",
+        },
+        PaletteCommand {
             name: "Vector",
             category: "Construct",
             syntax_hint: "Vector[(x1,y1), (x2,y2)]",

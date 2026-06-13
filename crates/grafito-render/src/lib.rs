@@ -265,9 +265,17 @@ impl Renderer {
                     Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
-                    let a = view.world_to_screen(l.start);
-                    let b = view.world_to_screen(l.end);
-                    Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
+                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view.screen_to_world(view.screen_size);
+                    let view_bounds = grafito_geometry::AABB::new(
+                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    );
+                    if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
+                        let a = view.world_to_screen(start);
+                        let b = view.world_to_screen(end);
+                        Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
+                    }
                 }
                 GeoObject::Circle(c) => {
                     let center = view.world_to_screen(c.center);
@@ -628,9 +636,17 @@ impl Renderer {
                     Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
-                    let a = view_transform.world_to_screen(l.start);
-                    let b = view_transform.world_to_screen(l.end);
-                    Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
+                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
+                    let view_bounds = grafito_geometry::AABB::new(
+                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    );
+                    if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
+                        let a = view_transform.world_to_screen(start);
+                        let b = view_transform.world_to_screen(end);
+                        Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
+                    }
                 }
                 GeoObject::Circle(c) => {
                     let screen_center = view_transform.world_to_screen(c.center);

@@ -220,6 +220,12 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
                 ));
             }
             grafito_core::GeoObject::Line(l) => {
+                let kind_str = match l.kind {
+                    grafito_core::LineKind::Segment => "Segment",
+                    grafito_core::LineKind::Ray => "Ray",
+                    grafito_core::LineKind::Line => "Line",
+                };
+                ui.label(format!("Kind: {}", kind_str));
                 ui.label(format!("Start: ({}, {})", px(l.start.x), px(l.start.y)));
                 ui.label(format!("End: ({}, {})", px(l.end.x), px(l.end.y)));
                 ui.label(format!("Length: {}", px(l.start.distance(&l.end))));
@@ -357,6 +363,10 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
             ui.separator();
 
             // Construction tools (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::Segment, "Seg", "");
+            tool_btn(ui, current_tool, Tool::Ray, "Ray", "");
+            tool_btn(ui, current_tool, Tool::Vector, "Vec", "");
+            tool_btn(ui, current_tool, Tool::RegularPolygon, "RegPoly", "");
             tool_btn(ui, current_tool, Tool::Tangent, "Tangent", "");
             tool_btn(ui, current_tool, Tool::Perpendicular, "Perpendicular", "");
         }
@@ -536,6 +546,49 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
                 stroke,
             );
         }
+        Tool::Segment => {
+            painter.line_segment(
+                [c - egui::vec2(10.0, -6.0), c + egui::vec2(10.0, 6.0)],
+                stroke,
+            );
+            painter.circle_filled(c - egui::vec2(10.0, -6.0), 2.0, text_color);
+            painter.circle_filled(c + egui::vec2(10.0, 6.0), 2.0, text_color);
+        }
+        Tool::Ray => {
+            painter.line_segment(
+                [c - egui::vec2(8.0, 0.0), c + egui::vec2(10.0, 0.0)],
+                stroke,
+            );
+            // arrowhead
+            let tip = c + egui::vec2(10.0, 0.0);
+            painter.line_segment([tip, tip - egui::vec2(5.0, 3.0)], stroke);
+            painter.line_segment([tip, tip - egui::vec2(5.0, -3.0)], stroke);
+            painter.circle_filled(c - egui::vec2(8.0, 0.0), 2.0, text_color);
+        }
+        Tool::Vector => {
+            painter.line_segment(
+                [c - egui::vec2(8.0, -6.0), c + egui::vec2(8.0, 6.0)],
+                stroke,
+            );
+            let tip = c + egui::vec2(8.0, 6.0);
+            painter.line_segment([tip, tip - egui::vec2(4.0, 2.0)], stroke);
+            painter.line_segment([tip, tip - egui::vec2(2.0, 4.0)], stroke);
+        }
+        Tool::RegularPolygon => {
+            let center = c;
+            let radius = 10.0;
+            let n = 5;
+            let points: Vec<egui::Pos2> = (0..=n)
+                .map(|i| {
+                    let angle =
+                        i as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                    center + egui::vec2(radius * angle.cos(), radius * angle.sin())
+                })
+                .collect();
+            for i in 0..points.len().saturating_sub(1) {
+                painter.line_segment([points[i], points[i + 1]], stroke);
+            }
+        }
         Tool::DomainColoring => {
             painter.text(
                 c,
@@ -679,6 +732,10 @@ pub enum Tool {
     Histogram,
     ScatterPlot,
     // Construction tools
+    Segment,
+    Ray,
+    Vector,
+    RegularPolygon,
     Tangent,
     Perpendicular,
     Locus,
@@ -713,6 +770,10 @@ impl Tool {
             | Tool::Fractal
             | Tool::Histogram
             | Tool::ScatterPlot
+            | Tool::Segment
+            | Tool::Ray
+            | Tool::Vector
+            | Tool::RegularPolygon
             | Tool::Tangent
             | Tool::Perpendicular
             | Tool::Locus

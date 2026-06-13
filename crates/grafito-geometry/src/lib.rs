@@ -9,6 +9,7 @@ pub mod expr;
 pub mod fractals;
 pub mod intersections;
 pub mod interval;
+pub mod lines;
 pub mod matrices;
 pub mod ode;
 pub mod precision;
@@ -19,6 +20,7 @@ pub mod symbolic;
 pub mod types;
 pub mod types3d;
 
+pub use lines::*;
 pub use types::*;
 pub use types3d::*;
 

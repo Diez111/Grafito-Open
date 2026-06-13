@@ -8,10 +8,11 @@
 //! in topological order. Independent branches are evaluated in parallel via rayon.
 
 use crate::ObjectId;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// A geometric constraint / construction algorithm.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Constraint {
     /// Unique identifier for this constraint.
     pub id: usize,
@@ -23,10 +24,13 @@ pub struct Constraint {
     pub outputs: Vec<ObjectId>,
     /// Construction index (order in which this was created).
     pub order: usize,
+    /// Named parameters for this constraint (e.g., translation delta, rotation angle).
+    #[serde(default)]
+    pub params: HashMap<String, f64>,
 }
 
 /// The constraint graph: a DAG of dependencies between geometric objects.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConstraintGraph {
     /// All constraints, indexed by ID.
     constraints: HashMap<usize, Constraint>,
@@ -72,6 +76,7 @@ impl ConstraintGraph {
         name: &str,
         inputs: Vec<ObjectId>,
         outputs: Vec<ObjectId>,
+        params: HashMap<String, f64>,
     ) -> usize {
         let id = self.next_id;
         self.next_id += 1;
@@ -84,6 +89,7 @@ impl ConstraintGraph {
             inputs: inputs.clone(),
             outputs: outputs.clone(),
             order,
+            params,
         };
 
         // Register dependents
@@ -103,39 +109,59 @@ impl ConstraintGraph {
 
     /// Get the topological update order for changed objects.
     /// Returns constraints in the order they must be re-evaluated.
+    ///
+    /// Uses DFS with three colors to detect cycles. If a back edge is found,
+    /// a warning is logged and the edge is skipped so that a valid order is
+    /// still returned for the acyclic portion of the graph.
     pub fn get_update_order(&self, changed: &[ObjectId]) -> Vec<usize> {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::new(); // fully processed (black)
+        let mut in_stack = HashSet::new(); // currently in recursion stack (gray)
         let mut order = Vec::new();
-        let mut stack: Vec<usize> = Vec::new();
 
-        // Find all constraints that depend on changed objects
-        for id in changed {
-            if let Some(deps) = self.dependents.get(id) {
-                for cons_id in deps {
-                    if visited.insert(*cons_id) {
-                        stack.push(*cons_id);
-                    }
-                }
+        fn visit(
+            this: &ConstraintGraph,
+            cons_id: usize,
+            visited: &mut HashSet<usize>,
+            in_stack: &mut HashSet<usize>,
+            order: &mut Vec<usize>,
+        ) {
+            if visited.contains(&cons_id) {
+                return;
             }
-        }
-
-        // BFS through the dependency graph
-        while let Some(cons_id) = stack.pop() {
-            order.push(cons_id);
-            if let Some(cons) = self.constraints.get(&cons_id) {
+            if in_stack.contains(&cons_id) {
+                log::warn!(
+                    "Cycle detected in constraint graph at constraint {}, skipping back edge",
+                    cons_id
+                );
+                return;
+            }
+            in_stack.insert(cons_id);
+            if let Some(cons) = this.constraints.get(&cons_id) {
                 for output in &cons.outputs {
-                    if let Some(deps) = self.dependents.get(output) {
-                        for next_id in deps {
-                            if visited.insert(*next_id) {
-                                stack.push(*next_id);
-                            }
+                    if let Some(deps) = this.dependents.get(output) {
+                        for &next_id in deps {
+                            visit(this, next_id, visited, in_stack, order);
                         }
                     }
                 }
             }
+            in_stack.remove(&cons_id);
+            visited.insert(cons_id);
+            order.push(cons_id);
         }
 
-        // Sort by construction order for correct evaluation
+        // Start DFS from every constraint that directly depends on a changed object.
+        for id in changed {
+            if let Some(deps) = self.dependents.get(id) {
+                for &cons_id in deps {
+                    visit(self, cons_id, &mut visited, &mut in_stack, &mut order);
+                }
+            }
+        }
+
+        // Sort by construction order for stable, correct evaluation.
+        // Construction order is a valid topological order because inputs must
+        // exist before a constraint is created.
         order.sort_by_key(|id| {
             self.constraints
                 .get(id)

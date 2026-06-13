@@ -60,6 +60,31 @@ pub fn dispatch_tool(
             let r = pts[0].distance(&pts[1]);
             GeoObject::Circle(grafito_core::CircleObj::new(pts[0], r))
         }),
+        Tool::Segment => handle_two_click_line(
+            state,
+            world,
+            grafito_core::LineKind::Segment,
+            "s",
+            "Select start point",
+            "Segment created",
+        ),
+        Tool::Ray => handle_two_click_line(
+            state,
+            world,
+            grafito_core::LineKind::Ray,
+            "r",
+            "Select start point",
+            "Ray created",
+        ),
+        Tool::Vector => handle_two_click_line(
+            state,
+            world,
+            grafito_core::LineKind::Segment,
+            "v",
+            "Select start point",
+            "Vector created",
+        ),
+        Tool::RegularPolygon => handle_regular_polygon(state, world),
         Tool::Polygon => handle_polygon(state, document, world),
         Tool::Function => ToolResult {
             objects: vec![],
@@ -293,11 +318,11 @@ fn handle_measure(
             let b = state.pending[1];
             let c = state.pending[2];
             // Visual: two rays from vertex
-            let mut ray1 = grafito_core::LineObj::new(b, a);
+            let mut ray1 = grafito_core::LineObj::new_with_kind(b, a, grafito_core::LineKind::Ray);
             ray1.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray1.width = 1.5;
             document.add_object(grafito_core::GeoObject::Line(ray1));
-            let mut ray2 = grafito_core::LineObj::new(b, c);
+            let mut ray2 = grafito_core::LineObj::new_with_kind(b, c, grafito_core::LineKind::Ray);
             ray2.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray2.width = 1.5;
             document.add_object(grafito_core::GeoObject::Line(ray2));
@@ -477,6 +502,64 @@ fn handle_perpendicular(
         ToolResult {
             objects: vec![],
             message: Some("Select 2nd point".into()),
+            reset_tool: false,
+        }
+    }
+}
+
+fn handle_two_click_line(
+    state: &mut ToolState,
+    world: Point2,
+    kind: grafito_core::LineKind,
+    label: &str,
+    first_msg: &str,
+    done_msg: &str,
+) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() >= 2 {
+        let pts = state.pending[..2].to_vec();
+        state.pending.clear();
+        let obj = GeoObject::Line(
+            grafito_core::LineObj::new_with_kind(pts[0], pts[1], kind).with_label(label),
+        );
+        ToolResult {
+            objects: vec![obj],
+            message: Some(done_msg.into()),
+            reset_tool: false,
+        }
+    } else {
+        ToolResult {
+            objects: vec![],
+            message: Some(first_msg.into()),
+            reset_tool: false,
+        }
+    }
+}
+
+fn handle_regular_polygon(state: &mut ToolState, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() >= 2 {
+        let center = state.pending[0];
+        let vertex = state.pending[1];
+        let r = center.distance(&vertex);
+        let n = 5;
+        let start_angle = (vertex.y - center.y).atan2(vertex.x - center.x);
+        let verts: Vec<Point2> = (0..n)
+            .map(|i| {
+                let angle = start_angle + i as f64 / n as f64 * std::f64::consts::TAU;
+                Point2::new(center.x + r * angle.cos(), center.y + r * angle.sin())
+            })
+            .collect();
+        state.pending.clear();
+        ToolResult {
+            objects: vec![GeoObject::Polygon(grafito_core::PolygonObj::new(verts))],
+            message: Some("Regular polygon created".into()),
+            reset_tool: false,
+        }
+    } else {
+        ToolResult {
+            objects: vec![],
+            message: Some("Select center".into()),
             reset_tool: false,
         }
     }

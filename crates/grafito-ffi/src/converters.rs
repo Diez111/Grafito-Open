@@ -47,7 +47,17 @@ pub fn geo_object_to_dto(obj: &GeoObject) -> ObjectDto {
         }
         GeoObject::Line(l) => {
             let length = l.length();
+            let kind_str = match l.kind {
+                grafito_core::LineKind::Segment => "segment",
+                grafito_core::LineKind::Ray => "ray",
+                grafito_core::LineKind::Line => "line",
+            };
             let props = vec![
+                PropertyDto {
+                    name: "kind".into(),
+                    value: kind_str.into(),
+                    editable: false,
+                },
                 PropertyDto {
                     name: "start".into(),
                     value: format!("({:.2}, {:.2})", l.start.x, l.start.y),
@@ -64,7 +74,7 @@ pub fn geo_object_to_dto(obj: &GeoObject) -> ObjectDto {
                     editable: false,
                 },
             ];
-            let summary = format!("length={:.2}", length);
+            let summary = format!("{} length={:.2}", kind_str, length);
             (props, summary)
         }
         GeoObject::Circle(c) => {

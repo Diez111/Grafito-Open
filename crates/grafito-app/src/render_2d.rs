@@ -234,7 +234,11 @@ impl GrafitoApp {
             | Tool::Angle
             | Tool::Area
             | Tool::Slope
-            | Tool::Image => {
+            | Tool::Image
+            | Tool::Segment
+            | Tool::Ray
+            | Tool::Vector
+            | Tool::RegularPolygon => {
                 let mut state = self.tool_state.clone();
                 let result = crate::tool_dispatcher::dispatch_tool(
                     self.current_tool,
@@ -964,6 +968,25 @@ impl GrafitoApp {
         // Disabled
     }
 
+    fn draw_arrowhead(painter: &egui::Painter, from: Pos2, to: Pos2, width: f32, color: Color32) {
+        let dir = to - from;
+        let len = dir.length();
+        if len < 1e-3 {
+            return;
+        }
+        let dir = dir / len;
+        let normal = Vec2::new(-dir.y, dir.x);
+        let arrow_len = (width * 4.0).max(6.0).min(len * 0.5);
+        let arrow_width = arrow_len * 0.5;
+
+        let tip_back = to - dir * arrow_len;
+        let left = tip_back + normal * arrow_width;
+        let right = tip_back - normal * arrow_width;
+
+        painter.line_segment([to, left], Stroke::new(width, color));
+        painter.line_segment([to, right], Stroke::new(width, color));
+    }
+
     pub(crate) fn draw_tool_ghost(&self, painter: &egui::Painter, canvas_rect: Rect) {
         if let Some(ghost) = &self.tool_ghost {
             let mut g = ghost.clone();
@@ -1014,18 +1037,37 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Line(l) => {
-                let a = view.world_to_screen(l.start);
-                let b = view.world_to_screen(l.end);
-                let stroke = Stroke::new(l.width, to_color32(l.color));
-                painter.line_segment(
-                    [
-                        canvas_rect.min + Vec2::new(a.x, a.y),
-                        canvas_rect.min + Vec2::new(b.x, b.y),
-                    ],
-                    stroke,
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let view_bounds = grafito_geometry::AABB::new(
+                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                 );
+
+                let stroke = Stroke::new(l.width, to_color32(l.color));
+                if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
+                    let a = view.world_to_screen(start);
+                    let b = view.world_to_screen(end);
+                    let pa = canvas_rect.min + Vec2::new(a.x, a.y);
+                    let pb = canvas_rect.min + Vec2::new(b.x, b.y);
+                    painter.line_segment([pa, pb], stroke);
+
+                    // Arrowhead for vectors at the forward (t=1) end.
+                    let is_vector = l.label == "v";
+                    if is_vector {
+                        Self::draw_arrowhead(painter, pa, pb, l.width, to_color32(l.color));
+                    }
+                }
                 if !l.label.is_empty() {
-                    let mid = (a + b) * 0.5;
+                    let mid = if l.kind == grafito_core::LineKind::Segment {
+                        let a = view.world_to_screen(l.start);
+                        let b = view.world_to_screen(l.end);
+                        (a + b) * 0.5
+                    } else {
+                        // Place label near the start for rays/lines.
+                        view.world_to_screen(l.start)
+                    };
                     painter.text(
                         canvas_rect.min + Vec2::new(mid.x, mid.y) + Vec2::new(0.0, -8.0),
                         egui::Align2::CENTER_BOTTOM,

@@ -1,5 +1,5 @@
 use crate::id::ObjectId;
-use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D};
+use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -378,6 +378,10 @@ pub struct PointObj {
     pub id: ObjectId,
     pub label: String,
     pub position: Point2,
+    #[serde(default)]
+    pub x_expr: Option<String>,
+    #[serde(default)]
+    pub y_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub size: f32,
@@ -389,6 +393,8 @@ impl PointObj {
             id: ObjectId::new(),
             label: String::new(),
             position,
+            x_expr: None,
+            y_expr: None,
             color: Color::BLUE,
             visible: true,
             size: 6.0,
@@ -401,12 +407,25 @@ impl PointObj {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineKind {
+    /// Finite segment between two endpoints.
+    #[default]
+    Segment,
+    /// Infinite line through two points.
+    Line,
+    /// Ray starting at `start` and passing through `end`.
+    Ray,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineObj {
     pub id: ObjectId,
     pub label: String,
     pub start: Point2,
     pub end: Point2,
+    #[serde(default)]
+    pub kind: LineKind,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -414,11 +433,16 @@ pub struct LineObj {
 
 impl LineObj {
     pub fn new(start: Point2, end: Point2) -> Self {
+        Self::new_with_kind(start, end, LineKind::Segment)
+    }
+
+    pub fn new_with_kind(start: Point2, end: Point2, kind: LineKind) -> Self {
         Self {
             id: ObjectId::new(),
             label: String::new(),
             start,
             end,
+            kind,
             color: Color::BLACK,
             visible: true,
             width: 2.0,
@@ -433,6 +457,47 @@ impl LineObj {
     pub fn length(&self) -> f64 {
         self.start.distance(&self.end)
     }
+
+    /// True for Segment or Ray; infinite lines have no finite length.
+    pub fn has_finite_length(&self) -> bool {
+        self.kind != LineKind::Line
+    }
+
+    pub fn point_at(&self, t: f64) -> Point2 {
+        let dx = self.end.x - self.start.x;
+        let dy = self.end.y - self.start.y;
+        Point2::new(self.start.x + t * dx, self.start.y + t * dy)
+    }
+
+    pub fn param_at_point(&self, p: Point2) -> f64 {
+        grafito_geometry::line_param_at_point(p, self.start, self.end)
+    }
+
+    pub fn distance_to_point(&self, p: Point2) -> f64 {
+        match self.kind {
+            LineKind::Segment => {
+                grafito_geometry::distance_point_to_segment(p, self.start, self.end)
+            }
+            LineKind::Ray => grafito_geometry::distance_point_to_ray(p, self.start, self.end),
+            LineKind::Line => grafito_geometry::distance_point_to_line(p, self.start, self.end),
+        }
+    }
+
+    pub fn clip_to_aabb(&self, rect: AABB) -> Option<(Point2, Point2)> {
+        match self.kind {
+            LineKind::Segment => grafito_geometry::clip_segment_to_rect(self.start, self.end, rect),
+            LineKind::Ray => grafito_geometry::clip_ray_to_rect(self.start, self.end, rect),
+            LineKind::Line => grafito_geometry::clip_line_to_rect(self.start, self.end, rect),
+        }
+    }
+
+    pub fn kind_contains_t(&self, t: f64) -> bool {
+        match self.kind {
+            LineKind::Segment => (0.0..=1.0).contains(&t),
+            LineKind::Ray => t >= 0.0,
+            LineKind::Line => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -441,6 +506,8 @@ pub struct CircleObj {
     pub label: String,
     pub center: Point2,
     pub radius: f64,
+    #[serde(default)]
+    pub radius_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -454,6 +521,7 @@ impl CircleObj {
             label: String::new(),
             center,
             radius,
+            radius_expr: None,
             color: Color::BLACK,
             visible: true,
             width: 2.0,

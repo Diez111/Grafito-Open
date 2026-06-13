@@ -1,7 +1,7 @@
 use grafito_core::{
-    Attractor3DObj, BoxPlotObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj, Document,
-    EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
-    HyperbolaObj, ImplicitCurveObj, LineObj, MoebiusStripObj, ObjectId, ParabolaObj,
+    Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
+    Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
+    HyperbolaObj, ImplicitCurveObj, LineKind, LineObj, MoebiusStripObj, ObjectId, ParabolaObj,
     ParametricCurve2DObj, PhasePortraitObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
     RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj,
     Torus3DObj, VectorField2DObj, VectorField3DObj,
@@ -140,15 +140,17 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         match obj {
                             GeoObject::Point(p) => {
                                 let new_pos = Point2::new(p.position.x + dx, p.position.y + dy);
-                                let (_, cons_id) = document.add_constructed_object(
+                                let mut params = HashMap::new();
+                                params.insert("dx".to_string(), dx);
+                                params.insert("dy".to_string(), dy);
+                                let (_, _cons_id) = document.add_constructed_object_with_params(
                                     GeoObject::Point(
                                         PointObj::new(new_pos).with_label(format!("{}'", p.label)),
                                     ),
                                     "Translate",
                                     &[id],
+                                    params,
                                 );
-                                document.set_constraint_param(cons_id, "_tr_dx", dx);
-                                document.set_constraint_param(cons_id, "_tr_dy", dy);
                             }
                             _ => {
                                 result = Some("Translate only supports Points".into());
@@ -172,15 +174,17 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                                 let c = angle.to_radians();
                                 let nx = p.position.x * c.cos() - p.position.y * c.sin();
                                 let ny = p.position.x * c.sin() + p.position.y * c.cos();
-                                let (_, cons_id) = document.add_constructed_object(
+                                let mut params = HashMap::new();
+                                params.insert("angle".to_string(), angle);
+                                let (_, _cons_id) = document.add_constructed_object_with_params(
                                     GeoObject::Point(
                                         PointObj::new(Point2::new(nx, ny))
                                             .with_label(format!("{}'", p.label)),
                                     ),
                                     "Rotate",
                                     &[id],
+                                    params,
                                 );
-                                document.set_constraint_param(cons_id, "_rot_a", angle);
                             }
                             _ => {
                                 result = Some("Rotate only supports Points".into());
@@ -352,10 +356,12 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                             let t1 = Point2::new(pm.x + perp_x, pm.y + perp_y);
                             let t2 = Point2::new(pm.x - perp_x, pm.y - perp_y);
                             document.add_object(GeoObject::Line(
-                                LineObj::new(Point2::new(px, py), t1).with_label("T1"),
+                                LineObj::new_with_kind(Point2::new(px, py), t1, LineKind::Line)
+                                    .with_label("T1"),
                             ));
                             document.add_object(GeoObject::Line(
-                                LineObj::new(Point2::new(px, py), t2).with_label("T2"),
+                                LineObj::new_with_kind(Point2::new(px, py), t2, LineKind::Line)
+                                    .with_label("T2"),
                             ));
                         }
                     }
@@ -421,7 +427,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let dy = y2 - y1;
                     let p1 = Point2::new(mx - dy * 5.0, my + dx * 5.0);
                     let p2 = Point2::new(mx + dy * 5.0, my - dx * 5.0);
-                    document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("B")));
+                    document.add_object(GeoObject::Line(
+                        LineObj::new_with_kind(p1, p2, LineKind::Line).with_label("B"),
+                    ));
                 }
                 input_text.clear();
                 return None;
@@ -445,7 +453,8 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         if b_len > 0.0 {
                             let p = Point2::new(xv + bx / b_len * 5.0, yv + by / b_len * 5.0);
                             document.add_object(GeoObject::Line(
-                                LineObj::new(Point2::new(xv, yv), p).with_label("Ab"),
+                                LineObj::new_with_kind(Point2::new(xv, yv), p, LineKind::Ray)
+                                    .with_label("Ab"),
                             ));
                         }
                     }
@@ -480,12 +489,174 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 input_text.clear();
                 return None;
             }
+            "Perpendicular" if cmd.args.len() == 2 => {
+                let line_id = find_object_by_label(document, cmd.args[0].trim());
+                let point_id = find_object_by_label(document, cmd.args[1].trim());
+                if let (Some(line_id), Some(point_id)) = (line_id, point_id) {
+                    if let (Some(GeoObject::Line(_)), Some(GeoObject::Point(_))) =
+                        (document.get_object(line_id), document.get_object(point_id))
+                    {
+                        document.add_constructed_object(
+                            GeoObject::Line(
+                                LineObj::new_with_kind(
+                                    Point2::new(0.0, 0.0),
+                                    Point2::new(1.0, 1.0),
+                                    LineKind::Line,
+                                )
+                                .with_label("P"),
+                            ),
+                            "Perpendicular",
+                            &[line_id, point_id],
+                        );
+                    }
+                }
+                input_text.clear();
+                return None;
+            }
+            "Parallel" if cmd.args.len() == 2 => {
+                let line_id = find_object_by_label(document, cmd.args[0].trim());
+                let point_id = find_object_by_label(document, cmd.args[1].trim());
+                if let (Some(line_id), Some(point_id)) = (line_id, point_id) {
+                    if let (Some(GeoObject::Line(_)), Some(GeoObject::Point(_))) =
+                        (document.get_object(line_id), document.get_object(point_id))
+                    {
+                        document.add_constructed_object(
+                            GeoObject::Line(
+                                LineObj::new_with_kind(
+                                    Point2::new(0.0, 0.0),
+                                    Point2::new(1.0, 1.0),
+                                    LineKind::Line,
+                                )
+                                .with_label("L"),
+                            ),
+                            "Parallel",
+                            &[line_id, point_id],
+                        );
+                    }
+                }
+                input_text.clear();
+                return None;
+            }
+            "PointOnObject" if cmd.args.len() == 2 => {
+                let object_id = find_object_by_label(document, cmd.args[0].trim());
+                let point_id = find_object_by_label(document, cmd.args[1].trim());
+                if let (Some(object_id), Some(point_id)) = (object_id, point_id) {
+                    if document.get_object(object_id).is_some()
+                        && matches!(document.get_object(point_id), Some(GeoObject::Point(_)))
+                    {
+                        document.constraints.add_constraint(
+                            "PointOnObject",
+                            vec![object_id, point_id],
+                            vec![point_id],
+                            HashMap::new(),
+                        );
+                        let order = document.propagation_order(&[object_id, point_id]);
+                        if !order.is_empty() {
+                            document.re_evaluate_constraints(&order);
+                        }
+                    }
+                }
+                input_text.clear();
+                return None;
+            }
+            "CircleByCenterRadius" if cmd.args.len() == 2 => {
+                let center_id = find_object_by_label(document, cmd.args[0].trim());
+                if let Some(center_id) = center_id {
+                    if let Some(GeoObject::Point(_)) = document.get_object(center_id) {
+                        let radius = cmd.args[1].trim().parse::<f64>().unwrap_or(1.0);
+                        let mut params = HashMap::new();
+                        params.insert("radius".to_string(), radius);
+                        document.add_constructed_object_with_params(
+                            GeoObject::Circle(
+                                CircleObj::new(Point2::new(0.0, 0.0), radius).with_label("C"),
+                            ),
+                            "CircleByCenterRadius",
+                            &[center_id],
+                            params,
+                        );
+                    }
+                }
+                input_text.clear();
+                return None;
+            }
+            "CircleByThreePoints" if cmd.args.len() == 3 => {
+                let ids: Vec<Option<ObjectId>> = cmd
+                    .args
+                    .iter()
+                    .map(|a| find_object_by_label(document, a.trim()))
+                    .collect();
+                if let [Some(id1), Some(id2), Some(id3)] = ids.as_slice() {
+                    if matches!(
+                        (
+                            document.get_object(*id1),
+                            document.get_object(*id2),
+                            document.get_object(*id3)
+                        ),
+                        (
+                            Some(GeoObject::Point(_)),
+                            Some(GeoObject::Point(_)),
+                            Some(GeoObject::Point(_))
+                        )
+                    ) {
+                        document.add_constructed_object(
+                            GeoObject::Circle(
+                                CircleObj::new(Point2::new(0.0, 0.0), 1.0).with_label("C"),
+                            ),
+                            "CircleByThreePoints",
+                            &[*id1, *id2, *id3],
+                        );
+                    }
+                }
+                input_text.clear();
+                return None;
+            }
+            "PointExpr" if cmd.args.len() == 2 => {
+                let x_expr = cmd.args[0].trim().to_string();
+                let y_expr = cmd.args[1].trim().to_string();
+                let mut point = PointObj::new(Point2::new(0.0, 0.0));
+                point.x_expr = Some(x_expr);
+                point.y_expr = Some(y_expr);
+                document.add_object(GeoObject::Point(point));
+                document.recompute_bound_parameters();
+                input_text.clear();
+                return None;
+            }
+            "CircleExpr" if cmd.args.len() == 2 => {
+                let center_arg = cmd.args[0].trim();
+                let radius_expr = cmd.args[1].trim().to_string();
+                let center = if center_arg.starts_with('(') && center_arg.ends_with(')') {
+                    parse_point_str(center_arg)
+                        .map(|(x, y)| Point2::new(x, y))
+                        .unwrap_or_else(|_| Point2::new(0.0, 0.0))
+                } else if let Some(id) = find_object_by_label(document, center_arg) {
+                    document
+                        .get_object(id)
+                        .and_then(|obj| match obj {
+                            GeoObject::Point(p) => Some(p.position),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Point2::new(0.0, 0.0))
+                } else {
+                    Point2::new(0.0, 0.0)
+                };
+                let mut circle = CircleObj::new(center, 1.0);
+                circle.radius_expr = Some(radius_expr);
+                document.add_object(GeoObject::Circle(circle));
+                document.recompute_bound_parameters();
+                input_text.clear();
+                return None;
+            }
             "Vector" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
                     (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]))
                 {
                     let obj = GeoObject::Line(
-                        LineObj::new(Point2::new(x1, y1), Point2::new(x2, y2)).with_label("v"),
+                        LineObj::new_with_kind(
+                            Point2::new(x1, y1),
+                            Point2::new(x2, y2),
+                            LineKind::Segment,
+                        )
+                        .with_label("v"),
                     );
                     document.add_object(obj);
                 }
@@ -496,12 +667,45 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
                     (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]))
                 {
-                    let dx = x2 - x1;
-                    let dy = y2 - y1;
-                    let len = (dx * dx + dy * dy).sqrt().max(0.01);
-                    let far = Point2::new(x1 + dx / len * 100.0, y1 + dy / len * 100.0);
                     document.add_object(GeoObject::Line(
-                        LineObj::new(Point2::new(x1, y1), far).with_label("r"),
+                        LineObj::new_with_kind(
+                            Point2::new(x1, y1),
+                            Point2::new(x2, y2),
+                            LineKind::Ray,
+                        )
+                        .with_label("r"),
+                    ));
+                }
+                input_text.clear();
+                return None;
+            }
+            "Line" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) =
+                    (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]))
+                {
+                    document.add_object(GeoObject::Line(
+                        LineObj::new_with_kind(
+                            Point2::new(x1, y1),
+                            Point2::new(x2, y2),
+                            LineKind::Line,
+                        )
+                        .with_label("l"),
+                    ));
+                }
+                input_text.clear();
+                return None;
+            }
+            "Segment" if cmd.args.len() == 2 => {
+                if let (Ok((x1, y1)), Ok((x2, y2))) =
+                    (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]))
+                {
+                    document.add_object(GeoObject::Line(
+                        LineObj::new_with_kind(
+                            Point2::new(x1, y1),
+                            Point2::new(x2, y2),
+                            LineKind::Segment,
+                        )
+                        .with_label("s"),
                     ));
                 }
                 input_text.clear();
@@ -770,24 +974,26 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         let bn = Point3D::new(vn.x, base_y, vn.y);
                         let tn = Point3D::new(vn.x, top_y, vn.y);
                         if let Some(poly_id) = id_opt {
-                            let (_, c1) = document.add_constructed_object(
+                            let mut params = HashMap::new();
+                            params.insert("height".to_string(), height);
+                            let (_, _c1) = document.add_constructed_object_with_params(
                                 GeoObject::Segment3D(Segment3DObj::new(b, t).with_label("E")),
                                 "Extrude",
                                 &[poly_id],
+                                params.clone(),
                             );
-                            document.set_constraint_param(c1, "_ext_h", height);
-                            let (_, c2) = document.add_constructed_object(
+                            let (_, _c2) = document.add_constructed_object_with_params(
                                 GeoObject::Segment3D(Segment3DObj::new(b, bn).with_label("E")),
                                 "Extrude",
                                 &[poly_id],
+                                params.clone(),
                             );
-                            document.set_constraint_param(c2, "_ext_h", height);
-                            let (_, c3) = document.add_constructed_object(
+                            let (_, _c3) = document.add_constructed_object_with_params(
                                 GeoObject::Segment3D(Segment3DObj::new(t, tn).with_label("E")),
                                 "Extrude",
                                 &[poly_id],
+                                params,
                             );
-                            document.set_constraint_param(c3, "_ext_h", height);
                         }
                     }
                 } else {
@@ -2093,15 +2299,36 @@ fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
     match (obj_a, obj_b) {
         (GeoObject::Line(a), GeoObject::Line(b)) => {
             match intersections::line_line(a.start, a.end, b.start, b.end) {
-                IntersectionResult::One(p) => vec![p],
-                IntersectionResult::Two(p1, p2) => vec![p1, p2],
+                IntersectionResult::One(p) => {
+                    let t_a = a.param_at_point(p);
+                    let t_b = b.param_at_point(p);
+                    if a.kind_contains_t(t_a) && b.kind_contains_t(t_b) {
+                        vec![p]
+                    } else {
+                        vec![]
+                    }
+                }
                 _ => vec![],
             }
         }
         (GeoObject::Line(l), GeoObject::Circle(c)) | (GeoObject::Circle(c), GeoObject::Line(l)) => {
             match intersections::line_circle(l.start, l.end, c.center, c.radius) {
-                IntersectionResult::One(p) => vec![p],
-                IntersectionResult::Two(p1, p2) => vec![p1, p2],
+                IntersectionResult::One(p) => {
+                    if l.kind_contains_t(l.param_at_point(p)) {
+                        vec![p]
+                    } else {
+                        vec![]
+                    }
+                }
+                IntersectionResult::Two(p1, p2) => {
+                    let mut pts = Vec::new();
+                    for p in [p1, p2] {
+                        if l.kind_contains_t(l.param_at_point(p)) {
+                            pts.push(p);
+                        }
+                    }
+                    pts
+                }
                 _ => vec![],
             }
         }
@@ -2113,7 +2340,8 @@ fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
                 IntersectionResult::None => vec![],
             }
         }
-        (GeoObject::Function(f), GeoObject::Line(l)) => {
+        (GeoObject::Function(f), GeoObject::Line(l))
+        | (GeoObject::Line(l), GeoObject::Function(f)) => {
             let slope = if (l.end.x - l.start.x).abs() < 1e-12 {
                 0.0
             } else {
@@ -2123,17 +2351,9 @@ fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
             let x_min = f.domain_min.unwrap_or(-10.0);
             let x_max = f.domain_max.unwrap_or(10.0);
             intersections::function_line(&f.expr, slope, intercept, x_min, x_max)
-        }
-        (GeoObject::Line(l), GeoObject::Function(f)) => {
-            let slope = if (l.end.x - l.start.x).abs() < 1e-12 {
-                0.0
-            } else {
-                (l.end.y - l.start.y) / (l.end.x - l.start.x)
-            };
-            let intercept = l.start.y - slope * l.start.x;
-            let x_min = f.domain_min.unwrap_or(-10.0);
-            let x_max = f.domain_max.unwrap_or(10.0);
-            intersections::function_line(&f.expr, slope, intercept, x_min, x_max)
+                .into_iter()
+                .filter(|p| l.kind_contains_t(l.param_at_point(*p)))
+                .collect()
         }
         (GeoObject::Function(f1), GeoObject::Function(f2)) => {
             let x_min = f1

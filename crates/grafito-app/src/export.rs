@@ -63,11 +63,22 @@ pub fn export_svg(doc: &Document, width: f64, height: f64) -> String {
                 ));
             }
             grafito_core::GeoObject::Line(l) => {
-                let a = view.world_to_screen(l.start);
-                let b = view.world_to_screen(l.end);
+                let (a, b) = match l.kind {
+                    grafito_core::LineKind::Segment => (l.start, l.end),
+                    _ => {
+                        let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                        let world_br =
+                            view.screen_to_world(glam::Vec2::new(width as f32, height as f32));
+                        let mut view_bounds = grafito_geometry::AABB::new(world_tl, world_tl);
+                        view_bounds.expand(&world_br);
+                        l.clip_to_aabb(view_bounds).unwrap_or((l.start, l.end))
+                    }
+                };
+                let sa = view.world_to_screen(a);
+                let sb = view.world_to_screen(b);
                 svg.push_str(&format!(
                     r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="{:.1}"/>"#,
-                    a.x, a.y, b.x, b.y, rgb, l.width
+                    sa.x, sa.y, sb.x, sb.y, rgb, l.width
                 ));
             }
             grafito_core::GeoObject::Circle(c) => {

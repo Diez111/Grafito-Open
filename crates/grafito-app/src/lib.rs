@@ -8,6 +8,9 @@ pub mod render_2d;
 pub mod render_3d;
 pub mod tool_dispatcher;
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(target_os = "android")]
 pub mod android;
 
@@ -854,6 +857,7 @@ impl eframe::App for GrafitoApp {
                                 let sl = egui::Slider::new(&mut v,-10.0..=10.0).step_by(0.1);
                                 if ui.add_sized([100.0, 16.0], sl).changed() {
                                     self.document.set_variable(name.clone(), v);
+                                    self.document.recompute_bound_parameters();
                                 }
                             });
                         }
@@ -862,6 +866,7 @@ impl eframe::App for GrafitoApp {
                                 if let Some(v) = self.document.variables.get(name) {
                                     let nv = (v + 0.02) % 20.0 - 10.0;
                                     self.document.set_variable(name.clone(), nv);
+                                    self.document.recompute_bound_parameters();
                                 }
                             }
                             ctx.request_repaint();
