@@ -25,6 +25,7 @@ pub struct GrafitoEngine {
     screen_width: Arc<Mutex<f32>>,
     screen_height: Arc<Mutex<f32>>,
     pending_points: Arc<Mutex<Vec<Point2>>>,
+    documents_dir: Arc<Mutex<Option<String>>>,
 }
 
 #[uniffi::export]
@@ -49,6 +50,7 @@ impl GrafitoEngine {
             screen_width: Arc::new(Mutex::new(screen_width)),
             screen_height: Arc::new(Mutex::new(screen_height)),
             pending_points: Arc::new(Mutex::new(Vec::new())),
+            documents_dir: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -541,9 +543,13 @@ impl GrafitoEngine {
         }
     }
 
-    pub fn set_cell(self: &Arc<Self>, row: u32, col: u32, value: String) {
+    pub fn set_cell(self: &Arc<Self>, row: u32, col: u32, value: String) -> bool {
         let mut doc = self.document.lock();
-        doc.set_spreadsheet_cell(row as usize, col as usize, value);
+        doc.set_spreadsheet_cell(row as usize, col as usize, value)
+            .map_err(|e| {
+                log::warn!("set_cell: {}", e);
+            })
+            .is_ok()
     }
 
     pub fn search_commands(self: &Arc<Self>, query: String) -> Vec<PaletteCommandDto> {
@@ -575,12 +581,24 @@ impl GrafitoEngine {
             .collect()
     }
 
+    pub fn set_documents_dir(self: &Arc<Self>, path: String) {
+        *self.documents_dir.lock() = Some(path);
+    }
+
     pub fn save_to_file(self: &Arc<Self>, path: String) -> bool {
+        if let Err(e) = self.validate_path(&path) {
+            log::warn!("save_to_file rejected path: {}", e);
+            return false;
+        }
         let doc = self.document.lock();
         persist::save_document(&doc, &path)
     }
 
     pub fn load_from_file(self: &Arc<Self>, path: String) -> bool {
+        if let Err(e) = self.validate_path(&path) {
+            log::warn!("load_from_file rejected path: {}", e);
+            return false;
+        }
         if let Some(doc) = persist::load_document(&path) {
             *self.document.lock() = doc;
             true
@@ -607,6 +625,35 @@ impl GrafitoEngine {
 
     pub fn get_camera(&self) -> Arc<Mutex<Camera3D>> {
         self.camera.clone()
+    }
+
+    fn validate_path(&self, path: &str) -> Result<(), String> {
+        let target = std::path::Path::new(path);
+
+        // Reject paths with parent-dir traversal.
+        for component in target.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err("path contains '..'".to_string());
+            }
+        }
+
+        if let Some(base) = self.documents_dir.lock().as_deref() {
+            let base_path = std::path::Path::new(base);
+            let abs_base = std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
+            let abs_target = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                abs_base.join(target)
+            };
+            let abs_target = std::fs::canonicalize(&abs_target).unwrap_or(abs_target);
+            if !abs_target.starts_with(&abs_base) {
+                return Err(format!("path {} is outside documents dir", path));
+            }
+        } else if !target.is_relative() {
+            return Err("absolute paths are not allowed without documents_dir".to_string());
+        }
+
+        Ok(())
     }
 
     fn save_state(&self) {

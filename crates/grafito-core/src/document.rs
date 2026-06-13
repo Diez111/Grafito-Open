@@ -968,7 +968,29 @@ impl Document {
         }
     }
 
-    pub fn set_spreadsheet_cell(&mut self, row: usize, col: usize, value: String) {
+    pub const MAX_SPREADSHEET_ROWS: usize = 1000;
+    pub const MAX_SPREADSHEET_COLS: usize = 1000;
+
+    pub fn set_spreadsheet_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        value: String,
+    ) -> Result<(), String> {
+        if row >= Self::MAX_SPREADSHEET_ROWS {
+            return Err(format!(
+                "row {} exceeds maximum {}",
+                row,
+                Self::MAX_SPREADSHEET_ROWS
+            ));
+        }
+        if col >= Self::MAX_SPREADSHEET_COLS {
+            return Err(format!(
+                "col {} exceeds maximum {}",
+                col,
+                Self::MAX_SPREADSHEET_COLS
+            ));
+        }
         while self.spreadsheet.len() <= row {
             self.spreadsheet.push(Vec::new());
         }
@@ -976,6 +998,7 @@ impl Document {
             self.spreadsheet[row].push(String::new());
         }
         self.spreadsheet[row][col] = value;
+        Ok(())
     }
 
     pub fn eval_spreadsheet_cell(&self, row: usize, col: usize) -> Option<f64> {
