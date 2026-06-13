@@ -1,3 +1,4 @@
+use geo::BooleanOps;
 use grafito_core::{
     Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
     Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
@@ -6,6 +7,7 @@ use grafito_core::{
     RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj,
     Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
+use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::matrices::{taylor_series, Matrix};
 use grafito_geometry::statistics;
@@ -130,6 +132,46 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     input_text.clear();
                     return None;
                 }
+            }
+            "PolygonUnion" if cmd.args.len() == 2 => {
+                match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
+                    Ok((a, b)) => {
+                        add_boolean_result(document, &a.union(&b), "U");
+                    }
+                    Err(msg) => result = Some(msg),
+                }
+                input_text.clear();
+                return result;
+            }
+            "PolygonIntersection" if cmd.args.len() == 2 => {
+                match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
+                    Ok((a, b)) => {
+                        add_boolean_result(document, &a.intersection(&b), "I");
+                    }
+                    Err(msg) => result = Some(msg),
+                }
+                input_text.clear();
+                return result;
+            }
+            "PolygonDifference" if cmd.args.len() == 2 => {
+                match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
+                    Ok((a, b)) => {
+                        add_boolean_result(document, &a.difference(&b), "D");
+                    }
+                    Err(msg) => result = Some(msg),
+                }
+                input_text.clear();
+                return result;
+            }
+            "PolygonXor" if cmd.args.len() == 2 => {
+                match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
+                    Ok((a, b)) => {
+                        add_boolean_result(document, &a.xor(&b), "X");
+                    }
+                    Err(msg) => result = Some(msg),
+                }
+                input_text.clear();
+                return result;
             }
             "Translate" if cmd.args.len() == 2 => {
                 if let (Some(id), Ok((dx, dy))) = (
@@ -3037,6 +3079,64 @@ pub fn find_object_by_label(document: &Document, label: &str) -> Option<ObjectId
         .map(|(id, _)| *id)
 }
 
+fn resolve_two_polygons(
+    document: &Document,
+    label_a: &str,
+    label_b: &str,
+) -> Result<(geo::Polygon<f64>, geo::Polygon<f64>), String> {
+    let id_a = find_object_by_label(document, label_a)
+        .ok_or_else(|| format!("Object '{}' not found", label_a))?;
+    let id_b = find_object_by_label(document, label_b)
+        .ok_or_else(|| format!("Object '{}' not found", label_b))?;
+
+    let obj_a = document
+        .get_object(id_a)
+        .ok_or_else(|| "Object not found".to_string())?;
+    let obj_b = document
+        .get_object(id_b)
+        .ok_or_else(|| "Object not found".to_string())?;
+
+    match (obj_a, obj_b) {
+        (GeoObject::Polygon(a), GeoObject::Polygon(b)) => {
+            Ok((polygon_to_geo(&a.vertices), polygon_to_geo(&b.vertices)))
+        }
+        _ => Err("Both arguments must be polygons".to_string()),
+    }
+}
+
+fn add_boolean_result(document: &mut Document, mp: &geo::MultiPolygon<f64>, base_label: &str) {
+    let polys = grafito_geometry::boolean::multipolygon_to_polygons(mp);
+    for (i, verts) in polys.into_iter().enumerate() {
+        let label = if i == 0 {
+            base_label.to_string()
+        } else {
+            format!("{}{}", base_label, subscript_label(i))
+        };
+        let mut poly = PolygonObj::new(verts);
+        poly.label = label;
+        document.add_object(GeoObject::Polygon(poly));
+    }
+}
+
+fn subscript_label(n: usize) -> String {
+    n.to_string()
+        .chars()
+        .map(|c| match c {
+            '0' => '₀',
+            '1' => '₁',
+            '2' => '₂',
+            '3' => '₃',
+            '4' => '₄',
+            '5' => '₅',
+            '6' => '₆',
+            '7' => '₇',
+            '8' => '₈',
+            '9' => '₉',
+            _ => c,
+        })
+        .collect()
+}
+
 pub fn parse_point_str(s: &str) -> Result<(f64, f64), String> {
     let s = s.trim().trim_start_matches('(').trim_end_matches(')');
     let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
@@ -3208,4 +3308,35 @@ fn parse_matrix_arg(s: &str) -> Option<Matrix> {
         }
     }
     Matrix::from_rows(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafito_core::Document;
+
+    #[test]
+    fn test_polygon_union_command() {
+        let mut doc = Document::new();
+
+        // Create two overlapping unit squares via process_input.
+        process_input(&mut doc, &mut "RegularPolygon[(0,0), 4, 1]".to_string());
+        process_input(&mut doc, &mut "RegularPolygon[(0.5,0), 4, 1]".to_string());
+
+        let polygon_labels: Vec<String> = doc
+            .objects_iter()
+            .filter(|(_, obj)| matches!(obj, GeoObject::Polygon(_)))
+            .map(|(_, obj)| obj.label().to_string())
+            .collect();
+        assert_eq!(polygon_labels.len(), 2, "two input polygons should exist");
+
+        let mut cmd = format!("PolygonUnion[{}, {}]", polygon_labels[0], polygon_labels[1]);
+        process_input(&mut doc, &mut cmd);
+
+        let union_exists = doc.objects_iter().any(|(_, obj)| obj.label() == "U");
+        assert!(
+            union_exists,
+            "union result polygon labeled 'U' should exist"
+        );
+    }
 }

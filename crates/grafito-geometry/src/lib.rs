@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod attractors;
+pub mod boolean;
 pub mod cas;
 pub mod complex_expr;
 pub mod dd;

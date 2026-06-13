@@ -193,6 +193,7 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 | Cónicas | `Circle`, `Ellipse`, `Parabola`, `Hyperbola` |
 | Curvas | `Function`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve` |
 | Polígonos | `Polygon`, `RegularPolygon` |
+| Operaciones booleanas | `PolygonUnion`, `PolygonIntersection`, `PolygonDifference`, `PolygonXor` |
 | Campos | `VectorField2D` (flechas normalizadas con punta) |
 | Complejos | `ComplexGrid` (malla deformada), `ComplexMapping` |
 | Fractales | `Fractal2D` (Mandelbrot, Julia, Burning Ship) |

@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
+    use crate::boolean::*;
     use crate::cas::*;
     use crate::expr::*;
     use crate::types::*;
+    use geo::{Area, BooleanOps};
     use glam::Vec2;
 
     #[test]
@@ -218,5 +220,106 @@ mod tests {
         cam.orbit(0.1, 0.1);
         assert!((cam.theta - theta_before).abs() > 1e-6);
         assert!((cam.phi - phi_before).abs() > 1e-6);
+    }
+
+    fn unit_square(bottom_left: (f64, f64)) -> Vec<Point2> {
+        let (x, y) = bottom_left;
+        vec![
+            Point2::new(x, y),
+            Point2::new(x + 1.0, y),
+            Point2::new(x + 1.0, y + 1.0),
+            Point2::new(x, y + 1.0),
+        ]
+    }
+
+    #[test]
+    fn test_polygon_union_two_squares() {
+        let a = unit_square((0.0, 0.0));
+        let b = unit_square((0.5, 0.0));
+        let geo_a = polygon_to_geo(&a);
+        let geo_b = polygon_to_geo(&b);
+        let union = geo_a.union(&geo_b);
+        let area = union.unsigned_area();
+        assert!(
+            (area - 1.5).abs() < 1e-9,
+            "union area should be 1.5, got {}",
+            area
+        );
+    }
+
+    #[test]
+    fn test_polygon_intersection_two_squares() {
+        let a = unit_square((0.0, 0.0));
+        let b = unit_square((0.5, 0.0));
+        let geo_a = polygon_to_geo(&a);
+        let geo_b = polygon_to_geo(&b);
+        let intersection = geo_a.intersection(&geo_b);
+        let area = intersection.unsigned_area();
+        assert!(
+            (area - 0.5).abs() < 1e-9,
+            "intersection area should be 0.5, got {}",
+            area
+        );
+    }
+
+    #[test]
+    fn test_polygon_difference() {
+        let a = unit_square((0.0, 0.0));
+        let b = unit_square((0.5, 0.0));
+        let geo_a = polygon_to_geo(&a);
+        let geo_b = polygon_to_geo(&b);
+        let difference = geo_a.difference(&geo_b);
+        let area = difference.unsigned_area();
+        assert!(
+            (area - 0.5).abs() < 1e-9,
+            "difference area should be 0.5, got {}",
+            area
+        );
+    }
+
+    #[test]
+    fn test_polygon_xor_two_squares() {
+        let a = unit_square((0.0, 0.0));
+        let b = unit_square((0.5, 0.0));
+        let geo_a = polygon_to_geo(&a);
+        let geo_b = polygon_to_geo(&b);
+        let xor = geo_a.xor(&geo_b);
+        let area = xor.unsigned_area();
+        assert!(
+            (area - 1.0).abs() < 1e-9,
+            "xor area should be 1.0, got {}",
+            area
+        );
+    }
+
+    #[test]
+    fn test_polygon_boolean_closes_open_ring() {
+        let open = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(0.0, 1.0),
+        ];
+        let poly = polygon_to_geo(&open);
+        let exterior = poly.exterior();
+        let first = exterior.coords().next().unwrap();
+        let last = exterior.coords().last().unwrap();
+        assert!((first.x - last.x).abs() < 1e-12);
+        assert!((first.y - last.y).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_polygon_boolean_self_intersecting_no_panic() {
+        // Bow-tie / self-intersecting quadrilateral.
+        let bowtie = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+        ];
+        // The operation should not panic; `geo` may produce an empty or
+        // degenerate result for self-intersecting inputs.
+        let geo = polygon_to_geo(&bowtie);
+        let _result = geo.union(&polygon_to_geo(&bowtie));
     }
 }

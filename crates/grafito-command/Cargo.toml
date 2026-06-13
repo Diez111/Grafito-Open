@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+geo.workspace = true
 
 [dev-dependencies]
 grafito-core.workspace = true
