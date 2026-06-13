@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::types::*;
-    use crate::expr::*;
     use crate::cas::*;
+    use crate::expr::*;
+    use crate::types::*;
     use glam::Vec2;
 
     #[test]
@@ -82,10 +82,10 @@ mod tests {
 
     #[test]
     fn test_expression_with_variables() {
-        let result = evaluate("x * 2 + y", &[
-            ("x".to_string(), 5.0),
-            ("y".to_string(), 3.0),
-        ]);
+        let result = evaluate(
+            "x * 2 + y",
+            &[("x".to_string(), 5.0), ("y".to_string(), 3.0)],
+        );
         assert!(result.is_ok());
     }
 
@@ -174,5 +174,49 @@ mod tests {
     fn test_color_construction() {
         let c = Color::new(0.5, 0.25, 0.75, 1.0);
         assert_eq!(c.to_array(), [0.5, 0.25, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn test_view_transform_log_zoom_preserves_anchor() {
+        let mut view = ViewTransform::new(800.0, 600.0);
+        view.x_log = true;
+        view.y_log = true;
+        let anchor = glam::Vec2::new(400.0, 300.0);
+        let anchor_world_before = view.screen_to_world(anchor);
+        view.zoom(2.0, anchor);
+        let anchor_world_after = view.screen_to_world(anchor);
+        assert!(
+            (anchor_world_before.x - anchor_world_after.x).abs() < 1e-9
+                && (anchor_world_before.y - anchor_world_after.y).abs() < 1e-9,
+            "zoom anchor should stay fixed in world coordinates"
+        );
+    }
+
+    #[test]
+    fn test_view_transform_pan_does_not_change_scale() {
+        let mut view = ViewTransform::new(800.0, 600.0);
+        let scale_before = view.scale;
+        view.pan(glam::Vec2::new(123.0, -456.0));
+        assert!((view.scale - scale_before).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_camera3d_pan_changes_target() {
+        use crate::types3d::Camera3D;
+        let mut cam = Camera3D::new(1.6);
+        let target_before = cam.target;
+        cam.pan(100.0, 50.0);
+        assert!((cam.target - target_before).length() > 1e-3);
+    }
+
+    #[test]
+    fn test_camera3d_orbit_changes_angles() {
+        use crate::types3d::Camera3D;
+        let mut cam = Camera3D::new(1.6);
+        let theta_before = cam.theta;
+        let phi_before = cam.phi;
+        cam.orbit(0.1, 0.1);
+        assert!((cam.theta - theta_before).abs() > 1e-6);
+        assert!((cam.phi - phi_before).abs() > 1e-6);
     }
 }

@@ -26,23 +26,19 @@ pub fn derivative(expr: &str, var: &str) -> Result<String, String> {
     }
 }
 
-/// Compute a definite integral numerically with adaptive Gauss-Legendre quadrature.
 pub fn integrate(expr: &str, var: &str) -> Result<String, String> {
     let preprocessed = expr.replace(" ", "");
     match crate::ast::parse_ast(&preprocessed) {
         Ok(ast) => match ast.integrate(var) {
-            Some(integrated) => {
-                let result = integrated.to_expr_string();
-                Ok(format!("{result} + C"))
-            }
+            Some(integrated) => Ok(integrated.to_expr_string()),
             None => {
                 let result = crate::ast::integrate_adaptive(expr, var, 0.0, 1.0, 6);
-                Ok(format!("∫₀¹ {expr} d{var} ≈ {result:.8}"))
+                Ok(format!("{result:.8}"))
             }
         },
         Err(_) => {
             let result = crate::ast::integrate_adaptive(expr, var, 0.0, 1.0, 6);
-            Ok(format!("∫₀¹ {expr} d{var} ≈ {result:.8}"))
+            Ok(format!("{result:.8}"))
         }
     }
 }
@@ -138,6 +134,50 @@ pub fn simplify(expr: &str) -> Result<String, String> {
     }
 }
 
+pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Result<String, String> {
+    let mut current_deriv = expr.to_string();
+    let mut terms = Vec::new();
+
+    let mut factorial = 1.0;
+
+    for n in 0..=order {
+        // Evaluate current_deriv at center
+        let ast = crate::ast::parse_ast(&current_deriv)?;
+        let val = ast.eval_at(var, center);
+
+        if val.is_finite() && val.abs() > 1e-9 {
+            let coef = val / factorial;
+            let term = if n == 0 {
+                format!("{coef}")
+            } else if n == 1 {
+                if center == 0.0 {
+                    format!("{coef}*{var}")
+                } else {
+                    format!("{coef}*({var} - {center})")
+                }
+            } else {
+                if center == 0.0 {
+                    format!("{coef}*{var}^{n}")
+                } else {
+                    format!("{coef}*({var} - {center})^{n}")
+                }
+            };
+            terms.push(term);
+        }
+
+        if n < order {
+            current_deriv = derivative(&current_deriv, var)?;
+            factorial *= (n + 1) as f64;
+        }
+    }
+
+    if terms.is_empty() {
+        Ok("0".to_string())
+    } else {
+        Ok(terms.join(" + ").replace("+ -", "- "))
+    }
+}
+
 pub fn substitute(expr: &str, var: &str, value: &str) -> Result<String, String> {
     let result = expr.replace(var, &format!("({})", value));
     match crate::expr::evaluate(&result, &[]) {
@@ -172,6 +212,89 @@ fn solve_polynomial_ast(ast: &crate::ast::Expr, var: &str) -> Option<Vec<f64>> {
     let coeffs = collect_polynomial_coeffs(ast, var, 4)?;
     let roots = solve_polynomial_real(&coeffs);
     Some(roots)
+}
+
+pub fn solve_polynomial_complex(ast: &crate::ast::Expr, var: &str) -> Option<Vec<(f64, f64)>> {
+    let coeffs = collect_polynomial_coeffs(ast, var, 20)?;
+    Some(durand_kerner(&coeffs))
+}
+
+fn durand_kerner(coeffs: &[f64]) -> Vec<(f64, f64)> {
+    let degree = coeffs.iter().rposition(|&c| c.abs() > 1e-12).unwrap_or(0);
+    if degree == 0 {
+        return vec![];
+    }
+
+    let lead = coeffs[degree];
+    let mut norm_coeffs = vec![0.0; degree + 1];
+    for i in 0..=degree {
+        norm_coeffs[i] = coeffs[i] / lead;
+    }
+
+    let mut roots = Vec::with_capacity(degree);
+    let mut angle: f64 = 0.4;
+    let radius: f64 = 1.0;
+    for _ in 0..degree {
+        roots.push((radius * angle.cos(), radius * angle.sin()));
+        angle += std::f64::consts::TAU / (degree as f64) + 0.1;
+    }
+
+    let cmul = |a: (f64, f64), b: (f64, f64)| -> (f64, f64) {
+        (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+    };
+    let cadd = |a: (f64, f64), b: (f64, f64)| -> (f64, f64) { (a.0 + b.0, a.1 + b.1) };
+    let csub = |a: (f64, f64), b: (f64, f64)| -> (f64, f64) { (a.0 - b.0, a.1 - b.1) };
+    let cdiv = |a: (f64, f64), b: (f64, f64)| -> (f64, f64) {
+        let den = b.0 * b.0 + b.1 * b.1;
+        if den == 0.0 {
+            return (0.0, 0.0);
+        }
+        ((a.0 * b.0 + a.1 * b.1) / den, (a.1 * b.0 - a.0 * b.1) / den)
+    };
+
+    let poly_eval = |z: (f64, f64)| -> (f64, f64) {
+        let mut res = (norm_coeffs[0], 0.0);
+        let mut zn = z;
+        for &coef in norm_coeffs.iter().skip(1) {
+            res = cadd(res, cmul((coef, 0.0), zn));
+            zn = cmul(zn, z);
+        }
+        res
+    };
+
+    for _ in 0..100 {
+        let mut max_err = 0.0_f64;
+        let mut next_roots = roots.clone();
+        for i in 0..degree {
+            let pz = poly_eval(roots[i]);
+            let mut denom = (1.0, 0.0);
+            for j in 0..degree {
+                if i != j {
+                    denom = cmul(denom, csub(roots[i], roots[j]));
+                }
+            }
+            let diff = cdiv(pz, denom);
+            next_roots[i] = csub(roots[i], diff);
+            let err = diff.0.hypot(diff.1);
+            if err > max_err {
+                max_err = err;
+            }
+        }
+        roots = next_roots;
+        if max_err < 1e-10 {
+            break;
+        }
+    }
+
+    // Clean tiny imaginary parts
+    for r in roots.iter_mut() {
+        if r.1.abs() < 1e-9 {
+            r.1 = 0.0;
+        }
+    }
+
+    roots.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    roots
 }
 
 fn collect_polynomial_coeffs(

@@ -15,7 +15,7 @@ use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
 use std::collections::{HashMap, HashSet};
 
-fn insert_implicit_multiplication(text: &str) -> String {
+pub fn insert_implicit_multiplication(text: &str) -> String {
     let mut res = String::new();
     let chars: Vec<char> = text.chars().collect();
     for i in 0..chars.len() {
@@ -32,7 +32,7 @@ fn insert_implicit_multiplication(text: &str) -> String {
             if c1 == ')' && c2.is_ascii_digit() {
                 res.push('*');
             }
-            if c1.is_ascii_digit() && c2 == '(' {
+            if c1.is_ascii_digit() && c2 == '(' && (i == 0 || !chars[i - 1].is_ascii_alphabetic()) {
                 res.push('*');
             }
             if c1 == ')' && c2 == '(' {
@@ -75,8 +75,6 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         .replace("×", "*")
         .replace("≤", "<=")
         .replace("≥", ">=");
-
-    let text = insert_implicit_multiplication(&text);
 
     let mut result: Option<String> = None;
 
@@ -1143,8 +1141,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .and_then(|s| s.trim().parse().ok())
                     .unwrap_or(5);
                 if let Some(series) = taylor_series(expr, var, center, order) {
+                    let label = next_function_label(document);
+                    let obj = GeoObject::Function(FunctionObj::new(&series).with_label(&label));
+                    document.add_object(obj);
                     input_text.clear();
-                    return Some(format!("Taylor: {}", series));
+                    return Some(format!("Taylor: {} → {}", series, label));
                 }
             }
             "Cardioid" if !cmd.args.is_empty() => {
@@ -1657,11 +1658,27 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
             }
-            "ComplexGrid" if cmd.args.len() >= 5 => {
-                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
-                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
-                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
-                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+            "ComplexGrid" if !cmd.args.is_empty() => {
+                let x_min = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let x_max = cmd
+                    .args
+                    .get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
+                let y_min = cmd
+                    .args
+                    .get(3)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let y_max = cmd
+                    .args
+                    .get(4)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
                 let density: usize = cmd
                     .args
                     .get(5)
@@ -1684,11 +1701,27 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 input_text.clear();
                 return Some("Complex grid created — scroll/zoom to explore".into());
             }
-            "DomainColoring" if cmd.args.len() >= 5 => {
-                let x_min = cmd.args[1].trim().parse().unwrap_or(-3.0);
-                let x_max = cmd.args[2].trim().parse().unwrap_or(3.0);
-                let y_min = cmd.args[3].trim().parse().unwrap_or(-3.0);
-                let y_max = cmd.args[4].trim().parse().unwrap_or(3.0);
+            "DomainColoring" if !cmd.args.is_empty() => {
+                let x_min = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let x_max = cmd
+                    .args
+                    .get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
+                let y_min = cmd
+                    .args
+                    .get(3)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let y_max = cmd
+                    .args
+                    .get(4)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
                 let res: usize = cmd
                     .args
                     .get(5)
@@ -1704,11 +1737,27 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 input_text.clear();
                 return Some(format!("Domain coloring ({}x{}) created", res, res));
             }
-            "HeatMap" if cmd.args.len() >= 5 => {
-                let x_min = cmd.args[1].trim().parse().unwrap_or(-5.0);
-                let x_max = cmd.args[2].trim().parse().unwrap_or(5.0);
-                let y_min = cmd.args[3].trim().parse().unwrap_or(-5.0);
-                let y_max = cmd.args[4].trim().parse().unwrap_or(5.0);
+            "HeatMap" if !cmd.args.is_empty() => {
+                let x_min = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let x_max = cmd
+                    .args
+                    .get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
+                let y_min = cmd
+                    .args
+                    .get(3)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let y_max = cmd
+                    .args
+                    .get(4)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
                 let res: usize = cmd
                     .args
                     .get(5)
@@ -1811,6 +1860,21 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 input_text.clear();
                 return Some("Contour curves created".into());
             }
+            "ImplicitCurve" if !cmd.args.is_empty() => {
+                let expr = cmd.args[0].trim();
+                let (lhs, rhs) = if let Some(pos) = expr.find('=') {
+                    (
+                        expr[..pos].trim().to_string(),
+                        expr[pos + 1..].trim().to_string(),
+                    )
+                } else {
+                    (expr.to_string(), "0".to_string())
+                };
+                let obj = ImplicitCurveObj::new(&lhs, &rhs, RelationOperator::Eq);
+                document.add_object(GeoObject::ImplicitCurve(obj));
+                input_text.clear();
+                return Some("Implicit curve created".into());
+            }
             _ => {}
         }
         result = execute_cas_command(document, &cmd);
@@ -1835,12 +1899,17 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             && (rest.contains('x')
                 || rest
                     .chars()
-                    .all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c)))
+                    .all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))
+                || rest.to_lowercase().starts_with("deriv")
+                || rest.to_lowercase().starts_with("integ")
+                || rest.to_lowercase().starts_with("taylor"))
         {
             if let Some(id) = find_object_by_label(document, name) {
                 document.remove_object(id);
             }
-            let obj = GeoObject::Function(FunctionObj::new(rest).with_label(name));
+            let final_expr = expand_all_cas(rest, document);
+            println!("final_expr for {}: {}", name, final_expr);
+            let obj = GeoObject::Function(FunctionObj::new(&final_expr).with_label(name));
             document.add_object(obj);
             input_text.clear();
             return None;
@@ -2099,6 +2168,182 @@ pub struct CasCmd {
     pub args: Vec<String>,
 }
 
+pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Range<usize>)> {
+    let keywords = [
+        "Derivative",
+        "Integral",
+        "Solve",
+        "Limit",
+        "Factor",
+        "Expand",
+        "Simplify",
+        "Taylor",
+        "deriv",
+        "diff",
+        "int",
+        "nsolve",
+        "lim",
+        "derivada",
+        "integrar",
+        "resolver",
+        "limite",
+        "factorizar",
+        "expandir",
+        "simplificar",
+    ];
+
+    for &kw in &keywords {
+        let mut start_idx = 0;
+        while let Some(idx) = text[start_idx..].find(kw) {
+            let actual_idx = start_idx + idx;
+            let after_kw = &text[actual_idx + kw.len()..];
+            let trimmed = after_kw.trim_start();
+            if trimmed.starts_with('[') {
+                let bracket_start = actual_idx + kw.len() + (after_kw.len() - trimmed.len());
+                let mut depth = 0;
+                let mut bracket_end = None;
+                for (i, c) in text[bracket_start..].char_indices() {
+                    if c == '[' {
+                        depth += 1;
+                    } else if c == ']' {
+                        depth -= 1;
+                        if depth == 0 {
+                            bracket_end = Some(bracket_start + i);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(end) = bracket_end {
+                    let cmd_name = kw.to_string();
+                    let inner = text[bracket_start + 1..end].to_string();
+                    return Some((cmd_name, inner, actual_idx..end + 1));
+                }
+            }
+            start_idx = actual_idx + kw.len();
+        }
+    }
+    None
+}
+
+pub fn expand_all_cas(text: &str, document: &Document) -> String {
+    let mut current = text.to_string();
+    while let Some((cmd, inner, range)) = extract_cas_command(&current) {
+        let expanded_inner = expand_all_cas(&inner, document);
+        let args: Vec<String> = split_args(&expanded_inner)
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .collect();
+        let mut resolved_expr = String::new();
+
+        let normalized = match cmd.to_lowercase().as_str() {
+            "derivative" | "derivada" | "deriv" | "diff" => "Derivative",
+            "integral" | "integrar" | "int" => "Integral",
+            "solve" | "nsolve" | "resolver" => "Solve",
+            "limit" | "limite" | "lim" => "Limit",
+            "factor" | "factorizar" => "Factor",
+            "expand" | "expandir" => "Expand",
+            "simplify" | "simplificar" => "Simplify",
+            "taylor" => "Taylor",
+            _ => "Unknown",
+        };
+
+        println!("Expanding CAS: {} with args {:?}", normalized, args);
+
+        let mut expr_arg = args.first().cloned().unwrap_or_default();
+
+        // Try full expr_arg first (e.g. "f(x)")
+        let mut found_func = false;
+        if let Some(id) = find_object_by_label(document, &expr_arg) {
+            if let Some(GeoObject::Function(f)) = document.get_object(id) {
+                expr_arg = format!("({})", f.expr.clone());
+                found_func = true;
+            }
+        }
+        // If not found, try stripping (x)
+        if !found_func {
+            if let Some(pos) = expr_arg.find('(') {
+                let fname = &expr_arg[..pos];
+                if let Some(id) = find_object_by_label(document, fname) {
+                    if let Some(GeoObject::Function(f)) = document.get_object(id) {
+                        expr_arg = format!("({})", f.expr.clone());
+                    }
+                }
+            }
+        }
+
+        match normalized {
+            "Derivative" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                resolved_expr = symbolic::derivative(&expr_arg, var)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "Integral" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                if args.len() == 4 || args.len() == 3 {
+                    let a_str = if args.len() == 4 {
+                        args.get(2)
+                    } else {
+                        args.get(1)
+                    };
+                    let b_str = if args.len() == 4 {
+                        args.get(3)
+                    } else {
+                        args.get(2)
+                    };
+                    if let (Some(a), Some(b)) = (a_str, b_str) {
+                        if let (Ok(a_val), Ok(b_val)) = (a.parse::<f64>(), b.parse::<f64>()) {
+                            resolved_expr =
+                                symbolic::integrate_definite(&expr_arg, var, a_val, b_val)
+                                    .unwrap_or_else(|_| current[range.clone()].to_string());
+                        } else {
+                            resolved_expr = symbolic::integrate(&expr_arg, var)
+                                .unwrap_or_else(|_| current[range.clone()].to_string());
+                        }
+                    }
+                } else {
+                    resolved_expr = symbolic::integrate(&expr_arg, var)
+                        .unwrap_or_else(|_| current[range.clone()].to_string());
+                }
+            }
+            "Taylor" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                let center = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let order = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5);
+                resolved_expr = symbolic::taylor_series(&expr_arg, var, center, order)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "Expand" => {
+                resolved_expr = symbolic::expand(&expr_arg)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "Factor" => {
+                resolved_expr = symbolic::factor(&expr_arg)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "Simplify" => {
+                resolved_expr = symbolic::simplify(&expr_arg)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "Limit" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                let at = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                resolved_expr = symbolic::limit(&expr_arg, var, at)
+                    .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            _ => {
+                resolved_expr = current[range.clone()].to_string();
+            }
+        }
+
+        if resolved_expr == current[range.clone()] {
+            break;
+        }
+        current.replace_range(range, &format!("({})", resolved_expr));
+    }
+    current
+}
+
 pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
     let text = text.trim();
     if let Some(open) = text.find('[') {
@@ -2155,7 +2400,11 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "contour" | "contourlines" | "contour_lines" => "Contour",
             "piecewise" | "pw" => "Piecewise",
             _ => {
-                if args.is_empty() {
+                if args.is_empty()
+                    || command.contains(' ')
+                    || command.contains('=')
+                    || command.contains('(')
+                {
                     return None;
                 }
                 return Some(CasCmd { command, args });
@@ -2236,9 +2485,9 @@ pub fn split_args(s: &str) -> Vec<String> {
 pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<String> {
     match cmd.command.as_str() {
         "Derivative" => {
-            let expr = cmd.args.first()?;
+            let expr = expand_all_cas(cmd.args.first()?, document);
             let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
-            match symbolic::derivative(expr, var) {
+            match symbolic::derivative(&expr, var) {
                 Ok(d_expr) => {
                     // Also graph the derivative if it contains the variable
                     if d_expr.contains(var) || d_expr.parse::<f64>().is_ok() {
@@ -2257,7 +2506,7 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             }
         }
         "Integral" => {
-            let expr = cmd.args.first()?;
+            let expr = expand_all_cas(cmd.args.first()?, document);
             let mut var = "x".to_string();
             let mut a_str = None;
             let mut b_str = None;
@@ -2280,7 +2529,7 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 if b_trim.len() == 1 && b_trim.chars().all(|c| c.is_alphabetic()) {
                     let lower: f64 = a_s.trim().parse().unwrap_or(0.0);
                     let label = next_function_label(document);
-                    let obj = FunctionObj::new(expr)
+                    let obj = FunctionObj::new(&expr)
                         .with_label(&label)
                         .as_integral(&var, lower);
                     document.add_object(GeoObject::Function(obj));
@@ -2293,26 +2542,43 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
 
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(
-                FunctionObj::new(expr).with_label(&label),
+                FunctionObj::new(&expr).with_label(&label),
             ));
 
             if let (Some(a_s), Some(b_s)) = (a_str, b_str) {
                 let a: f64 = a_s.trim().parse().unwrap_or(0.0);
                 let b: f64 = b_s.trim().parse().unwrap_or(1.0);
-                match symbolic::integrate_definite(expr, &var, a, b) {
+                match symbolic::integrate_definite(&expr, &var, a, b) {
                     Ok(result) => Some(format!("{} → Graficado como {}", result, label)),
                     Err(e) => Some(format!("Error calculando integral: {}", e)),
                 }
             } else {
-                match symbolic::integrate(expr, &var) {
+                match symbolic::integrate(&expr, &var) {
                     Ok(result) => Some(format!("{} → Graficado original como {}", result, label)),
                     Err(e) => Some(format!("Error calculando integral: {}", e)),
                 }
             }
         }
         "Solve" => {
-            let expr = cmd.args.first()?;
-            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            let expr_raw = expand_all_cas(cmd.args.first()?, document);
+            let mut expr_clean = expr_raw.trim().to_string();
+            if let Some((lhs, rhs)) = expr_clean.split_once('=') {
+                expr_clean = format!("({}) - ({})", lhs, rhs);
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| {
+                    // simple variable extraction
+                    for c in expr_clean.chars() {
+                        if c.is_alphabetic() && c != 'e' && c != 'i' {
+                            return c.to_string();
+                        }
+                    }
+                    "x".to_string()
+                });
+            let var = var.as_str();
             let a: f64 = cmd
                 .args
                 .get(2)
@@ -2326,14 +2592,50 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
 
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(
-                FunctionObj::new(expr).with_label(&label),
+                FunctionObj::new(&expr_clean).with_label(&label),
             ));
 
-            let expr_c1 = expr.clone();
-            let expr_c2 = expr.clone();
+            let mut complex_roots_found = false;
+            let mut strs = Vec::new();
+
+            let preprocessed = expr_clean.replace(" ", "");
+            if let Ok(ast) = grafito_geometry::ast::parse_ast(&preprocessed) {
+                if let Some(roots) = symbolic::solve_polynomial_complex(&ast, var) {
+                    if !roots.is_empty() {
+                        complex_roots_found = true;
+                        for r in &roots {
+                            if r.1.abs() < 1e-9 {
+                                strs.push(format!("{var} ≈ {:.6}", r.0));
+                                document.add_object(GeoObject::Point(
+                                    PointObj::new(Point2::new(r.0, 0.0)).with_label("Raíz"),
+                                ));
+                            } else {
+                                let sign = if r.1 > 0.0 { "+" } else { "-" };
+                                strs.push(format!("{var} ≈ {:.6} {} {:.6}i", r.0, sign, r.1.abs()));
+                                document.add_object(GeoObject::Point(
+                                    PointObj::new(Point2::new(r.0, r.1)).with_label("Raíz"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if complex_roots_found {
+                return Some(format!("{} → Graficado como {}", strs.join(", "), label));
+            }
+
+            let expr_c1 = expr_clean.clone();
+            let expr_c2 = expr_clean.clone();
             let vars1 = document.variables.clone();
             let vars2 = document.variables.clone();
-            let f = move |x: f64| eval_function_with_vars(&expr_c1, x, &vars1).unwrap_or(f64::NAN);
+            let var_name1 = var.to_string();
+            let var_name2 = var.to_string();
+            let f = move |x: f64| {
+                let mut v = vars1.clone();
+                v.insert(var_name1.clone(), x);
+                eval_function_with_vars(&expr_c1, x, &v).unwrap_or(f64::NAN)
+            };
             let mut roots = Vec::new();
             let steps = 4000;
             let step = (b - a) / steps as f64;
@@ -2353,8 +2655,9 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                     let mut root = left;
                     for _ in 0..50 {
                         let mid = (left + right) * 0.5;
-                        let f_mid =
-                            eval_function_with_vars(&expr_c2, mid, &vars2).unwrap_or(f64::NAN);
+                        let mut v2 = vars2.clone();
+                        v2.insert(var_name2.clone(), mid);
+                        let f_mid = eval_function_with_vars(&expr_c2, mid, &v2).unwrap_or(f64::NAN);
                         if f_mid.abs() < 1e-9 {
                             root = mid;
                             break;
@@ -2380,7 +2683,8 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             }
             if roots.is_empty() {
                 Some(format!(
-                    "Sin raíces para {expr} en [{a:.1}, {b:.1}] → Graficado como {label}"
+                    "Sin raíces para {} en [{a:.1}, {b:.1}] → Graficado como {label}",
+                    var
                 ))
             } else {
                 let mut strs = Vec::new();
@@ -2393,23 +2697,46 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 Some(format!("{} → Graficado como {}", strs.join(", "), label))
             }
         }
-
+        "Taylor" => {
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
+            let center: f64 = cmd
+                .args
+                .get(2)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0.0);
+            let order: usize = cmd
+                .args
+                .get(3)
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(5);
+            match symbolic::taylor_series(&expr, var, center, order) {
+                Ok(result) => {
+                    let label = next_function_label(document);
+                    document.add_object(GeoObject::Function(
+                        FunctionObj::new(&result).with_label(&label),
+                    ));
+                    Some(format!("{} → Graficado como {}", result, label))
+                }
+                Err(e) => Some(format!("Error: {}", e)),
+            }
+        }
         "Limit" => {
-            let expr = cmd.args.first()?;
+            let expr = expand_all_cas(cmd.args.first()?, document);
             let var = cmd.args.get(1).map(|s| s.trim()).unwrap_or("x");
             let at_str = cmd.args.get(2).map(|s| s.trim()).unwrap_or("0");
             let at: f64 = match at_str {
-                "inf" | "Inf" | "∞" => f64::INFINITY,
-                "-inf" | "-Inf" | "-∞" => f64::NEG_INFINITY,
+                "inf" | "infty" | "infinity" | "∞" => f64::INFINITY,
+                "-inf" | "-infty" | "-infinity" | "-∞" => f64::NEG_INFINITY,
                 s => s.parse().unwrap_or(0.0),
             };
 
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(
-                FunctionObj::new(expr).with_label(&label),
+                FunctionObj::new(&expr).with_label(&label),
             ));
 
-            match symbolic::limit(expr, var, at) {
+            match symbolic::limit(&expr, var, at) {
                 Ok(result) => {
                     if let Some(val_str) = result.split("=").last() {
                         if let Ok(val) = val_str.trim().parse::<f64>() {
@@ -2426,22 +2753,22 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             }
         }
         "Factor" => {
-            let expr = cmd.args.first()?;
-            match symbolic::factor(expr) {
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            match symbolic::factor(&expr) {
                 Ok(factors) => Some(format!("{} = {}", expr, factors)),
                 Err(e) => Some(format!("Factor error: {}", e)),
             }
         }
         "Expand" => {
-            let expr = cmd.args.first()?;
-            match symbolic::expand(expr) {
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            match symbolic::expand(&expr) {
                 Ok(expanded) => Some(format!("{} = {}", expr, expanded)),
                 Err(e) => Some(format!("Expand error: {}", e)),
             }
         }
         "Simplify" => {
-            let expr = cmd.args.first()?;
-            match symbolic::simplify(expr) {
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            match symbolic::simplify(&expr) {
                 Ok(simplified) => Some(format!("{} = {}", expr, simplified)),
                 Err(e) => Some(format!("Simplify error: {}", e)),
             }

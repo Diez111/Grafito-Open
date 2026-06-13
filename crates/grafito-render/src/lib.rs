@@ -901,32 +901,38 @@ impl Renderer {
                     }
                 }
                 GeoObject::ImplicitCurve(ic) => {
-                    if let Some(contour_data) = &ic.contour_levels {
-                        if !contour_data.is_empty() {
-                            for level in contour_data {
-                                let pts = Self::marching_squares_contour(
-                                    &ic.expr_lhs,
-                                    &ic.expr_rhs,
-                                    *level,
-                                    -10.0,
-                                    10.0,
-                                    -10.0,
-                                    10.0,
-                                    100,
-                                );
-                                for w in pts.windows(2) {
-                                    let a = view_transform.world_to_screen(w[0]);
-                                    let b = view_transform.world_to_screen(w[1]);
-                                    Self::add_line_segment(
-                                        &mut vertices,
-                                        &mut indices,
-                                        a,
-                                        b,
-                                        ic.width,
-                                        ic.color,
-                                    );
-                                }
-                            }
+                    let levels = if let Some(contour_data) = &ic.contour_levels {
+                        if contour_data.is_empty() {
+                            vec![0.0]
+                        } else {
+                            contour_data.clone()
+                        }
+                    } else {
+                        vec![0.0]
+                    };
+
+                    for level in levels {
+                        let pts = Self::marching_squares_contour(
+                            &ic.expr_lhs,
+                            &ic.expr_rhs,
+                            level,
+                            -10.0,
+                            10.0,
+                            -10.0,
+                            10.0,
+                            100,
+                        );
+                        for w in pts.windows(2) {
+                            let a = view_transform.world_to_screen(w[0]);
+                            let b = view_transform.world_to_screen(w[1]);
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                a,
+                                b,
+                                ic.width,
+                                ic.color,
+                            );
                         }
                     }
                 }

@@ -21,3 +21,6 @@ pub mod types3d;
 
 pub use types::*;
 pub use types3d::*;
+
+#[cfg(test)]
+mod tests;

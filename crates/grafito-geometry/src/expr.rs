@@ -731,6 +731,14 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
             if result.is_finite() {
                 return Ok(result);
             }
+        } else if vars.len() == 3 {
+            let (v1, x1) = &vars[0];
+            let (v2, x2) = &vars[1];
+            let (v3, x3) = &vars[2];
+            let result = ast.eval_3d(v1, *x1, v2, *x2, v3, *x3);
+            if result.is_finite() {
+                return Ok(result);
+            }
         }
     }
 

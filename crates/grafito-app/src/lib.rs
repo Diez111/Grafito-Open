@@ -51,6 +51,8 @@ pub struct GrafitoApp {
     pub pending_points: Vec<Point2>,
     pub pending_points_3d: Vec<Point3D>,
     pub last_mouse_pos: Option<Pos2>,
+    pub canvas_drag_start: Option<Pos2>,
+    pub canvas_is_panning: bool,
     pub selected_object: Option<ObjectId>,
     pub preview_object: Option<GeoObject>,
     pub input_text: String,
@@ -147,6 +149,8 @@ impl GrafitoApp {
             pending_points: Vec::new(),
             pending_points_3d: Vec::new(),
             last_mouse_pos: None,
+            canvas_drag_start: None,
+            canvas_is_panning: false,
             selected_object: None,
             preview_object: None,
             input_text: String::new(),
@@ -1446,28 +1450,36 @@ impl eframe::App for GrafitoApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let coord_text = if let Some(pos) = ui.ctx().pointer_hover_pos() {
-                        // Approximate world coords via last known view
-                        format!("x: {:.2}, y: {:.2}", pos.x, pos.y)
+                    let coord_text = if let Some(pos) = self.last_mouse_pos {
+                        let view = self.document.view();
+                        let world = view.screen_to_world(glam::Vec2::new(pos.x, pos.y));
+                        if view.x_log || view.y_log {
+                            format!("x: {:.4}, y: {:.4}", world.x, world.y)
+                        } else {
+                            format!("x: {:.2}, y: {:.2}", world.x, world.y)
+                        }
                     } else {
                         "x: ---, y: ---".to_string()
                     };
                     ui.label(egui::RichText::new(coord_text).size(11.0).color(txt_dim));
                     ui.add_space(16.0);
-                    let hint = match self.current_tool {
-                        Tool::Select => {
-                            "↖ Seleccionar: clic para elegir, arrastrar para mover punto"
-                        }
-                        Tool::Point => "· Punto: clic para crear",
-                        Tool::Line => "╱ Recta: clic en dos puntos",
-                        Tool::Circle => "○ Círculo: clic centro, clic borde",
-                        Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar",
-                        Tool::Function => "f(x) Función: escribe en la entrada",
-                        Tool::Distance => "↔ Distancia: clic en dos puntos",
-                        Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos",
-                        Tool::Slider => "═ Deslizador: clic para crear variable",
-                        Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente",
-                        _ => "",
+                    let hint = match self.current_view {
+                        ViewMode::D2 => match self.current_tool {
+                            Tool::Select => {
+                                "↖ Seleccionar: clic objeto, arrastrar vacío para mover vista"
+                            }
+                            Tool::Point => "· Punto: clic para crear",
+                            Tool::Line => "╱ Recta: clic en dos puntos",
+                            Tool::Circle => "○ Círculo: clic centro, clic borde",
+                            Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar",
+                            Tool::Function => "f(x) Función: escribe en la entrada",
+                            Tool::Distance => "↔ Distancia: clic en dos puntos",
+                            Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos",
+                            Tool::Slider => "═ Deslizador: clic para crear variable",
+                            Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente",
+                            _ => "Espacio / clic medio: mover vista",
+                        },
+                        ViewMode::D3 => "3D: clic izq pan (Select), der orbitar, rueda zoom",
                     };
                     if !hint.is_empty() {
                         ui.label(egui::RichText::new(hint).size(11.0).color(txt_dim));
@@ -2034,42 +2046,84 @@ impl eframe::App for GrafitoApp {
                         ui.id().with("canvas3d"),
                         Sense::click_and_drag(),
                     );
-                    if let Some(pos) = response.hover_pos() {
-                        if response.dragged_by(egui::PointerButton::Secondary) {
-                            if let Some(last) = self.last_mouse_pos {
-                                self.camera
-                                    .orbit((pos.x - last.x) * 0.005, (pos.y - last.y) * 0.005);
-                            }
-                        }
-                        if response.dragged_by(egui::PointerButton::Primary) {
-                            if let Some(last) = self.last_mouse_pos {
-                                if self.current_tool == Tool::Select {
-                                    self.camera.pan(pos.x - last.x, pos.y - last.y);
-                                }
-                            }
-                        }
-                        if response.hovered() {
-                            let sc = ui.input(|i| i.smooth_scroll_delta);
-                            if sc.y != 0.0 {
-                                self.camera.zoom(1.0 + sc.y * 0.005);
-                            }
-                        }
 
-                        // Tool ghost for 3D mode
-                        self.tool_ghost = None;
-                        if matches!(
-                            self.current_tool,
-                            Tool::Point3D | Tool::Sphere3D | Tool::Cube3D
-                        ) {
-                            let t = self.camera.target;
-                            let ghost_pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
-                            self.tool_ghost = Some(GeoObject::Point3D(Point3DObj::new(ghost_pos)));
-                        }
+                    let space_pressed = ui.input(|i| i.key_down(egui::Key::Space));
+                    let pointer = ui.input(|i| i.pointer.clone());
+                    let current_pos = response
+                        .interact_pointer_pos()
+                        .or(response.hover_pos())
+                        .or(pointer.latest_pos());
+                    let pointer_in_canvas = current_pos
+                        .map(|p| canvas_rect.contains(p))
+                        .unwrap_or(false);
 
+                    if response.drag_started() {
+                        self.canvas_drag_start = current_pos;
+                        self.canvas_is_panning = false;
+                    }
+                    let drag_distance = self
+                        .canvas_drag_start
+                        .and_then(|s| current_pos.map(|p| (p - s).length()))
+                        .unwrap_or(0.0);
+                    if drag_distance > 3.0 {
+                        self.canvas_is_panning = true;
+                    }
+
+                    // Orbit with right drag
+                    if response.dragged_by(egui::PointerButton::Secondary) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        let delta = response.drag_delta();
+                        self.camera.orbit(delta.x * 0.005, delta.y * 0.005);
+                    }
+                    // Pan with Space + primary, middle button, or primary drag in any tool
+                    else if (space_pressed && response.dragged_by(egui::PointerButton::Primary))
+                        || (pointer_in_canvas && pointer.button_down(egui::PointerButton::Middle))
+                        || response.dragged_by(egui::PointerButton::Primary)
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        let delta = if pointer.button_down(egui::PointerButton::Middle) {
+                            pointer.delta()
+                        } else {
+                            response.drag_delta()
+                        };
+                        if delta != Vec2::ZERO {
+                            self.camera.pan(delta.x, delta.y);
+                        }
+                    } else if space_pressed && pointer_in_canvas {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+
+                    if response.hovered() {
+                        let sc = ui.input(|i| i.smooth_scroll_delta);
+                        if sc.y != 0.0 {
+                            self.camera.zoom(1.0 + sc.y * 0.005);
+                        }
+                    }
+
+                    // Tool ghost for 3D mode
+                    self.tool_ghost = None;
+                    if matches!(
+                        self.current_tool,
+                        Tool::Point3D | Tool::Sphere3D | Tool::Cube3D
+                    ) {
+                        let t = self.camera.target;
+                        let ghost_pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
+                        self.tool_ghost = Some(GeoObject::Point3D(Point3DObj::new(ghost_pos)));
+                    }
+
+                    if let Some(pos) = current_pos {
                         self.last_mouse_pos = Some(pos);
                     }
-                    if (response.clicked_by(egui::PointerButton::Primary)
-                        || response.drag_stopped_by(egui::PointerButton::Primary))
+
+                    if response.drag_stopped() {
+                        self.canvas_is_panning = false;
+                        self.canvas_drag_start = None;
+                    }
+
+                    // 3D object placement: only on real clicks, not drags
+                    let is_click = !self.canvas_is_panning && drag_distance <= 3.0;
+                    if response.clicked_by(egui::PointerButton::Primary)
+                        && is_click
                         && self.current_tool != Tool::Select
                     {
                         self.handle_3d_click(ui, &response, canvas_rect, w, h);

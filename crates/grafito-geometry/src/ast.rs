@@ -736,6 +736,175 @@ impl Expr {
         }
     }
 
+    pub fn eval_3d(
+        &self,
+        var1: &str,
+        val1: f64,
+        var2: &str,
+        val2: f64,
+        var3: &str,
+        val3: f64,
+    ) -> f64 {
+        use Expr::*;
+        match self {
+            Const(c) => *c,
+            Var(v) => {
+                if v == var1 {
+                    val1
+                } else if v == var2 {
+                    val2
+                } else if v == var3 {
+                    val3
+                } else {
+                    f64::NAN
+                }
+            }
+            Neg(u) => -u.eval_3d(var1, val1, var2, val2, var3, val3),
+            Add(a, b) => {
+                a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    + b.eval_3d(var1, val1, var2, val2, var3, val3)
+            }
+            Sub(a, b) => {
+                a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    - b.eval_3d(var1, val1, var2, val2, var3, val3)
+            }
+            Mul(a, b) => {
+                a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    * b.eval_3d(var1, val1, var2, val2, var3, val3)
+            }
+            Div(a, b) => {
+                let den = b.eval_3d(var1, val1, var2, val2, var3, val3);
+                if den.abs() < 1e-300 {
+                    f64::NAN
+                } else {
+                    a.eval_3d(var1, val1, var2, val2, var3, val3) / den
+                }
+            }
+            Pow(a, b) => a
+                .eval_3d(var1, val1, var2, val2, var3, val3)
+                .powf(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+            Sin(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin(),
+            Cos(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos(),
+            Tan(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan(),
+            Asin(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).asin(),
+            Acos(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).acos(),
+            Atan(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).atan(),
+            Exp(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).exp(),
+            Ln(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).ln(),
+            Log(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).log10(),
+            Sqrt(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).sqrt(),
+            Abs(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).abs(),
+            Sinh(u) => {
+                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                if a.abs() > 1e9 {
+                    0.0
+                } else {
+                    a.sinh()
+                }
+            }
+            Cosh(u) => {
+                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                if a.abs() > 1e9 {
+                    0.0
+                } else {
+                    a.cosh()
+                }
+            }
+            Tanh(u) => {
+                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                if a.abs() > 1e9 {
+                    0.0
+                } else {
+                    a.tanh()
+                }
+            }
+            Floor(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).floor(),
+            Ceil(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).ceil(),
+            Round(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).round(),
+            Sec(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos(),
+            Csc(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin(),
+            Cot(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan(),
+            Asinh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).asinh(),
+            Acosh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).acosh(),
+            Atanh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).atanh(),
+            Sign(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).signum(),
+            Heaviside(u) => {
+                if u.eval_3d(var1, val1, var2, val2, var3, val3) < 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Cbrt(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).cbrt(),
+            Atan2(a, b) => a
+                .eval_3d(var1, val1, var2, val2, var3, val3)
+                .atan2(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+            Modulo(a, b) => {
+                a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    % b.eval_3d(var1, val1, var2, val2, var3, val3)
+            }
+            Min(a, b) => a
+                .eval_3d(var1, val1, var2, val2, var3, val3)
+                .min(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+            Max(a, b) => a
+                .eval_3d(var1, val1, var2, val2, var3, val3)
+                .max(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+            Clamp(x, lo, hi) => x.eval_3d(var1, val1, var2, val2, var3, val3).clamp(
+                lo.eval_3d(var1, val1, var2, val2, var3, val3),
+                hi.eval_3d(var1, val1, var2, val2, var3, val3),
+            ),
+            Re(u) => u.eval_3d(var1, val1, var2, val2, var3, val3), // re(x) = x for real
+            Im(_) => 0.0,                                           // im(x) = 0 for real
+            Arg(u) => {
+                if u.eval_3d(var1, val1, var2, val2, var3, val3) >= 0.0 {
+                    0.0
+                } else {
+                    std::f64::consts::PI
+                }
+            }
+            Conj(u) => u.eval_3d(var1, val1, var2, val2, var3, val3), // conj(x) = x for real
+            Erf(u) => crate::special_functions::erf(u.eval_3d(var1, val1, var2, val2, var3, val3)),
+            Erfc(u) => {
+                crate::special_functions::erfc(u.eval_3d(var1, val1, var2, val2, var3, val3))
+            }
+            Gamma(u) => {
+                crate::special_functions::gamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
+            }
+            LnGamma(u) => {
+                crate::special_functions::ln_gamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
+            }
+            Digamma(u) => {
+                crate::special_functions::digamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
+            }
+            Beta(a, b) => crate::special_functions::beta(
+                a.eval_3d(var1, val1, var2, val2, var3, val3),
+                b.eval_3d(var1, val1, var2, val2, var3, val3),
+            ),
+            BesselJ(n, u) => crate::special_functions::bessel_j(
+                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                u.eval_3d(var1, val1, var2, val2, var3, val3),
+            ),
+            BesselY(n, u) => crate::special_functions::bessel_y(
+                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                u.eval_3d(var1, val1, var2, val2, var3, val3),
+            ),
+            BesselI(n, u) => crate::special_functions::bessel_i(
+                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                u.eval_3d(var1, val1, var2, val2, var3, val3),
+            ),
+            Sum(_, _, _, _) => f64::NAN, // expanded by preprocess_expr before AST eval
+            Product(_, _, _, _) => f64::NAN,
+            Piecewise(pieces, default) => {
+                for (cond, val) in pieces {
+                    if cond.eval_3d(var1, val1, var2, val2, var3, val3) != 0.0 {
+                        return val.eval_3d(var1, val1, var2, val2, var3, val3);
+                    }
+                }
+                default.eval_3d(var1, val1, var2, val2, var3, val3)
+            }
+        }
+    }
+
     pub fn eval_at(&self, var: &str, value: f64) -> f64 {
         use Expr::*;
         match self {

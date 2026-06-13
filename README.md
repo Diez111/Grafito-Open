@@ -232,7 +232,7 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 
 ### Herramientas Interactivas
 
-- **Click-and-drag**: Arrastrar para posicionar con previsualización fantasma semitransparente
+- **Click-and-drag**: Clic para colocar; arrastrar en vacío panea la vista; arrastrar un punto libre lo mueve
 - **Construcción**: Tangent, PerpendicularBisector, AngleBisector, Midpoint, Vector, Ray
 - **Transformaciones**: Translate, Rotate, Dilate, Reflect
 - **Herramientas contextuales**: Se ocultan/muestran según modo 2D/3D automáticamente
@@ -349,12 +349,13 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 
 | Acción | Control |
 |--------|---------|
-| Pan 2D | Arrastrar (solo herramienta Select) |
+| Pan 2D | Arrastrar en vacío (cualquier herramienta), Espacio + arrastrar, o botón medio |
+| Pan 2D alternativo | Botón derecho (si no hay polígono en curso) |
 | Zoom 2D | Scroll wheel |
-| Pan 3D | Botón izquierdo (Select tool) |
-| Orbitar 3D | Botón derecho |
+| Pan 3D | Arrastrar (cualquier herramienta), Espacio + arrastrar, o botón medio |
+| Orbitar 3D | Botón derecho + arrastrar |
 | Zoom 3D | Scroll wheel |
-| Crear objeto | Click (Point: arrastrar y soltar) |
+| Crear objeto | Click (Point: clic simple) |
 | Cerrar polígono | Click derecho (3+ vértices) |
 | Cancelar punto | Click derecho (1 punto pendiente) |
 | Seleccionar | Click (Select tool) |
