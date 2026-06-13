@@ -1105,7 +1105,10 @@ impl eframe::App for GrafitoApp {
                                                             .document
                                                             .set_spreadsheet_cell(r, c, val)
                                                         {
-                                                            log::warn!("set_spreadsheet_cell: {}", e);
+                                                            log::warn!(
+                                                                "set_spreadsheet_cell: {}",
+                                                                e
+                                                            );
                                                         }
                                                         if let Some(ev) = self
                                                             .document
@@ -1888,10 +1891,11 @@ impl eframe::App for GrafitoApp {
                                             );
                                             if resp.changed() {
                                                 self.save_state();
-                                                if let Err(e) = self
-                                                    .document
-                                                    .set_spreadsheet_cell(r, c, val.clone())
-                                                {
+                                                if let Err(e) = self.document.set_spreadsheet_cell(
+                                                    r,
+                                                    c,
+                                                    val.clone(),
+                                                ) {
                                                     log::warn!("set_spreadsheet_cell: {}", e);
                                                 }
                                                 if let Ok((x, y)) = commands::parse_point_str(&val)

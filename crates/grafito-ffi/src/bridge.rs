@@ -639,7 +639,8 @@ impl GrafitoEngine {
 
         if let Some(base) = self.documents_dir.lock().as_deref() {
             let base_path = std::path::Path::new(base);
-            let abs_base = std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
+            let abs_base =
+                std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
             let abs_target = if target.is_absolute() {
                 target.to_path_buf()
             } else {
