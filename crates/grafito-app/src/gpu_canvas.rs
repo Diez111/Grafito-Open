@@ -103,6 +103,59 @@ impl CallbackTrait for CanvasCallback {
                 }
             }
 
+            // Try to evaluate parametric curves and surfaces on the GPU.
+            if let Some(compute) = renderer.parametric_compute.as_ref() {
+                for (_, obj) in self.document.objects_iter() {
+                    match obj {
+                        grafito_core::GeoObject::ParametricCurve2D(pc) => {
+                            let _ =
+                                grafito_render::parametric_compute::maybe_compute_curve_2d_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    pc,
+                                    4000,
+                                    &self.document.variables,
+                                );
+                        }
+                        grafito_core::GeoObject::ParametricCurve3D(pc) => {
+                            let _ =
+                                grafito_render::parametric_compute::maybe_compute_curve_3d_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    pc,
+                                    4000,
+                                    &self.document.variables,
+                                );
+                        }
+                        grafito_core::GeoObject::PolarCurve(pol) => {
+                            let _ = grafito_render::parametric_compute::maybe_compute_polar_on_gpu(
+                                compute,
+                                device,
+                                queue,
+                                pol,
+                                4000,
+                                &self.document.variables,
+                            );
+                        }
+                        grafito_core::GeoObject::Surface3D(su) => {
+                            let res = su.mesh_res.min(128);
+                            let _ =
+                                grafito_render::parametric_compute::maybe_compute_surface_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    su,
+                                    res,
+                                    &self.document.variables,
+                                );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             renderer.build_geometry(&self.document, self.dark_mode)
         };
 

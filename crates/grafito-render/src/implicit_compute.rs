@@ -78,10 +78,13 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// Compile an AST expression into RPN bytecode that the WGSL interpreter can
-/// execute. Document variables are baked in as constants.
-pub(crate) fn compile_expr(
+/// execute. Document variables are baked in as constants. Variables listed in
+/// `var_map` are mapped to GPU operand indices; unknown variables must be
+/// present in `document_vars` or compilation fails.
+pub(crate) fn compile_expr_with_mapping(
     expr: &grafito_geometry::ast::Expr,
     document_vars: &HashMap<String, f64>,
+    var_map: &[(&str, u32)],
     prog: &mut BytecodeProgram,
 ) -> Result<(), CompileError> {
     use grafito_geometry::ast::Expr;
@@ -92,92 +95,91 @@ pub(crate) fn compile_expr(
             prog.constants.push(*c as f32);
             prog.code.push(Op::PushConst.encode(idx));
         }
-        Expr::Var(name) => match name.as_str() {
-            "x" => prog.code.push(Op::PushVar.encode(0)),
-            "y" => prog.code.push(Op::PushVar.encode(1)),
-            other => {
-                if let Some(v) = document_vars.get(other) {
-                    let idx = prog.constants.len() as u32;
-                    prog.constants.push(*v as f32);
-                    prog.code.push(Op::PushConst.encode(idx));
-                } else {
-                    return Err(CompileError::UnsupportedVariable(other.to_string()));
-                }
+        Expr::Var(name) => {
+            let name = name.as_str();
+            if let Some((_, operand)) = var_map.iter().find(|(n, _)| *n == name) {
+                prog.code.push(Op::PushVar.encode(*operand));
+            } else if let Some(v) = document_vars.get(name) {
+                let idx = prog.constants.len() as u32;
+                prog.constants.push(*v as f32);
+                prog.code.push(Op::PushConst.encode(idx));
+            } else {
+                return Err(CompileError::UnsupportedVariable(name.to_string()));
             }
-        },
+        }
         Expr::Add(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Add.encode(0));
         }
         Expr::Sub(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Sub.encode(0));
         }
         Expr::Mul(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Mul.encode(0));
         }
         Expr::Div(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Div.encode(0));
         }
         Expr::Pow(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Pow.encode(0));
         }
         Expr::Neg(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Neg.encode(0));
         }
         Expr::Sin(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Sin.encode(0));
         }
         Expr::Cos(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Cos.encode(0));
         }
         Expr::Tan(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Tan.encode(0));
         }
         Expr::Exp(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Exp.encode(0));
         }
         Expr::Ln(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Log.encode(0));
         }
         Expr::Sqrt(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Sqrt.encode(0));
         }
         Expr::Abs(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Abs.encode(0));
         }
         Expr::Min(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Min.encode(0));
         }
         Expr::Max(a, b) => {
-            compile_expr(a, document_vars, prog)?;
-            compile_expr(b, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
             prog.code.push(Op::Max.encode(0));
         }
         Expr::Floor(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Floor.encode(0));
         }
         Expr::Ceil(a) => {
-            compile_expr(a, document_vars, prog)?;
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Ceil.encode(0));
         }
         other => {
@@ -189,6 +191,16 @@ pub(crate) fn compile_expr(
         return Err(CompileError::StackTooDeep);
     }
     Ok(())
+}
+
+/// Compile an AST expression into RPN bytecode using the default variable
+/// mapping: `x` -> operand 0, `y` -> operand 1.
+pub(crate) fn compile_expr(
+    expr: &grafito_geometry::ast::Expr,
+    document_vars: &HashMap<String, f64>,
+    prog: &mut BytecodeProgram,
+) -> Result<(), CompileError> {
+    compile_expr_with_mapping(expr, document_vars, &[("x", 0), ("y", 1)], prog)
 }
 
 /// GPU resources needed to evaluate one implicit curve per dispatch.

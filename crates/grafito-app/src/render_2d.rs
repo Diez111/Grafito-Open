@@ -1,6 +1,7 @@
 use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
+use grafito_core::parametric_sampling;
 use grafito_core::{CircleObj, GeoObject, LineObj, PointObj, PolygonObj, RenderQuality};
 use grafito_geometry::expr::{eval_function_with_vars, eval_integral_batch, prepare_function_ast};
 use grafito_geometry::{Color, Point2};
@@ -1706,58 +1707,50 @@ impl GrafitoApp {
                 }
             }
             GeoObject::ParametricCurve2D(pc) => {
-                let steps = 500;
-                let dt = (pc.t_max - pc.t_min) / steps as f64;
+                let steps = 4000;
+                let samples = parametric_sampling::samples_or_compute_curve_2d(
+                    pc,
+                    steps,
+                    &self.document.variables,
+                );
                 let mut prev: Option<Pos2> = None;
-                for i in 0..=steps {
-                    let t = pc.t_min + i as f64 * dt;
-                    if let (Ok(x), Ok(y)) = (
-                        eval_function_with_vars(&pc.expr_x, t, &self.document.variables),
-                        eval_function_with_vars(&pc.expr_y, t, &self.document.variables),
-                    ) {
-                        if x.is_finite() && y.is_finite() {
-                            let screen = view.world_to_screen(Point2::new(x, y));
-                            let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                            if let Some(prev_pos) = prev {
-                                painter.line_segment(
-                                    [prev_pos, pos],
-                                    Stroke::new(pc.width, to_color32(pc.color)),
-                                );
-                            }
-                            prev = Some(pos);
-                        } else {
-                            prev = None;
+                for &(x, y) in samples.iter() {
+                    if x.is_finite() && y.is_finite() {
+                        let screen = view.world_to_screen(Point2::new(x, y));
+                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        if let Some(prev_pos) = prev {
+                            painter.line_segment(
+                                [prev_pos, pos],
+                                Stroke::new(pc.width, to_color32(pc.color)),
+                            );
                         }
+                        prev = Some(pos);
                     } else {
                         prev = None;
                     }
                 }
             }
             GeoObject::PolarCurve(pol) => {
-                let steps = 500;
-                let dt = (pol.t_max - pol.t_min) / steps as f64;
+                let steps = 4000;
+                let samples = parametric_sampling::samples_or_compute_polar(
+                    pol,
+                    steps,
+                    &self.document.variables,
+                );
                 let mut prev: Option<Pos2> = None;
                 let mut all_pts: Vec<Pos2> = Vec::new();
-                for i in 0..=steps {
-                    let t = pol.t_min + i as f64 * dt;
-                    if let Ok(r) = eval_function_with_vars(&pol.expr_r, t, &self.document.variables)
-                    {
-                        if r.is_finite() {
-                            let x = r * t.cos();
-                            let y = r * t.sin();
-                            let screen = view.world_to_screen(Point2::new(x, y));
-                            let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                            if let Some(prev_pos) = prev {
-                                painter.line_segment(
-                                    [prev_pos, pos],
-                                    Stroke::new(pol.width, to_color32(pol.color)),
-                                );
-                            }
-                            all_pts.push(pos);
-                            prev = Some(pos);
-                        } else {
-                            prev = None;
+                for &(x, y) in samples.iter() {
+                    if x.is_finite() && y.is_finite() {
+                        let screen = view.world_to_screen(Point2::new(x, y));
+                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        if let Some(prev_pos) = prev {
+                            painter.line_segment(
+                                [prev_pos, pos],
+                                Stroke::new(pol.width, to_color32(pol.color)),
+                            );
                         }
+                        all_pts.push(pos);
+                        prev = Some(pos);
                     } else {
                         prev = None;
                     }

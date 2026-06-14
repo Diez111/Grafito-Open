@@ -7,6 +7,7 @@ pub mod id;
 pub mod implicit_curve;
 pub mod macros;
 pub mod object;
+pub mod parametric_sampling;
 pub mod spatial;
 pub mod validation;
 

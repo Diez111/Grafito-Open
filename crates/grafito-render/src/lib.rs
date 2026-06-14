@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 
 pub mod function_compute;
 pub mod implicit_compute;
+pub mod parametric_compute;
 
 #[cfg(test)]
 mod tests;
@@ -79,6 +80,7 @@ pub struct Renderer {
     pub mvp_bind_group: wgpu::BindGroup,
     pub implicit_compute: Option<crate::implicit_compute::ImplicitComputePipeline>,
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
+    pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
@@ -227,6 +229,9 @@ impl Renderer {
         let function_compute = Some(crate::function_compute::FunctionComputePipeline::new(
             device, 10000,
         ));
+        let parametric_compute = Some(crate::parametric_compute::ParametricComputePipeline::new(
+            device, 4000, 128,
+        ));
 
         Self {
             pipeline,
@@ -236,6 +241,7 @@ impl Renderer {
             mvp_bind_group,
             implicit_compute,
             function_compute,
+            parametric_compute,
         }
     }
 
@@ -850,64 +856,59 @@ impl Renderer {
                 }
                 GeoObject::ParametricCurve2D(pc) => {
                     let steps = 4000;
-                    let dt = (pc.t_max - pc.t_min) / steps as f64;
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
+                        pc,
+                        steps,
+                        &document.variables,
+                    );
                     let mut prev: Option<[f32; 2]> = None;
-                    for i in 0..=steps {
-                        let t = pc.t_min + i as f64 * dt;
-                        if let (Ok(x), Ok(y)) = (
-                            grafito_geometry::expr::evaluate(&pc.expr_x, &[("t".to_string(), t)]),
-                            grafito_geometry::expr::evaluate(&pc.expr_y, &[("t".to_string(), t)]),
-                        ) {
-                            if x.is_finite() && y.is_finite() {
-                                let s = view_transform.world_to_screen(Point2::new(x, y));
-                                if let Some(p) = prev {
-                                    if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
-                                        Self::add_line_segment(
-                                            &mut vertices,
-                                            &mut indices,
-                                            glam::Vec2::new(p[0], p[1]),
-                                            s,
-                                            pc.width,
-                                            pc.color,
-                                        );
-                                    }
+                    for &(x, y) in samples.iter() {
+                        if x.is_finite() && y.is_finite() {
+                            let s = view_transform.world_to_screen(Point2::new(x, y));
+                            if let Some(p) = prev {
+                                if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
+                                    Self::add_line_segment(
+                                        &mut vertices,
+                                        &mut indices,
+                                        glam::Vec2::new(p[0], p[1]),
+                                        s,
+                                        pc.width,
+                                        pc.color,
+                                    );
                                 }
-                                prev = Some([s.x, s.y]);
-                            } else {
-                                prev = None;
                             }
+                            prev = Some([s.x, s.y]);
+                        } else {
+                            prev = None;
                         }
                     }
                 }
                 GeoObject::PolarCurve(pol) => {
                     let steps = 4000;
-                    let dt = (pol.t_max - pol.t_min) / steps as f64;
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
+                        pol,
+                        steps,
+                        &document.variables,
+                    );
                     let mut prev: Option<[f32; 2]> = None;
-                    for i in 0..=steps {
-                        let t = pol.t_min + i as f64 * dt;
-                        if let Ok(r) =
-                            grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
-                        {
-                            if r.is_finite() {
-                                let x = r * t.cos();
-                                let y = r * t.sin();
-                                let s = view_transform.world_to_screen(Point2::new(x, y));
-                                if let Some(p) = prev {
-                                    if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
-                                        Self::add_line_segment(
-                                            &mut vertices,
-                                            &mut indices,
-                                            glam::Vec2::new(p[0], p[1]),
-                                            s,
-                                            pol.width,
-                                            pol.color,
-                                        );
-                                    }
+                    for &(x, y) in samples.iter() {
+                        if x.is_finite() && y.is_finite() {
+                            let s = view_transform.world_to_screen(Point2::new(x, y));
+                            if let Some(p) = prev {
+                                if (s.x - p[0]).abs() < 300.0 && (s.y - p[1]).abs() < 300.0 {
+                                    Self::add_line_segment(
+                                        &mut vertices,
+                                        &mut indices,
+                                        glam::Vec2::new(p[0], p[1]),
+                                        s,
+                                        pol.width,
+                                        pol.color,
+                                    );
                                 }
-                                prev = Some([s.x, s.y]);
-                            } else {
-                                prev = None;
                             }
+                            prev = Some([s.x, s.y]);
+                        } else {
+                            prev = None;
                         }
                     }
                 }
@@ -2166,6 +2167,7 @@ impl Renderer {
                         &mut indices,
                         camera,
                         su,
+                        &document.variables,
                         screen_w,
                         screen_h,
                     );
@@ -2221,35 +2223,32 @@ impl Renderer {
                     );
                 }
                 GeoObject::ParametricCurve3D(pc) => {
-                    let steps = 500;
-                    let dt = (pc.t_max - pc.t_min) / steps as f64;
+                    let steps = 4000;
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_curve_3d(
+                        pc,
+                        steps,
+                        &document.variables,
+                    );
                     let mut prev: Option<Point3D> = None;
-                    for i in 0..=steps {
-                        let t = pc.t_min + i as f64 * dt;
-                        if let (Ok(x), Ok(y), Ok(z)) = (
-                            grafito_geometry::expr::evaluate(&pc.expr_x, &[("t".to_string(), t)]),
-                            grafito_geometry::expr::evaluate(&pc.expr_y, &[("t".to_string(), t)]),
-                            grafito_geometry::expr::evaluate(&pc.expr_z, &[("t".to_string(), t)]),
-                        ) {
-                            if x.is_finite() && y.is_finite() && z.is_finite() {
-                                let p = Point3D::new(x, y, z);
-                                if let Some(prev_p) = prev {
-                                    Self::add_line_3d(
-                                        &mut vertices,
-                                        &mut indices,
-                                        camera,
-                                        &prev_p,
-                                        &p,
-                                        pc.width,
-                                        pc.color,
-                                        screen_w,
-                                        screen_h,
-                                    );
-                                }
-                                prev = Some(p);
-                            } else {
-                                prev = None;
+                    for &(x, y, z) in samples.iter() {
+                        if x.is_finite() && y.is_finite() && z.is_finite() {
+                            let p = Point3D::new(x, y, z);
+                            if let Some(prev_p) = prev {
+                                Self::add_line_3d(
+                                    &mut vertices,
+                                    &mut indices,
+                                    camera,
+                                    &prev_p,
+                                    &p,
+                                    pc.width,
+                                    pc.color,
+                                    screen_w,
+                                    screen_h,
+                                );
                             }
+                            prev = Some(p);
+                        } else {
+                            prev = None;
                         }
                     }
                 }
@@ -3010,89 +3009,68 @@ impl Renderer {
         indices: &mut Vec<u32>,
         camera: &Camera3D,
         surface: &grafito_core::Surface3DObj,
+        variables: &std::collections::HashMap<String, f64>,
         screen_w: f32,
         screen_h: f32,
     ) {
-        use rayon::prelude::*;
-        let steps = 40;
+        let res = surface.mesh_res.min(128);
+        let grid =
+            grafito_core::parametric_sampling::samples_or_compute_surface(surface, res, variables);
+        if grid.is_empty() || grid[0].is_empty() {
+            return;
+        }
+        let n = grid.len().saturating_sub(1);
+        let m = grid[0].len().saturating_sub(1);
         let x_min = surface.x_min;
         let x_max = surface.x_max;
         let y_min = surface.y_min;
         let y_max = surface.y_max;
-        let x_step = (x_max - x_min) / steps as f64;
-        let y_step = (y_max - y_min) / steps as f64;
+        let x_step = (x_max - x_min) / n as f64;
+        let y_step = (y_max - y_min) / m as f64;
 
-        let empty_vars = std::collections::HashMap::new();
-        let parsed_ast =
-            grafito_geometry::expr::prepare_function_ast(&surface.expr, &empty_vars, &["x", "y"])
-                .ok();
-
-        let grid: Vec<Vec<Option<Point3D>>> = (0..=steps)
-            .into_par_iter()
-            .map(|i| {
-                let x = x_min + i as f64 * x_step;
-                (0..=steps)
-                    .map(|j| {
-                        let y = y_min + j as f64 * y_step;
-                        let z_val = if let Some(ast) = &parsed_ast {
-                            let res = ast.eval_2d("x", x, "y", y);
-                            if res.is_finite() && res.abs() < 100.0 {
-                                Some(res)
-                            } else {
-                                None
-                            }
-                        } else {
-                            let vars_vec = vec![("x".to_string(), x), ("y".to_string(), y)];
-                            if let Ok(z) =
-                                grafito_geometry::expr::evaluate(&surface.expr, &vars_vec)
-                            {
-                                if z.is_finite() && z.abs() < 100.0 {
-                                    Some(z)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        z_val.map(|z| Point3D::new(x, z, y))
-                    })
-                    .collect()
-            })
-            .collect();
-
-        for i in 0..=steps {
-            for j in 0..=steps {
-                if let Some(p) = grid[i][j] {
-                    if i < steps {
-                        if let Some(p_right) = grid[i + 1][j] {
-                            Self::add_line_3d(
-                                vertices,
-                                indices,
-                                camera,
-                                &p,
-                                &p_right,
-                                surface.width,
-                                surface.color,
-                                screen_w,
-                                screen_h,
-                            );
-                        }
+        for i in 0..=n {
+            let x = x_min + i as f64 * x_step;
+            for j in 0..=m {
+                let z = grid[i][j];
+                if !z.is_finite() || z.abs() >= 100.0 {
+                    continue;
+                }
+                let y = y_min + j as f64 * y_step;
+                let p = Point3D::new(x, z, y);
+                if i < n {
+                    let z_right = grid[i + 1][j];
+                    if z_right.is_finite() && z_right.abs() < 100.0 {
+                        let x_right = x_min + (i + 1) as f64 * x_step;
+                        let p_right = Point3D::new(x_right, z_right, y);
+                        Self::add_line_3d(
+                            vertices,
+                            indices,
+                            camera,
+                            &p,
+                            &p_right,
+                            surface.width,
+                            surface.color,
+                            screen_w,
+                            screen_h,
+                        );
                     }
-                    if j < steps {
-                        if let Some(p_down) = grid[i][j + 1] {
-                            Self::add_line_3d(
-                                vertices,
-                                indices,
-                                camera,
-                                &p,
-                                &p_down,
-                                surface.width,
-                                surface.color,
-                                screen_w,
-                                screen_h,
-                            );
-                        }
+                }
+                if j < m {
+                    let z_down = grid[i][j + 1];
+                    if z_down.is_finite() && z_down.abs() < 100.0 {
+                        let y_down = y_min + (j + 1) as f64 * y_step;
+                        let p_down = Point3D::new(x, z_down, y_down);
+                        Self::add_line_3d(
+                            vertices,
+                            indices,
+                            camera,
+                            &p,
+                            &p_down,
+                            surface.width,
+                            surface.color,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                 }
             }

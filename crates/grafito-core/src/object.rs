@@ -970,7 +970,7 @@ impl MoebiusStripObj {
 }
 
 // ── 3D Parametric Surface ──
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Surface3DObj {
     pub id: ObjectId,
     pub label: String,
@@ -984,7 +984,50 @@ pub struct Surface3DObj {
     pub width: f32,
     pub solid: bool,
     pub mesh_res: usize,
+    #[serde(skip)]
+    pub cached_grid: RwLock<SurfaceSamples>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<(usize, u64)>>,
 }
+
+impl Clone for Surface3DObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr: self.expr.clone(),
+            x_min: self.x_min,
+            x_max: self.x_max,
+            y_min: self.y_min,
+            y_max: self.y_max,
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            solid: self.solid,
+            mesh_res: self.mesh_res,
+            cached_grid: RwLock::new(SurfaceSamples::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for Surface3DObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr == other.expr
+            && self.x_min == other.x_min
+            && self.x_max == other.x_max
+            && self.y_min == other.y_min
+            && self.y_max == other.y_max
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+            && self.solid == other.solid
+            && self.mesh_res == other.mesh_res
+    }
+}
+
 impl Surface3DObj {
     pub fn new(expr: impl Into<String>, xr: (f64, f64), yr: (f64, f64)) -> Self {
         Self {
@@ -1000,6 +1043,8 @@ impl Surface3DObj {
             width: 1.0,
             solid: false,
             mesh_res: 30,
+            cached_grid: RwLock::new(SurfaceSamples::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1009,6 +1054,15 @@ impl Surface3DObj {
     pub fn as_solid(mut self) -> Self {
         self.solid = true;
         self
+    }
+
+    /// Invalidate any cached grid for this surface.
+    pub fn invalidate_cache(&self) {
+        self.cached_grid
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1111,7 +1165,7 @@ impl HyperbolaObj {
 // AM2, AM3, and 4D Structural Objects
 // --------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ParametricCurve2DObj {
     pub id: ObjectId,
     pub label: String,
@@ -1122,7 +1176,44 @@ pub struct ParametricCurve2DObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(skip)]
+    pub cached_samples: RwLock<Curve2DSamples>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<(usize, u64)>>,
 }
+
+impl Clone for ParametricCurve2DObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr_x: self.expr_x.clone(),
+            expr_y: self.expr_y.clone(),
+            t_min: self.t_min,
+            t_max: self.t_max,
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            cached_samples: RwLock::new(Curve2DSamples::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for ParametricCurve2DObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr_x == other.expr_x
+            && self.expr_y == other.expr_y
+            && self.t_min == other.t_min
+            && self.t_max == other.t_max
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+    }
+}
+
 impl ParametricCurve2DObj {
     pub fn new(expr_x: &str, expr_y: &str, t_min: f64, t_max: f64) -> Self {
         Self {
@@ -1135,15 +1226,26 @@ impl ParametricCurve2DObj {
             color: Color::BLUE,
             visible: true,
             width: 2.0,
+            cached_samples: RwLock::new(Curve2DSamples::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
     }
+
+    /// Invalidate any cached samples for this curve.
+    pub fn invalidate_cache(&self) {
+        self.cached_samples
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ParametricCurve3DObj {
     pub id: ObjectId,
     pub label: String,
@@ -1155,7 +1257,46 @@ pub struct ParametricCurve3DObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    #[serde(skip)]
+    pub cached_samples: RwLock<Curve3DSamples>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<(usize, u64)>>,
 }
+
+impl Clone for ParametricCurve3DObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr_x: self.expr_x.clone(),
+            expr_y: self.expr_y.clone(),
+            expr_z: self.expr_z.clone(),
+            t_min: self.t_min,
+            t_max: self.t_max,
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            cached_samples: RwLock::new(Curve3DSamples::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for ParametricCurve3DObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr_x == other.expr_x
+            && self.expr_y == other.expr_y
+            && self.expr_z == other.expr_z
+            && self.t_min == other.t_min
+            && self.t_max == other.t_max
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+    }
+}
+
 impl ParametricCurve3DObj {
     pub fn new(expr_x: &str, expr_y: &str, expr_z: &str, t_min: f64, t_max: f64) -> Self {
         Self {
@@ -1169,15 +1310,26 @@ impl ParametricCurve3DObj {
             color: Color::new(1.0, 0.0, 1.0, 1.0),
             visible: true,
             width: 2.0,
+            cached_samples: RwLock::new(Curve3DSamples::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
     }
+
+    /// Invalidate any cached samples for this curve.
+    pub fn invalidate_cache(&self) {
+        self.cached_samples
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PolarCurveObj {
     pub id: ObjectId,
     pub label: String,
@@ -1188,7 +1340,44 @@ pub struct PolarCurveObj {
     pub visible: bool,
     pub width: f32,
     pub fill_color: Option<Color>,
+    #[serde(skip)]
+    pub cached_samples: RwLock<Curve2DSamples>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<(usize, u64)>>,
 }
+
+impl Clone for PolarCurveObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr_r: self.expr_r.clone(),
+            t_min: self.t_min,
+            t_max: self.t_max,
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            fill_color: self.fill_color,
+            cached_samples: RwLock::new(Curve2DSamples::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for PolarCurveObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr_r == other.expr_r
+            && self.t_min == other.t_min
+            && self.t_max == other.t_max
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+            && self.fill_color == other.fill_color
+    }
+}
+
 impl PolarCurveObj {
     pub fn new(expr_r: &str, t_min: f64, t_max: f64) -> Self {
         Self {
@@ -1201,6 +1390,8 @@ impl PolarCurveObj {
             visible: true,
             width: 2.0,
             fill_color: None,
+            cached_samples: RwLock::new(Curve2DSamples::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1210,6 +1401,15 @@ impl PolarCurveObj {
     pub fn with_fill(mut self, color: Color) -> Self {
         self.fill_color = Some(color);
         self
+    }
+
+    /// Invalidate any cached samples for this curve.
+    pub fn invalidate_cache(&self) {
+        self.cached_samples
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 
@@ -1369,6 +1569,15 @@ pub enum RelationOperator {
 
 /// Cached (x, y) samples for a 1D function.
 pub type FunctionSamples = Vec<(f64, Option<f64>)>;
+
+/// Cached samples for a 2D parametric or polar curve.
+pub type Curve2DSamples = Vec<(f64, f64)>;
+
+/// Cached samples for a 3D parametric curve.
+pub type Curve3DSamples = Vec<(f64, f64, f64)>;
+
+/// Cached z-grid for a 3D parametric surface.
+pub type SurfaceSamples = Vec<Vec<f64>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionCacheKey {

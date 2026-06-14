@@ -732,4 +732,70 @@ mod tests {
             panic!("expected point");
         }
     }
+
+    #[test]
+    fn test_parametric_curve_2d_caching() {
+        let pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+        let vars = std::collections::HashMap::new();
+        let steps = 200;
+
+        let samples1 = {
+            let guard = parametric_sampling::samples_or_compute_curve_2d(&pc, steps, &vars);
+            guard.clone()
+        };
+        assert!(!samples1.is_empty());
+        let key1 = pc.cached_key.read().unwrap().clone();
+
+        let samples2 = {
+            let guard = parametric_sampling::samples_or_compute_curve_2d(&pc, steps, &vars);
+            guard.clone()
+        };
+        assert_eq!(samples1, samples2);
+        let key2 = pc.cached_key.read().unwrap().clone();
+        assert_eq!(key1, key2, "cache key should be reused");
+    }
+
+    #[test]
+    fn test_polar_curve_caching() {
+        let pol = PolarCurveObj::new("1", 0.0, std::f64::consts::TAU);
+        let vars = std::collections::HashMap::new();
+        let steps = 200;
+
+        let samples1 = {
+            let guard = parametric_sampling::samples_or_compute_polar(&pol, steps, &vars);
+            guard.clone()
+        };
+        assert!(!samples1.is_empty());
+        let key1 = pol.cached_key.read().unwrap().clone();
+
+        let samples2 = {
+            let guard = parametric_sampling::samples_or_compute_polar(&pol, steps, &vars);
+            guard.clone()
+        };
+        assert_eq!(samples1, samples2);
+        let key2 = pol.cached_key.read().unwrap().clone();
+        assert_eq!(key1, key2, "cache key should be reused");
+    }
+
+    #[test]
+    fn test_surface_3d_caching() {
+        let surf = Surface3DObj::new("x^2 + y^2", (-1.0, 1.0), (-1.0, 1.0));
+        let vars = std::collections::HashMap::new();
+        let res = 40;
+
+        let grid1 = {
+            let guard = parametric_sampling::samples_or_compute_surface(&surf, res, &vars);
+            guard.clone()
+        };
+        assert!(!grid1.is_empty());
+        let key1 = surf.cached_key.read().unwrap().clone();
+
+        let grid2 = {
+            let guard = parametric_sampling::samples_or_compute_surface(&surf, res, &vars);
+            guard.clone()
+        };
+        assert_eq!(grid1, grid2);
+        let key2 = surf.cached_key.read().unwrap().clone();
+        assert_eq!(key1, key2, "cache key should be reused");
+    }
 }
