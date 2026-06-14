@@ -40,6 +40,9 @@ impl CallbackTrait for CanvasCallback {
         _encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("canvas_prepare");
+
         let (vertices, indices) = {
             let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
                 log::warn!("GpuCanvasResources not registered in prepare (2D)");
@@ -65,56 +68,68 @@ impl CallbackTrait for CanvasCallback {
             // Try to evaluate implicit curves on the GPU before building geometry.
             // If a curve cannot be compiled to GPU bytecode, the geometry builder
             // will fall back to the CPU evaluator through the per-object cache.
-            if let Some(compute) = renderer.implicit_compute.as_ref() {
-                for (_, obj) in self.document.objects_iter() {
-                    if let grafito_core::GeoObject::ImplicitCurve(ic) = obj {
-                        let _ = grafito_render::implicit_compute::maybe_compute_on_gpu(
-                            compute,
-                            device,
-                            queue,
-                            ic,
-                            self.document.view(),
-                            &self.document.variables,
-                            self.document.render_quality,
-                        );
+            {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("gpu_compute_implicit");
+                if let Some(compute) = renderer.implicit_compute.as_ref() {
+                    for (_, obj) in self.document.objects_iter() {
+                        if let grafito_core::GeoObject::ImplicitCurve(ic) = obj {
+                            let _ = grafito_render::implicit_compute::maybe_compute_on_gpu(
+                                compute,
+                                device,
+                                queue,
+                                ic,
+                                self.document.view(),
+                                &self.document.variables,
+                                self.document.render_quality,
+                            );
+                        }
                     }
                 }
             }
 
             // Try to evaluate 1D functions on the GPU as well.
-            if let Some(compute) = renderer.function_compute.as_ref() {
-                let view = *self.document.view();
-                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view.screen_to_world(view.screen_size);
-                let grid_size = grafito_core::function_sampling::recommended_grid_size_for_quality(
-                    view.screen_size.x,
-                    self.document.render_quality,
-                );
-                for (_, obj) in self.document.objects_iter() {
-                    if let grafito_core::GeoObject::Function(fun) = obj {
-                        let domain = (
-                            fun.domain_min.unwrap_or(world_tl.x),
-                            fun.domain_max.unwrap_or(world_br.x),
+            {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("gpu_compute_function");
+                if let Some(compute) = renderer.function_compute.as_ref() {
+                    let view = *self.document.view();
+                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view.screen_to_world(view.screen_size);
+                    let grid_size =
+                        grafito_core::function_sampling::recommended_grid_size_for_quality(
+                            view.screen_size.x,
+                            self.document.render_quality,
                         );
-                        let _ = grafito_render::function_compute::maybe_compute_function_on_gpu(
-                            compute,
-                            device,
-                            queue,
-                            fun,
-                            domain,
-                            grid_size,
-                            &self.document.variables,
-                        );
+                    for (_, obj) in self.document.objects_iter() {
+                        if let grafito_core::GeoObject::Function(fun) = obj {
+                            let domain = (
+                                fun.domain_min.unwrap_or(world_tl.x),
+                                fun.domain_max.unwrap_or(world_br.x),
+                            );
+                            let _ = grafito_render::function_compute::maybe_compute_function_on_gpu(
+                                compute,
+                                device,
+                                queue,
+                                fun,
+                                domain,
+                                grid_size,
+                                &self.document.variables,
+                            );
+                        }
                     }
                 }
             }
 
             // Try to evaluate parametric curves and surfaces on the GPU.
-            if let Some(compute) = renderer.parametric_compute.as_ref() {
-                for (_, obj) in self.document.objects_iter() {
-                    match obj {
-                        grafito_core::GeoObject::ParametricCurve2D(pc) => {
-                            let _ =
+            {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("gpu_compute_parametric");
+                if let Some(compute) = renderer.parametric_compute.as_ref() {
+                    for (_, obj) in self.document.objects_iter() {
+                        match obj {
+                            grafito_core::GeoObject::ParametricCurve2D(pc) => {
+                                let _ =
                                 grafito_render::parametric_compute::maybe_compute_curve_2d_on_gpu(
                                     compute,
                                     device,
@@ -123,9 +138,9 @@ impl CallbackTrait for CanvasCallback {
                                     4000,
                                     &self.document.variables,
                                 );
-                        }
-                        grafito_core::GeoObject::ParametricCurve3D(pc) => {
-                            let _ =
+                            }
+                            grafito_core::GeoObject::ParametricCurve3D(pc) => {
+                                let _ =
                                 grafito_render::parametric_compute::maybe_compute_curve_3d_on_gpu(
                                     compute,
                                     device,
@@ -134,20 +149,21 @@ impl CallbackTrait for CanvasCallback {
                                     4000,
                                     &self.document.variables,
                                 );
-                        }
-                        grafito_core::GeoObject::PolarCurve(pol) => {
-                            let _ = grafito_render::parametric_compute::maybe_compute_polar_on_gpu(
-                                compute,
-                                device,
-                                queue,
-                                pol,
-                                4000,
-                                &self.document.variables,
-                            );
-                        }
-                        grafito_core::GeoObject::Surface3D(su) => {
-                            let res = su.mesh_res.min(128);
-                            let _ =
+                            }
+                            grafito_core::GeoObject::PolarCurve(pol) => {
+                                let _ =
+                                    grafito_render::parametric_compute::maybe_compute_polar_on_gpu(
+                                        compute,
+                                        device,
+                                        queue,
+                                        pol,
+                                        4000,
+                                        &self.document.variables,
+                                    );
+                            }
+                            grafito_core::GeoObject::Surface3D(su) => {
+                                let res = su.mesh_res.min(128);
+                                let _ =
                                 grafito_render::parametric_compute::maybe_compute_surface_on_gpu(
                                     compute,
                                     device,
@@ -156,28 +172,36 @@ impl CallbackTrait for CanvasCallback {
                                     res,
                                     &self.document.variables,
                                 );
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
 
             // Try to evaluate 2D vector fields on the GPU.
-            if let Some(compute) = renderer.vector_compute.as_ref() {
-                for (_, obj) in self.document.objects_iter() {
-                    if let grafito_core::GeoObject::VectorField2D(vf) = obj {
-                        let _ = grafito_render::vector_compute::maybe_compute_vector_field_on_gpu(
-                            compute,
-                            device,
-                            queue,
-                            vf,
-                            self.document.view(),
-                            &self.document.variables,
-                        );
+            {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("gpu_compute_vector_field");
+                if let Some(compute) = renderer.vector_compute.as_ref() {
+                    for (_, obj) in self.document.objects_iter() {
+                        if let grafito_core::GeoObject::VectorField2D(vf) = obj {
+                            let _ =
+                                grafito_render::vector_compute::maybe_compute_vector_field_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    vf,
+                                    self.document.view(),
+                                    &self.document.variables,
+                                );
+                        }
                     }
                 }
             }
 
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("geometry_build");
             renderer.build_geometry(&self.document, self.dark_mode)
         };
 
@@ -258,6 +282,9 @@ impl CallbackTrait for CanvasCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("canvas_paint");
+
         let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
             return;
         };
@@ -301,6 +328,9 @@ impl CallbackTrait for Canvas3DCallback {
         _encoder: &mut wgpu::CommandEncoder,
         callback_resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("canvas_prepare_3d");
+
         let (vertices, indices) = {
             let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
                 log::warn!("GpuCanvasResources not registered in prepare (3D)");
@@ -322,6 +352,8 @@ impl CallbackTrait for Canvas3DCallback {
                 self.document.object_count()
             );
 
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("geometry_build_3d");
             renderer.build_3d_geometry(
                 &self.document,
                 &self.camera,
@@ -408,6 +440,9 @@ impl CallbackTrait for Canvas3DCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("canvas_paint_3d");
+
         let Some(resources) = callback_resources.get::<GpuCanvasResources>() else {
             return;
         };

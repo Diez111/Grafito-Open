@@ -7,6 +7,9 @@ use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
 use grafito_ui::Tool;
 
 pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
+    #[cfg(feature = "profile")]
+    puffin::profile_scope!("ui_top_bar");
+
     let is_dark = app.dark_mode;
     let accent = Color32::from_rgb(53, 132, 228); // GNOME blue
     let bar_fill = if is_dark {
@@ -133,6 +136,8 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         .max_height(120.0)
         .frame(egui::Frame::none().fill(side_fill))
         .show(ctx, |ui| {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("ui_toolbar");
             grafito_ui::toolbar::toolbar(
                 ui,
                 &mut app.current_tool,
@@ -157,6 +162,8 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::new(1.0, sep_col)),
         )
         .show(ctx, |ui| {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("ui_sidebar");
             ui.vertical_centered(|ui| {
                 ui.add_space(6.0);
                 for (i, (label, icon, tip)) in tabs.iter().enumerate() {
@@ -208,6 +215,9 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
+    #[cfg(feature = "profile")]
+    puffin::profile_scope!("ui_bottom_bar");
+
     let is_dark = app.dark_mode;
     let accent = Color32::from_rgb(53, 132, 228);
     let sep_col = if is_dark {
@@ -349,6 +359,9 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
+    #[cfg(feature = "profile")]
+    puffin::profile_scope!("ui_color_picker");
+
     if let Some((oid, mut picker)) = app.active_color_picker.clone() {
         let mut keep_open = true;
 

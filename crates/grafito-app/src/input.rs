@@ -256,6 +256,9 @@ impl GrafitoApp {
     }
 
     pub(crate) fn handle_canvas_input(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("input_canvas");
+
         const CLICK_THRESHOLD: f32 = 3.0;
 
         let response = ui.interact(canvas_rect, ui.id().with("canvas"), Sense::click_and_drag());
@@ -277,6 +280,8 @@ impl GrafitoApp {
 
         // ── Drag lifecycle: start / distance / stop ──────────────────────────
         if response.drag_started() {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("input_drag_start");
             self.canvas_drag_start = current_pos;
             self.canvas_is_panning = false;
             self.is_view_changing = true;
@@ -340,6 +345,8 @@ impl GrafitoApp {
 
         // Apply pan
         if panning && pan_delta != Vec2::ZERO {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("input_pan");
             self.is_view_changing = true;
             self.last_interaction_time = Instant::now();
             self.document.render_quality = RenderQuality::Preview;
@@ -368,7 +375,7 @@ impl GrafitoApp {
                     }
                     self.document.move_point(sel_id, world);
                     let order = self.document.propagation_order(&[sel_id]);
-                    self.document.re_evaluate_constraints(&order);
+                    self.re_evaluate_constraints(&order);
                 }
             }
         }
@@ -391,6 +398,8 @@ impl GrafitoApp {
         let is_click = !self.canvas_is_panning && drag_distance <= CLICK_THRESHOLD;
 
         if response.clicked_by(PointerButton::Primary) && is_click {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("input_click");
             if let Some(world) = world_at_pointer {
                 let world = if self.snap_to_grid {
                     snap_world_to_grid(world, self.document.view().scale)
@@ -426,6 +435,8 @@ impl GrafitoApp {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll.y != 0.0 {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("input_zoom");
                 self.is_view_changing = true;
                 self.last_interaction_time = Instant::now();
                 self.document.render_quality = RenderQuality::Preview;
@@ -468,6 +479,9 @@ impl GrafitoApp {
 
 impl GrafitoApp {
     pub(crate) fn handle_canvas_3d_input(&mut self, ui: &mut egui::Ui, canvas_rect: egui::Rect) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("input_canvas_3d");
+
         let w = canvas_rect.width();
         let h = canvas_rect.height();
         self.camera.aspect = w / h.max(1.0);
@@ -524,6 +538,8 @@ impl GrafitoApp {
 
         // Orbit with right drag
         if response.dragged_by(egui::PointerButton::Secondary) {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("input_orbit");
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             let delta = response.drag_delta();
             self.camera.orbit(delta.x * 0.005, delta.y * 0.005);
@@ -533,6 +549,8 @@ impl GrafitoApp {
             || (pointer_in_canvas && pointer.button_down(egui::PointerButton::Middle))
             || response.dragged_by(egui::PointerButton::Primary)
         {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("input_pan");
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             let delta = if pointer.button_down(egui::PointerButton::Middle) {
                 pointer.delta()
@@ -552,6 +570,8 @@ impl GrafitoApp {
         if response.hovered() {
             let sc = ui.input(|i| i.smooth_scroll_delta);
             if sc.y != 0.0 {
+                #[cfg(feature = "profile")]
+                puffin::profile_scope!("input_zoom");
                 self.is_view_changing = true;
                 self.last_interaction_time = Instant::now();
                 self.document.render_quality = RenderQuality::Preview;

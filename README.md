@@ -405,6 +405,18 @@ Los benchmarks cubren:
 
 ---
 
+## Perfilado de Rendimiento
+
+El binario desktop soporta instrumentación opcional de frames mediante `puffin`. Actívala con la feature `profile` y el flag `--profile`:
+
+```bash
+cargo run -p grafito-app --features profile -- --profile
+```
+
+Esto habilita scopes en `app_update`, UI, input, restricciones, preparación/pintado del canvas y cómputos GPU, e inicia un servidor `puffin_http` en `127.0.0.1:8585`. Conecta `puffin_viewer` a esa dirección para ver el flamegraph. Sin la feature la instrumentación se elimina en tiempo de compilación y no hay overhead.
+
+---
+
 ## Stack Tecnológico
 
 | Capa | Tecnología | Versión |

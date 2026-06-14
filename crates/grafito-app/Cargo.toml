@@ -40,3 +40,9 @@ serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
 rfd.workspace = true
+
+puffin = { version = "0.19", optional = true }
+puffin_http = { version = "0.16", optional = true }
+
+[features]
+profile = ["puffin", "puffin_http"]

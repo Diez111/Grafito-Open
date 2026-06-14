@@ -261,6 +261,12 @@ impl GrafitoApp {
         }
     }
 
+    pub(crate) fn re_evaluate_constraints(&mut self, order: &[usize]) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("constraints");
+        self.document.re_evaluate_constraints(order);
+    }
+
     pub(crate) fn save_state(&mut self) {
         self.undo_stack.push(self.document.clone());
         self.redo_stack.clear();
@@ -542,7 +548,7 @@ impl GrafitoApp {
                         self.save_state();
                         let target = p1.distance(&p2);
                         self.document.add_distance_constraint(first, id, target);
-                        self.document.re_evaluate_constraints(&[]);
+                        self.re_evaluate_constraints(&[]);
                     }
                 } else {
                     self.pending_action = PendingAction::Distance { first: Some(id) };
@@ -558,7 +564,7 @@ impl GrafitoApp {
                     if let Some(target) = self.angle_between_lines(first, id) {
                         self.save_state();
                         self.document.add_angle_constraint(first, id, target);
-                        self.document.re_evaluate_constraints(&[]);
+                        self.re_evaluate_constraints(&[]);
                     }
                 } else {
                     self.pending_action = PendingAction::Angle { first: Some(id) };
@@ -578,7 +584,7 @@ impl GrafitoApp {
                 if let Some(first) = first {
                     self.save_state();
                     self.document.add_tangent_constraint(first, id);
-                    self.document.re_evaluate_constraints(&[]);
+                    self.re_evaluate_constraints(&[]);
                 } else {
                     self.pending_action = PendingAction::Tangent { first: Some(id) };
                     return;
@@ -592,7 +598,7 @@ impl GrafitoApp {
                 if let Some(first) = first {
                     self.save_state();
                     self.document.add_coincident_constraint(first, id);
-                    self.document.re_evaluate_constraints(&[]);
+                    self.re_evaluate_constraints(&[]);
                 } else {
                     self.pending_action = PendingAction::Coincident { first: Some(id) };
                     return;
@@ -605,7 +611,7 @@ impl GrafitoApp {
                 }
                 self.save_state();
                 self.document.add_horizontal_constraint(id);
-                self.document.re_evaluate_constraints(&[]);
+                self.re_evaluate_constraints(&[]);
             }
             PendingAction::Vertical { line } => {
                 let _ = line;
@@ -615,7 +621,7 @@ impl GrafitoApp {
                 }
                 self.save_state();
                 self.document.add_vertical_constraint(id);
-                self.document.re_evaluate_constraints(&[]);
+                self.re_evaluate_constraints(&[]);
             }
             PendingAction::EqualLength { first } => {
                 if !self.is_line(id) {
@@ -625,7 +631,7 @@ impl GrafitoApp {
                 if let Some(first) = first {
                     self.save_state();
                     self.document.add_equal_length_constraint(first, id);
-                    self.document.re_evaluate_constraints(&[]);
+                    self.re_evaluate_constraints(&[]);
                 } else {
                     self.pending_action = PendingAction::EqualLength { first: Some(id) };
                     return;
@@ -672,7 +678,7 @@ impl GrafitoApp {
                         mirror_point.unwrap(),
                         id,
                     );
-                    self.document.re_evaluate_constraints(&[]);
+                    self.re_evaluate_constraints(&[]);
                 }
             }
             PendingAction::EllipseByFoci { f1, f2 } => {
@@ -692,7 +698,7 @@ impl GrafitoApp {
                     self.document
                         .add_ellipse_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
                     let order = self.document.propagation_order(&inputs);
-                    self.document.re_evaluate_constraints(&order);
+                    self.re_evaluate_constraints(&order);
                 }
             }
             PendingAction::ParabolaByFocusDirectrix { focus, directrix } => {
@@ -719,7 +725,7 @@ impl GrafitoApp {
                     self.document
                         .add_parabola_by_focus_directrix_constraint(inputs[0], inputs[1]);
                     let order = self.document.propagation_order(&inputs);
-                    self.document.re_evaluate_constraints(&order);
+                    self.re_evaluate_constraints(&order);
                 }
             }
             PendingAction::HyperbolaByFoci { f1, f2 } => {
@@ -739,7 +745,7 @@ impl GrafitoApp {
                     self.document
                         .add_hyperbola_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
                     let order = self.document.propagation_order(&inputs);
-                    self.document.re_evaluate_constraints(&order);
+                    self.re_evaluate_constraints(&order);
                 }
             }
             PendingAction::ConicByFivePoints { mut points } => {
@@ -755,7 +761,7 @@ impl GrafitoApp {
                 self.save_state();
                 let cons = self.document.add_conic_by_five_points_constraint(&points);
                 let order = self.document.propagation_order(&points);
-                self.document.re_evaluate_constraints(&order);
+                self.re_evaluate_constraints(&order);
                 let _ = cons;
             }
             PendingAction::BooleanUnion { .. }
@@ -841,6 +847,9 @@ impl GrafitoApp {
 
 impl eframe::App for GrafitoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("app_update");
+
         configure_modern_style(ctx);
         if self.is_view_changing
             && self.last_interaction_time.elapsed() > Duration::from_millis(150)
@@ -924,27 +933,31 @@ impl eframe::App for GrafitoApp {
             });
         }
 
-        crate::ui::draw_top_bar(self, ctx);
-        self.sync_pending_action_with_tool();
-
         let is_dark = self.dark_mode;
-        match self.sidebar_tab {
-            0 => crate::algebra::draw_algebra_panel(self, ctx),
-            1 => crate::panels::draw_cas_panel(self, ctx),
-            2 => crate::panels::draw_table_panel(self, ctx),
-            3 => crate::panels::draw_spreadsheet_panel(self, ctx),
-            4 => crate::panels::draw_view_panel(self, ctx),
-            _ => crate::panels::draw_empty_panel(self, ctx),
-        }
+        {
+            #[cfg(feature = "profile")]
+            puffin::profile_scope!("ui");
 
-        crate::ui::draw_bottom_bar(self, ctx);
+            crate::ui::draw_top_bar(self, ctx);
+            self.sync_pending_action_with_tool();
+            match self.sidebar_tab {
+                0 => crate::algebra::draw_algebra_panel(self, ctx),
+                1 => crate::panels::draw_cas_panel(self, ctx),
+                2 => crate::panels::draw_table_panel(self, ctx),
+                3 => crate::panels::draw_spreadsheet_panel(self, ctx),
+                4 => crate::panels::draw_view_panel(self, ctx),
+                _ => crate::panels::draw_empty_panel(self, ctx),
+            }
 
-        if self.keyboard_visible {
-            crate::keyboard::draw_math_keyboard(self, ctx);
-        }
+            crate::ui::draw_bottom_bar(self, ctx);
 
-        if self.show_spreadsheet {
-            crate::panels::draw_right_spreadsheet(self, ctx);
+            if self.keyboard_visible {
+                crate::keyboard::draw_math_keyboard(self, ctx);
+            }
+
+            if self.show_spreadsheet {
+                crate::panels::draw_right_spreadsheet(self, ctx);
+            }
         }
 
         // Central canvas: 2D or 3D view.
@@ -979,7 +992,11 @@ impl eframe::App for GrafitoApp {
                         }
 
                         let canvas_rect = ui.available_rect_before_wrap();
-                        self.handle_canvas_input(ui, canvas_rect);
+                        {
+                            #[cfg(feature = "profile")]
+                            puffin::profile_scope!("input");
+                            self.handle_canvas_input(ui, canvas_rect);
+                        }
 
                         // Compact canvas controls — top-right corner, inside canvas
                         let ctrl_x = canvas_rect.right() - 44.0;
@@ -1070,7 +1087,11 @@ impl eframe::App for GrafitoApp {
                     let w = canvas_rect.width();
                     let h = canvas_rect.height();
 
-                    self.handle_canvas_3d_input(ui, canvas_rect);
+                    {
+                        #[cfg(feature = "profile")]
+                        puffin::profile_scope!("input");
+                        self.handle_canvas_3d_input(ui, canvas_rect);
+                    }
 
                     if self.use_gpu {
                         let callback = egui_wgpu::Callback::new_paint_callback(
@@ -1125,13 +1146,39 @@ impl eframe::App for GrafitoApp {
 pub fn run_app() -> Result<(), eframe::Error> {
     env_logger::init();
 
+    #[cfg(feature = "profile")]
+    let mut profile = false;
     for arg in std::env::args().skip(1) {
-        if arg == "--help" || arg == "-h" {
-            println!("Grafito v0.9.0-alpha");
-            println!("Usage: grafito [OPTIONS]");
-            println!("Options:");
-            println!("  -h, --help    Print help information");
-            return Ok(());
+        match arg.as_str() {
+            "--help" | "-h" => {
+                println!("Grafito v0.9.0-alpha");
+                println!("Usage: grafito [OPTIONS]");
+                println!("Options:");
+                println!("  -h, --help       Print help information");
+                #[cfg(feature = "profile")]
+                println!(
+                    "  --profile        Start a puffin_http profiler server on port {}",
+                    puffin_http::DEFAULT_PORT
+                );
+                return Ok(());
+            }
+            #[cfg(feature = "profile")]
+            "--profile" => profile = true,
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "profile")]
+    if profile {
+        let server_addr = format!("127.0.0.1:{}", puffin_http::DEFAULT_PORT);
+        match puffin_http::Server::new(&server_addr) {
+            Ok(server) => {
+                // Leak the server so its background thread lives for the app lifetime.
+                Box::leak(Box::new(server));
+                puffin::set_scopes_on(true);
+                log::info!("Puffin profiling server started on {}", server_addr);
+            }
+            Err(e) => log::warn!("Failed to start puffin profiling server: {}", e),
         }
     }
 
