@@ -1183,6 +1183,8 @@ pub struct ParabolaObj {
     pub vertex: Point2,
     pub p: f64,
     pub vertical: bool,
+    #[serde(default)]
+    pub angle: f64,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -1195,6 +1197,7 @@ impl ParabolaObj {
             vertex,
             p,
             vertical: true,
+            angle: 0.0,
             color: Color::RED,
             visible: true,
             width: 2.0,

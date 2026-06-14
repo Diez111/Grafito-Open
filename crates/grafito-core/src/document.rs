@@ -4,9 +4,15 @@ use crate::numeric_constraints::{
     VerticalEq,
 };
 use crate::numeric_solver::{NumericSolver, SolveError, VarIndex};
-use crate::{GeoObject, LineKind, ObjectId, PointObj, RelationOperator};
+use crate::{
+    EllipseObj, GeoObject, HyperbolaObj, LineKind, ObjectId, ParabolaObj, PointObj,
+    RelationOperator,
+};
 use grafito_geometry::expr::evaluate;
-use grafito_geometry::{distance_point_to_segment, Point2, Point3D, ViewTransform};
+use grafito_geometry::{
+    distance_point_to_segment, matrices::solve_linear_system, matrices::Matrix, Color, Point2,
+    Point3D, ViewTransform,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -558,6 +564,65 @@ impl Document {
         )
     }
 
+    /// Add a constructive constraint that creates an ellipse from two foci and
+    /// a point on the ellipse.
+    pub fn add_ellipse_by_foci_constraint(
+        &mut self,
+        f1: ObjectId,
+        f2: ObjectId,
+        p: ObjectId,
+    ) -> usize {
+        let (_, cons_id) = self.add_constructed_object(
+            GeoObject::Ellipse(EllipseObj::new(Point2::new(0.0, 0.0), 1.0, 1.0).with_label("E")),
+            "EllipseByFoci",
+            &[f1, f2, p],
+        );
+        cons_id
+    }
+
+    /// Add a constructive constraint that creates a parabola from a focus point
+    /// and a directrix line.
+    pub fn add_parabola_by_focus_directrix_constraint(
+        &mut self,
+        focus: ObjectId,
+        directrix: ObjectId,
+    ) -> usize {
+        let (_, cons_id) = self.add_constructed_object(
+            GeoObject::Parabola(ParabolaObj::new(Point2::new(0.0, 0.0), 1.0).with_label("P")),
+            "ParabolaByFocusDirectrix",
+            &[focus, directrix],
+        );
+        cons_id
+    }
+
+    /// Add a constructive constraint that creates a hyperbola from two foci and
+    /// a point on the hyperbola.
+    pub fn add_hyperbola_by_foci_constraint(
+        &mut self,
+        f1: ObjectId,
+        f2: ObjectId,
+        p: ObjectId,
+    ) -> usize {
+        let (_, cons_id) = self.add_constructed_object(
+            GeoObject::Hyperbola(
+                HyperbolaObj::new(Point2::new(0.0, 0.0), 1.0, 1.0).with_label("H"),
+            ),
+            "HyperbolaByFoci",
+            &[f1, f2, p],
+        );
+        cons_id
+    }
+
+    /// Add a constructive constraint that fits a conic through five points.
+    pub fn add_conic_by_five_points_constraint(&mut self, points: &[ObjectId]) -> usize {
+        let (_, cons_id) = self.add_constructed_object(
+            GeoObject::Ellipse(EllipseObj::new(Point2::new(0.0, 0.0), 1.0, 1.0).with_label("C")),
+            "ConicByFivePoints",
+            points,
+        );
+        cons_id
+    }
+
     pub fn re_evaluate_constraints(&mut self, order: &[usize]) {
         // Numeric constraints have no outputs, so they never appear in a
         // propagation order rooted at changed objects. Always include them.
@@ -842,6 +907,151 @@ impl Document {
                                 {
                                     out.center = center;
                                     out.radius = radius;
+                                }
+                            }
+                        }
+                    }
+                    "EllipseByFoci" if cons.inputs.len() >= 3 && !cons.outputs.is_empty() => {
+                        let f1 = self.get_object(cons.inputs[0]).cloned();
+                        let f2 = self.get_object(cons.inputs[1]).cloned();
+                        let p = self.get_object(cons.inputs[2]).cloned();
+                        if let (
+                            Some(GeoObject::Point(f1)),
+                            Some(GeoObject::Point(f2)),
+                            Some(GeoObject::Point(p)),
+                        ) = (&f1, &f2, &p)
+                        {
+                            if let Some(GeoObject::Ellipse(out)) =
+                                self.get_object_mut(cons.outputs[0])
+                            {
+                                let d1 = p.position.distance(&f1.position);
+                                let d2 = p.position.distance(&f2.position);
+                                let a = (d1 + d2) * 0.5;
+                                let c = f1.position.distance(&f2.position) * 0.5;
+                                let b = (a * a - c * c).max(0.0).sqrt();
+                                out.center = Point2::new(
+                                    (f1.position.x + f2.position.x) * 0.5,
+                                    (f1.position.y + f2.position.y) * 0.5,
+                                );
+                                out.rx = a;
+                                out.ry = b;
+                                out.angle = (f2.position.y - f1.position.y)
+                                    .atan2(f2.position.x - f1.position.x);
+                            }
+                        }
+                    }
+                    "ParabolaByFocusDirectrix"
+                        if cons.inputs.len() >= 2 && !cons.outputs.is_empty() =>
+                    {
+                        let focus = self.get_object(cons.inputs[0]).cloned();
+                        let directrix = self.get_object(cons.inputs[1]).cloned();
+                        if let (Some(GeoObject::Point(f)), Some(GeoObject::Line(d))) =
+                            (&focus, &directrix)
+                        {
+                            if let Some(GeoObject::Parabola(out)) =
+                                self.get_object_mut(cons.outputs[0])
+                            {
+                                let proj = project_point_to_line(f.position, d.start, d.end);
+                                out.vertex = Point2::new(
+                                    (f.position.x + proj.x) * 0.5,
+                                    (f.position.y + proj.y) * 0.5,
+                                );
+                                out.p = f.position.distance(&proj) * 0.5;
+                                let dx = d.end.x - d.start.x;
+                                let dy = d.end.y - d.start.y;
+                                // Axis direction points from the directrix toward the focus.
+                                let axis_dx = f.position.x - proj.x;
+                                let axis_dy = f.position.y - proj.y;
+                                if dx.abs() < 1e-12 {
+                                    // Directrix is vertical => parabola opens horizontally.
+                                    out.vertical = false;
+                                    out.angle = 0.0;
+                                } else if dy.abs() < 1e-12 {
+                                    // Directrix is horizontal => parabola opens vertically.
+                                    out.vertical = true;
+                                    out.angle = 0.0;
+                                } else {
+                                    // General directrix: store the axis direction as an
+                                    // approximation. The renderer currently ignores `angle`,
+                                    // so `vertical` is left as a best-effort flag.
+                                    out.vertical = false;
+                                    out.angle = axis_dy.atan2(axis_dx);
+                                }
+                            }
+                        }
+                    }
+                    "HyperbolaByFoci" if cons.inputs.len() >= 3 && !cons.outputs.is_empty() => {
+                        let f1 = self.get_object(cons.inputs[0]).cloned();
+                        let f2 = self.get_object(cons.inputs[1]).cloned();
+                        let p = self.get_object(cons.inputs[2]).cloned();
+                        if let (
+                            Some(GeoObject::Point(f1)),
+                            Some(GeoObject::Point(f2)),
+                            Some(GeoObject::Point(p)),
+                        ) = (&f1, &f2, &p)
+                        {
+                            if let Some(GeoObject::Hyperbola(out)) =
+                                self.get_object_mut(cons.outputs[0])
+                            {
+                                let d1 = p.position.distance(&f1.position);
+                                let d2 = p.position.distance(&f2.position);
+                                let a = (d1 - d2).abs() * 0.5;
+                                let c = f1.position.distance(&f2.position) * 0.5;
+                                let b = (c * c - a * a).max(0.0).sqrt();
+                                out.center = Point2::new(
+                                    (f1.position.x + f2.position.x) * 0.5,
+                                    (f1.position.y + f2.position.y) * 0.5,
+                                );
+                                out.a = a;
+                                out.b = b;
+                                let axis_angle = (f2.position.y - f1.position.y)
+                                    .atan2(f2.position.x - f1.position.x);
+                                out.horizontal = axis_angle.abs() < std::f64::consts::FRAC_PI_4
+                                    || axis_angle.abs()
+                                        > std::f64::consts::PI - std::f64::consts::FRAC_PI_4;
+                            }
+                        }
+                    }
+                    "ConicByFivePoints" if cons.inputs.len() >= 5 && !cons.outputs.is_empty() => {
+                        let mut pts = Vec::with_capacity(5);
+                        for &id in &cons.inputs[..5] {
+                            if let Some(GeoObject::Point(p)) = self.get_object(id) {
+                                pts.push(p.position);
+                            }
+                        }
+                        if pts.len() == 5 {
+                            if let Some(obj) = conic_from_five_points(&pts) {
+                                let out_id = cons.outputs[0];
+                                if let Some(existing) = self.objects.get(&out_id) {
+                                    let (label, color, visible, width) = match existing {
+                                        GeoObject::Ellipse(o) => {
+                                            (o.label.clone(), o.color, o.visible, o.width)
+                                        }
+                                        GeoObject::Hyperbola(o) => {
+                                            (o.label.clone(), o.color, o.visible, o.width)
+                                        }
+                                        _ => (String::new(), Color::BLACK, true, 2.0),
+                                    };
+                                    let new_obj = match obj {
+                                        GeoObject::Ellipse(mut o) => {
+                                            o.id = out_id;
+                                            o.label = label;
+                                            o.color = color;
+                                            o.visible = visible;
+                                            o.width = width;
+                                            GeoObject::Ellipse(o)
+                                        }
+                                        GeoObject::Hyperbola(mut o) => {
+                                            o.id = out_id;
+                                            o.label = label;
+                                            o.color = color;
+                                            o.visible = visible;
+                                            o.width = width;
+                                            GeoObject::Hyperbola(o)
+                                        }
+                                        _ => obj,
+                                    };
+                                    self.objects.insert(out_id, new_obj);
                                 }
                             }
                         }
@@ -1702,6 +1912,164 @@ fn circle_from_three_points(a: Point2, b: Point2, c: Point2) -> Option<(Point2, 
     let center = Point2::new(ux, uy);
     let radius = center.distance(&a);
     Some((center, radius))
+}
+
+fn conic_from_five_points(points: &[Point2]) -> Option<GeoObject> {
+    // Build the 5x6 homogeneous system for the conic coefficients
+    // [A, B, C, D, E, F] such that A*x^2 + B*x*y + C*y^2 + D*x + E*y + F = 0.
+    let mut rows = Vec::with_capacity(5);
+    for p in points {
+        rows.push(vec![p.x * p.x, p.x * p.y, p.y * p.y, p.x, p.y, 1.0]);
+    }
+    let m = Matrix::from_rows(rows)?;
+
+    // Try fixing each coefficient to 1 and solving the resulting 5x5 system.
+    let mut coeffs: Option<[f64; 6]> = None;
+    for fixed in 0..6 {
+        let mut a_rows = Vec::with_capacity(5);
+        let mut b_rows = Vec::with_capacity(5);
+        for r in 0..5 {
+            let mut a_row = Vec::with_capacity(5);
+            let b_val = -m.get(r, fixed);
+            for c in 0..6 {
+                if c == fixed {
+                    continue;
+                }
+                a_row.push(m.get(r, c));
+            }
+            a_rows.push(a_row);
+            b_rows.push(vec![b_val]);
+        }
+        let a_mat = Matrix::from_rows(a_rows)?;
+        let b_mat = Matrix::from_rows(b_rows)?;
+        if let Some(sol) = solve_linear_system(&a_mat, &b_mat) {
+            let mut coeffs_local = [0.0; 6];
+            let mut idx = 0;
+            for (i, coeff) in coeffs_local.iter_mut().enumerate() {
+                if i == fixed {
+                    *coeff = 1.0;
+                } else {
+                    *coeff = sol.get(idx, 0);
+                    idx += 1;
+                }
+            }
+            // Verify the solution fits the points.
+            let max_residual = points
+                .iter()
+                .zip(m.data.chunks(6))
+                .map(|(_p, row)| {
+                    let v = row
+                        .iter()
+                        .zip(coeffs_local.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f64>();
+                    v.abs()
+                })
+                .fold(0.0f64, f64::max);
+            if max_residual < 1e-6 {
+                coeffs = Some(coeffs_local);
+                break;
+            }
+        }
+    }
+
+    let [a, b, c, d, e, f] = coeffs?;
+
+    // Discriminant: B^2 - 4AC.
+    let discriminant = b * b - 4.0 * a * c;
+
+    // Center of the conic (valid for ellipse/hyperbola).
+    let q = Matrix::from_rows(vec![vec![a, b * 0.5], vec![b * 0.5, c]])?;
+    let q_inv = q.inverse()?;
+    let center = Point2::new(
+        -0.5 * (q_inv.get(0, 0) * d + q_inv.get(0, 1) * e),
+        -0.5 * (q_inv.get(1, 0) * d + q_inv.get(1, 1) * e),
+    );
+
+    // Evaluate the constant term at the center.
+    let f_prime = a * center.x * center.x
+        + b * center.x * center.y
+        + c * center.y * center.y
+        + d * center.x
+        + e * center.y
+        + f;
+
+    // Eigen-decomposition of Q.
+    let trace = a + c;
+    let diff = a - c;
+    let gap = (diff * diff + b * b).sqrt();
+    if gap < 1e-12 {
+        return None;
+    }
+    let lambda1 = 0.5 * (trace + gap);
+    let lambda2 = 0.5 * (trace - gap);
+
+    // Eigenvector for lambda1.
+    let mut ev_x = lambda1 - c;
+    let mut ev_y = b * 0.5;
+    let mut ev_norm = (ev_x * ev_x + ev_y * ev_y).sqrt();
+    if ev_norm < 1e-12 {
+        ev_x = b * 0.5;
+        ev_y = lambda1 - a;
+        ev_norm = (ev_x * ev_x + ev_y * ev_y).sqrt();
+    }
+    if ev_norm < 1e-12 {
+        return None;
+    }
+    let angle = ev_y.atan2(ev_x);
+
+    if discriminant < -1e-12 {
+        // Ellipse.
+        let denom1 = -f_prime / lambda1;
+        let denom2 = -f_prime / lambda2;
+        if denom1 > 1e-12 && denom2 > 1e-12 {
+            return Some(GeoObject::Ellipse(EllipseObj {
+                id: ObjectId::new(),
+                label: String::new(),
+                center,
+                rx: denom1.sqrt(),
+                ry: denom2.sqrt(),
+                angle,
+                color: Color::BLACK,
+                visible: true,
+                width: 2.0,
+                fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
+            }));
+        }
+    } else if discriminant > 1e-12 {
+        // Hyperbola.
+        let denom1 = -f_prime / lambda1;
+        let denom2 = -f_prime / lambda2;
+        if denom1 * denom2 < -1e-12 {
+            // One denominator positive, one negative.
+            let (a_axis, b_axis, transverse_is_lambda1) = if denom1 > 0.0 {
+                (denom1.sqrt(), (-denom2).sqrt(), true)
+            } else {
+                (denom2.sqrt(), (-denom1).sqrt(), false)
+            };
+            // Angle of the transverse axis.
+            let transverse_angle = if transverse_is_lambda1 {
+                angle
+            } else {
+                angle + std::f64::consts::FRAC_PI_2
+            };
+            let horizontal = transverse_angle.abs() < std::f64::consts::FRAC_PI_4
+                || transverse_angle.abs() > std::f64::consts::PI - std::f64::consts::FRAC_PI_4;
+            return Some(GeoObject::Hyperbola(HyperbolaObj {
+                id: ObjectId::new(),
+                label: String::new(),
+                center,
+                a: a_axis,
+                b: b_axis,
+                horizontal,
+                color: Color::RED,
+                visible: true,
+                width: 2.0,
+            }));
+        }
+    }
+
+    None
 }
 
 fn doc_intersect(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {

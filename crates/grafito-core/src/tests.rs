@@ -578,6 +578,141 @@ mod tests {
     }
 
     #[test]
+    fn test_ellipse_by_foci() {
+        let mut doc = Document::new();
+        let f1 = doc.add_point(Point2::new(-1.0, 0.0));
+        let f2 = doc.add_point(Point2::new(1.0, 0.0));
+        let p = doc.add_point(Point2::new(0.0, 2.0));
+        let cons = doc.add_ellipse_by_foci_constraint(f1, f2, p);
+        let order = doc.constraints.get_update_order(&[f1, f2, p]);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let ell = doc.get_object(out_id).unwrap();
+        if let GeoObject::Ellipse(e) = ell {
+            assert!((e.center.x).abs() < 1e-9);
+            assert!((e.center.y).abs() < 1e-9);
+            assert!((e.rx - 5f64.sqrt()).abs() < 1e-9);
+            assert!((e.ry - 2.0).abs() < 1e-9);
+            assert!((e.angle).abs() < 1e-9);
+        } else {
+            panic!("expected ellipse");
+        }
+    }
+
+    #[test]
+    fn test_parabola_by_focus_directrix() {
+        let mut doc = Document::new();
+        let focus = doc.add_point(Point2::new(0.0, 1.0));
+        let directrix = doc.add_object(GeoObject::Line(
+            LineObj::new_with_kind(
+                Point2::new(-1.0, -1.0),
+                Point2::new(1.0, -1.0),
+                LineKind::Line,
+            )
+            .with_label("d"),
+        ));
+        let cons = doc.add_parabola_by_focus_directrix_constraint(focus, directrix);
+        let order = doc.constraints.get_update_order(&[focus, directrix]);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let par = doc.get_object(out_id).unwrap();
+        if let GeoObject::Parabola(pb) = par {
+            assert!((pb.vertex.x).abs() < 1e-9);
+            assert!((pb.vertex.y).abs() < 1e-9);
+            assert!((pb.p - 1.0).abs() < 1e-9);
+            assert!(pb.vertical);
+            assert!((pb.angle).abs() < 1e-9);
+        } else {
+            panic!("expected parabola");
+        }
+    }
+
+    #[test]
+    fn test_hyperbola_by_foci() {
+        let mut doc = Document::new();
+        let f1 = doc.add_point(Point2::new(-1.0, 0.0));
+        let f2 = doc.add_point(Point2::new(1.0, 0.0));
+        let p = doc.add_point(Point2::new(2.0, 1.0));
+        let cons = doc.add_hyperbola_by_foci_constraint(f1, f2, p);
+        let order = doc.constraints.get_update_order(&[f1, f2, p]);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let hyp = doc.get_object(out_id).unwrap();
+        if let GeoObject::Hyperbola(h) = hyp {
+            assert!((h.center.x).abs() < 1e-9);
+            assert!((h.center.y).abs() < 1e-9);
+            let d1 = Point2::new(2.0, 1.0).distance(&Point2::new(-1.0, 0.0));
+            let d2 = Point2::new(2.0, 1.0).distance(&Point2::new(1.0, 0.0));
+            let a_expected = (d1 - d2).abs() * 0.5;
+            let c = 1.0;
+            let b_expected = (c * c - a_expected * a_expected).max(0.0).sqrt();
+            assert!((h.a - a_expected).abs() < 1e-9);
+            assert!((h.b - b_expected).abs() < 1e-9);
+            assert!(h.horizontal);
+        } else {
+            panic!("expected hyperbola");
+        }
+    }
+
+    #[test]
+    fn test_conic_by_five_points_ellipse() {
+        let mut doc = Document::new();
+        let pts: Vec<ObjectId> = [
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+            Point2::new(-1.0, 0.0),
+            Point2::new(0.0, -1.0),
+            Point2::new(2f64.sqrt() / 2.0, 2f64.sqrt() / 2.0),
+        ]
+        .iter()
+        .map(|p| doc.add_point(*p))
+        .collect();
+        let cons = doc.add_conic_by_five_points_constraint(&pts);
+        let order = doc.constraints.get_update_order(&pts);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let obj = doc.get_object(out_id).unwrap();
+        if let GeoObject::Ellipse(e) = obj {
+            assert!((e.center.x).abs() < 1e-6);
+            assert!((e.center.y).abs() < 1e-6);
+            assert!((e.rx - 1.0).abs() < 1e-6);
+            assert!((e.ry - 1.0).abs() < 1e-6);
+        } else {
+            panic!("expected ellipse from five points");
+        }
+    }
+
+    #[test]
+    fn test_conic_by_five_points_hyperbola() {
+        let mut doc = Document::new();
+        let x_at_y1 = 2.0 * 2f64.sqrt();
+        let pts: Vec<ObjectId> = [
+            Point2::new(2.0, 0.0),
+            Point2::new(-2.0, 0.0),
+            Point2::new(x_at_y1, 1.0),
+            Point2::new(x_at_y1, -1.0),
+            Point2::new(-x_at_y1, 1.0),
+        ]
+        .iter()
+        .map(|p| doc.add_point(*p))
+        .collect();
+        let cons = doc.add_conic_by_five_points_constraint(&pts);
+        let order = doc.constraints.get_update_order(&pts);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let obj = doc.get_object(out_id).unwrap();
+        if let GeoObject::Hyperbola(h) = obj {
+            assert!((h.center.x).abs() < 1e-6);
+            assert!((h.center.y).abs() < 1e-6);
+            assert!((h.a - 2.0).abs() < 1e-6);
+            assert!((h.b - 1.0).abs() < 1e-6);
+            assert!(h.horizontal);
+        } else {
+            panic!("expected hyperbola from five points");
+        }
+    }
+
+    #[test]
     fn test_constraint_params_backward_compatible() {
         // Serialize a document with a constraint, then strip the params field to
         // simulate an old JSON document that has no params field on Constraint.
