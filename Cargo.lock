@@ -1813,6 +1813,7 @@ name = "grafito-core"
 version = "0.9.0-alpha"
 dependencies = [
  "criterion",
+ "geo",
  "grafito-geometry",
  "log",
  "rayon",

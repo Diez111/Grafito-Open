@@ -208,6 +208,11 @@ pub fn dispatch_tool(
                 reset_tool: true,
             }
         }
+        _ => ToolResult {
+            objects: vec![],
+            message: None,
+            reset_tool: false,
+        },
     }
 }
 

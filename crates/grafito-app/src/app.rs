@@ -17,9 +17,96 @@ use std::time::{Duration, Instant};
 
 const MAX_UNDO: usize = 50;
 
+/// Pending interactive action that requires selecting objects on the canvas.
+#[derive(Debug, Clone, Default)]
+pub enum PendingAction {
+    #[default]
+    None,
+    Distance {
+        first: Option<ObjectId>,
+    },
+    Angle {
+        first: Option<ObjectId>,
+    },
+    Tangent {
+        first: Option<ObjectId>,
+    },
+    Coincident {
+        first: Option<ObjectId>,
+    },
+    Horizontal {
+        line: Option<ObjectId>,
+    },
+    Vertical {
+        line: Option<ObjectId>,
+    },
+    EqualLength {
+        first: Option<ObjectId>,
+    },
+    Symmetry {
+        point: Option<ObjectId>,
+        mirror_point: Option<ObjectId>,
+        line: Option<ObjectId>,
+    },
+    EllipseByFoci {
+        f1: Option<ObjectId>,
+        f2: Option<ObjectId>,
+    },
+    ParabolaByFocusDirectrix {
+        focus: Option<ObjectId>,
+        directrix: Option<ObjectId>,
+    },
+    HyperbolaByFoci {
+        f1: Option<ObjectId>,
+        f2: Option<ObjectId>,
+    },
+    ConicByFivePoints {
+        points: Vec<ObjectId>,
+    },
+    BooleanUnion {
+        first: Option<ObjectId>,
+    },
+    BooleanIntersection {
+        first: Option<ObjectId>,
+    },
+    BooleanDifference {
+        first: Option<ObjectId>,
+    },
+    BooleanXor {
+        first: Option<ObjectId>,
+    },
+}
+
+impl PendingAction {
+    fn boolean_cmd_name(&self) -> Option<&'static str> {
+        match self {
+            PendingAction::BooleanUnion { .. } => Some("PolygonUnion"),
+            PendingAction::BooleanIntersection { .. } => Some("PolygonIntersection"),
+            PendingAction::BooleanDifference { .. } => Some("PolygonDifference"),
+            PendingAction::BooleanXor { .. } => Some("PolygonXor"),
+            _ => None,
+        }
+    }
+
+    fn with_boolean_first(self, id: ObjectId) -> Self {
+        match self {
+            PendingAction::BooleanUnion { .. } => PendingAction::BooleanUnion { first: Some(id) },
+            PendingAction::BooleanIntersection { .. } => {
+                PendingAction::BooleanIntersection { first: Some(id) }
+            }
+            PendingAction::BooleanDifference { .. } => {
+                PendingAction::BooleanDifference { first: Some(id) }
+            }
+            PendingAction::BooleanXor { .. } => PendingAction::BooleanXor { first: Some(id) },
+            other => other,
+        }
+    }
+}
+
 pub struct GrafitoApp {
     pub document: Document,
     pub current_tool: Tool,
+    pub previous_tool: Tool,
     pub current_view: ViewMode,
     pub camera: Camera3D,
     pub animation_running: bool,
@@ -56,6 +143,7 @@ pub struct GrafitoApp {
     pub use_gpu: bool,
     pub last_interaction_time: Instant,
     pub is_view_changing: bool,
+    pub pending_action: PendingAction,
 }
 
 impl GrafitoApp {
@@ -126,6 +214,7 @@ impl GrafitoApp {
         Self {
             document,
             current_tool: Tool::default(),
+            previous_tool: Tool::default(),
             current_view: ViewMode::D2,
             camera: Camera3D::new(1280.0 / 720.0),
             animation_running: false,
@@ -161,6 +250,7 @@ impl GrafitoApp {
             use_gpu: true,
             last_interaction_time: Instant::now(),
             is_view_changing: false,
+            pending_action: PendingAction::None,
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
@@ -239,6 +329,473 @@ impl GrafitoApp {
             self.document.remove_object(id);
             self.selected_object = None;
         }
+    }
+
+    pub(crate) fn start_pending_action(&mut self, tool: Tool) {
+        self.pending_action = match tool {
+            Tool::Distance => PendingAction::Distance { first: None },
+            Tool::Angle => PendingAction::Angle { first: None },
+            Tool::Tangent => PendingAction::Tangent { first: None },
+            Tool::Coincident => PendingAction::Coincident { first: None },
+            Tool::Horizontal => PendingAction::Horizontal { line: None },
+            Tool::Vertical => PendingAction::Vertical { line: None },
+            Tool::EqualLength => PendingAction::EqualLength { first: None },
+            Tool::Symmetry => PendingAction::Symmetry {
+                point: None,
+                mirror_point: None,
+                line: None,
+            },
+            Tool::EllipseByFoci => PendingAction::EllipseByFoci { f1: None, f2: None },
+            Tool::ParabolaByFocusDirectrix => PendingAction::ParabolaByFocusDirectrix {
+                focus: None,
+                directrix: None,
+            },
+            Tool::HyperbolaByFoci => PendingAction::HyperbolaByFoci { f1: None, f2: None },
+            Tool::ConicByFivePoints => PendingAction::ConicByFivePoints { points: Vec::new() },
+            Tool::PolygonUnion => PendingAction::BooleanUnion { first: None },
+            Tool::PolygonIntersection => PendingAction::BooleanIntersection { first: None },
+            Tool::PolygonDifference => PendingAction::BooleanDifference { first: None },
+            Tool::PolygonXor => PendingAction::BooleanXor { first: None },
+            _ => PendingAction::None,
+        };
+    }
+
+    pub(crate) fn clear_pending_action(&mut self) {
+        self.pending_action = PendingAction::None;
+    }
+
+    pub(crate) fn is_constraint_tool(tool: Tool) -> bool {
+        matches!(
+            tool,
+            Tool::Distance
+                | Tool::Angle
+                | Tool::Tangent
+                | Tool::Coincident
+                | Tool::Horizontal
+                | Tool::Vertical
+                | Tool::EqualLength
+                | Tool::Symmetry
+                | Tool::EllipseByFoci
+                | Tool::ParabolaByFocusDirectrix
+                | Tool::HyperbolaByFoci
+                | Tool::ConicByFivePoints
+                | Tool::PolygonUnion
+                | Tool::PolygonIntersection
+                | Tool::PolygonDifference
+                | Tool::PolygonXor
+        )
+    }
+
+    pub(crate) fn sync_pending_action_with_tool(&mut self) {
+        if self.current_tool != self.previous_tool {
+            if Self::is_constraint_tool(self.current_tool) {
+                self.start_pending_action(self.current_tool);
+            } else {
+                self.clear_pending_action();
+            }
+            self.previous_tool = self.current_tool;
+        }
+    }
+
+    pub(crate) fn pending_action_hint(&self) -> Option<String> {
+        Some(match &self.pending_action {
+            PendingAction::None => return None,
+            PendingAction::Distance { first } if first.is_none() => {
+                "Select first point for distance constraint".to_string()
+            }
+            PendingAction::Distance { .. } => {
+                "Select second point for distance constraint".to_string()
+            }
+            PendingAction::Angle { first } if first.is_none() => {
+                "Select first line for angle constraint".to_string()
+            }
+            PendingAction::Angle { .. } => "Select second line for angle constraint".to_string(),
+            PendingAction::Tangent { first } if first.is_none() => {
+                "Select circle for tangent constraint".to_string()
+            }
+            PendingAction::Tangent { .. } => "Select line for tangent constraint".to_string(),
+            PendingAction::Coincident { first } if first.is_none() => {
+                "Select first point for coincident constraint".to_string()
+            }
+            PendingAction::Coincident { .. } => {
+                "Select second point for coincident constraint".to_string()
+            }
+            PendingAction::Horizontal { .. } => "Select line for horizontal constraint".to_string(),
+            PendingAction::Vertical { .. } => "Select line for vertical constraint".to_string(),
+            PendingAction::EqualLength { first } if first.is_none() => {
+                "Select first segment for equal length constraint".to_string()
+            }
+            PendingAction::EqualLength { .. } => {
+                "Select second segment for equal length constraint".to_string()
+            }
+            PendingAction::Symmetry { point, .. } if point.is_none() => {
+                "Select point for symmetry constraint".to_string()
+            }
+            PendingAction::Symmetry { mirror_point, .. } if mirror_point.is_none() => {
+                "Select mirror point for symmetry constraint".to_string()
+            }
+            PendingAction::Symmetry { line, .. } if line.is_none() => {
+                "Select mirror line for symmetry constraint".to_string()
+            }
+            PendingAction::Symmetry { .. } => "Confirm symmetry constraint".to_string(),
+            PendingAction::EllipseByFoci { f1, .. } if f1.is_none() => {
+                "Select first focus for ellipse".to_string()
+            }
+            PendingAction::EllipseByFoci { f2, .. } if f2.is_none() => {
+                "Select second focus for ellipse".to_string()
+            }
+            PendingAction::EllipseByFoci { .. } => "Select point on ellipse".to_string(),
+            PendingAction::ParabolaByFocusDirectrix { focus, .. } if focus.is_none() => {
+                "Select focus for parabola".to_string()
+            }
+            PendingAction::ParabolaByFocusDirectrix { directrix, .. } if directrix.is_none() => {
+                "Select directrix line for parabola".to_string()
+            }
+            PendingAction::ParabolaByFocusDirectrix { .. } => "Confirm parabola".to_string(),
+            PendingAction::HyperbolaByFoci { f1, .. } if f1.is_none() => {
+                "Select first focus for hyperbola".to_string()
+            }
+            PendingAction::HyperbolaByFoci { f2, .. } if f2.is_none() => {
+                "Select second focus for hyperbola".to_string()
+            }
+            PendingAction::HyperbolaByFoci { .. } => "Select point on hyperbola".to_string(),
+            PendingAction::ConicByFivePoints { points } => {
+                format!("Select point {} of 5 for conic", points.len() + 1)
+            }
+            PendingAction::BooleanUnion { first } if first.is_none() => {
+                "Select first polygon for union".to_string()
+            }
+            PendingAction::BooleanUnion { .. } => "Select second polygon for union".to_string(),
+            PendingAction::BooleanIntersection { first } if first.is_none() => {
+                "Select first polygon for intersection".to_string()
+            }
+            PendingAction::BooleanIntersection { .. } => {
+                "Select second polygon for intersection".to_string()
+            }
+            PendingAction::BooleanDifference { first } if first.is_none() => {
+                "Select first polygon for difference".to_string()
+            }
+            PendingAction::BooleanDifference { .. } => {
+                "Select second polygon for difference".to_string()
+            }
+            PendingAction::BooleanXor { first } if first.is_none() => {
+                "Select first polygon for xor".to_string()
+            }
+            PendingAction::BooleanXor { .. } => "Select second polygon for xor".to_string(),
+        })
+    }
+
+    fn is_point(&self, id: ObjectId) -> bool {
+        matches!(self.document.get_object(id), Some(GeoObject::Point(_)))
+    }
+
+    fn is_line(&self, id: ObjectId) -> bool {
+        matches!(self.document.get_object(id), Some(GeoObject::Line(_)))
+    }
+
+    fn is_circle(&self, id: ObjectId) -> bool {
+        matches!(self.document.get_object(id), Some(GeoObject::Circle(_)))
+    }
+
+    fn is_polygon(&self, id: ObjectId) -> bool {
+        matches!(self.document.get_object(id), Some(GeoObject::Polygon(_)))
+    }
+
+    fn line_direction(&self, id: ObjectId) -> Option<Point2> {
+        if let Some(GeoObject::Line(l)) = self.document.get_object(id) {
+            let dx = l.end.x - l.start.x;
+            let dy = l.end.y - l.start.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 1e-12 {
+                return Some(Point2::new(dx / len, dy / len));
+            }
+        }
+        None
+    }
+
+    fn angle_between_lines(&self, a: ObjectId, b: ObjectId) -> Option<f64> {
+        let d1 = self.line_direction(a)?;
+        let d2 = self.line_direction(b)?;
+        let dot = d1.x * d2.x + d1.y * d2.y;
+        let angle = dot.clamp(-1.0, 1.0).acos().to_degrees();
+        Some(angle)
+    }
+
+    pub(crate) fn handle_pending_object_click(&mut self, id: ObjectId) {
+        use std::mem;
+        let action = mem::take(&mut self.pending_action);
+        match action {
+            PendingAction::None => {
+                self.pending_action = PendingAction::None;
+                return;
+            }
+            PendingAction::Distance { first } => {
+                if !self.is_point(id) {
+                    self.pending_action = PendingAction::Distance { first };
+                    return;
+                }
+                if let Some(first) = first {
+                    if let (Some(p1), Some(p2)) = (
+                        self.document.point_position(first),
+                        self.document.point_position(id),
+                    ) {
+                        self.save_state();
+                        let target = p1.distance(&p2);
+                        self.document.add_distance_constraint(first, id, target);
+                        self.document.re_evaluate_constraints(&[]);
+                    }
+                } else {
+                    self.pending_action = PendingAction::Distance { first: Some(id) };
+                    return;
+                }
+            }
+            PendingAction::Angle { first } => {
+                if !self.is_line(id) {
+                    self.pending_action = PendingAction::Angle { first };
+                    return;
+                }
+                if let Some(first) = first {
+                    if let Some(target) = self.angle_between_lines(first, id) {
+                        self.save_state();
+                        self.document.add_angle_constraint(first, id, target);
+                        self.document.re_evaluate_constraints(&[]);
+                    }
+                } else {
+                    self.pending_action = PendingAction::Angle { first: Some(id) };
+                    return;
+                }
+            }
+            PendingAction::Tangent { first } => {
+                let valid = if first.is_none() {
+                    self.is_circle(id)
+                } else {
+                    self.is_line(id)
+                };
+                if !valid {
+                    self.pending_action = PendingAction::Tangent { first };
+                    return;
+                }
+                if let Some(first) = first {
+                    self.save_state();
+                    self.document.add_tangent_constraint(first, id);
+                    self.document.re_evaluate_constraints(&[]);
+                } else {
+                    self.pending_action = PendingAction::Tangent { first: Some(id) };
+                    return;
+                }
+            }
+            PendingAction::Coincident { first } => {
+                if !self.is_point(id) {
+                    self.pending_action = PendingAction::Coincident { first };
+                    return;
+                }
+                if let Some(first) = first {
+                    self.save_state();
+                    self.document.add_coincident_constraint(first, id);
+                    self.document.re_evaluate_constraints(&[]);
+                } else {
+                    self.pending_action = PendingAction::Coincident { first: Some(id) };
+                    return;
+                }
+            }
+            PendingAction::Horizontal { line } => {
+                if !self.is_line(id) {
+                    self.pending_action = PendingAction::Horizontal { line };
+                    return;
+                }
+                self.save_state();
+                self.document.add_horizontal_constraint(id);
+                self.document.re_evaluate_constraints(&[]);
+            }
+            PendingAction::Vertical { line } => {
+                let _ = line;
+                if !self.is_line(id) {
+                    self.pending_action = PendingAction::Vertical { line: None };
+                    return;
+                }
+                self.save_state();
+                self.document.add_vertical_constraint(id);
+                self.document.re_evaluate_constraints(&[]);
+            }
+            PendingAction::EqualLength { first } => {
+                if !self.is_line(id) {
+                    self.pending_action = PendingAction::EqualLength { first };
+                    return;
+                }
+                if let Some(first) = first {
+                    self.save_state();
+                    self.document.add_equal_length_constraint(first, id);
+                    self.document.re_evaluate_constraints(&[]);
+                } else {
+                    self.pending_action = PendingAction::EqualLength { first: Some(id) };
+                    return;
+                }
+            }
+            PendingAction::Symmetry {
+                point,
+                mirror_point,
+                line,
+            } => {
+                let expected_point = point.is_none();
+                let expected_mirror = point.is_some() && mirror_point.is_none();
+                let valid = if expected_point || expected_mirror {
+                    self.is_point(id)
+                } else {
+                    self.is_line(id)
+                };
+                if !valid {
+                    self.pending_action = PendingAction::Symmetry {
+                        point,
+                        mirror_point,
+                        line,
+                    };
+                    return;
+                }
+                if expected_point {
+                    self.pending_action = PendingAction::Symmetry {
+                        point: Some(id),
+                        mirror_point,
+                        line,
+                    };
+                    return;
+                } else if expected_mirror {
+                    self.pending_action = PendingAction::Symmetry {
+                        point,
+                        mirror_point: Some(id),
+                        line,
+                    };
+                    return;
+                } else {
+                    self.save_state();
+                    self.document.add_symmetry_constraint(
+                        point.unwrap(),
+                        mirror_point.unwrap(),
+                        id,
+                    );
+                    self.document.re_evaluate_constraints(&[]);
+                }
+            }
+            PendingAction::EllipseByFoci { f1, f2 } => {
+                if !self.is_point(id) {
+                    self.pending_action = PendingAction::EllipseByFoci { f1, f2 };
+                    return;
+                }
+                if f1.is_none() {
+                    self.pending_action = PendingAction::EllipseByFoci { f1: Some(id), f2 };
+                    return;
+                } else if f2.is_none() {
+                    self.pending_action = PendingAction::EllipseByFoci { f1, f2: Some(id) };
+                    return;
+                } else if let (Some(f1_id), Some(f2_id)) = (f1, f2) {
+                    self.save_state();
+                    let inputs = [f1_id, f2_id, id];
+                    self.document
+                        .add_ellipse_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
+                    let order = self.document.propagation_order(&inputs);
+                    self.document.re_evaluate_constraints(&order);
+                }
+            }
+            PendingAction::ParabolaByFocusDirectrix { focus, directrix } => {
+                let expected_focus = focus.is_none();
+                let valid = if expected_focus {
+                    self.is_point(id)
+                } else {
+                    self.is_line(id)
+                };
+                if !valid {
+                    self.pending_action =
+                        PendingAction::ParabolaByFocusDirectrix { focus, directrix };
+                    return;
+                }
+                if expected_focus {
+                    self.pending_action = PendingAction::ParabolaByFocusDirectrix {
+                        focus: Some(id),
+                        directrix,
+                    };
+                    return;
+                } else if let Some(focus_id) = focus {
+                    self.save_state();
+                    let inputs = [focus_id, id];
+                    self.document
+                        .add_parabola_by_focus_directrix_constraint(inputs[0], inputs[1]);
+                    let order = self.document.propagation_order(&inputs);
+                    self.document.re_evaluate_constraints(&order);
+                }
+            }
+            PendingAction::HyperbolaByFoci { f1, f2 } => {
+                if !self.is_point(id) {
+                    self.pending_action = PendingAction::HyperbolaByFoci { f1, f2 };
+                    return;
+                }
+                if f1.is_none() {
+                    self.pending_action = PendingAction::HyperbolaByFoci { f1: Some(id), f2 };
+                    return;
+                } else if f2.is_none() {
+                    self.pending_action = PendingAction::HyperbolaByFoci { f1, f2: Some(id) };
+                    return;
+                } else if let (Some(f1_id), Some(f2_id)) = (f1, f2) {
+                    self.save_state();
+                    let inputs = [f1_id, f2_id, id];
+                    self.document
+                        .add_hyperbola_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
+                    let order = self.document.propagation_order(&inputs);
+                    self.document.re_evaluate_constraints(&order);
+                }
+            }
+            PendingAction::ConicByFivePoints { mut points } => {
+                if !self.is_point(id) {
+                    self.pending_action = PendingAction::ConicByFivePoints { points };
+                    return;
+                }
+                points.push(id);
+                if points.len() < 5 {
+                    self.pending_action = PendingAction::ConicByFivePoints { points };
+                    return;
+                }
+                self.save_state();
+                let cons = self.document.add_conic_by_five_points_constraint(&points);
+                let order = self.document.propagation_order(&points);
+                self.document.re_evaluate_constraints(&order);
+                let _ = cons;
+            }
+            PendingAction::BooleanUnion { .. }
+            | PendingAction::BooleanIntersection { .. }
+            | PendingAction::BooleanDifference { .. }
+            | PendingAction::BooleanXor { .. } => {
+                if !self.is_polygon(id) {
+                    self.pending_action = action;
+                    return;
+                }
+                if let Some(first) = match &action {
+                    PendingAction::BooleanUnion { first }
+                    | PendingAction::BooleanIntersection { first }
+                    | PendingAction::BooleanDifference { first }
+                    | PendingAction::BooleanXor { first } => *first,
+                    _ => None,
+                } {
+                    let first_label = self
+                        .document
+                        .get_object(first)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    let second_label = self
+                        .document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    let cmd_name = action.boolean_cmd_name().unwrap_or("PolygonUnion");
+                    let mut cmd = format!("{}[{}, {}]", cmd_name, first_label, second_label);
+                    self.save_state();
+                    let _ = crate::commands::process_input(&mut self.document, &mut cmd);
+                } else {
+                    self.pending_action = action.with_boolean_first(id);
+                    return;
+                }
+            }
+        }
+        self.current_tool = Tool::Select;
+        self.tool_ghost = None;
+        self.pending_action = PendingAction::None;
     }
 
     pub(crate) fn zoom_to_fit(&mut self) {
@@ -336,6 +893,7 @@ impl eframe::App for GrafitoApp {
             self.current_tool = Tool::Select;
             self.tool_ghost = None;
             self.pending_points.clear();
+            self.clear_pending_action();
         }
         // Log axis toggles: Shift+L = X, Shift+K = Y, Shift+J = both
         if ctx.input(|i| i.key_pressed(Key::L) && i.modifiers.shift) {
@@ -367,6 +925,7 @@ impl eframe::App for GrafitoApp {
         }
 
         crate::ui::draw_top_bar(self, ctx);
+        self.sync_pending_action_with_tool();
 
         let is_dark = self.dark_mode;
         match self.sidebar_tab {

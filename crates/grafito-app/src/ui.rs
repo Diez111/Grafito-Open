@@ -128,7 +128,9 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── TOOLBAR (horizontal, with dropdown groups) ──
     egui::TopBottomPanel::top("toolbar_panel")
-        .exact_height(38.0)
+        .default_height(38.0)
+        .min_height(38.0)
+        .max_height(120.0)
         .frame(egui::Frame::none().fill(side_fill))
         .show(ctx, |ui| {
             grafito_ui::toolbar::toolbar(
@@ -307,23 +309,30 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 };
                 ui.label(egui::RichText::new(coord_text).size(11.0).color(txt_dim));
                 ui.add_space(16.0);
-                let hint = match app.current_view {
-                    ViewMode::D2 => match app.current_tool {
-                        Tool::Select => {
-                            "↖ Seleccionar: clic objeto, arrastrar vacío para mover vista"
+                let hint = if let Some(h) = app.pending_action_hint() {
+                    h.to_string()
+                } else {
+                    match app.current_view {
+                        ViewMode::D2 => match app.current_tool {
+                            Tool::Select => {
+                                "↖ Seleccionar: clic objeto, arrastrar vacío para mover vista"
+                            }
+                            Tool::Point => "· Punto: clic para crear",
+                            Tool::Line => "╱ Recta: clic en dos puntos",
+                            Tool::Circle => "○ Círculo: clic centro, clic borde",
+                            Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar",
+                            Tool::Function => "f(x) Función: escribe en la entrada",
+                            Tool::Distance => "↔ Distancia: clic en dos puntos",
+                            Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos",
+                            Tool::Slider => "═ Deslizador: clic para crear variable",
+                            Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente",
+                            _ => "Espacio / clic medio: mover vista",
                         }
-                        Tool::Point => "· Punto: clic para crear",
-                        Tool::Line => "╱ Recta: clic en dos puntos",
-                        Tool::Circle => "○ Círculo: clic centro, clic borde",
-                        Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar",
-                        Tool::Function => "f(x) Función: escribe en la entrada",
-                        Tool::Distance => "↔ Distancia: clic en dos puntos",
-                        Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos",
-                        Tool::Slider => "═ Deslizador: clic para crear variable",
-                        Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente",
-                        _ => "Espacio / clic medio: mover vista",
-                    },
-                    ViewMode::D3 => "3D: clic izq pan (Select), der orbitar, rueda zoom",
+                        .to_string(),
+                        ViewMode::D3 => {
+                            "3D: clic izq pan (Select), der orbitar, rueda zoom".to_string()
+                        }
+                    }
                 };
                 if !hint.is_empty() {
                     ui.label(egui::RichText::new(hint).size(11.0).color(txt_dim));

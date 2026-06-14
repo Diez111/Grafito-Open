@@ -133,6 +133,164 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     return None;
                 }
             }
+            "Distance" if cmd.args.len() >= 2 => {
+                if let (Some(a), Some(b)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    let target = cmd
+                        .args
+                        .get(2)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or_else(|| {
+                            if let (Some(p1), Some(p2)) =
+                                (document.point_position(a), document.point_position(b))
+                            {
+                                p1.distance(&p2)
+                            } else {
+                                0.0
+                            }
+                        });
+                    document.add_distance_constraint(a, b, target);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Angle" if cmd.args.len() >= 2 => {
+                if let (Some(a), Some(b)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    let target = cmd
+                        .args
+                        .get(2)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0.0);
+                    document.add_angle_constraint(a, b, target);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Tangent" if cmd.args.len() == 2 => {
+                if let (Some(a), Some(b)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    document.add_tangent_constraint(a, b);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Coincident" if cmd.args.len() == 2 => {
+                if let (Some(a), Some(b)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    document.add_coincident_constraint(a, b);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Horizontal" if !cmd.args.is_empty() => {
+                if let Some(id) = find_object_by_label(document, cmd.args[0].trim()) {
+                    document.add_horizontal_constraint(id);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Vertical" if !cmd.args.is_empty() => {
+                if let Some(id) = find_object_by_label(document, cmd.args[0].trim()) {
+                    document.add_vertical_constraint(id);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "EqualLength" if cmd.args.len() == 2 => {
+                if let (Some(a), Some(b)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    document.add_equal_length_constraint(a, b);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "Symmetry" if cmd.args.len() == 3 => {
+                if let [Some(p), Some(q), Some(line)] = [
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                    find_object_by_label(document, cmd.args[2].trim()),
+                ]
+                .as_slice()
+                {
+                    document.add_symmetry_constraint(*p, *q, *line);
+                    document.re_evaluate_constraints(&[]);
+                }
+                input_text.clear();
+                return None;
+            }
+            "EllipseByFoci" if cmd.args.len() == 3 => {
+                let ids: Vec<Option<ObjectId>> = cmd
+                    .args
+                    .iter()
+                    .map(|a| find_object_by_label(document, a.trim()))
+                    .collect();
+                if let [Some(f1), Some(f2), Some(p)] = ids.as_slice() {
+                    document.add_ellipse_by_foci_constraint(*f1, *f2, *p);
+                    let order = document.propagation_order(&[*f1, *f2, *p]);
+                    document.re_evaluate_constraints(&order);
+                }
+                input_text.clear();
+                return None;
+            }
+            "ParabolaByFocusDirectrix" if cmd.args.len() == 2 => {
+                if let (Some(focus), Some(directrix)) = (
+                    find_object_by_label(document, cmd.args[0].trim()),
+                    find_object_by_label(document, cmd.args[1].trim()),
+                ) {
+                    document.add_parabola_by_focus_directrix_constraint(focus, directrix);
+                    let order = document.propagation_order(&[focus, directrix]);
+                    document.re_evaluate_constraints(&order);
+                }
+                input_text.clear();
+                return None;
+            }
+            "HyperbolaByFoci" if cmd.args.len() == 3 => {
+                let ids: Vec<Option<ObjectId>> = cmd
+                    .args
+                    .iter()
+                    .map(|a| find_object_by_label(document, a.trim()))
+                    .collect();
+                if let [Some(f1), Some(f2), Some(p)] = ids.as_slice() {
+                    document.add_hyperbola_by_foci_constraint(*f1, *f2, *p);
+                    let order = document.propagation_order(&[*f1, *f2, *p]);
+                    document.re_evaluate_constraints(&order);
+                }
+                input_text.clear();
+                return None;
+            }
+            "ConicByFivePoints" if cmd.args.len() == 5 => {
+                let ids: Vec<Option<ObjectId>> = cmd
+                    .args
+                    .iter()
+                    .map(|a| find_object_by_label(document, a.trim()))
+                    .collect();
+                if ids.iter().all(|o| o.is_some()) {
+                    let ids: Vec<ObjectId> = ids.into_iter().flatten().collect();
+                    document.add_conic_by_five_points_constraint(&ids);
+                    let order = document.propagation_order(&ids);
+                    document.re_evaluate_constraints(&order);
+                }
+                input_text.clear();
+                return None;
+            }
             "PolygonUnion" if cmd.args.len() == 2 => {
                 match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                     Ok((a, b)) => {
@@ -2661,6 +2819,28 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "phaseportrait" | "phase_portrait" | "phase" => "PhasePortrait",
             "contour" | "contourlines" | "contour_lines" => "Contour",
             "piecewise" | "pw" => "Piecewise",
+            "distance" | "dist" => "Distance",
+            "angle" => "Angle",
+            "tangent" => "Tangent",
+            "coincident" => "Coincident",
+            "horizontal" => "Horizontal",
+            "vertical" => "Vertical",
+            "equallength" | "equal_length" | "eqlength" => "EqualLength",
+            "symmetry" => "Symmetry",
+            "ellipsebyfoci" | "ellipse_by_foci" => "EllipseByFoci",
+            "parabolabyfocusdirectrix" | "parabola_by_focus_directrix" => {
+                "ParabolaByFocusDirectrix"
+            }
+            "hyperbolabyfoci" | "hyperbola_by_foci" => "HyperbolaByFoci",
+            "conicbyfivepoints" | "conic_by_five_points" => "ConicByFivePoints",
+            "polygonunion" | "polyunion" => "PolygonUnion",
+            "polygonintersection" | "polyintersection" => "PolygonIntersection",
+            "polygondifference" | "polydifference" => "PolygonDifference",
+            "polygonxor" | "polyxor" => "PolygonXor",
+            "segment" => "Segment",
+            "ray" => "Ray",
+            "vector" => "Vector",
+            "regularpolygon" | "regular_polygon" => "RegularPolygon",
             _ => {
                 if args.is_empty()
                     || command.contains(' ')

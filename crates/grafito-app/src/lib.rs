@@ -33,4 +33,5 @@ pub enum ViewMode {
 
 pub use app::run_app;
 pub(crate) use app::GrafitoApp;
+pub(crate) use app::PendingAction;
 pub(crate) use utils::to_color32;

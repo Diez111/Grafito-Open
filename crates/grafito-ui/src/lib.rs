@@ -369,6 +369,40 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
             tool_btn(ui, current_tool, Tool::RegularPolygon, "RegPoly", "");
             tool_btn(ui, current_tool, Tool::Tangent, "Tangent", "");
             tool_btn(ui, current_tool, Tool::Perpendicular, "Perpendicular", "");
+
+            ui.separator();
+
+            // Numeric constraints (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::Distance, "Dist", "");
+            tool_btn(ui, current_tool, Tool::Angle, "Angle", "");
+            tool_btn(ui, current_tool, Tool::Tangent, "Tangent", "");
+            tool_btn(ui, current_tool, Tool::Coincident, "Coincident", "");
+            tool_btn(ui, current_tool, Tool::Horizontal, "Horizontal", "");
+            tool_btn(ui, current_tool, Tool::Vertical, "Vertical", "");
+            tool_btn(ui, current_tool, Tool::EqualLength, "EqLength", "");
+            tool_btn(ui, current_tool, Tool::Symmetry, "Symmetry", "");
+
+            ui.separator();
+
+            // Conic constructions (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::EllipseByFoci, "Ellipse", "");
+            tool_btn(
+                ui,
+                current_tool,
+                Tool::ParabolaByFocusDirectrix,
+                "Parabola",
+                "",
+            );
+            tool_btn(ui, current_tool, Tool::HyperbolaByFoci, "Hyperbola", "");
+            tool_btn(ui, current_tool, Tool::ConicByFivePoints, "Conic5", "");
+
+            ui.separator();
+
+            // Polygon boolean operations (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::PolygonUnion, "Union", "");
+            tool_btn(ui, current_tool, Tool::PolygonIntersection, "Intersect", "");
+            tool_btn(ui, current_tool, Tool::PolygonDifference, "Diff", "");
+            tool_btn(ui, current_tool, Tool::PolygonXor, "Xor", "");
         }
     })
     .response
@@ -589,6 +623,124 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
                 painter.line_segment([points[i], points[i + 1]], stroke);
             }
         }
+        Tool::Coincident => {
+            painter.circle_filled(c - egui::vec2(3.0, 0.0), 3.0, text_color);
+            painter.circle_stroke(c + egui::vec2(3.0, 0.0), 3.0, stroke);
+        }
+        Tool::Horizontal => {
+            painter.line_segment(
+                [c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)],
+                stroke,
+            );
+        }
+        Tool::Vertical => {
+            painter.line_segment(
+                [c - egui::vec2(0.0, -10.0), c + egui::vec2(0.0, 10.0)],
+                stroke,
+            );
+        }
+        Tool::EqualLength => {
+            painter.line_segment(
+                [c - egui::vec2(8.0, -4.0), c + egui::vec2(8.0, -4.0)],
+                stroke,
+            );
+            painter.line_segment([c - egui::vec2(8.0, 4.0), c + egui::vec2(8.0, 4.0)], stroke);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "=",
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::Symmetry => {
+            painter.line_segment(
+                [c - egui::vec2(0.0, -10.0), c + egui::vec2(0.0, 10.0)],
+                stroke,
+            );
+            for dx in [-4.0f32, 4.0f32] {
+                painter.circle_filled(c + egui::vec2(dx, 0.0), 2.5, text_color);
+            }
+        }
+        Tool::EllipseByFoci => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "E",
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+            for dx in [-5.0f32, 5.0f32] {
+                painter.circle_filled(c + egui::vec2(dx, 0.0), 2.0, text_color);
+            }
+        }
+        Tool::ParabolaByFocusDirectrix => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "P",
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+            painter.line_segment([c - egui::vec2(8.0, 6.0), c + egui::vec2(8.0, 6.0)], stroke);
+        }
+        Tool::HyperbolaByFoci => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "H",
+                egui::FontId::new(16.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+            for dx in [-5.0f32, 5.0f32] {
+                painter.circle_filled(c + egui::vec2(dx, 0.0), 2.0, text_color);
+            }
+        }
+        Tool::ConicByFivePoints => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "C5",
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::PolygonUnion => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "∪",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::PolygonIntersection => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "∩",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::PolygonDifference => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "\\",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::PolygonXor => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "⊕",
+                egui::FontId::new(18.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
         Tool::DomainColoring => {
             painter.text(
                 c,
@@ -753,6 +905,22 @@ pub enum Tool {
     DomainColoring,
     HeatMap,
     ComplexGrid,
+    // Numeric constraints
+    Coincident,
+    Horizontal,
+    Vertical,
+    EqualLength,
+    Symmetry,
+    // Conic constructions
+    EllipseByFoci,
+    ParabolaByFocusDirectrix,
+    HyperbolaByFoci,
+    ConicByFivePoints,
+    // Polygon booleans
+    PolygonUnion,
+    PolygonIntersection,
+    PolygonDifference,
+    PolygonXor,
 }
 
 impl Tool {
@@ -787,7 +955,20 @@ impl Tool {
             | Tool::Image
             | Tool::DomainColoring
             | Tool::HeatMap
-            | Tool::ComplexGrid => egui::CursorIcon::Crosshair,
+            | Tool::ComplexGrid
+            | Tool::Coincident
+            | Tool::Horizontal
+            | Tool::Vertical
+            | Tool::EqualLength
+            | Tool::Symmetry
+            | Tool::EllipseByFoci
+            | Tool::ParabolaByFocusDirectrix
+            | Tool::HyperbolaByFoci
+            | Tool::ConicByFivePoints
+            | Tool::PolygonUnion
+            | Tool::PolygonIntersection
+            | Tool::PolygonDifference
+            | Tool::PolygonXor => egui::CursorIcon::Crosshair,
         }
     }
 }

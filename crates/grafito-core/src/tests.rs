@@ -1281,6 +1281,43 @@ mod tests {
     }
 
     #[test]
+    fn test_polygon_boolean_union_document() {
+        use geo::BooleanOps;
+        let mut doc = Document::new();
+        let square = PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+            Point2::new(2.0, 2.0),
+            Point2::new(0.0, 2.0),
+        ]);
+        let offset = PolygonObj::new(vec![
+            Point2::new(1.0, 1.0),
+            Point2::new(3.0, 1.0),
+            Point2::new(3.0, 3.0),
+            Point2::new(1.0, 3.0),
+        ]);
+        let geo_a = grafito_geometry::boolean::polygon_to_geo(&square.vertices);
+        let geo_b = grafito_geometry::boolean::polygon_to_geo(&offset.vertices);
+        doc.add_object(GeoObject::Polygon(square));
+        doc.add_object(GeoObject::Polygon(offset));
+        let union = geo_a.union(&geo_b);
+        let polys = grafito_geometry::boolean::multipolygon_to_polygons(&union);
+        assert_eq!(
+            polys.len(),
+            1,
+            "union of two overlapping squares is one polygon"
+        );
+        // Area of union = 4 + 4 - 1 = 7
+        let area: f64 = polys[0]
+            .windows(2)
+            .map(|w| w[0].x * w[1].y - w[1].x * w[0].y)
+            .sum::<f64>()
+            .abs()
+            * 0.5;
+        assert!((area - 7.0).abs() < 1e-9, "union area should be 7");
+    }
+
+    #[test]
     fn test_conic_by_five_points_rotated() {
         let mut doc = Document::new();
         // Five points on an ellipse with rx=2, ry=1 rotated by 45 deg around the origin.

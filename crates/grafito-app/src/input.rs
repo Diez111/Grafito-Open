@@ -3,7 +3,7 @@
 //! Covers 2D/3D drag, pan, zoom, selection, tool clicks, and the transient
 //! tool-ghost preview that follows the pointer.
 
-use crate::{commands, GrafitoApp};
+use crate::{commands, GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
@@ -34,6 +34,17 @@ fn snap_world_to_grid(world: Point2, scale: f64) -> Point2 {
 
 impl GrafitoApp {
     fn handle_canvas_primary_click(&mut self, world: Point2) {
+        if !matches!(self.pending_action, PendingAction::None) {
+            let tolerance = 10.0 / self.document.view().scale;
+            if let Some(id) = self.document.pick_object(world, tolerance) {
+                self.document.clear_selection();
+                self.document.select(id);
+                self.selected_object = Some(id);
+                self.handle_pending_object_click(id);
+            }
+            return;
+        }
+
         match self.current_tool {
             Tool::Select => {
                 let tolerance = 10.0 / self.document.view().scale;
@@ -184,6 +195,21 @@ impl GrafitoApp {
                 for obj in result.objects {
                     self.document.add_object(obj);
                 }
+            }
+            Tool::Coincident
+            | Tool::Horizontal
+            | Tool::Vertical
+            | Tool::EqualLength
+            | Tool::Symmetry
+            | Tool::EllipseByFoci
+            | Tool::ParabolaByFocusDirectrix
+            | Tool::HyperbolaByFoci
+            | Tool::ConicByFivePoints
+            | Tool::PolygonUnion
+            | Tool::PolygonIntersection
+            | Tool::PolygonDifference
+            | Tool::PolygonXor => {
+                // These tools are driven by the pending_action state machine in app.rs.
             }
         }
     }
@@ -377,6 +403,11 @@ impl GrafitoApp {
 
         // Right-click: close polygon / cancel pending point (only if not a pan)
         if response.clicked_by(PointerButton::Secondary) && is_click {
+            if !matches!(self.pending_action, PendingAction::None) {
+                self.clear_pending_action();
+                self.current_tool = Tool::Select;
+                return;
+            }
             if self.current_tool == Tool::Polygon && self.pending_points.len() >= 3 {
                 self.save_state();
                 let vertices = self.pending_points.clone();

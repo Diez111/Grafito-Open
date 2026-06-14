@@ -11,7 +11,8 @@ pub use commands::{parse_point_str, parse_preview, process_input};
 #[cfg(test)]
 mod tests {
     use super::process_input;
-    use grafito_core::{Document, GeoObject};
+    use grafito_core::{Document, GeoObject, LineObj, PointObj};
+    use grafito_geometry::Point2;
 
     #[test]
     fn creates_basic_function_from_expression() {
@@ -115,6 +116,92 @@ mod tests {
         assert!(
             doc.constraints.constraint_count() >= 1,
             "Should have at least one constraint"
+        );
+    }
+
+    #[test]
+    fn test_parse_distance_command() {
+        let mut doc = Document::new();
+        let a = doc.add_object(GeoObject::Point(
+            PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+        ));
+        let b = doc.add_object(GeoObject::Point(
+            PointObj::new(Point2::new(3.0, 4.0)).with_label("B"),
+        ));
+        let mut input = "Distance[A, B, 5]".to_string();
+        process_input(&mut doc, &mut input);
+
+        assert_eq!(doc.constraints.constraint_count(), 1);
+        let cons = doc.constraints.get_constraint(0).expect("constraint 0");
+        assert_eq!(cons.name, "Distance");
+        assert_eq!(cons.inputs, vec![a, b]);
+        assert_eq!(cons.params.get("distance"), Some(&5.0));
+    }
+
+    #[test]
+    fn test_parse_angle_command() {
+        let mut doc = Document::new();
+        let l1 = doc.add_object(GeoObject::Line(
+            LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0)).with_label("l1"),
+        ));
+        let l2 = doc.add_object(GeoObject::Line(
+            LineObj::new(Point2::new(0.0, 0.0), Point2::new(0.0, 1.0)).with_label("l2"),
+        ));
+        let mut input = "Angle[l1, l2, 90]".to_string();
+        process_input(&mut doc, &mut input);
+
+        assert_eq!(doc.constraints.constraint_count(), 1);
+        let cons = doc.constraints.get_constraint(0).expect("constraint 0");
+        assert_eq!(cons.name, "Angle");
+        assert_eq!(cons.inputs, vec![l1, l2]);
+        assert_eq!(cons.params.get("angle"), Some(&90.0));
+    }
+
+    #[test]
+    fn test_parse_boolean_command() {
+        let mut doc = Document::new();
+        process_input(&mut doc, &mut "RegularPolygon[(0,0), 4, 1]".to_string());
+        process_input(&mut doc, &mut "RegularPolygon[(0.5,0), 4, 1]".to_string());
+
+        let polygon_labels: Vec<String> = doc
+            .objects_iter()
+            .filter(|(_, obj)| matches!(obj, GeoObject::Polygon(_)))
+            .map(|(_, obj)| obj.label().to_string())
+            .collect();
+        assert_eq!(polygon_labels.len(), 2);
+
+        let mut cmd = format!("PolygonUnion[{}, {}]", polygon_labels[0], polygon_labels[1]);
+        process_input(&mut doc, &mut cmd);
+
+        assert!(
+            doc.objects_iter().any(|(_, obj)| obj.label() == "U"),
+            "union result polygon labeled 'U' should exist"
+        );
+    }
+
+    #[test]
+    fn test_parse_conic_command() {
+        let mut doc = Document::new();
+        let labels = ["A", "B", "C", "D", "E"];
+        for (i, label) in labels.iter().enumerate() {
+            let angle = i as f64 / 5.0 * std::f64::consts::TAU;
+            doc.add_object(GeoObject::Point(
+                PointObj::new(Point2::new(angle.cos(), angle.sin())).with_label(*label),
+            ));
+        }
+        let mut input = "ConicByFivePoints[A, B, C, D, E]".to_string();
+        process_input(&mut doc, &mut input);
+
+        assert_eq!(doc.constraints.constraint_count(), 1);
+        let cons = doc
+            .constraints
+            .get_constraint(0)
+            .expect("conic constraint should exist");
+        assert_eq!(cons.name, "ConicByFivePoints");
+        assert_eq!(cons.inputs.len(), 5);
+        assert!(
+            !cons.outputs.is_empty(),
+            "conic constraint should produce an output object"
         );
     }
 }
