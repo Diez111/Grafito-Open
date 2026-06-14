@@ -642,6 +642,78 @@ mod tests {
     }
 
     #[test]
+    fn test_function_samples_caching() {
+        let fun = FunctionObj::new("sin(x)");
+        let vars = std::collections::HashMap::new();
+        let domain = (0.0, std::f64::consts::TAU);
+        let grid_size = 100;
+
+        // First call computes and caches.
+        let samples1 = {
+            let guard = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
+            guard.clone()
+        };
+        assert!(!samples1.is_empty());
+
+        // Second call with identical parameters returns the cached value.
+        let samples2 = {
+            let guard = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
+            guard.clone()
+        };
+        assert_eq!(samples1, samples2);
+    }
+
+    #[test]
+    fn test_function_samples_pan_reuse() {
+        let fun = FunctionObj::new("sin(x)");
+        let vars = std::collections::HashMap::new();
+        // Use non-symmetric bounds so the padded/snapped region does not sit
+        // exactly on snap-cell boundaries; a tiny pan then reuses the cache.
+        let domain = (0.1, 6.1);
+        let grid_size = 100;
+
+        let samples1 = {
+            let guard = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
+            guard.clone()
+        };
+        let first_key = fun.cached_key.read().unwrap().clone();
+        assert!(!samples1.is_empty());
+
+        // A small pan stays inside the same snapped padded region.
+        let panned = (domain.0 + 0.05, domain.1 + 0.05);
+        let samples2 = {
+            let guard = function_sampling::samples_or_compute(&fun, panned, grid_size, &vars);
+            guard.clone()
+        };
+        let second_key = fun.cached_key.read().unwrap().clone();
+        assert!(!samples2.is_empty());
+        assert_eq!(first_key, second_key, "small pan should reuse cache");
+    }
+
+    #[test]
+    fn test_function_samples_far_domain_recompute() {
+        let fun = FunctionObj::new("sin(x)");
+        let vars = std::collections::HashMap::new();
+        let domain = (0.0, std::f64::consts::TAU);
+        let grid_size = 100;
+
+        drop(function_sampling::samples_or_compute(
+            &fun, domain, grid_size, &vars,
+        ));
+        let first_key = fun.cached_key.read().unwrap().clone();
+
+        // A far-away domain is outside the padded cached region, so it
+        // recomputes and updates the cached key.
+        let far = (10.0, 20.0);
+        drop(function_sampling::samples_or_compute(
+            &fun, far, grid_size, &vars,
+        ));
+        let second_key = fun.cached_key.read().unwrap().clone();
+
+        assert_ne!(first_key, second_key, "far domain should update cache key");
+    }
+
+    #[test]
     fn test_expression_fields_backward_compatible() {
         // Old JSON without x_expr/y_expr/radius_expr should deserialize to None.
         let mut doc = Document::new();

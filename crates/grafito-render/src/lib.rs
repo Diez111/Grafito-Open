@@ -8,9 +8,9 @@
 
 use grafito_core::{Document, GeoObject};
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
-use rayon::prelude::*;
 use wgpu::util::DeviceExt;
 
+pub mod function_compute;
 pub mod implicit_compute;
 
 #[cfg(test)]
@@ -78,6 +78,7 @@ pub struct Renderer {
     pub mvp_buffer: wgpu::Buffer,
     pub mvp_bind_group: wgpu::BindGroup,
     pub implicit_compute: Option<crate::implicit_compute::ImplicitComputePipeline>,
+    pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
@@ -223,6 +224,9 @@ impl Renderer {
         let implicit_compute = Some(crate::implicit_compute::ImplicitComputePipeline::new(
             device, 1024,
         ));
+        let function_compute = Some(crate::function_compute::FunctionComputePipeline::new(
+            device, 10000,
+        ));
 
         Self {
             pipeline,
@@ -231,6 +235,7 @@ impl Renderer {
             mvp_buffer,
             mvp_bind_group,
             implicit_compute,
+            function_compute,
         }
     }
 
@@ -691,39 +696,21 @@ impl Renderer {
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
                     let min_x = fun.domain_min.unwrap_or(world_tl.x);
                     let max_x = fun.domain_max.unwrap_or(world_br.x);
-                    let screen_width = view_transform.screen_size.x as f64;
-                    let steps = (screen_width * 2.0).clamp(1000.0, 10000.0) as usize;
-                    let step = (max_x - min_x) / steps as f64;
-                    let variables = &document.variables;
-
-                    let parsed_ast =
-                        grafito_geometry::expr::prepare_function_ast(&fun.expr, variables, &["x"])
-                            .ok();
-
-                    let samples: Vec<(f64, Option<f64>)> = (0..=steps)
-                        .into_par_iter()
-                        .map(|i| {
-                            let x = min_x + i as f64 * step;
-                            let y = if let Some(ast) = &parsed_ast {
-                                let res = ast.eval_at("x", x);
-                                if res.is_finite() && res.abs() < 1e6 {
-                                    Some(res)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                grafito_geometry::expr::eval_function_with_vars(
-                                    &fun.expr, x, variables,
-                                )
-                                .ok()
-                                .filter(|v| v.is_finite() && v.abs() < 1e6)
-                            };
-                            (x, y)
-                        })
-                        .collect();
+                    let domain = (min_x, max_x);
+                    let grid_size =
+                        grafito_core::function_sampling::recommended_grid_size_for_quality(
+                            view_transform.screen_size.x,
+                            document.render_quality,
+                        );
+                    let samples = grafito_core::function_sampling::samples_or_compute(
+                        fun,
+                        domain,
+                        grid_size,
+                        &document.variables,
+                    );
 
                     let mut prev_screen: Option<glam::Vec2> = None;
-                    for (x, y_opt) in &samples {
+                    for (x, y_opt) in samples.iter() {
                         if let Some(y) = y_opt {
                             let s = view_transform.world_to_screen(Point2::new(*x, *y));
                             if let Some(prev) = prev_screen {

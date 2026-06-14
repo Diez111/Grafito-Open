@@ -2,6 +2,7 @@
 
 pub mod constraints;
 pub mod document;
+pub mod function_sampling;
 pub mod id;
 pub mod implicit_curve;
 pub mod macros;

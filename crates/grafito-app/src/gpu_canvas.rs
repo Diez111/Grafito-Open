@@ -75,6 +75,34 @@ impl CallbackTrait for CanvasCallback {
                 }
             }
 
+            // Try to evaluate 1D functions on the GPU as well.
+            if let Some(compute) = renderer.function_compute.as_ref() {
+                let view = *self.document.view();
+                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                let world_br = view.screen_to_world(view.screen_size);
+                let grid_size = grafito_core::function_sampling::recommended_grid_size_for_quality(
+                    view.screen_size.x,
+                    self.document.render_quality,
+                );
+                for (_, obj) in self.document.objects_iter() {
+                    if let grafito_core::GeoObject::Function(fun) = obj {
+                        let domain = (
+                            fun.domain_min.unwrap_or(world_tl.x),
+                            fun.domain_max.unwrap_or(world_br.x),
+                        );
+                        let _ = grafito_render::function_compute::maybe_compute_function_on_gpu(
+                            compute,
+                            device,
+                            queue,
+                            fun,
+                            domain,
+                            grid_size,
+                            &self.document.variables,
+                        );
+                    }
+                }
+            }
+
             renderer.build_geometry(&self.document, self.dark_mode)
         };
 

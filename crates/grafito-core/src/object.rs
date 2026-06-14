@@ -564,7 +564,7 @@ impl PolygonObj {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FunctionObj {
     pub id: ObjectId,
     pub label: String,
@@ -579,6 +579,49 @@ pub struct FunctionObj {
     pub is_integral: bool,
     pub integral_var: String,
     pub integral_lower: f64,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<FunctionCacheKey>>,
+    #[serde(skip)]
+    pub cached_samples: RwLock<FunctionSamples>,
+}
+
+impl Clone for FunctionObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr: self.expr.clone(),
+            color: self.color,
+            visible: self.visible,
+            width: self.width,
+            domain_min: self.domain_min,
+            domain_max: self.domain_max,
+            fill_color: self.fill_color,
+            is_integral: self.is_integral,
+            integral_var: self.integral_var.clone(),
+            integral_lower: self.integral_lower,
+            // A clone starts with an empty cache; it will be recomputed on demand.
+            cached_key: RwLock::new(None),
+            cached_samples: RwLock::new(FunctionSamples::new()),
+        }
+    }
+}
+
+impl PartialEq for FunctionObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr == other.expr
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.width == other.width
+            && self.domain_min == other.domain_min
+            && self.domain_max == other.domain_max
+            && self.fill_color == other.fill_color
+            && self.is_integral == other.is_integral
+            && self.integral_var == other.integral_var
+            && self.integral_lower == other.integral_lower
+    }
 }
 
 impl FunctionObj {
@@ -596,6 +639,8 @@ impl FunctionObj {
             is_integral: false,
             integral_var: String::new(),
             integral_lower: 0.0,
+            cached_key: RwLock::new(None),
+            cached_samples: RwLock::new(FunctionSamples::new()),
         }
     }
 
@@ -614,6 +659,15 @@ impl FunctionObj {
         self.integral_var = var.to_string();
         self.integral_lower = lower;
         self
+    }
+
+    /// Invalidate any cached samples for this function.
+    pub fn invalidate_cache(&self) {
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        self.cached_samples
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 }
 
@@ -1311,6 +1365,17 @@ pub enum RelationOperator {
     Greater,
     LessEq,
     GreaterEq,
+}
+
+/// Cached (x, y) samples for a 1D function.
+pub type FunctionSamples = Vec<(f64, Option<f64>)>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionCacheKey {
+    pub expr: String,
+    pub domain: (f64, f64),
+    pub grid_size: usize,
+    pub variables_hash: u64,
 }
 
 /// World-space line segments grouped by contour level.

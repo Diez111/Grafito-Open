@@ -2,9 +2,7 @@ use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{CircleObj, GeoObject, LineObj, PointObj, PolygonObj, RenderQuality};
-use grafito_geometry::expr::{
-    eval_function_with_vars, eval_integral_batch, eval_parsed_batch, prepare_function_ast,
-};
+use grafito_geometry::expr::{eval_function_with_vars, eval_integral_batch, prepare_function_ast};
 use grafito_geometry::{Color, Point2};
 use grafito_ui::Tool;
 use std::time::Instant;
@@ -1152,89 +1150,71 @@ impl GrafitoApp {
                 let min_x = fun.domain_min.unwrap_or(world_tl.x);
                 let max_x = fun.domain_max.unwrap_or(world_br.x);
 
-                let screen_width = canvas_rect.width() as f64;
-                let world_width = max_x - min_x;
-
-                let mut steps = screen_width.clamp(400.0, 4000.0) as usize;
-                let max_world_step = 0.01;
-                let mut step = world_width / steps as f64;
-                if step > max_world_step {
-                    steps = (world_width / max_world_step).ceil() as usize;
-                }
-                steps = steps.min(500_000);
-                step = world_width / steps as f64;
-
                 let variables = &self.document.variables;
-                let xs = (0..=steps).map(|i| min_x + i as f64 * step);
+                let samples: Vec<(f64, Option<f64>)> = if fun.is_integral {
+                    let screen_width = canvas_rect.width() as f64;
+                    let world_width = max_x - min_x;
 
-                let prepared = if fun.is_integral {
-                    Err("integral function".to_string())
-                } else {
-                    prepare_function_ast(&fun.expr, variables, &["x"])
-                };
+                    let mut steps = screen_width.clamp(400.0, 4000.0) as usize;
+                    let max_world_step = 0.01;
+                    let mut step = world_width / steps as f64;
+                    if step > max_world_step {
+                        steps = (world_width / max_world_step).ceil() as usize;
+                    }
+                    steps = steps.min(500_000);
+                    step = world_width / steps as f64;
 
-                let mut samples: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
-                let batch_results = if fun.is_integral {
-                    eval_integral_batch(
+                    let xs = (0..=steps).map(|i| min_x + i as f64 * step);
+
+                    let mut s: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
+                    let batch_results = eval_integral_batch(
                         &fun.expr,
                         &fun.integral_var,
                         fun.integral_lower,
                         xs.clone(),
                         variables,
-                    )
-                } else {
-                    match &prepared {
-                        Ok(ast) => eval_parsed_batch(ast, "x", xs.clone()),
-                        Err(_) => grafito_geometry::expr::eval_batch_1d(
-                            &fun.expr,
-                            "x",
-                            xs.clone(),
-                            variables,
-                        )
-                        .unwrap_or_default(),
-                    }
-                };
+                    );
 
-                for (x, y_opt) in xs.zip(batch_results.into_iter().chain(std::iter::repeat(None))) {
-                    if let Some(y) = y_opt {
-                        if y.is_finite() && y.abs() < 1e50 {
-                            samples.push((x, Some(y)));
-                            continue;
+                    for (x, y_opt) in
+                        xs.zip(batch_results.into_iter().chain(std::iter::repeat(None)))
+                    {
+                        if let Some(y) = y_opt {
+                            if y.is_finite() && y.abs() < 1e50 {
+                                s.push((x, Some(y)));
+                                continue;
+                            }
                         }
-                    }
-                    if let Ok(ast) = &prepared {
-                        let eps = 1e-9;
-                        let y1 = ast.eval_at("x", x - eps);
-                        let y2 = ast.eval_at("x", x + eps);
-                        if y1.is_finite() && y2.is_finite() && (y1 - y2).abs() < 1.0 {
-                            samples.push((x, Some((y1 + y2) * 0.5)));
-                            continue;
-                        }
-                        let y = ast.eval_at("x", x);
-                        if y.is_finite() && y.abs() < 1e50 {
-                            samples.push((x, Some(y)));
-                            continue;
-                        }
-                    } else {
                         let eps = 1e-9;
                         if let (Ok(y1), Ok(y2)) = (
                             eval_function_with_vars(&fun.expr, x - eps, variables),
                             eval_function_with_vars(&fun.expr, x + eps, variables),
                         ) {
                             if y1.is_finite() && y2.is_finite() && (y1 - y2).abs() < 1.0 {
-                                samples.push((x, Some((y1 + y2) * 0.5)));
+                                s.push((x, Some((y1 + y2) * 0.5)));
                                 continue;
                             }
                         }
                         if let Ok(y) = eval_function_with_vars(&fun.expr, x, variables) {
                             if y.is_finite() && y.abs() < 1e50 {
-                                samples.push((x, Some(y)));
+                                s.push((x, Some(y)));
                                 continue;
                             }
                         }
+                        s.push((x, None));
                     }
-                    samples.push((x, None));
-                }
+                    s
+                } else {
+                    let domain = (min_x, max_x);
+                    let grid_size =
+                        grafito_core::function_sampling::recommended_grid_size_for_quality(
+                            canvas_rect.width(),
+                            self.document.render_quality,
+                        );
+                    grafito_core::function_sampling::samples_or_compute(
+                        fun, domain, grid_size, variables,
+                    )
+                    .clone()
+                };
 
                 let mut refined_samples = Vec::with_capacity(samples.len() + 100);
                 for i in 0..samples.len() {
@@ -1251,32 +1231,17 @@ impl GrafitoApp {
                                 y2_opt.unwrap_or(0.0)
                             };
 
-                            if let Ok(ast) = &prepared {
-                                for _ in 0..24 {
-                                    let mid = (good_x + bad_x) * 0.5;
-                                    let y = ast.eval_at("x", mid);
+                            for _ in 0..24 {
+                                let mid = (good_x + bad_x) * 0.5;
+                                if let Ok(y) = eval_function_with_vars(&fun.expr, mid, variables) {
                                     if y.is_finite() && y.abs() < 1e50 {
                                         good_x = mid;
                                         best_y = y;
                                     } else {
                                         bad_x = mid;
                                     }
-                                }
-                            } else {
-                                for _ in 0..24 {
-                                    let mid = (good_x + bad_x) * 0.5;
-                                    if let Ok(y) =
-                                        eval_function_with_vars(&fun.expr, mid, variables)
-                                    {
-                                        if y.is_finite() && y.abs() < 1e50 {
-                                            good_x = mid;
-                                            best_y = y;
-                                        } else {
-                                            bad_x = mid;
-                                        }
-                                    } else {
-                                        bad_x = mid;
-                                    }
+                                } else {
+                                    bad_x = mid;
                                 }
                             }
 

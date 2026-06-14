@@ -17,7 +17,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 #[allow(dead_code)]
-enum Op {
+pub(crate) enum Op {
     Nop = 0,
     PushConst = 1,
     PushVar = 2,
@@ -43,21 +43,21 @@ enum Op {
 }
 
 impl Op {
-    fn encode(self, operand: u32) -> u32 {
+    pub(crate) fn encode(self, operand: u32) -> u32 {
         (self as u32) | (operand << 8)
     }
 }
 
-/// Compiled GPU program for one implicit curve.
+/// Compiled GPU program for one expression.
 #[derive(Debug, Default)]
-struct BytecodeProgram {
-    code: Vec<u32>,
-    constants: Vec<f32>,
+pub(crate) struct BytecodeProgram {
+    pub(crate) code: Vec<u32>,
+    pub(crate) constants: Vec<f32>,
 }
 
 /// Reason why an expression cannot be compiled to GPU bytecode.
 #[derive(Debug)]
-pub enum CompileError {
+pub(crate) enum CompileError {
     UnsupportedNode(String),
     UnsupportedVariable(String),
     StackTooDeep,
@@ -79,7 +79,7 @@ impl std::error::Error for CompileError {}
 
 /// Compile an AST expression into RPN bytecode that the WGSL interpreter can
 /// execute. Document variables are baked in as constants.
-fn compile_expr(
+pub(crate) fn compile_expr(
     expr: &grafito_geometry::ast::Expr,
     document_vars: &HashMap<String, f64>,
     prog: &mut BytecodeProgram,
