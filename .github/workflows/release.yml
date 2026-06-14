@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: grafito
+            archive: grafito-linux-x64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: grafito.exe
+            archive: grafito-windows-x64.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: grafito
+            archive: grafito-macos-x64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: grafito
+            archive: grafito-macos-arm64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p grafito-app
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/ 2>/dev/null || true
+          cd dist
+          if [[ "${{ matrix.archive }}" == *.zip ]]; then
+            7z a ../${{ matrix.archive }} *
+          else
+            tar czf ../${{ matrix.archive }} *
+          fi
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

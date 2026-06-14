@@ -1,9 +1,19 @@
+[package]
+name = "grafito-release-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Workspace-level release smoke tests for Grafito"
+
 [workspace]
 members = ["crates/grafito-app", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-render", "crates/grafito-ui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0-alpha"
+version = "0.9.0"
 edition = "2021"
 authors = ["Grafito Contributors"]
 license = "GPL-3.0-or-later"
