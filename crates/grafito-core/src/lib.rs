@@ -12,7 +12,7 @@ pub mod parametric_sampling;
 pub mod spatial;
 pub mod validation;
 
-mod numeric_constraints;
+pub mod numeric_constraints;
 
 pub use constraints::*;
 pub use document::*;

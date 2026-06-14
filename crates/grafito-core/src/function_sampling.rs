@@ -123,6 +123,10 @@ fn evaluate_function_samples(
     }
     let dx = (max - min) / grid_size as f64;
     let parsed_ast = expr::prepare_function_ast(&fun.expr, variables, &["x"]).ok();
+    let compiled = parsed_ast
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&fun.expr, variables).ok())
+        .flatten();
 
     (0..=grid_size)
         .into_par_iter()
@@ -135,6 +139,10 @@ fn evaluate_function_samples(
                 } else {
                     None
                 }
+            } else if let Some(c) = &compiled {
+                c.eval_at("x", x)
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() < 1e6)
             } else {
                 expr::eval_function_with_vars(&fun.expr, x, variables)
                     .ok()

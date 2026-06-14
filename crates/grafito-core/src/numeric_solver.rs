@@ -2,8 +2,11 @@
 //!
 //! The solver is intentionally minimal: it targets the small, dense systems that
 //! arise from 2D geometric constraints (a handful of point coordinates and radii).
-//! The Jacobian is approximated with finite differences and the LM normal
-//! equations are solved with a simple dense Gaussian elimination.
+//! The Jacobian can be supplied analytically by constraint implementations or
+//! approximated with finite differences. The LM normal equations are solved with
+//! a simple dense Gaussian elimination.
+
+use rayon::prelude::*;
 
 /// Index of a scalar variable in the solver vector.
 pub type VarIndex = usize;
@@ -16,6 +19,19 @@ pub trait ConstraintEquation: Send + Sync {
 
     /// Evaluate residuals given the current variable vector.
     fn residual(&self, vars: &[f64]) -> Vec<f64>;
+
+    /// Optional analytic Jacobian.
+    ///
+    /// Returns a list of `(row, col, value)` triples where `row` is the local
+    /// row index inside this equation's residual block (`0..dimension()`),
+    /// `col` is the global variable index, and `value` is the partial
+    /// derivative `dr[row] / dvars[col]`.
+    ///
+    /// An empty return value means the solver will fall back to finite
+    /// differences for this equation.
+    fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        Vec::new()
+    }
 }
 
 /// Statistics returned by a successful solve.
@@ -56,6 +72,14 @@ impl Default for NumericSolver {
     }
 }
 
+/// Cached Jacobian sparsity pattern derived from analytic Jacobians.
+struct JacobianPattern {
+    /// For each global column, the list of global rows that depend on it.
+    col_to_rows: Vec<Vec<usize>>,
+    /// Whether the pattern is fully described by analytic Jacobians.
+    has_analytic: bool,
+}
+
 impl NumericSolver {
     /// Solve `equations(vars) ≈ 0` using the Levenberg-Marquardt algorithm.
     ///
@@ -73,6 +97,8 @@ impl NumericSolver {
         }
 
         let n = vars.len();
+        let pattern = Self::build_jacobian_pattern(equations, m, n);
+
         let mut lambda = self.lambda;
         let mut r = compute_residual(vars, equations, m);
         let mut residual_norm = norm(&r);
@@ -85,7 +111,7 @@ impl NumericSolver {
                 });
             }
 
-            let j = finite_difference_jacobian(vars, equations, &r, m, n);
+            let j = Self::compute_jacobian(vars, equations, &r, m, n, &pattern);
 
             // Build the normal equations: (J^T J + lambda*I) delta = -J^T r
             let mut jtj = vec![vec![0.0; n]; n];
@@ -148,36 +174,157 @@ impl NumericSolver {
             final_residual: residual_norm,
         })
     }
-}
 
-fn compute_residual(vars: &[f64], equations: &[Box<dyn ConstraintEquation>], m: usize) -> Vec<f64> {
-    let mut r = Vec::with_capacity(m);
-    for eq in equations {
-        r.extend(eq.residual(vars));
-    }
-    r
-}
+    fn build_jacobian_pattern(
+        equations: &[Box<dyn ConstraintEquation>],
+        m: usize,
+        n: usize,
+    ) -> JacobianPattern {
+        let mut col_to_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut row_offset = 0usize;
+        let mut has_analytic = true;
 
-fn finite_difference_jacobian(
-    vars: &[f64],
-    equations: &[Box<dyn ConstraintEquation>],
-    r0: &[f64],
-    m: usize,
-    n: usize,
-) -> Vec<Vec<f64>> {
-    let mut j = vec![vec![0.0; n]; m];
+        for eq in equations {
+            let dim = eq.dimension();
+            let triples = eq.jacobian(&[]);
+            if triples.is_empty() {
+                has_analytic = false;
+            } else {
+                for (local_row, col, _) in triples {
+                    let global_row = row_offset + local_row;
+                    if col < n && global_row < m {
+                        let rows = &mut col_to_rows[col];
+                        if rows.last() != Some(&global_row) {
+                            rows.push(global_row);
+                        }
+                    }
+                }
+            }
+            row_offset += dim;
+        }
 
-    for i in 0..n {
-        let h = 1e-8 * vars[i].abs().max(1.0);
-        let mut vars_plus = vars.to_vec();
-        vars_plus[i] += h;
-        let r_plus = compute_residual(&vars_plus, equations, m);
-        for k in 0..m {
-            j[k][i] = (r_plus[k] - r0[k]) / h;
+        // Sort and deduplicate row lists for stable access.
+        for rows in &mut col_to_rows {
+            rows.sort_unstable();
+            rows.dedup();
+        }
+
+        JacobianPattern {
+            col_to_rows,
+            has_analytic,
         }
     }
 
-    j
+    fn compute_jacobian(
+        vars: &[f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        r0: &[f64],
+        m: usize,
+        n: usize,
+        pattern: &JacobianPattern,
+    ) -> Vec<Vec<f64>> {
+        if pattern.has_analytic {
+            Self::analytic_jacobian(vars, equations, r0, m, n, pattern)
+        } else {
+            Self::finite_difference_jacobian(vars, equations, r0, m, n)
+        }
+    }
+
+    fn analytic_jacobian(
+        vars: &[f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        r0: &[f64],
+        m: usize,
+        n: usize,
+        pattern: &JacobianPattern,
+    ) -> Vec<Vec<f64>> {
+        // Evaluate analytic Jacobians in parallel per equation, then merge.
+        let row_offsets: Vec<usize> = equations
+            .iter()
+            .scan(0usize, |offset, eq| {
+                let start = *offset;
+                *offset += eq.dimension();
+                Some(start)
+            })
+            .collect();
+
+        let per_eq_jacobians: Vec<Vec<(usize, usize, f64)>> =
+            equations.par_iter().map(|eq| eq.jacobian(vars)).collect();
+
+        let mut j = vec![vec![0.0; n]; m];
+        for (offset, triples) in row_offsets.iter().zip(per_eq_jacobians.iter()) {
+            for &(local_row, col, value) in triples {
+                let global_row = offset + local_row;
+                if global_row < m && col < n {
+                    j[global_row][col] = value;
+                }
+            }
+        }
+
+        // For any column not covered by the analytic pattern, fall back to
+        // finite differences on the affected rows only. This keeps the sparse
+        // speedup while guaranteeing correctness if an equation omitted some
+        // non-zero entries.
+        for col in 0..n {
+            if pattern.col_to_rows[col].is_empty() {
+                let h = 1e-8 * vars[col].abs().max(1.0);
+                let mut vars_plus = vars.to_vec();
+                vars_plus[col] += h;
+                let r_plus = compute_residual(&vars_plus, equations, m);
+                for row in 0..m {
+                    j[row][col] = (r_plus[row] - compute_residual_row(r0, row)) / h;
+                }
+            }
+        }
+
+        j
+    }
+
+    fn finite_difference_jacobian(
+        vars: &[f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        r0: &[f64],
+        m: usize,
+        n: usize,
+    ) -> Vec<Vec<f64>> {
+        let mut j = vec![vec![0.0; n]; m];
+
+        // Parallelise over columns: each perturbed evaluation is independent.
+        let cols: Vec<usize> = (0..n).collect();
+        let col_results: Vec<(usize, Vec<f64>)> = cols
+            .par_iter()
+            .map(|&i| {
+                let h = 1e-8 * vars[i].abs().max(1.0);
+                let mut vars_plus = vars.to_vec();
+                vars_plus[i] += h;
+                let r_plus = compute_residual(&vars_plus, equations, m);
+                let col: Vec<f64> = (0..m).map(|k| (r_plus[k] - r0[k]) / h).collect();
+                (i, col)
+            })
+            .collect();
+
+        for (i, col) in col_results {
+            for k in 0..m {
+                j[k][i] = col[k];
+            }
+        }
+
+        j
+    }
+}
+
+#[inline]
+fn compute_residual_row(r0: &[f64], row: usize) -> f64 {
+    r0.get(row).copied().unwrap_or(0.0)
+}
+
+fn compute_residual(vars: &[f64], equations: &[Box<dyn ConstraintEquation>], m: usize) -> Vec<f64> {
+    let per_eq: Vec<Vec<f64>> = equations.par_iter().map(|eq| eq.residual(vars)).collect();
+    let mut r = Vec::with_capacity(m);
+    for eq_r in per_eq {
+        r.extend(eq_r);
+    }
+    r
 }
 
 #[allow(clippy::needless_range_loop)]

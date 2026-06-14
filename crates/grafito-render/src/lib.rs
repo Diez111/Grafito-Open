@@ -258,8 +258,9 @@ impl Renderer {
         view: &ViewTransform,
         dark_mode: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let obj_count = document.object_count().max(1);
+        let mut vertices = Vec::with_capacity(obj_count * 256);
+        let mut indices = Vec::with_capacity(obj_count * 384);
 
         Self::build_grid_static(&mut vertices, &mut indices, view, dark_mode);
         Self::build_axes_static(&mut vertices, &mut indices, view, dark_mode);
@@ -322,18 +323,12 @@ impl Renderer {
                     }
                 }
                 GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                    let screen_verts: Vec<_> = poly
-                        .vertices
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let x =
-                                document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
-                            let y =
-                                document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
-                            view.world_to_screen(Point2::new(x, y))
-                        })
-                        .collect();
+                    let mut screen_verts = Vec::with_capacity(poly.vertices.len());
+                    for (i, v) in poly.vertices.iter().enumerate() {
+                        let x = document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        screen_verts.push(view.world_to_screen(Point2::new(x, y)));
+                    }
                     if let Some(fill) = poly.fill_color {
                         Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
                     }
@@ -419,8 +414,9 @@ impl Renderer {
         screen_w: f32,
         screen_h: f32,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let obj_count = document.object_count().max(1);
+        let mut vertices = Vec::with_capacity(obj_count * 256);
+        let mut indices = Vec::with_capacity(obj_count * 384);
 
         Self::build_3d_grid_static(
             &mut vertices,
@@ -648,8 +644,9 @@ impl Renderer {
     }
 
     pub fn build_geometry(&self, document: &Document, dark_mode: bool) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let obj_count = document.object_count().max(1);
+        let mut vertices = Vec::with_capacity(obj_count * 256);
+        let mut indices = Vec::with_capacity(obj_count * 384);
 
         let view_transform = *document.view();
 
@@ -720,18 +717,12 @@ impl Renderer {
                     }
                 }
                 GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                    let screen_verts: Vec<_> = poly
-                        .vertices
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| {
-                            let x =
-                                document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
-                            let y =
-                                document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
-                            view_transform.world_to_screen(Point2::new(x, y))
-                        })
-                        .collect();
+                    let mut screen_verts = Vec::with_capacity(poly.vertices.len());
+                    for (i, v) in poly.vertices.iter().enumerate() {
+                        let x = document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        screen_verts.push(view_transform.world_to_screen(Point2::new(x, y)));
+                    }
                     if let Some(fill) = poly.fill_color {
                         Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
                     }
@@ -1610,6 +1601,8 @@ impl Renderer {
         let hw = w * 0.5;
         let hh = h * 0.5;
         let base = vertices.len() as u32;
+        vertices.reserve(4);
+        indices.reserve(6);
         vertices.push(Vertex::new(center.x - hw, center.y - hh, color));
         vertices.push(Vertex::new(center.x + hw, center.y - hh, color));
         vertices.push(Vertex::new(center.x + hw, center.y + hh, color));
@@ -1633,6 +1626,8 @@ impl Renderer {
         let perp = glam::Vec2::new(-dir.y, dir.x) * (width * 0.5).max(0.5);
 
         let base = vertices.len() as u32;
+        vertices.reserve(4);
+        indices.reserve(6);
         vertices.push(Vertex::new(a.x + perp.x, a.y + perp.y, color));
         vertices.push(Vertex::new(b.x + perp.x, b.y + perp.y, color));
         vertices.push(Vertex::new(b.x - perp.x, b.y - perp.y, color));
@@ -1946,6 +1941,8 @@ impl Renderer {
         let inner_r = (radius - width * 0.5).max(0.0);
         let outer_r = radius + width * 0.5;
         let base = vertices.len() as u32;
+        vertices.reserve((segments + 1) * 2);
+        indices.reserve(segments * 6);
 
         for i in 0..=segments {
             let theta = (i as f32 / segments as f32) * std::f32::consts::TAU;
@@ -1981,6 +1978,8 @@ impl Renderer {
     ) {
         let segments = ((radius * 0.5).max(16.0).min(128.0)) as usize;
         let center_idx = vertices.len() as u32;
+        vertices.reserve(segments + 2);
+        indices.reserve(segments * 3);
         vertices.push(Vertex::new(center.x, center.y, color));
 
         for i in 0..=segments {
@@ -2012,6 +2011,8 @@ impl Renderer {
         }
         // Simple fan triangulation (assumes convex or near-convex)
         let base = vertices.len() as u32;
+        vertices.reserve(pts.len());
+        indices.reserve((pts.len() - 1) * 3);
         for p in pts {
             vertices.push(Vertex::new(p.x, p.y, color));
         }
@@ -2030,6 +2031,8 @@ impl Renderer {
         if pts.len() < 2 {
             return;
         }
+        vertices.reserve(pts.len() * 4);
+        indices.reserve(pts.len() * 6);
         for i in 0..pts.len() {
             let a = pts[i];
             let b = pts[(i + 1) % pts.len()];
@@ -2045,8 +2048,9 @@ impl Renderer {
         screen_w: f32,
         screen_h: f32,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        let obj_count = document.object_count().max(1);
+        let mut vertices = Vec::with_capacity(obj_count * 256);
+        let mut indices = Vec::with_capacity(obj_count * 384);
 
         self.build_3d_grid(
             &mut vertices,

@@ -68,6 +68,14 @@ pub fn evaluate_parametric_curve_2d(
 
     let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &["t"]).ok();
     let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &["t"]).ok();
+    let compiled_x = ast_x
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pc.expr_x, variables).ok())
+        .flatten();
+    let compiled_y = ast_y
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pc.expr_y, variables).ok())
+        .flatten();
 
     (0..=steps)
         .into_par_iter()
@@ -76,21 +84,21 @@ pub fn evaluate_parametric_curve_2d(
             let x = ast_x
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pc.expr_x, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_x
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             let y = ast_y
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pc.expr_y, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_y
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             (x, y)
         })
         .collect()
@@ -113,6 +121,18 @@ pub fn evaluate_parametric_curve_3d(
     let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &["t"]).ok();
     let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &["t"]).ok();
     let ast_z = expr::prepare_function_ast(&pc.expr_z, variables, &["t"]).ok();
+    let compiled_x = ast_x
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pc.expr_x, variables).ok())
+        .flatten();
+    let compiled_y = ast_y
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pc.expr_y, variables).ok())
+        .flatten();
+    let compiled_z = ast_z
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pc.expr_z, variables).ok())
+        .flatten();
 
     (0..=steps)
         .into_par_iter()
@@ -121,30 +141,30 @@ pub fn evaluate_parametric_curve_3d(
             let x = ast_x
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pc.expr_x, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_x
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             let y = ast_y
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pc.expr_y, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_y
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             let z = ast_z
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pc.expr_z, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_z
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             (x, y, z)
         })
         .collect()
@@ -165,6 +185,10 @@ pub fn evaluate_polar_curve(
     let dt = (t_max - t_min) / steps as f64;
 
     let ast_r = expr::prepare_function_ast(&pol.expr_r, variables, &["t"]).ok();
+    let compiled_r = ast_r
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&pol.expr_r, variables).ok())
+        .flatten();
 
     (0..=steps)
         .into_par_iter()
@@ -173,12 +197,12 @@ pub fn evaluate_polar_curve(
             let r = ast_r
                 .as_ref()
                 .map(|ast| finite_clamp(ast.eval_at("t", t)))
-                .unwrap_or_else(|| {
-                    expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
-                        .ok()
-                        .map(finite_clamp)
-                        .unwrap_or(f64::NAN)
-                });
+                .or_else(|| {
+                    compiled_r
+                        .as_ref()
+                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                })
+                .unwrap_or(f64::NAN);
             if r.is_finite() {
                 (r * t.cos(), r * t.sin())
             } else {
@@ -212,6 +236,10 @@ pub fn evaluate_surface_3d(
     let dy = (y_max - y_min) / res as f64;
 
     let ast = expr::prepare_function_ast(&surf.expr, variables, &["x", "y"]).ok();
+    let compiled = ast
+        .is_none()
+        .then(|| expr::CompiledExpr::new(&surf.expr, variables).ok())
+        .flatten();
 
     (0..=res)
         .into_par_iter()
@@ -222,15 +250,14 @@ pub fn evaluate_surface_3d(
                     let y = y_min + j as f64 * dy;
                     ast.as_ref()
                         .map(|a| finite_clamp(a.eval_2d("x", x, "y", y)))
-                        .unwrap_or_else(|| {
-                            expr::evaluate(
-                                &surf.expr,
-                                &[("x".to_string(), x), ("y".to_string(), y)],
-                            )
-                            .ok()
-                            .map(finite_clamp)
-                            .unwrap_or(f64::NAN)
+                        .or_else(|| {
+                            compiled.as_ref().and_then(|c| {
+                                c.eval(&[("x".to_string(), x), ("y".to_string(), y)])
+                                    .ok()
+                                    .map(finite_clamp)
+                            })
                         })
+                        .unwrap_or(f64::NAN)
                 })
                 .collect()
         })

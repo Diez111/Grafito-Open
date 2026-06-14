@@ -22,6 +22,14 @@ pub struct DistanceEq {
 }
 
 impl DistanceEq {
+    pub fn new(a_idx: VarIndex, b_idx: VarIndex, target: f64) -> Self {
+        Self {
+            a_idx,
+            b_idx,
+            target,
+        }
+    }
+
     pub fn from_inputs(
         _doc: &crate::Document,
         a: ObjectId,
@@ -31,11 +39,7 @@ impl DistanceEq {
     ) -> Option<Self> {
         let a_idx = *var_index.get(&(a, ObjField::PointX))?;
         let _ = *var_index.get(&(b, ObjField::PointX))?;
-        Some(Self {
-            a_idx,
-            b_idx: var_index[&(b, ObjField::PointX)],
-            target,
-        })
+        Some(Self::new(a_idx, var_index[&(b, ObjField::PointX)], target))
     }
 }
 
@@ -54,6 +58,34 @@ impl ConstraintEquation for DistanceEq {
         let d = (dx * dx + dy * dy).sqrt();
         vec![d - self.target]
     }
+
+    fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        if vars.is_empty() {
+            return vec![
+                (0, self.a_idx, 1.0),
+                (0, self.a_idx + 1, 1.0),
+                (0, self.b_idx, 1.0),
+                (0, self.b_idx + 1, 1.0),
+            ];
+        }
+        let ax = vars[self.a_idx];
+        let ay = vars[self.a_idx + 1];
+        let bx = vars[self.b_idx];
+        let by = vars[self.b_idx + 1];
+        let dx = ax - bx;
+        let dy = ay - by;
+        let d = (dx * dx + dy * dy).sqrt();
+        if d < 1e-12 {
+            return Vec::new();
+        }
+        let inv = 1.0 / d;
+        vec![
+            (0, self.a_idx, dx * inv),
+            (0, self.a_idx + 1, dy * inv),
+            (0, self.b_idx, -dx * inv),
+            (0, self.b_idx + 1, -dy * inv),
+        ]
+    }
 }
 
 /// Angle constraint between two lines.
@@ -70,6 +102,22 @@ pub struct AngleEq {
 }
 
 impl AngleEq {
+    pub fn new(
+        line1_start: VarIndex,
+        line1_end: VarIndex,
+        line2_start: VarIndex,
+        line2_end: VarIndex,
+        target_deg: f64,
+    ) -> Self {
+        Self {
+            line1_start,
+            line1_end,
+            line2_start,
+            line2_end,
+            target_rad: target_deg.to_radians(),
+        }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         inputs: &[ObjectId],
@@ -88,13 +136,13 @@ impl AngleEq {
         let line1_end = *var_index.get(&(line1.id, ObjField::LineEndX))?;
         let line2_start = *var_index.get(&(line2.id, ObjField::LineStartX))?;
         let line2_end = *var_index.get(&(line2.id, ObjField::LineEndX))?;
-        Some(Self {
+        Some(Self::new(
             line1_start,
             line1_end,
             line2_start,
             line2_end,
-            target_rad: target_deg.to_radians(),
-        })
+            target_deg,
+        ))
     }
 }
 
@@ -122,6 +170,88 @@ impl ConstraintEquation for AngleEq {
         }
         vec![residual]
     }
+
+    fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        if vars.is_empty() {
+            return vec![
+                (0, self.line1_start, 1.0),
+                (0, self.line1_start + 1, 1.0),
+                (0, self.line1_end, 1.0),
+                (0, self.line1_end + 1, 1.0),
+                (0, self.line2_start, 1.0),
+                (0, self.line2_start + 1, 1.0),
+                (0, self.line2_end, 1.0),
+                (0, self.line2_end + 1, 1.0),
+            ];
+        }
+        let s1 = Point2::new(vars[self.line1_start], vars[self.line1_start + 1]);
+        let e1 = Point2::new(vars[self.line1_end], vars[self.line1_end + 1]);
+        let s2 = Point2::new(vars[self.line2_start], vars[self.line2_start + 1]);
+        let e2 = Point2::new(vars[self.line2_end], vars[self.line2_end + 1]);
+
+        let (u, l1) = normalized_direction_with_length(s1, e1);
+        let (v, l2) = normalized_direction_with_length(s2, e2);
+        if l1 < 1e-12 || l2 < 1e-12 {
+            return Vec::new();
+        }
+
+        let cross = u.x * v.y - u.y * v.x;
+        let dot = u.x * v.x + u.y * v.y;
+
+        // Gradient of theta = atan2(cross, dot) with respect to the unit vectors.
+        // Since cross^2 + dot^2 == 1 for unit vectors, the denominator is 1.
+        let dtheta_du_x = dot * v.y - cross * v.x;
+        let dtheta_du_y = -dot * v.x - cross * v.y;
+        let dtheta_dv_x = -dot * u.y - cross * u.x;
+        let dtheta_dv_y = dot * u.x - cross * u.y;
+
+        let dx1 = e1.x - s1.x;
+        let dy1 = e1.y - s1.y;
+        let il1_3 = 1.0 / (l1 * l1 * l1);
+
+        let du_x_dx1 = -dy1 * dy1 * il1_3;
+        let du_x_dy1 = dx1 * dy1 * il1_3;
+        let du_x_dx2 = dy1 * dy1 * il1_3;
+        let du_x_dy2 = -dx1 * dy1 * il1_3;
+        let du_y_dx1 = dx1 * dy1 * il1_3;
+        let du_y_dy1 = -dx1 * dx1 * il1_3;
+        let du_y_dx2 = -dx1 * dy1 * il1_3;
+        let du_y_dy2 = dx1 * dx1 * il1_3;
+
+        let dx2 = e2.x - s2.x;
+        let dy2 = e2.y - s2.y;
+        let il2_3 = 1.0 / (l2 * l2 * l2);
+
+        let dv_x_dx3 = -dy2 * dy2 * il2_3;
+        let dv_x_dy3 = dx2 * dy2 * il2_3;
+        let dv_x_dx4 = dy2 * dy2 * il2_3;
+        let dv_x_dy4 = -dx2 * dy2 * il2_3;
+        let dv_y_dx3 = dx2 * dy2 * il2_3;
+        let dv_y_dy3 = -dx2 * dx2 * il2_3;
+        let dv_y_dx4 = -dx2 * dy2 * il2_3;
+        let dv_y_dy4 = dx2 * dx2 * il2_3;
+
+        // Chain rule: dtheta/dp = dtheta/du * du/dp + dtheta/dv * dv/dp.
+        let ds1x = dtheta_du_x * du_x_dx1 + dtheta_du_y * du_y_dx1;
+        let ds1y = dtheta_du_x * du_x_dy1 + dtheta_du_y * du_y_dy1;
+        let de1x = dtheta_du_x * du_x_dx2 + dtheta_du_y * du_y_dx2;
+        let de1y = dtheta_du_x * du_x_dy2 + dtheta_du_y * du_y_dy2;
+        let ds2x = dtheta_dv_x * dv_x_dx3 + dtheta_dv_y * dv_y_dx3;
+        let ds2y = dtheta_dv_x * dv_x_dy3 + dtheta_dv_y * dv_y_dy3;
+        let de2x = dtheta_dv_x * dv_x_dx4 + dtheta_dv_y * dv_y_dx4;
+        let de2y = dtheta_dv_x * dv_x_dy4 + dtheta_dv_y * dv_y_dy4;
+
+        vec![
+            (0, self.line1_start, ds1x),
+            (0, self.line1_start + 1, ds1y),
+            (0, self.line1_end, de1x),
+            (0, self.line1_end + 1, de1y),
+            (0, self.line2_start, ds2x),
+            (0, self.line2_start + 1, ds2y),
+            (0, self.line2_end, de2x),
+            (0, self.line2_end + 1, de2y),
+        ]
+    }
 }
 
 /// Tangent constraint between a circle and a line.
@@ -135,6 +265,20 @@ pub struct TangentEq {
 }
 
 impl TangentEq {
+    pub fn new(
+        radius_idx: VarIndex,
+        center: Point2,
+        line_start: VarIndex,
+        line_end: VarIndex,
+    ) -> Self {
+        Self {
+            radius_idx,
+            center,
+            line_start,
+            line_end,
+        }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         a: ObjectId,
@@ -149,12 +293,7 @@ impl TangentEq {
         let radius_idx = *var_index.get(&(circle.id, ObjField::CircleRadius))?;
         let line_start = *var_index.get(&(line.id, ObjField::LineStartX))?;
         let line_end = *var_index.get(&(line.id, ObjField::LineEndX))?;
-        Some(Self {
-            radius_idx,
-            center: circle.center,
-            line_start,
-            line_end,
-        })
+        Some(Self::new(radius_idx, circle.center, line_start, line_end))
     }
 }
 
@@ -170,16 +309,71 @@ impl ConstraintEquation for TangentEq {
         let dist = point_to_line_distance(self.center, start, end);
         vec![dist - r]
     }
+
+    fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        if vars.is_empty() {
+            return vec![
+                (0, self.radius_idx, 1.0),
+                (0, self.line_start, 1.0),
+                (0, self.line_start + 1, 1.0),
+                (0, self.line_end, 1.0),
+                (0, self.line_end + 1, 1.0),
+            ];
+        }
+        let _r = vars[self.radius_idx];
+        let start = Point2::new(vars[self.line_start], vars[self.line_start + 1]);
+        let end = Point2::new(vars[self.line_end], vars[self.line_end + 1]);
+
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        let len2 = dx * dx + dy * dy;
+        let len = len2.sqrt();
+        if len < 1e-12 {
+            return Vec::new();
+        }
+
+        let n = dx * (start.y - self.center.y) - dy * (start.x - self.center.x);
+        let signed = n / len;
+        let sign = if signed >= 0.0 { 1.0 } else { -1.0 };
+        let inv_len3 = 1.0 / (len2 * len);
+
+        // d(signed)/dstart_x
+        let dsx = ((-end.y + self.center.y) * len2 + n * dx) * inv_len3;
+        // d(signed)/dstart_y
+        let dsy = ((end.x - self.center.x) * len2 + n * dy) * inv_len3;
+        // d(signed)/dend_x
+        let dex = ((start.y - self.center.y) * len2 - n * dx) * inv_len3;
+        // d(signed)/dend_y
+        let dey = ((self.center.x - start.x) * len2 - n * dy) * inv_len3;
+
+        let mut triples = Vec::with_capacity(5);
+        if self.radius_idx < vars.len() {
+            triples.push((0, self.radius_idx, -1.0));
+        }
+        if self.line_start + 1 < vars.len() {
+            triples.push((0, self.line_start, sign * dsx));
+            triples.push((0, self.line_start + 1, sign * dsy));
+        }
+        if self.line_end + 1 < vars.len() {
+            triples.push((0, self.line_end, sign * dex));
+            triples.push((0, self.line_end + 1, sign * dey));
+        }
+        triples
+    }
 }
 
 /// Either a solver variable index or a constant fallback value.
 #[derive(Clone, Copy)]
-struct VarOrConst {
+pub struct VarOrConst {
     idx: Option<VarIndex>,
     value: f64,
 }
 
 impl VarOrConst {
+    pub fn new(idx: Option<VarIndex>, value: f64) -> Self {
+        Self { idx, value }
+    }
+
     fn get(&self, vars: &[f64]) -> f64 {
         self.idx.map_or(self.value, |i| vars[i])
     }
@@ -227,6 +421,10 @@ pub struct CoincidentEq {
 }
 
 impl CoincidentEq {
+    pub fn new(ax: VarOrConst, ay: VarOrConst, bx: VarOrConst, by: VarOrConst) -> Self {
+        Self { ax, ay, bx, by }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         a: ObjectId,
@@ -234,12 +432,12 @@ impl CoincidentEq {
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
         match (doc.get_object(a)?, doc.get_object(b)?) {
-            (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self {
-                ax: field_or_const(doc, a, ObjField::PointX, var_index),
-                ay: field_or_const(doc, a, ObjField::PointY, var_index),
-                bx: field_or_const(doc, b, ObjField::PointX, var_index),
-                by: field_or_const(doc, b, ObjField::PointY, var_index),
-            }),
+            (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self::new(
+                field_or_const(doc, a, ObjField::PointX, var_index),
+                field_or_const(doc, a, ObjField::PointY, var_index),
+                field_or_const(doc, b, ObjField::PointX, var_index),
+                field_or_const(doc, b, ObjField::PointY, var_index),
+            )),
             _ => None,
         }
     }
@@ -257,6 +455,23 @@ impl ConstraintEquation for CoincidentEq {
         let by = self.by.get(vars);
         vec![ax - bx, ay - by]
     }
+
+    fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        let mut triples = Vec::with_capacity(8);
+        if let Some(idx) = self.ax.idx {
+            triples.push((0, idx, 1.0));
+        }
+        if let Some(idx) = self.ay.idx {
+            triples.push((1, idx, 1.0));
+        }
+        if let Some(idx) = self.bx.idx {
+            triples.push((0, idx, -1.0));
+        }
+        if let Some(idx) = self.by.idx {
+            triples.push((1, idx, -1.0));
+        }
+        triples
+    }
 }
 
 /// Horizontal line constraint.
@@ -268,6 +483,10 @@ pub struct HorizontalEq {
 }
 
 impl HorizontalEq {
+    pub fn new(sy: VarOrConst, ey: VarOrConst) -> Self {
+        Self { sy, ey }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         line: ObjectId,
@@ -276,10 +495,10 @@ impl HorizontalEq {
         if !matches!(doc.get_object(line)?, GeoObject::Line(_)) {
             return None;
         }
-        Some(Self {
-            sy: field_or_const(doc, line, ObjField::LineStartY, var_index),
-            ey: field_or_const(doc, line, ObjField::LineEndY, var_index),
-        })
+        Some(Self::new(
+            field_or_const(doc, line, ObjField::LineStartY, var_index),
+            field_or_const(doc, line, ObjField::LineEndY, var_index),
+        ))
     }
 }
 
@@ -290,6 +509,17 @@ impl ConstraintEquation for HorizontalEq {
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         vec![self.sy.get(vars) - self.ey.get(vars)]
+    }
+
+    fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        let mut triples = Vec::with_capacity(2);
+        if let Some(idx) = self.sy.idx {
+            triples.push((0, idx, 1.0));
+        }
+        if let Some(idx) = self.ey.idx {
+            triples.push((0, idx, -1.0));
+        }
+        triples
     }
 }
 
@@ -302,6 +532,10 @@ pub struct VerticalEq {
 }
 
 impl VerticalEq {
+    pub fn new(sx: VarOrConst, ex: VarOrConst) -> Self {
+        Self { sx, ex }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         line: ObjectId,
@@ -310,10 +544,10 @@ impl VerticalEq {
         if !matches!(doc.get_object(line)?, GeoObject::Line(_)) {
             return None;
         }
-        Some(Self {
-            sx: field_or_const(doc, line, ObjField::LineStartX, var_index),
-            ex: field_or_const(doc, line, ObjField::LineEndX, var_index),
-        })
+        Some(Self::new(
+            field_or_const(doc, line, ObjField::LineStartX, var_index),
+            field_or_const(doc, line, ObjField::LineEndX, var_index),
+        ))
     }
 }
 
@@ -324,6 +558,17 @@ impl ConstraintEquation for VerticalEq {
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         vec![self.sx.get(vars) - self.ex.get(vars)]
+    }
+
+    fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        let mut triples = Vec::with_capacity(2);
+        if let Some(idx) = self.sx.idx {
+            triples.push((0, idx, 1.0));
+        }
+        if let Some(idx) = self.ex.idx {
+            triples.push((0, idx, -1.0));
+        }
+        triples
     }
 }
 
@@ -338,6 +583,15 @@ pub struct EqualLengthEq {
 }
 
 impl EqualLengthEq {
+    pub fn new(
+        a: [VarOrConst; 2],
+        b: [VarOrConst; 2],
+        c: [VarOrConst; 2],
+        d: [VarOrConst; 2],
+    ) -> Self {
+        Self { a, b, c, d }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         line1: ObjectId,
@@ -352,24 +606,24 @@ impl EqualLengthEq {
         if l1.kind != LineKind::Segment || l2.kind != LineKind::Segment {
             return None;
         }
-        Some(Self {
-            a: [
+        Some(Self::new(
+            [
                 field_or_const(doc, line1, ObjField::LineStartX, var_index),
                 field_or_const(doc, line1, ObjField::LineStartY, var_index),
             ],
-            b: [
+            [
                 field_or_const(doc, line1, ObjField::LineEndX, var_index),
                 field_or_const(doc, line1, ObjField::LineEndY, var_index),
             ],
-            c: [
+            [
                 field_or_const(doc, line2, ObjField::LineStartX, var_index),
                 field_or_const(doc, line2, ObjField::LineStartY, var_index),
             ],
-            d: [
+            [
                 field_or_const(doc, line2, ObjField::LineEndX, var_index),
                 field_or_const(doc, line2, ObjField::LineEndY, var_index),
             ],
-        })
+        ))
     }
 }
 
@@ -391,6 +645,73 @@ impl ConstraintEquation for EqualLengthEq {
         let len2 = ((cx - dx).powi(2) + (cy - dy).powi(2)).sqrt();
         vec![len1 - len2]
     }
+
+    fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        if vars.is_empty() {
+            let mut triples = Vec::with_capacity(8);
+            for vc in self
+                .a
+                .iter()
+                .chain(self.b.iter())
+                .chain(self.c.iter())
+                .chain(self.d.iter())
+            {
+                if let Some(idx) = vc.idx {
+                    triples.push((0, idx, 1.0));
+                }
+            }
+            return triples;
+        }
+        let ax = self.a[0].get(vars);
+        let ay = self.a[1].get(vars);
+        let bx = self.b[0].get(vars);
+        let by = self.b[1].get(vars);
+        let cx = self.c[0].get(vars);
+        let cy = self.c[1].get(vars);
+        let dx = self.d[0].get(vars);
+        let dy = self.d[1].get(vars);
+
+        let u_x = ax - bx;
+        let u_y = ay - by;
+        let len1 = (u_x * u_x + u_y * u_y).sqrt();
+        let w_x = cx - dx;
+        let w_y = cy - dy;
+        let len2 = (w_x * w_x + w_y * w_y).sqrt();
+
+        if len1 < 1e-12 || len2 < 1e-12 {
+            return Vec::new();
+        }
+
+        let il1 = 1.0 / len1;
+        let il2 = 1.0 / len2;
+
+        let mut triples = Vec::with_capacity(8);
+        if let Some(idx) = self.a[0].idx {
+            triples.push((0, idx, u_x * il1));
+        }
+        if let Some(idx) = self.a[1].idx {
+            triples.push((0, idx, u_y * il1));
+        }
+        if let Some(idx) = self.b[0].idx {
+            triples.push((0, idx, -u_x * il1));
+        }
+        if let Some(idx) = self.b[1].idx {
+            triples.push((0, idx, -u_y * il1));
+        }
+        if let Some(idx) = self.c[0].idx {
+            triples.push((0, idx, -w_x * il2));
+        }
+        if let Some(idx) = self.c[1].idx {
+            triples.push((0, idx, -w_y * il2));
+        }
+        if let Some(idx) = self.d[0].idx {
+            triples.push((0, idx, w_x * il2));
+        }
+        if let Some(idx) = self.d[1].idx {
+            triples.push((0, idx, w_y * il2));
+        }
+        triples
+    }
 }
 
 /// Symmetry constraint: point `q` is the mirror of point `p` across line `m`.
@@ -410,6 +731,29 @@ pub struct SymmetryEq {
 }
 
 impl SymmetryEq {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        px: VarOrConst,
+        py: VarOrConst,
+        qx: VarOrConst,
+        qy: VarOrConst,
+        mx1: VarOrConst,
+        my1: VarOrConst,
+        mx2: VarOrConst,
+        my2: VarOrConst,
+    ) -> Self {
+        Self {
+            px,
+            py,
+            qx,
+            qy,
+            mx1,
+            my1,
+            mx2,
+            my2,
+        }
+    }
+
     pub fn from_inputs(
         doc: &crate::Document,
         point: ObjectId,
@@ -424,16 +768,16 @@ impl SymmetryEq {
         ) else {
             return None;
         };
-        Some(Self {
-            px: field_or_const(doc, point, ObjField::PointX, var_index),
-            py: field_or_const(doc, point, ObjField::PointY, var_index),
-            qx: field_or_const(doc, mirror_point, ObjField::PointX, var_index),
-            qy: field_or_const(doc, mirror_point, ObjField::PointY, var_index),
-            mx1: field_or_const(doc, mirror_line, ObjField::LineStartX, var_index),
-            my1: field_or_const(doc, mirror_line, ObjField::LineStartY, var_index),
-            mx2: field_or_const(doc, mirror_line, ObjField::LineEndX, var_index),
-            my2: field_or_const(doc, mirror_line, ObjField::LineEndY, var_index),
-        })
+        Some(Self::new(
+            field_or_const(doc, point, ObjField::PointX, var_index),
+            field_or_const(doc, point, ObjField::PointY, var_index),
+            field_or_const(doc, mirror_point, ObjField::PointX, var_index),
+            field_or_const(doc, mirror_point, ObjField::PointY, var_index),
+            field_or_const(doc, mirror_line, ObjField::LineStartX, var_index),
+            field_or_const(doc, mirror_line, ObjField::LineStartY, var_index),
+            field_or_const(doc, mirror_line, ObjField::LineEndX, var_index),
+            field_or_const(doc, mirror_line, ObjField::LineEndY, var_index),
+        ))
     }
 }
 
@@ -461,6 +805,106 @@ impl ConstraintEquation for SymmetryEq {
         let dot = (qx - px) * dir_x + (qy - py) * dir_y;
         vec![cross, dot]
     }
+
+    fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
+        if vars.is_empty() {
+            let mut triples = Vec::with_capacity(16);
+            for vc in [
+                &self.px, &self.py, &self.qx, &self.qy, &self.mx1, &self.my1, &self.mx2, &self.my2,
+            ] {
+                if let Some(idx) = vc.idx {
+                    triples.push((0, idx, 1.0));
+                    triples.push((1, idx, 1.0));
+                }
+            }
+            return triples;
+        }
+        let px = self.px.get(vars);
+        let py = self.py.get(vars);
+        let qx = self.qx.get(vars);
+        let qy = self.qy.get(vars);
+        let mx1 = self.mx1.get(vars);
+        let my1 = self.my1.get(vars);
+        let mx2 = self.mx2.get(vars);
+        let my2 = self.my2.get(vars);
+
+        let mid_x = (px + qx) * 0.5;
+        let mid_y = (py + qy) * 0.5;
+        let dir_x = mx2 - mx1;
+        let dir_y = my2 - my1;
+
+        // Row 0: cross = dir_x * (mid_y - my1) - dir_y * (mid_x - mx1)
+        // Row 1: dot   = (qx - px) * dir_x + (qy - py) * dir_y
+        let mut triples = Vec::with_capacity(16);
+
+        // r0 wrt px -> -dir_y * 0.5
+        if let Some(idx) = self.px.idx {
+            triples.push((0, idx, -dir_y * 0.5));
+        }
+        // r0 wrt py -> dir_x * 0.5
+        if let Some(idx) = self.py.idx {
+            triples.push((0, idx, dir_x * 0.5));
+        }
+        // r0 wrt qx -> -dir_y * 0.5
+        if let Some(idx) = self.qx.idx {
+            triples.push((0, idx, -dir_y * 0.5));
+        }
+        // r0 wrt qy -> dir_x * 0.5
+        if let Some(idx) = self.qy.idx {
+            triples.push((0, idx, dir_x * 0.5));
+        }
+        // r0 wrt mx1 -> my2 - mid_y
+        if let Some(idx) = self.mx1.idx {
+            triples.push((0, idx, my2 - mid_y));
+        }
+        // r0 wrt my1 -> mid_x - mx2
+        if let Some(idx) = self.my1.idx {
+            triples.push((0, idx, mid_x - mx2));
+        }
+        // r0 wrt mx2 -> mid_y - my1
+        if let Some(idx) = self.mx2.idx {
+            triples.push((0, idx, mid_y - my1));
+        }
+        // r0 wrt my2 -> mx1 - mid_x
+        if let Some(idx) = self.my2.idx {
+            triples.push((0, idx, mx1 - mid_x));
+        }
+
+        // r1 wrt px -> -dir_x
+        if let Some(idx) = self.px.idx {
+            triples.push((1, idx, -dir_x));
+        }
+        // r1 wrt py -> -dir_y
+        if let Some(idx) = self.py.idx {
+            triples.push((1, idx, -dir_y));
+        }
+        // r1 wrt qx -> dir_x
+        if let Some(idx) = self.qx.idx {
+            triples.push((1, idx, dir_x));
+        }
+        // r1 wrt qy -> dir_y
+        if let Some(idx) = self.qy.idx {
+            triples.push((1, idx, dir_y));
+        }
+        // r1 wrt mx1 -> px - qx
+        if let Some(idx) = self.mx1.idx {
+            triples.push((1, idx, px - qx));
+        }
+        // r1 wrt my1 -> py - qy
+        if let Some(idx) = self.my1.idx {
+            triples.push((1, idx, py - qy));
+        }
+        // r1 wrt mx2 -> qx - px
+        if let Some(idx) = self.mx2.idx {
+            triples.push((1, idx, qx - px));
+        }
+        // r1 wrt my2 -> qy - py
+        if let Some(idx) = self.my2.idx {
+            triples.push((1, idx, qy - py));
+        }
+
+        triples
+    }
 }
 
 fn point_to_line_distance(p: Point2, start: Point2, end: Point2) -> f64 {
@@ -474,12 +918,16 @@ fn point_to_line_distance(p: Point2, start: Point2, end: Point2) -> f64 {
 }
 
 fn normalized_direction(start: Point2, end: Point2) -> Point2 {
+    normalized_direction_with_length(start, end).0
+}
+
+fn normalized_direction_with_length(start: Point2, end: Point2) -> (Point2, f64) {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let len = (dx * dx + dy * dy).sqrt();
     if len < 1e-12 {
-        Point2::new(1.0, 0.0)
+        (Point2::new(1.0, 0.0), len)
     } else {
-        Point2::new(dx / len, dy / len)
+        (Point2::new(dx / len, dy / len), len)
     }
 }

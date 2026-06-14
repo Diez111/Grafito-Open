@@ -8,7 +8,7 @@ use crate::{
     EllipseObj, GeoObject, HyperbolaObj, LineKind, ObjectId, ParabolaObj, PointObj,
     RelationOperator,
 };
-use grafito_geometry::expr::evaluate;
+use grafito_geometry::expr::evaluate_cached;
 use grafito_geometry::{
     distance_point_to_segment, matrices::solve_linear_system, matrices::Matrix, Color, Point2,
     Point3D, ViewTransform,
@@ -1696,7 +1696,7 @@ impl Document {
                     .iter()
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
-                match evaluate(e, &vars) {
+                match evaluate_cached(e, &vars) {
                     Ok(v) if v.is_finite() => v,
                     _ => fallback,
                 }
@@ -1715,19 +1715,19 @@ impl Document {
             match obj {
                 GeoObject::Point(p) => {
                     if let Some(expr) = &p.x_expr {
-                        if let Ok(x) = evaluate(expr, &vars) {
+                        if let Ok(x) = evaluate_cached(expr, &vars) {
                             p.position.x = x;
                         }
                     }
                     if let Some(expr) = &p.y_expr {
-                        if let Ok(y) = evaluate(expr, &vars) {
+                        if let Ok(y) = evaluate_cached(expr, &vars) {
                             p.position.y = y;
                         }
                     }
                 }
                 GeoObject::Circle(c) => {
                     if let Some(expr) = &c.radius_expr {
-                        if let Ok(r) = evaluate(expr, &vars) {
+                        if let Ok(r) = evaluate_cached(expr, &vars) {
                             c.radius = r;
                         }
                     }

@@ -20,3 +20,10 @@ log.workspace = true
 libm = "0.2"
 num-complex.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "expr_bench"
+harness = false

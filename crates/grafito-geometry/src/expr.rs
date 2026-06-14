@@ -1,4 +1,6 @@
 use evalexpr::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 fn setup_math_context() -> HashMapContext {
     let mut ctx = HashMapContext::new();
@@ -706,6 +708,36 @@ pub fn preprocess_expr(expr: &str) -> String {
     res
 }
 
+thread_local! {
+    /// Cache of compiled expressions, keyed by the original expression string.
+    ///
+    /// Storing `None` means the expression failed to compile and should fall
+    /// back to the slow interpreted path.
+    static COMPILED_EXPR_CACHE: RefCell<HashMap<String, Option<CompiledExpr>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Evaluate a mathematical expression, reusing a previously compiled form when
+/// available.
+///
+/// This is the preferred path for callers that evaluate the same expression
+/// repeatedly with different variable values (e.g. bound geometry parameters,
+/// parametric samples). The first call compiles and caches the expression;
+/// subsequent calls skip tokenisation/parsing/pre-processing.
+pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    COMPILED_EXPR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(expr) {
+            let compiled = CompiledExpr::new(expr, &HashMap::new()).ok();
+            cache.insert(expr.to_string(), compiled);
+        }
+        match cache.get(expr) {
+            Some(Some(compiled)) => compiled.eval(vars),
+            _ => evaluate(expr, vars),
+        }
+    })
+}
+
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
     let expr_raw = expr;
@@ -1029,6 +1061,123 @@ pub fn prepare_function_ast(
     let mut ast = crate::ast::parse_ast(&expr_clean).map_err(|e| format!("Parse error: {}", e))?;
     ast = ast.substitute_vars(vars, ignore).simplify();
     Ok(ast)
+}
+
+/// A pre-parsed expression that can be evaluated many times without
+/// re-tokenising or re-parsing the original string.
+///
+/// The fast path uses Grafito's native AST. If the expression cannot be parsed
+/// by the native AST (e.g. it uses evalexpr-only syntax), it falls back to a
+/// pre-built evalexpr operator tree. Constants supplied at compile time are
+/// substituted once.
+#[derive(Clone)]
+pub struct CompiledExpr {
+    ast: Option<crate::ast::Expr>,
+    tree: Option<evalexpr::Node>,
+}
+
+impl CompiledExpr {
+    /// Compile an expression, substituting the supplied constants.
+    pub fn new(
+        expr: &str,
+        constants: &std::collections::HashMap<String, f64>,
+    ) -> Result<Self, String> {
+        let expr_clean = preprocess_expr(expr);
+        let ignore: Vec<&str> = constants.keys().map(|s| s.as_str()).collect();
+
+        if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
+            ast = ast.substitute_vars(constants, &ignore).simplify();
+            return Ok(Self {
+                ast: Some(ast),
+                tree: None,
+            });
+        }
+
+        let tree = evalexpr::build_operator_tree(&expr_clean)
+            .map_err(|e| format!("Compile error: {}", e))?;
+        Ok(Self {
+            ast: None,
+            tree: Some(tree),
+        })
+    }
+
+    /// Evaluate the compiled expression with the given variable values.
+    /// The variable names must match those supplied at construction time.
+    pub fn eval(&self, vars: &[(String, f64)]) -> Result<f64, String> {
+        if let Some(ast) = &self.ast {
+            match vars.len() {
+                1 => {
+                    let (var, val) = &vars[0];
+                    let result = ast.eval_at(var, *val);
+                    if result.is_finite() {
+                        return Ok(result);
+                    }
+                }
+                2 => {
+                    let (v1, x1) = &vars[0];
+                    let (v2, x2) = &vars[1];
+                    let result = ast.eval_2d(v1, *x1, v2, *x2);
+                    if result.is_finite() {
+                        return Ok(result);
+                    }
+                }
+                3 => {
+                    let (v1, x1) = &vars[0];
+                    let (v2, x2) = &vars[1];
+                    let (v3, x3) = &vars[2];
+                    let result = ast.eval_3d(v1, *x1, v2, *x2, v3, *x3);
+                    if result.is_finite() {
+                        return Ok(result);
+                    }
+                }
+                _ => {
+                    // Generic path: substitute all supplied variables into the
+                    // AST, simplify, and read the resulting constant.
+                    let vars_map: HashMap<String, f64> =
+                        vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    let substituted = ast.clone().substitute_vars(&vars_map, &[]).simplify();
+                    if let crate::ast::Expr::Const(result) = substituted {
+                        if result.is_finite() {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(tree) = &self.tree {
+            let mut ctx = setup_math_context();
+            for (name, val) in vars {
+                if let Err(e) = ctx.set_value(name.clone(), Value::from(*val)) {
+                    return Err(format!("Variable error: {}", e));
+                }
+            }
+            return match tree.eval_with_context(&ctx) {
+                Ok(Value::Float(n)) => Ok(n),
+                Ok(Value::Int(n)) => Ok(n as f64),
+                Ok(other) => Err(format!(
+                    "Expression did not evaluate to a number: {:?}",
+                    other
+                )),
+                Err(e) => Err(format!("Evaluation error: {}", e)),
+            };
+        }
+
+        Err("Compiled expression has no evaluator".to_string())
+    }
+
+    /// Convenience: evaluate a single-variable compiled expression.
+    pub fn eval_at(&self, var: &str, val: f64) -> Result<f64, String> {
+        self.eval(&[(var.to_string(), val)])
+    }
+}
+
+/// Compile an expression with the given constants and evaluate it once.
+pub fn evaluate_compiled(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    let constants: std::collections::HashMap<String, f64> =
+        vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let compiled = CompiledExpr::new(expr, &constants)?;
+    compiled.eval(vars)
 }
 
 /// Evaluate a pre-parsed AST at a batch of x values.
