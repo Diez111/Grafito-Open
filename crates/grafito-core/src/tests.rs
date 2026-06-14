@@ -1318,6 +1318,95 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_field_cache_reuse() {
+        let vf = VectorField2DObj::new("x", "y");
+        let vars = std::collections::HashMap::new();
+        let view = ViewTransform::new(800.0, 600.0);
+        let view_bounds = (-3.0, 3.0, -3.0, 3.0);
+        let grid_size = 20;
+
+        let samples1 = {
+            let guard =
+                vector_field_sampling::samples_or_compute(&vf, view_bounds, grid_size, &vars);
+            guard.clone()
+        };
+        let key1 = vf.cached_key.read().unwrap().clone();
+        assert!(!samples1.is_empty());
+
+        let samples2 = {
+            let guard =
+                vector_field_sampling::samples_or_compute(&vf, view_bounds, grid_size, &vars);
+            guard.clone()
+        };
+        let key2 = vf.cached_key.read().unwrap().clone();
+        assert_eq!(samples1, samples2);
+        assert_eq!(key1, key2, "cache key should be reused");
+
+        // The cached key stores the padded/snapped bounds, which contain the
+        // requested view bounds.
+        let cached_bounds = vf.cached_key.read().unwrap().as_ref().unwrap().view_bounds;
+        assert!(
+            view_bounds.0 >= cached_bounds.0
+                && view_bounds.1 <= cached_bounds.1
+                && view_bounds.2 >= cached_bounds.2
+                && view_bounds.3 <= cached_bounds.3,
+            "cached bounds should contain requested view bounds"
+        );
+
+        // The direct evaluator returns the same shape of samples.
+        let direct =
+            vector_field_sampling::evaluate_vector_field_2d(&vf, view_bounds, &view, &vars);
+        assert_eq!(direct.len(), samples1.len());
+    }
+
+    #[test]
+    fn test_vector_field_padded_domain() {
+        let vf = VectorField2DObj::new("x", "y");
+        let vars = std::collections::HashMap::new();
+        let view_bounds = (-3.0, 3.0, -3.0, 3.0);
+        let grid_size = 20;
+
+        let samples1 = {
+            let guard =
+                vector_field_sampling::samples_or_compute(&vf, view_bounds, grid_size, &vars);
+            guard.clone()
+        };
+
+        // A small pan stays inside the padded/snapped region, so the cache is
+        // reused even though the requested view bounds changed slightly.
+        let panned = (
+            view_bounds.0 + 0.1,
+            view_bounds.1 + 0.1,
+            view_bounds.2,
+            view_bounds.3,
+        );
+        let samples2 = {
+            let guard = vector_field_sampling::samples_or_compute(&vf, panned, grid_size, &vars);
+            guard.clone()
+        };
+        assert_eq!(
+            samples1.len(),
+            samples2.len(),
+            "small pan should reuse cache"
+        );
+
+        // A far-away view leaves the cached region and recomputes.
+        drop(vector_field_sampling::samples_or_compute(
+            &vf,
+            view_bounds,
+            grid_size,
+            &vars,
+        ));
+        let first_key = vf.cached_key.read().unwrap().clone();
+        let far = (10.0, 16.0, 10.0, 16.0);
+        drop(vector_field_sampling::samples_or_compute(
+            &vf, far, grid_size, &vars,
+        ));
+        let second_key = vf.cached_key.read().unwrap().clone();
+        assert_ne!(first_key, second_key, "far pan should update cache key");
+    }
+
+    #[test]
     fn test_conic_by_five_points_rotated() {
         let mut doc = Document::new();
         // Five points on an ellipse with rx=2, ry=1 rotated by 45 deg around the origin.

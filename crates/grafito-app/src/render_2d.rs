@@ -2,6 +2,7 @@ use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::parametric_sampling;
+use grafito_core::vector_field_sampling;
 use grafito_core::GeoObject;
 use grafito_geometry::expr::{eval_function_with_vars, eval_integral_batch, prepare_function_ast};
 use grafito_geometry::{Color, Point2};
@@ -1347,63 +1348,68 @@ impl GrafitoApp {
                 }
             }
             GeoObject::VectorField2D(vf) => {
-                let grid_size = 20;
                 let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                let grid_size = vf.density.clamp(5, 80);
                 let dx = (world_br.x - world_tl.x) / grid_size as f64;
                 let dy = (world_br.y - world_tl.y) / grid_size as f64;
                 let arrow_length = dx.min(dy) * 0.8;
 
-                for i in 0..grid_size {
-                    for j in 0..grid_size {
-                        let x = world_tl.x + (i as f64 + 0.5) * dx;
-                        let y = world_tl.y + (j as f64 + 0.5) * dy;
+                let samples = vector_field_sampling::samples_or_compute(
+                    vf,
+                    view_bounds,
+                    grid_size,
+                    &self.document.variables,
+                )
+                .clone();
 
-                        let vars = vec![("x".to_string(), x), ("y".to_string(), y)];
-                        if let (Ok(u), Ok(v)) = (
-                            grafito_geometry::expr::evaluate(&vf.expr_u, &vars),
-                            grafito_geometry::expr::evaluate(&vf.expr_v, &vars),
-                        ) {
-                            if u.is_finite() && v.is_finite() {
-                                let mag = (u * u + v * v).sqrt();
-                                if mag > 1e-10 {
-                                    let nu = u / mag * arrow_length;
-                                    let nv = v / mag * arrow_length;
+                for (x, y, u, v) in samples {
+                    if x < world_tl.x - dx
+                        || x > world_br.x + dx
+                        || y < world_tl.y - dy
+                        || y > world_br.y + dy
+                    {
+                        continue;
+                    }
+                    if u.is_finite() && v.is_finite() {
+                        let mag = (u * u + v * v).sqrt();
+                        if mag > 1e-10 {
+                            let nu = u / mag * arrow_length;
+                            let nv = v / mag * arrow_length;
 
-                                    let start = view.world_to_screen(Point2::new(x, y));
-                                    let end = view.world_to_screen(Point2::new(x + nu, y + nv));
-                                    let start_pos = canvas_rect.min + Vec2::new(start.x, start.y);
-                                    let end_pos = canvas_rect.min + Vec2::new(end.x, end.y);
+                            let start = view.world_to_screen(Point2::new(x, y));
+                            let end = view.world_to_screen(Point2::new(x + nu, y + nv));
+                            let start_pos = canvas_rect.min + Vec2::new(start.x, start.y);
+                            let end_pos = canvas_rect.min + Vec2::new(end.x, end.y);
 
-                                    painter.line_segment(
-                                        [start_pos, end_pos],
-                                        Stroke::new(1.5, to_color32(vf.color)),
-                                    );
+                            painter.line_segment(
+                                [start_pos, end_pos],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
 
-                                    // Arrow head
-                                    let angle = (nv as f32).atan2(nu as f32);
-                                    let head_len = arrow_length as f32 * 0.3;
-                                    let head1 = end_pos
-                                        + Vec2::new(
-                                            -head_len * (angle - 0.4).cos(),
-                                            -head_len * (angle - 0.4).sin(),
-                                        );
-                                    let head2 = end_pos
-                                        + Vec2::new(
-                                            -head_len * (angle + 0.4).cos(),
-                                            -head_len * (angle + 0.4).sin(),
-                                        );
-                                    painter.line_segment(
-                                        [end_pos, head1],
-                                        Stroke::new(1.5, to_color32(vf.color)),
-                                    );
-                                    painter.line_segment(
-                                        [end_pos, head2],
-                                        Stroke::new(1.5, to_color32(vf.color)),
-                                    );
-                                }
-                            }
+                            // Arrow head
+                            let angle = (nv as f32).atan2(nu as f32);
+                            let head_len = arrow_length as f32 * 0.3;
+                            let head1 = end_pos
+                                + Vec2::new(
+                                    -head_len * (angle - 0.4).cos(),
+                                    -head_len * (angle - 0.4).sin(),
+                                );
+                            let head2 = end_pos
+                                + Vec2::new(
+                                    -head_len * (angle + 0.4).cos(),
+                                    -head_len * (angle + 0.4).sin(),
+                                );
+                            painter.line_segment(
+                                [end_pos, head1],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
+                            painter.line_segment(
+                                [end_pos, head2],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
                         }
                     }
                 }

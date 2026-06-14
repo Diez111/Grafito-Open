@@ -28,6 +28,7 @@ use wgpu::util::DeviceExt;
 pub mod function_compute;
 pub mod implicit_compute;
 pub mod parametric_compute;
+pub mod vector_compute;
 
 #[cfg(test)]
 mod tests;
@@ -96,6 +97,7 @@ pub struct Renderer {
     pub implicit_compute: Option<crate::implicit_compute::ImplicitComputePipeline>,
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
     pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
+    pub vector_compute: Option<crate::vector_compute::VectorComputePipeline>,
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
@@ -247,6 +249,9 @@ impl Renderer {
         let parametric_compute = Some(crate::parametric_compute::ParametricComputePipeline::new(
             device, 4000, 128,
         ));
+        let vector_compute = Some(crate::vector_compute::VectorComputePipeline::new(
+            device, 128,
+        ));
 
         Self {
             pipeline,
@@ -257,6 +262,7 @@ impl Renderer {
             implicit_compute,
             function_compute,
             parametric_compute,
+            vector_compute,
         }
     }
 
@@ -1130,42 +1136,35 @@ impl Renderer {
                     }
                 }
                 GeoObject::VectorField2D(vf) => {
-                    let d = vf.density.max(5).min(40);
-                    let dx = 20.0 / d as f64;
-                    for i in 0..=d {
-                        let x = -10.0 + i as f64 * dx;
-                        for j in 0..=d {
-                            let y = -10.0 + j as f64 * dx;
-                            if let (Ok(u), Ok(v)) = (
-                                grafito_geometry::expr::evaluate(
-                                    &vf.expr_u,
-                                    &[("x".to_string(), x), ("y".to_string(), y)],
-                                ),
-                                grafito_geometry::expr::evaluate(
-                                    &vf.expr_v,
-                                    &[("x".to_string(), x), ("y".to_string(), y)],
-                                ),
-                            ) {
-                                if u.is_finite() && v.is_finite() {
-                                    let mag = (u * u + v * v).sqrt();
-                                    if mag > 0.001 {
-                                        let nx = u / mag;
-                                        let ny = v / mag;
-                                        let len = mag.min(2.0) * 0.5;
-                                        let start = Point2::new(x, y);
-                                        let end = Point2::new(x + nx * len, y + ny * len);
-                                        let s = view_transform.world_to_screen(start);
-                                        let e = view_transform.world_to_screen(end);
-                                        Self::add_line_segment(
-                                            &mut vertices,
-                                            &mut indices,
-                                            s,
-                                            e,
-                                            1.5,
-                                            vf.color,
-                                        );
-                                    }
-                                }
+                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
+                    let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                    let grid_size = vf.density.max(5).min(128);
+                    let samples = grafito_core::vector_field_sampling::samples_or_compute(
+                        vf,
+                        view_bounds,
+                        grid_size,
+                        &document.variables,
+                    );
+                    for (x, y, u, v) in samples.iter() {
+                        if u.is_finite() && v.is_finite() {
+                            let mag = (u * u + v * v).sqrt();
+                            if mag > 0.001 {
+                                let nx = u / mag;
+                                let ny = v / mag;
+                                let len = mag.min(2.0) * 0.5;
+                                let start = Point2::new(*x, *y);
+                                let end = Point2::new(x + nx * len, y + ny * len);
+                                let s = view_transform.world_to_screen(start);
+                                let e = view_transform.world_to_screen(end);
+                                Self::add_line_segment(
+                                    &mut vertices,
+                                    &mut indices,
+                                    s,
+                                    e,
+                                    1.5,
+                                    vf.color,
+                                );
                             }
                         }
                     }

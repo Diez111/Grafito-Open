@@ -1599,7 +1599,7 @@ impl ComplexMappingObj {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VectorField2DObj {
     pub id: ObjectId,
     pub label: String,
@@ -1608,7 +1608,41 @@ pub struct VectorField2DObj {
     pub color: Color,
     pub visible: bool,
     pub density: usize,
+    #[serde(skip)]
+    pub cached_samples: RwLock<VectorFieldSamples>,
+    #[serde(skip)]
+    pub cached_key: RwLock<Option<VectorFieldCacheKey>>,
 }
+
+impl Clone for VectorField2DObj {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            label: self.label.clone(),
+            expr_u: self.expr_u.clone(),
+            expr_v: self.expr_v.clone(),
+            color: self.color,
+            visible: self.visible,
+            density: self.density,
+            // Un clon comienza con caché vacía; se recalculará bajo demanda.
+            cached_samples: RwLock::new(VectorFieldSamples::new()),
+            cached_key: RwLock::new(None),
+        }
+    }
+}
+
+impl PartialEq for VectorField2DObj {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.label == other.label
+            && self.expr_u == other.expr_u
+            && self.expr_v == other.expr_v
+            && self.color == other.color
+            && self.visible == other.visible
+            && self.density == other.density
+    }
+}
+
 impl VectorField2DObj {
     pub fn new(expr_u: &str, expr_v: &str) -> Self {
         Self {
@@ -1619,11 +1653,22 @@ impl VectorField2DObj {
             color: Color::new(0.8, 0.4, 0.0, 1.0),
             visible: true,
             density: 15,
+            cached_samples: RwLock::new(VectorFieldSamples::new()),
+            cached_key: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
+    }
+
+    /// Invalida cualquier caché de muestreo de este campo vectorial.
+    pub fn invalidate_cache(&self) {
+        self.cached_samples
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 
@@ -1714,6 +1759,19 @@ pub struct SurfaceCacheKey {
     pub x_domain: (f64, f64),
     pub y_domain: (f64, f64),
     pub res: usize,
+    pub variables_hash: u64,
+}
+
+/// Cached (x, y, u, v) samples for a 2D vector field.
+pub type VectorFieldSamples = Vec<(f64, f64, f64, f64)>;
+
+/// Cache key for 2D vector fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorFieldCacheKey {
+    pub expr_u: String,
+    pub expr_v: String,
+    pub view_bounds: (f64, f64, f64, f64),
+    pub grid_size: usize,
     pub variables_hash: u64,
 }
 

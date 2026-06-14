@@ -56,6 +56,17 @@ fn test_renderer_builds_geometry_for_surface() {
 }
 
 #[test]
+fn test_renderer_builds_geometry_for_vector_field() {
+    let mut doc = Document::new();
+    doc.set_view(view_800x600());
+    doc.add_object(GeoObject::VectorField2D(VectorField2DObj::new("x", "y")));
+
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    assert!(!vertices.is_empty(), "vector field should produce vertices");
+    assert!(!indices.is_empty(), "vector field should produce indices");
+}
+
+#[test]
 fn test_renderer_builds_geometry_for_boolean_polygon() {
     let mut doc = Document::new();
     doc.set_view(view_800x600());

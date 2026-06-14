@@ -162,6 +162,22 @@ impl CallbackTrait for CanvasCallback {
                 }
             }
 
+            // Try to evaluate 2D vector fields on the GPU.
+            if let Some(compute) = renderer.vector_compute.as_ref() {
+                for (_, obj) in self.document.objects_iter() {
+                    if let grafito_core::GeoObject::VectorField2D(vf) = obj {
+                        let _ = grafito_render::vector_compute::maybe_compute_vector_field_on_gpu(
+                            compute,
+                            device,
+                            queue,
+                            vf,
+                            self.document.view(),
+                            &self.document.variables,
+                        );
+                    }
+                }
+            }
+
             renderer.build_geometry(&self.document, self.dark_mode)
         };
 

@@ -29,6 +29,7 @@ pub mod object;
 pub mod parametric_sampling;
 pub mod spatial;
 pub mod validation;
+pub mod vector_field_sampling;
 
 pub mod numeric_constraints;
 
