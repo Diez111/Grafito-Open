@@ -1151,7 +1151,7 @@ pub fn run_app() -> Result<(), eframe::Error> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Grafito v0.9.0");
+                println!("Grafito v0.9.0-beta.1");
                 println!("Usage: grafito [OPTIONS]");
                 println!("Options:");
                 println!("  -h, --help       Print help information");

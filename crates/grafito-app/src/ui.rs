@@ -97,7 +97,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                 });
                 ui.menu_button("Ayuda", |ui| {
-                    if ui.button("Acerca de Grafito v0.9.0").clicked() {}
+                    if ui.button("Acerca de Grafito v0.9.0-beta.1").clicked() {}
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(

@@ -7,7 +7,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-06-14
+## [0.9.0-beta.1] - 2026-06-14
 
 ### v0.9.16-alpha
 
@@ -131,7 +131,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
-[0.9.0]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0
+[0.9.0-beta.1]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0-beta.1
 [v0.9.16-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.16-alpha
 [v0.9.15-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.15-alpha
 [v0.9.14-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.14-alpha

@@ -13,7 +13,7 @@ members = ["crates/grafito-app", "crates/grafito-command", "crates/grafito-core"
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.9.0-beta.1"
 edition = "2021"
 authors = ["Grafito Contributors"]
 license = "GPL-3.0-or-later"
