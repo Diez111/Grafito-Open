@@ -383,6 +383,37 @@ ParametricExpr[t, a*sin(t), -2pi, 2pi]
 
 ---
 
+## Cálculo simbólico
+
+### `Integral[expr, x, a, b]`
+
+Calcula la integral definida de `expr` respecto a `x` entre `a` y `b`.
+
+```text
+Integral[x^2, x, 0, 1]
+Integral[sin(x), x, 0, pi]
+```
+
+**Resultado:** valor numérico aproximado de la integral.
+
+> **Nota de implementación:** si hay un evaluador GPU registrado y la
+> expresión es compatible con el pipeline `function_compute`, la integral usa
+> una ruta híbrida: el GPU evalúa `f(x)` en una grilla densa y el CPU aplica
+> una regla de cuadratura compuesta (Simpson/trapecio). En caso contrario se
+> resuelve con la cuadratura adaptativa de CPU existente.
+
+### `Derivative[expr, x]`
+
+Calcula la derivada simbólica de `expr` respecto a `x` y la grafica.
+
+```text
+Derivative[x^3 + 2x, x]
+```
+
+**Resultado:** expresión derivada graficada como una nueva función.
+
+---
+
 ## Notas generales
 
 - Las etiquetas de objeto se generan automáticamente (`A`, `B`, `l`, `c`, `poly1`, etc.).

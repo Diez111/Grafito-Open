@@ -8,6 +8,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 ## [Unreleased]
 
 ### Added
+- Evaluación híbrida GPU/CPU para integrales definidas (`Integral[expr, x, a, b]`): el GPU muestrea `f(x)` y el CPU reduce con cuadratura compuesta; incluye fallback a cuadratura adaptativa en CPU.
 - Documentación ampliada: referencia de comandos (`docs/commands.md`) y guía para agentes (`AGENTS.md`).
 
 ## [v0.9.16-alpha] - 2026-06-14

@@ -16,6 +16,35 @@ use grafito_geometry::Color;
 use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
+
+/// Trait para evaluadores GPU de funciones 1D por lotes.
+///
+/// La aplicación puede registrar una implementación que envuelva el pipeline
+/// `function_compute` de `grafito-render` y así habilitar la ruta híbrida
+/// (GPU evalúa `f(x)`, CPU reduce) para integrales definidas.
+pub trait GpuFunctionEvaluator: Send + Sync {
+    /// Evalúa `expr` en `samples` puntos uniformes en `[a, b]`.
+    ///
+    /// Devuelve `None` si la expresión no es compatible con el bytecode GPU.
+    fn evaluate_function_batch(
+        &self,
+        expr: &str,
+        a: f64,
+        b: f64,
+        samples: usize,
+        variables: &HashMap<String, f64>,
+    ) -> Option<Vec<f64>>;
+}
+
+static GPU_FUNCTION_EVALUATOR: OnceLock<Box<dyn GpuFunctionEvaluator + Send + Sync>> =
+    OnceLock::new();
+
+/// Registra el evaluador GPU global usado por la ruta híbrida de integrales.
+/// Normalmente se llama una sola vez al inicializar la aplicación.
+pub fn register_gpu_function_evaluator(evaluator: Box<dyn GpuFunctionEvaluator + Send + Sync>) {
+    let _ = GPU_FUNCTION_EVALUATOR.set(evaluator);
+}
 
 pub fn insert_implicit_multiplication(text: &str) -> String {
     let mut res = String::new();
@@ -2990,6 +3019,34 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             if let (Some(a_s), Some(b_s)) = (a_str, b_str) {
                 let a: f64 = a_s.trim().parse().unwrap_or(0.0);
                 let b: f64 = b_s.trim().parse().unwrap_or(1.0);
+
+                // Ruta híbrida GPU/CPU: si hay un evaluador GPU registrado,
+                // la expresión es compatible y los límites son numéricos,
+                // evaluamos en GPU y reducimos en CPU con Simpson compuesto.
+                if var == "x" {
+                    const HYBRID_SAMPLES: usize = 4096;
+                    if let Some(evaluator) = GPU_FUNCTION_EVALUATOR.get() {
+                        if let Some(ys) = evaluator.evaluate_function_batch(
+                            &expr,
+                            a,
+                            b,
+                            HYBRID_SAMPLES,
+                            &document.variables,
+                        ) {
+                            if ys.len() >= 2 {
+                                let dx = (b - a) / (ys.len() - 1) as f64;
+                                let approx = grafito_geometry::integral::composite_simpson(&ys, dx);
+                                if approx.is_finite() {
+                                    return Some(format!(
+                                        "≈ {:.6} (híbrido GPU/CPU) → Graficado como {}",
+                                        approx, label
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match symbolic::integrate_definite(&expr, &var, a, b) {
                     Ok(result) => Some(format!("{} → Graficado como {}", result, label)),
                     Err(e) => Some(format!("Error calculando integral: {}", e)),

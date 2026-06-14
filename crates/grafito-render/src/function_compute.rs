@@ -176,14 +176,14 @@ impl FunctionComputePipeline {
         }
     }
 
-    /// Evaluate the function `y = f(x)` on the GPU and return a vector of y
-    /// values. Returns `None` if the expression cannot be compiled to GPU
-    /// bytecode (caller should fall back to CPU).
-    pub fn evaluate(
+    /// Evaluate the function `y = f(x)` on the GPU for an arbitrary expression
+    /// string and return a vector of y values. Returns `None` if the expression
+    /// cannot be compiled to GPU bytecode (caller should fall back to CPU).
+    pub fn evaluate_expr(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        fun: &FunctionObj,
+        expr: &str,
         domain: (f64, f64),
         grid_size: usize,
         variables: &HashMap<String, f64>,
@@ -192,8 +192,7 @@ impl FunctionComputePipeline {
             return None;
         }
 
-        let ast =
-            grafito_geometry::expr::prepare_function_ast(&fun.expr, variables, &["x"]).ok()?;
+        let ast = grafito_geometry::expr::prepare_function_ast(expr, variables, &["x"]).ok()?;
 
         let mut prog = BytecodeProgram::default();
         compile_function_expr(&ast, variables, &mut prog).ok()?;
@@ -280,6 +279,45 @@ impl FunctionComputePipeline {
 
         Some(ys)
     }
+
+    /// Evaluate a `FunctionObj` on the GPU by delegating to [`Self::evaluate_expr`].
+    pub fn evaluate(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        fun: &FunctionObj,
+        domain: (f64, f64),
+        grid_size: usize,
+        variables: &HashMap<String, f64>,
+    ) -> Option<Vec<f64>> {
+        self.evaluate_expr(device, queue, &fun.expr, domain, grid_size, variables)
+    }
+}
+
+/// Evaluate `f(x)` on a uniform grid `[a, b]` with `samples` points using the
+/// GPU compute pipeline. Returns only the `y` values.
+///
+/// This is the entry point for the hybrid integral path: the caller runs the
+/// GPU kernel for the bulk evaluation and then applies a CPU quadrature rule
+/// (for example, `grafito_geometry::integral::composite_simpson`) to obtain the
+/// definite integral.
+pub fn evaluate_function_batch_gpu(
+    pipeline: &FunctionComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    expr: &str,
+    a: f64,
+    b: f64,
+    samples: usize,
+    variables: &HashMap<String, f64>,
+) -> Result<Vec<f64>, String> {
+    if samples < 2 {
+        return Err("samples must be at least 2".to_string());
+    }
+    let grid_size = samples - 1;
+    pipeline
+        .evaluate_expr(device, queue, expr, (a, b), grid_size, variables)
+        .ok_or_else(|| "GPU function evaluation failed (unsupported expression?)".to_string())
 }
 
 /// Try to populate the function cache using the GPU compute pipeline.

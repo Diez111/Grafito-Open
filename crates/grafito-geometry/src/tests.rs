@@ -3,6 +3,7 @@ mod tests {
     use crate::boolean::*;
     use crate::cas::*;
     use crate::expr::*;
+    use crate::integral::eval_integral_hybrid;
     use crate::types::*;
     use geo::{Area, BooleanOps};
     use glam::Vec2;
@@ -125,6 +126,27 @@ mod tests {
         let f = |x: f64| x * x;
         let result = integral(f, 0.0, 1.0, 1000);
         assert!((result - 1.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_integral_hybrid_polynomial() {
+        // ∫₀¹ x² dx = 1/3
+        let result = eval_integral_hybrid(|x| x * x, 0.0, 1.0, 1024);
+        assert!((result - 1.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_integral_hybrid_sine() {
+        // ∫₀^π sin(x) dx = 2
+        let result = eval_integral_hybrid(|x| x.sin(), 0.0, std::f64::consts::PI, 2048);
+        assert!((result - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_integral_hybrid_exponential() {
+        // ∫₀¹ e^x dx = e - 1
+        let result = eval_integral_hybrid(|x| x.exp(), 0.0, 1.0, 1024);
+        assert!((result - (std::f64::consts::E - 1.0)).abs() < 1e-6);
     }
 
     #[test]

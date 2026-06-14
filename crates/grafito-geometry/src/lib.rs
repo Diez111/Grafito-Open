@@ -23,6 +23,7 @@ pub mod complex_expr;
 pub mod dd;
 pub mod expr;
 pub mod fractals;
+pub mod integral;
 pub mod intersections;
 pub mod interval;
 pub mod lines;
