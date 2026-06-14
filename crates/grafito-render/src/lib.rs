@@ -1,4 +1,19 @@
-//! Grafito Render — GPU-accelerated 2D/3D renderer using wgpu.
+//! Grafito Render — Renderizador 2D/3D acelerado por GPU con wgpu.
+//!
+//! Este crate convierte un [`Document`](grafito_core::Document) en geometría
+//! lista para GPU, gestiona los pipelines de cómputo (`function_compute`,
+//! `implicit_compute`, `parametric_compute`) y proporciona utilidades de
+//! iluminación y vértices.
+//!
+//! # Ejemplo mínimo
+//!
+//! ```
+//! use grafito_render::Vertex;
+//! use grafito_geometry::Color;
+//!
+//! let v = Vertex::new(0.0, 0.0, Color::BLACK);
+//! assert_eq!(v.position, [0.0, 0.0, 0.0]);
+//! ```
 #![allow(
     clippy::too_many_arguments,
     clippy::needless_range_loop,

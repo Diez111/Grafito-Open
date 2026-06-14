@@ -1,4 +1,22 @@
-//! Grafito Core — Document model, objects, and constraints.
+//! Grafito Core — Modelo de documento, objetos geométricos y restricciones.
+//!
+//! Este crate define el modelo central de Grafito: el [`Document`], los 32 tipos
+//! de objetos geométricos representados por [`GeoObject`], los índices
+//! espaciales y los dos sistemas de restricciones (constructivas y numéricas).
+//!
+//! # Ejemplo mínimo
+//!
+//! ```
+//! use grafito_core::{Document, GeoObject, PointObj};
+//! use grafito_geometry::Point2;
+//!
+//! let mut doc = Document::new();
+//! let id = doc.add_object(GeoObject::Point(
+//!     PointObj::new(Point2::new(1.0, 2.0)).with_label("A"),
+//! ));
+//!
+//! assert!(doc.get_object(id).is_some());
+//! ```
 
 pub mod constraints;
 pub mod document;

@@ -1,4 +1,20 @@
-//! Grafito UI — UI components and panels built with egui.
+//! Grafito UI — Componentes y paneles de interfaz construidos con egui.
+//!
+//! Provee la toolbar, la paleta de comandos, el panel de álgebra, el selector
+//! de color, temas y la enumeración [`Tool`] que sincroniza el modo de
+//! interacción del canvas.
+//!
+//! # Ejemplo mínimo
+//!
+//! ```
+//! use grafito_ui::{Tool, AlgebraAction};
+//!
+//! let mut tool = Tool::default();
+//! assert_eq!(tool, Tool::Select);
+//!
+//! tool = Tool::Point;
+//! assert_eq!(tool.cursor_icon(), egui::CursorIcon::Crosshair);
+//! ```
 
 pub mod animation;
 pub mod color_picker;

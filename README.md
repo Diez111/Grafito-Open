@@ -1,4 +1,4 @@
-# Grafito v0.9.0-alpha
+# Grafito v0.9.16-alpha
 
 **Grafito** es una aplicación interactiva de geometría, álgebra, estadística y cálculo de alto rendimiento, acelerada por GPU, inspirada en GeoGebra y construida desde cero en Rust con APIs gráficas modernas.
 
@@ -10,10 +10,11 @@
 grafito/
 ├── crates/
 │   ├── grafito-app/        # eframe desktop app — UI, input, rendering orchestration
-│   ├── grafito-core/       # Document model, 32 geometric object types, spatial index, constraints
-│   ├── grafito-geometry/   # Math engine: CAS, statistics, ODE, fractals, attractors, curves, matrices
-│   ├── grafito-render/     # wgpu GPU pipeline — 2D/3D tessellation, depth sorting, lighting
-│   └── grafito-ui/         # egui components — toolbar, command palette, properties, color picker, themes
+│   ├── grafito-core/       # Document model, 32+ geometric object types, spatial index, constraints
+│   ├── grafito-geometry/   # Math engine: CAS, statistics, ODE, fractals, attractors, curves, booleans
+│   ├── grafito-render/     # wgpu GPU pipeline — 2D/3D tessellation, compute shaders, lighting
+│   ├── grafito-ui/         # egui components — toolbar, command palette, properties, color picker, themes
+│   └── grafito-command/    # Shared text command processor for desktop and FFI frontends
 └── assets/                 # WGSL shaders
 ```
 
@@ -183,9 +184,23 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 
 ---
 
+## Compute Shaders GPU
+
+Grafito aprovecha `wgpu` para evaluar geometría masivamente en paralelo mediante compute shaders escritos en WGSL.
+
+| Pipeline | Función | Uso típico |
+|----------|---------|------------|
+| `function_compute` | Evalúa `y = f(x)` en una grilla 1D | Gráficas de funciones explícitas |
+| `implicit_compute` | Evalúa `f(x, y) = c` sobre una grilla 2D | Curvas implícitas vía marching squares |
+| `parametric_compute` | Evalúa `(x(t), y(t))` y superficies `(x(u,v), y(u,v), z(u,v))` | Curvas y superficies paramétricas 2D/3D |
+
+Cada pipeline compila un shader con la expresión embebida, crea un bind group con buffers de entrada/salida y lanza `dispatch_workgroups` para llenar un buffer de staging legible por CPU. El renderizador cae automáticamente al camino CPU si el pipeline GPU no está disponible.
+
+---
+
 ## Canvas 2D
 
-### Objetos Soportados (32 tipos)
+### Objetos Soportados (32+ tipos)
 
 | Categoría | Tipos |
 |-----------|-------|
@@ -193,7 +208,7 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 | Cónicas | `Circle`, `Ellipse`, `Parabola`, `Hyperbola` |
 | Curvas | `Function`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve` |
 | Polígonos | `Polygon`, `RegularPolygon` |
-| Operaciones booleanas | `PolygonUnion`, `PolygonIntersection`, `PolygonDifference`, `PolygonXor` |
+| Operaciones booleanas 2D | `PolygonUnion`, `PolygonIntersection`, `PolygonDifference`, `PolygonXor` |
 | Campos | `VectorField2D` (flechas normalizadas con punta) |
 | Complejos | `ComplexGrid` (malla deformada), `ComplexMapping` |
 | Fractales | `Fractal2D` (Mandelbrot, Julia, Burning Ship) |
@@ -202,9 +217,77 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 ### Herramientas Interactivas
 
 - **Click-and-drag**: Clic para colocar; arrastrar en vacío panea la vista; arrastrar un punto libre lo mueve
-- **Construcción**: Tangent, PerpendicularBisector, AngleBisector, Midpoint, Vector, Ray
+- **Construcción**: Tangent, PerpendicularBisector, AngleBisector, Midpoint, Vector, Ray, Intersect
 - **Transformaciones**: Translate, Rotate, Dilate, Reflect
+- **Restricciones numéricas**: Distance, Angle, Tangent, Coincident, Horizontal, Vertical, EqualLength, Symmetry
+- **Cónicas**: EllipseByFoci, ParabolaByFocusDirectrix, HyperbolaByFoci, ConicByFivePoints
+- **Booleanas 2D**: PolygonUnion, PolygonIntersection, PolygonDifference, PolygonXor
 - **Herramientas contextuales**: Se ocultan/muestran según modo 2D/3D automáticamente
+
+---
+
+## Operaciones Booleanas 2D
+
+Grafito incluye operaciones booleanas exactas sobre polígonos 2D usando la librería `geo`:
+
+| Operación | Comando | Resultado |
+|-----------|---------|-----------|
+| Unión | `PolygonUnion[p1, p2]` | Polígono que cubre el área combinada |
+| Intersección | `PolygonIntersection[p1, p2]` | Región común a ambos polígonos |
+| Diferencia | `PolygonDifference[p1, p2]` | `p1` con el área de `p2` removida |
+| Diferencia simétrica | `PolygonXor[p1, p2]` | Áreas que pertenecen a solo uno de los polígonos |
+
+Estas operaciones son accesibles tanto desde la toolbar como desde la paleta de comandos.
+
+---
+
+## Enlace de Expresiones
+
+Casi cualquier parámetro geométrico puede ligarse a una expresión simbólica que se reevalúa automáticamente cuando cambian las variables del documento.
+
+| Objeto | Sintaxis | Parámetros ligados |
+|--------|----------|-------------------|
+| Punto | `PointExpr[x_expr, y_expr]` | Coordenadas `x`, `y` |
+| Círculo | `CircleExpr[centro, radius_expr]` | Radio |
+| Recta | `LineExpr[(x1,y1), (x2,y2)]` | Coordenadas de los extremos |
+| Polígono | `PolygonExpr[...]` | Cada vértice |
+| Función | `FunctionExpr[expr]` | Expresión y dominio |
+| Curva paramétrica | `ParametricExpr[x(t), y(t), t_min, t_max]` | Funciones paramétricas |
+| Superficie 3D | `SurfaceExpr[x(u,v), y(u,v), z(u,v), ...]` | Funciones paramétricas |
+
+Esto permite crear familias de objetos, animaciones con sliders y construcciones dependientes de variables globales.
+
+---
+
+## Solver de Restricciones Numéricas
+
+Grafito resuelve restricciones geométricas numéricas mediante un método de Newton con Jacobianos analíticos. El solver mantiene un grafo de dependencias y propaga los cambios en orden topológico.
+
+| Restricción | Comando | Descripción |
+|-------------|---------|-------------|
+| Distancia | `Distance[A, B, 5]` | Fija `|AB| = 5` |
+| Ángulo | `Angle[l1, l2, 90]` | Fija el ángulo entre dos rectas |
+| Tangencia | `Tangent[c1, c2]` | Fuerza tangencia entre círculos o círculo/recta |
+| Coincidencia | `Coincident[A, B]` | Dos puntos comparten posición |
+| Horizontal | `Horizontal[s]` | Segmento o recta horizontal |
+| Vertical | `Vertical[l]` | Segmento o recta vertical |
+| Igual longitud | `EqualLength[s1, s2]` | Dos segmentos con la misma longitud |
+| Simetría | `Symmetry[P, Q, eje]` | `P` y `Q` son simétricos respecto a `eje` |
+
+---
+
+## Cónicas Avanzadas
+
+Además de las cónicas canónicas, Grafito soporta construcciones de cónicas por restricciones geométricas:
+
+| Cónica | Comando | Definición |
+|--------|---------|------------|
+| Elipse por focos | `EllipseByFoci[F1, F2, P]` | Focos `F1`, `F2` y punto `P` por el que pasa |
+| Parábola por foco y directriz | `ParabolaByFocusDirectrix[F, d]` | Foco `F` y recta directriz `d` |
+| Hipérbola por focos | `HyperbolaByFoci[F1, F2, P]` | Focos `F1`, `F2` y punto `P` por el que pasa |
+| Cónica por cinco puntos | `ConicByFivePoints[A, B, C, D, E]` | Única cónica general por cinco puntos |
+
+Todas las cónicas soportan rotación arbitraria y renderizado correcto de ramas/aberturas.
 
 ---
 
@@ -244,7 +327,7 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 | Panel | Acceso | Funcionalidad |
 |-------|--------|---------------|
 | **Álgebra** | Tab A | Lista de objetos, input bar, variables, sliders, animación, filtros por tipo |
-| **Herramientas** | Tab T | Toolbar con 16 herramientas, iconos vectoriales, shortcuts, ocultamiento contextual 2D/3D |
+| **Herramientas** | Tab T | Toolbar con 30+ herramientas, iconos vectoriales, shortcuts, ocultamiento contextual 2D/3D; incluye construcciones, restricciones numéricas, cónicas y booleanas 2D |
 | **Tabla de Valores** | Tab # | Próximamente |
 | **Hoja de Cálculo** | Tab S | Grid completo con celdas editables, creación de puntos desde coordenadas |
 | **Propiedades** | Selección | Panel derecho con tipo, label editable, visibilidad, color, mediciones |
@@ -284,12 +367,41 @@ Resueltos con integrador **Runge-Kutta 4** de paso adaptativo.
 
 | Técnica | Aplicación |
 |---------|-----------|
+| **Compute shaders GPU** | Evaluación masiva de funciones, curvas y superficies en `wgpu` |
 | **Cache de atractores** | Hash de parámetros → puntos cacheados, solo recalcula al cambiar params |
 | **Fractales paralelos** | `rayon::par_iter` sobre filas de píxeles, speedup 4-8x |
 | **Evaluación en lote** | `eval_batch_1d/2d` con fast path AST + fallback evalexpr |
+| **Caché de expresiones compiladas** | Reutilización de expresiones `evalexpr` para objetos ligados |
 | **Depth sorting** | Ordenamiento por distancia a cámara, evita overdraw innecesario |
-| **Spatial index R-tree** | `rstar` para O(log n) hit testing en 32 tipos de objetos |
+| **Spatial index R-tree** | `rstar` para O(log n) hit testing en 32+ tipos de objetos |
 | **Ocultamiento contextual** | Herramientas y objetos filtrados por modo 2D/3D |
+| **Solver con Jacobianos analíticos** | Convergencia más rápida en restricciones numéricas |
+
+---
+
+## Tests y Benchmarks
+
+### Tests de integración headless
+
+```bash
+cargo test --workspace
+```
+
+- Tests del modelo de documento sin inicializar GPU.
+- Tests del renderizador con contexto `wgpu` headless.
+- Tests CLI del punto de entrada de `grafito-app`.
+
+### Benchmarks
+
+```bash
+cargo bench --workspace
+```
+
+Los benchmarks cubren:
+- Evaluación masiva de funciones (CPU vs GPU).
+- Muestreo de curvas paramétricas y superficies.
+- Convergencia del solver de restricciones numéricas.
+- Operaciones booleanas 2D sobre polígonos complejos.
 
 ---
 
@@ -356,12 +468,27 @@ cargo run -p grafito-app --release
 
 ## Roadmap v0.9
 
+### Implementado
+
+- [x] GPU compute shaders para evaluación masiva de funciones
+- [x] GPU compute shaders para curvas y superficies paramétricas
+- [x] Operaciones booleanas 2D (Union, Intersection, Difference, Xor)
+- [x] Enlace de expresiones para puntos, círculos, líneas, polígonos, funciones, curvas y superficies
+- [x] Solver de restricciones numéricas (Distance, Angle, Tangent, Coincident, Horizontal, Vertical, EqualLength, Symmetry)
+- [x] Construcciones avanzadas de cónicas (EllipseByFoci, ParabolaByFocusDirectrix, HyperbolaByFoci, ConicByFivePoints)
+- [x] Renderizado de parábolas e hipérbolas rotadas
+- [x] Tests de integración headless y benchmarks
+- [x] Toolbar y comandos para restricciones, cónicas y booleanas
+
+### Pendiente
+
 - [ ] Superficies de revolución 3D
-- [ ] GPU compute shaders para evaluación masiva de funciones
 - [ ] Import `.ggb` (GeoGebra XML)
 - [ ] Animación temporal para atractores (morphing entre parámetros)
 - [ ] Vista de Probabilidad interactiva (PDF/CDF con sliders)
-- [ ] Tests de integración end-to-end
+- [ ] Tests end-to-end con interacción de usuario simulada
+- [ ] Exportación a formatos adicionales (PNG/SVG mejorados, PDF)
+- [ ] Soporte de scripting con macros y construcciones personalizadas
 
 ---
 

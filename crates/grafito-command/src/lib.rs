@@ -1,8 +1,21 @@
-//! Shared Grafito command processor.
+//! Procesador de comandos compartido de Grafito.
 //!
-//! This crate is the single Rust entry point for text commands used by both
-//! desktop and FFI frontends. All command parsing, geometry construction,
-//! CAS dispatch, and statistics live here.
+//! Este crate es el único punto de entrada en Rust para los comandos de texto
+//! usados por los frontends de escritorio y FFI. Aquí viven el parseo de
+//! comandos, la construcción geométrica, el despacho del CAS y la estadística.
+//!
+//! # Ejemplo mínimo
+//!
+//! ```
+//! use grafito_command::process_input;
+//! use grafito_core::Document;
+//!
+//! let mut doc = Document::new();
+//! let mut input = "A = (1, 2)".to_string();
+//! process_input(&mut doc, &mut input);
+//!
+//! assert!(doc.objects_iter().any(|(_, obj)| obj.label() == "A"));
+//! ```
 
 pub mod commands;
 

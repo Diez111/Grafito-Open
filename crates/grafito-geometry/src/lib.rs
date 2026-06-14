@@ -1,4 +1,19 @@
-//! Grafito Geometry — Mathematical primitives and computational geometry.
+//! Grafito Geometry — Primitivas matemáticas y geometría computacional.
+//!
+//! Contiene el motor matemático: álgebra simbólica (CAS), evaluación de
+//! expresiones, estadística, probabilidad, ODE, curvas especiales, atractores,
+//! fractales, matrices y operaciones booleanas 2D sobre polígonos.
+//!
+//! # Ejemplo mínimo
+//!
+//! ```
+//! use grafito_geometry::{Point2, expr::evaluate};
+//!
+//! let p = Point2::new(2.0, 3.0);
+//! let y = evaluate("x^2", &[("x".to_string(), p.x)]).unwrap();
+//!
+//! assert!((y - 4.0).abs() < 1e-9);
+//! ```
 
 pub mod ast;
 pub mod attractors;
