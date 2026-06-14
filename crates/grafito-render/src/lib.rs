@@ -253,7 +253,6 @@ impl Renderer {
         );
     }
 
-    #[cfg(test)]
     pub fn build_geometry_static(
         document: &Document,
         view: &ViewTransform,
@@ -353,7 +352,6 @@ impl Renderer {
         (vertices, indices)
     }
 
-    #[cfg(test)]
     fn build_grid_static(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
@@ -387,7 +385,6 @@ impl Renderer {
         }
     }
 
-    #[cfg(test)]
     fn build_axes_static(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
@@ -415,7 +412,6 @@ impl Renderer {
         Self::add_line_segment(vertices, indices, y_axis_a, y_axis_b, 2.0, axis_color);
     }
 
-    #[cfg(test)]
     pub fn build_3d_geometry_static(
         document: &Document,
         camera: &Camera3D,
@@ -502,7 +498,6 @@ impl Renderer {
         (vertices, indices)
     }
 
-    #[cfg(test)]
     fn build_3d_grid_static(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
@@ -572,7 +567,6 @@ impl Renderer {
         }
     }
 
-    #[cfg(test)]
     fn build_3d_axes_static(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
