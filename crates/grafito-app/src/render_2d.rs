@@ -1,12 +1,13 @@
 use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
-use grafito_core::{CircleObj, GeoObject, LineObj, PointObj, PolygonObj};
+use grafito_core::{CircleObj, GeoObject, LineObj, PointObj, PolygonObj, RenderQuality};
 use grafito_geometry::expr::{
     eval_function_with_vars, eval_integral_batch, eval_parsed_batch, prepare_function_ast,
 };
 use grafito_geometry::{Color, Point2};
 use grafito_ui::Tool;
+use std::time::Instant;
 
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -344,6 +345,9 @@ impl GrafitoApp {
         if response.drag_started() {
             self.canvas_drag_start = current_pos;
             self.canvas_is_panning = false;
+            self.is_view_changing = true;
+            self.last_interaction_time = Instant::now();
+            self.document.render_quality = RenderQuality::Preview;
         }
 
         let drag_distance = self
@@ -402,6 +406,9 @@ impl GrafitoApp {
 
         // Apply pan
         if panning && pan_delta != Vec2::ZERO {
+            self.is_view_changing = true;
+            self.last_interaction_time = Instant::now();
+            self.document.render_quality = RenderQuality::Preview;
             self.document
                 .view_mut()
                 .pan(GlamVec2::new(pan_delta.x, pan_delta.y));
@@ -480,6 +487,9 @@ impl GrafitoApp {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll.y != 0.0 {
+                self.is_view_changing = true;
+                self.last_interaction_time = Instant::now();
+                self.document.render_quality = RenderQuality::Preview;
                 let factor = if scroll.y > 0.0 {
                     1.0 + scroll.y.abs() * 0.001
                 } else {
@@ -894,9 +904,11 @@ impl GrafitoApp {
             let world_br =
                 view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
             let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
-            let grid_size = grafito_core::implicit_curve::recommended_grid_size(
+            let quality = self.document.render_quality;
+            let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
                 canvas_rect.width(),
                 canvas_rect.height(),
+                quality,
             );
             let variables = self.document.variables.clone();
             for (_, obj) in self.document.objects_iter_mut() {
@@ -906,6 +918,7 @@ impl GrafitoApp {
                         view_bounds,
                         grid_size,
                         &variables,
+                        quality,
                     );
                 }
             }

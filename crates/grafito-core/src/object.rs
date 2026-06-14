@@ -1347,6 +1347,11 @@ pub struct ImplicitCurveObj {
     pub cached_segments: RwLock<ImplicitCurveSegments>,
     #[serde(skip)]
     pub cached_key: RwLock<Option<ImplicitCurveCacheKey>>,
+    /// World-space region that was actually computed (padded/snapped view
+    /// bounds). Used to decide whether a new view can reuse the cached
+    /// geometry without re-evaluation.
+    #[serde(skip)]
+    pub cached_region: RwLock<Option<(f64, f64, f64, f64)>>,
 }
 
 impl Clone for ImplicitCurveObj {
@@ -1365,6 +1370,7 @@ impl Clone for ImplicitCurveObj {
             // A clone starts with an empty cache; it will be recomputed on demand.
             cached_segments: RwLock::new(ImplicitCurveSegments::new()),
             cached_key: RwLock::new(None),
+            cached_region: RwLock::new(None),
         }
     }
 }
@@ -1399,6 +1405,7 @@ impl ImplicitCurveObj {
             contour_colors: None,
             cached_segments: RwLock::new(ImplicitCurveSegments::new()),
             cached_key: RwLock::new(None),
+            cached_region: RwLock::new(None),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1457,6 +1464,10 @@ impl ImplicitCurveObj {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .cached_region
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = None;
     }
 }
 

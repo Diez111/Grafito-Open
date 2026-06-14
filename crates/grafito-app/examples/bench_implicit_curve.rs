@@ -4,6 +4,7 @@
 //!   cargo run --example bench_implicit_curve --release
 
 use grafito_core::object::{ImplicitCurveObj, RelationOperator};
+use grafito_core::RenderQuality;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -24,6 +25,7 @@ fn main() {
             view_bounds,
             grid_size,
             &vars,
+            RenderQuality::High,
         );
         let segs = guard.iter().map(|(_, s)| s.len()).sum::<usize>();
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;

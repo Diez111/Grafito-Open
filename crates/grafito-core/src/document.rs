@@ -51,6 +51,8 @@ pub struct Document {
     pub complex_base_symbol: String,
     #[serde(default)]
     pub constraints: ConstraintGraph,
+    #[serde(skip)]
+    pub render_quality: crate::RenderQuality,
 }
 
 impl Default for Document {
@@ -67,6 +69,7 @@ impl Default for Document {
             spatial_dirty: true,
             complex_base_symbol: "z".to_string(),
             constraints: ConstraintGraph::new(),
+            render_quality: crate::RenderQuality::default(),
         }
     }
 }

@@ -282,7 +282,13 @@ mod tests {
 
         // First call computes and caches.
         let segs1 = {
-            let guard = implicit_curve::segments_or_compute(&ic, view_bounds, grid_size, &vars);
+            let guard = implicit_curve::segments_or_compute(
+                &ic,
+                view_bounds,
+                grid_size,
+                &vars,
+                RenderQuality::Normal,
+            );
             guard.clone()
         };
         assert!(
@@ -290,17 +296,42 @@ mod tests {
             "folium of descartes should produce segments"
         );
 
+        // The cached region is a padded/snapped superset of the requested bounds.
+        let region = ic
+            .cached_region
+            .read()
+            .unwrap()
+            .expect("cached region should be set");
+        assert!(
+            view_bounds.0 >= region.0
+                && view_bounds.1 <= region.1
+                && view_bounds.2 >= region.2
+                && view_bounds.3 <= region.3,
+            "cached region should contain the requested view bounds"
+        );
+
         // Second call with identical parameters returns the cached value.
         let segs2 = {
-            let guard = implicit_curve::segments_or_compute(&ic, view_bounds, grid_size, &vars);
+            let guard = implicit_curve::segments_or_compute(
+                &ic,
+                view_bounds,
+                grid_size,
+                &vars,
+                RenderQuality::Normal,
+            );
             guard.clone()
         };
         assert_eq!(segs1.len(), segs2.len());
 
         // A different view invalidates and recomputes.
         let segs3 = {
-            let guard =
-                implicit_curve::segments_or_compute(&ic, (-1.0, 1.0, -1.0, 1.0), grid_size, &vars);
+            let guard = implicit_curve::segments_or_compute(
+                &ic,
+                (-1.0, 1.0, -1.0, 1.0),
+                grid_size,
+                &vars,
+                RenderQuality::Normal,
+            );
             guard.clone()
         };
         // May be empty if zoomed into a region without the curve, but cache key changed.
@@ -309,9 +340,89 @@ mod tests {
             .read()
             .unwrap()
             .as_ref()
-            .map(|k| k.view_bounds == (-1.0, 1.0, -1.0, 1.0))
+            .map(|k| k.view_bounds != view_bounds)
             .unwrap_or(false));
         let _ = segs3;
+    }
+
+    #[test]
+    fn test_implicit_curve_cache_reuses_for_small_pan() {
+        let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
+        let vars = std::collections::HashMap::new();
+        let view_bounds = (-3.0, 3.0, -3.0, 3.0);
+        let grid_size = 40;
+
+        let segs1 = {
+            let guard = implicit_curve::segments_or_compute(
+                &ic,
+                view_bounds,
+                grid_size,
+                &vars,
+                RenderQuality::Normal,
+            );
+            guard.clone()
+        };
+
+        // A small pan stays inside the padded/snapped cached region, so the
+        // previously computed segments are reused.
+        let panned = (
+            view_bounds.0 + 0.1,
+            view_bounds.1 + 0.1,
+            view_bounds.2,
+            view_bounds.3,
+        );
+        let segs2 = {
+            let guard = implicit_curve::segments_or_compute(
+                &ic,
+                panned,
+                grid_size,
+                &vars,
+                RenderQuality::Normal,
+            );
+            guard.clone()
+        };
+        assert_eq!(segs1.len(), segs2.len(), "small pan should reuse cache");
+    }
+
+    #[test]
+    fn test_implicit_curve_cache_recomputes_for_far_pan() {
+        let ic = ImplicitCurveObj::new("x^3 + y^3", "3*x*y", RelationOperator::Eq);
+        let vars = std::collections::HashMap::new();
+        let view_bounds = (-3.0, 3.0, -3.0, 3.0);
+        let grid_size = 40;
+
+        drop(implicit_curve::segments_or_compute(
+            &ic,
+            view_bounds,
+            grid_size,
+            &vars,
+            RenderQuality::Normal,
+        ));
+        let first_region = *ic.cached_region.read().unwrap().as_ref().unwrap();
+
+        // A far-away view is outside the padded cached region, so it recomputes
+        // and updates the cached region.
+        let far = (10.0, 16.0, 10.0, 16.0);
+        drop(implicit_curve::segments_or_compute(
+            &ic,
+            far,
+            grid_size,
+            &vars,
+            RenderQuality::Normal,
+        ));
+        let second_region = *ic.cached_region.read().unwrap().as_ref().unwrap();
+
+        assert_ne!(
+            first_region, second_region,
+            "far pan should update cached region"
+        );
+        assert!(
+            far.0 >= second_region.0
+                && far.1 <= second_region.1
+                && far.2 >= second_region.2
+                && far.3 <= second_region.3,
+            "new cached region should contain the far view bounds"
+        );
     }
 
     #[test]

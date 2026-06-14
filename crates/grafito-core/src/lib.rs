@@ -15,5 +15,17 @@ pub use id::*;
 pub use object::*;
 pub use spatial::*;
 
+/// Rendering quality hint used to trade fidelity for responsiveness while
+/// the user is interacting with the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderQuality {
+    #[default]
+    Normal,
+    /// Low resolution while panning / zooming.
+    Preview,
+    /// High resolution once the view has been idle for a short time.
+    High,
+}
+
 #[cfg(test)]
 mod tests;

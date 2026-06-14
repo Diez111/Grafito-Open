@@ -69,6 +69,7 @@ impl CallbackTrait for CanvasCallback {
                             ic,
                             self.document.view(),
                             &self.document.variables,
+                            self.document.render_quality,
                         );
                     }
                 }

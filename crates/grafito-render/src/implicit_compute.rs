@@ -10,6 +10,7 @@
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
 use grafito_core::object::{ImplicitCurveObj, ImplicitCurveSegments};
+use grafito_core::RenderQuality;
 use grafito_geometry::{Point2, ViewTransform};
 use std::collections::HashMap;
 
@@ -466,14 +467,31 @@ pub fn maybe_compute_on_gpu(
     ic: &ImplicitCurveObj,
     view: &ViewTransform,
     variables: &HashMap<String, f64>,
+    quality: RenderQuality,
 ) -> bool {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
     let world_br = view.screen_to_world(view.screen_size);
     let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
-    let grid_size =
-        grafito_core::implicit_curve::recommended_grid_size(view.screen_size.x, view.screen_size.y);
+    let padded_bounds = grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
+    let grid_size = match quality {
+        RenderQuality::Preview => grafito_core::implicit_curve::recommended_grid_size(
+            view.screen_size.x,
+            view.screen_size.y,
+        )
+        .min(128),
+        RenderQuality::Normal => grafito_core::implicit_curve::recommended_grid_size(
+            view.screen_size.x,
+            view.screen_size.y,
+        )
+        .min(512),
+        RenderQuality::High => grafito_core::implicit_curve::recommended_grid_size(
+            view.screen_size.x,
+            view.screen_size.y,
+        )
+        .min(1024),
+    };
 
-    let key = ic.cache_key(view_bounds, grid_size, variables);
+    let key = ic.cache_key(padded_bounds, grid_size, variables);
     {
         let cached_key = ic.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -481,7 +499,8 @@ pub fn maybe_compute_on_gpu(
         }
     }
 
-    let Some(rows) = compute.evaluate(device, queue, ic, view_bounds, grid_size, variables) else {
+    let Some(rows) = compute.evaluate(device, queue, ic, padded_bounds, grid_size, variables)
+    else {
         return false;
     };
 
@@ -492,12 +511,18 @@ pub fn maybe_compute_on_gpu(
         .cloned()
         .unwrap_or_else(|| vec![0.0]);
     let segments = marching_squares_from_grid(
-        &rows, &levels, world_tl.x, world_tl.y, world_br.x, world_br.y,
+        &rows,
+        &levels,
+        padded_bounds.0,
+        padded_bounds.2,
+        padded_bounds.1,
+        padded_bounds.3,
     );
     *ic.cached_segments
         .write()
         .unwrap_or_else(|p| p.into_inner()) = segments;
     *ic.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *ic.cached_region.write().unwrap_or_else(|p| p.into_inner()) = Some(padded_bounds);
     true
 }
 

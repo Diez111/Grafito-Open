@@ -13,11 +13,12 @@ mod tests;
 use egui::{Color32, Key, Pos2, Sense, Vec2};
 use grafito_core::{
     CircleObj, Cube3DObj, Document, EllipseObj, FunctionObj, GeoObject, LineObj, ObjectId,
-    Point3DObj, PointObj, PolygonObj, Sphere3DObj,
+    Point3DObj, PointObj, PolygonObj, RenderQuality, Sphere3DObj,
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
 use grafito_ui::Tool;
+use std::time::{Duration, Instant};
 
 const MAX_UNDO: usize = 50;
 
@@ -77,6 +78,8 @@ pub struct GrafitoApp {
     pub tool_ghost: Option<GeoObject>,
     pub tool_state: crate::tool_dispatcher::ToolState,
     pub use_gpu: bool,
+    pub last_interaction_time: Instant,
+    pub is_view_changing: bool,
 }
 
 impl GrafitoApp {
@@ -134,6 +137,7 @@ impl GrafitoApp {
         document.add_object(GeoObject::Ellipse(
             EllipseObj::new(Point2::new(-1.0, -2.0), 2.0, 1.0).with_label("E1"),
         ));
+        document.render_quality = RenderQuality::Normal;
 
         let config = load_config();
         let dark_mode = config.dark_mode;
@@ -179,6 +183,8 @@ impl GrafitoApp {
             tool_ghost: None,
             tool_state: crate::tool_dispatcher::ToolState::default(),
             use_gpu: true,
+            last_interaction_time: Instant::now(),
+            is_view_changing: false,
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
@@ -335,6 +341,12 @@ fn configure_modern_style(ctx: &egui::Context) {
 impl eframe::App for GrafitoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         configure_modern_style(ctx);
+        if self.is_view_changing
+            && self.last_interaction_time.elapsed() > Duration::from_millis(150)
+        {
+            self.is_view_changing = false;
+            self.document.render_quality = RenderQuality::High;
+        }
         // Keyboard shortcuts
         if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
             self.undo();
@@ -2087,6 +2099,9 @@ impl eframe::App for GrafitoApp {
                     if response.drag_started() {
                         self.canvas_drag_start = current_pos;
                         self.canvas_is_panning = false;
+                        self.is_view_changing = true;
+                        self.last_interaction_time = Instant::now();
+                        self.document.render_quality = RenderQuality::Preview;
                     }
                     let drag_distance = self
                         .canvas_drag_start
@@ -2114,6 +2129,9 @@ impl eframe::App for GrafitoApp {
                             response.drag_delta()
                         };
                         if delta != Vec2::ZERO {
+                            self.is_view_changing = true;
+                            self.last_interaction_time = Instant::now();
+                            self.document.render_quality = RenderQuality::Preview;
                             self.camera.pan(delta.x, delta.y);
                         }
                     } else if space_pressed && pointer_in_canvas {
@@ -2123,6 +2141,9 @@ impl eframe::App for GrafitoApp {
                     if response.hovered() {
                         let sc = ui.input(|i| i.smooth_scroll_delta);
                         if sc.y != 0.0 {
+                            self.is_view_changing = true;
+                            self.last_interaction_time = Instant::now();
+                            self.document.render_quality = RenderQuality::Preview;
                             self.camera.zoom(1.0 + sc.y * 0.005);
                         }
                     }

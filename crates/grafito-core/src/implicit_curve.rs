@@ -6,6 +6,7 @@
 //! (`grafito-render`) consume the cached world-space segments.
 
 use crate::object::{ImplicitCurveObj, ImplicitCurveSegments, RelationOperator};
+use crate::RenderQuality;
 use grafito_geometry::{expr, Point2};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -13,37 +14,113 @@ use std::collections::HashMap;
 /// Choose a grid resolution that keeps cells close to screen pixels while
 /// avoiding excessive work on high-DPI or huge canvases.
 ///
-/// Target ~2 pixels per cell, clamped between 40 and 256 samples per axis.
+/// Clamped between 128 and 1024 samples per axis.
 pub fn recommended_grid_size(canvas_width: f32, canvas_height: f32) -> usize {
-    let cells_x = (canvas_width as f64).clamp(128.0, 1024.0);
-    let cells_y = (canvas_height as f64).clamp(128.0, 1024.0);
-    cells_x.max(cells_y) as usize
+    ((canvas_width.max(canvas_height)) as f64).clamp(128.0, 1024.0) as usize
+}
+
+/// Choose a grid resolution capped by the current render quality.
+pub fn recommended_grid_size_for_quality(
+    canvas_width: f32,
+    canvas_height: f32,
+    quality: RenderQuality,
+) -> usize {
+    let base = recommended_grid_size(canvas_width, canvas_height);
+    match quality {
+        RenderQuality::Preview => base.min(128),
+        RenderQuality::Normal => base.min(512),
+        RenderQuality::High => base.min(1024),
+    }
+}
+
+/// Expand the visible view bounds by `pad_factor` and snap the result to a
+/// coarse grid so that small pans do not invalidate the cache.
+pub fn padded_snapped_bounds(
+    view_bounds: (f64, f64, f64, f64),
+    pad_factor: f64,
+    snap_cells: usize,
+) -> (f64, f64, f64, f64) {
+    let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
+    let cx = (vx_min + vx_max) * 0.5;
+    let cy = (vy_min + vy_max) * 0.5;
+    let half_w = (vx_max - vx_min) * 0.5 * pad_factor;
+    let half_h = (vy_max - vy_min) * 0.5 * pad_factor;
+
+    let cells = snap_cells.max(1) as f64;
+    let cell_x = (vx_max - vx_min) / cells;
+    let cell_y = (vy_max - vy_min) / cells;
+
+    let (x_min, mut x_max) = if cell_x > 0.0 {
+        (
+            ((cx - half_w) / cell_x).floor() * cell_x,
+            ((cx + half_w) / cell_x).ceil() * cell_x,
+        )
+    } else {
+        (cx - half_w, cx + half_w)
+    };
+
+    let (y_min, mut y_max) = if cell_y > 0.0 {
+        (
+            ((cy - half_h) / cell_y).floor() * cell_y,
+            ((cy + half_h) / cell_y).ceil() * cell_y,
+        )
+    } else {
+        (cy - half_h, cy + half_h)
+    };
+
+    // Defensive: ensure a non-degenerate domain.
+    if x_min >= x_max {
+        x_max = x_min + f64::EPSILON;
+    }
+    if y_min >= y_max {
+        y_max = y_min + f64::EPSILON;
+    }
+
+    (x_min, x_max, y_min, y_max)
 }
 
 /// Compute or retrieve cached world-space line segments for an implicit curve.
 ///
-/// The cache key covers the expression, operator, contour configuration, view
-/// bounds, grid resolution and document variables. When any of these change the
-/// grid is re-evaluated; otherwise the previous segments are returned.
+/// The cache key covers the expression, operator, contour configuration,
+/// padded/snapped view bounds, grid resolution and document variables. When
+/// any of these change the grid is re-evaluated; otherwise the previous
+/// segments are returned.
 pub fn segments_or_compute<'a>(
     ic: &'a ImplicitCurveObj,
     view_bounds: (f64, f64, f64, f64),
     grid_size: usize,
     variables: &HashMap<String, f64>,
+    quality: RenderQuality,
 ) -> std::sync::RwLockReadGuard<'a, ImplicitCurveSegments> {
-    let key = ic.cache_key(view_bounds, grid_size, variables);
+    let padded_bounds = padded_snapped_bounds(view_bounds, 2.0, 64);
+    let grid_size = match quality {
+        RenderQuality::Preview => grid_size.min(128),
+        RenderQuality::Normal => grid_size.min(512),
+        RenderQuality::High => grid_size.min(1024),
+    };
+
     {
         let cached_key = ic.cached_key.read().unwrap_or_else(|p| p.into_inner());
-        if cached_key.as_ref() == Some(&key) {
-            return ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+        if cached_key.as_ref().map(|k| k.view_bounds) == Some(padded_bounds)
+            && cached_key.as_ref().map(|k| k.grid_size) == Some(grid_size)
+        {
+            let cached_region = ic.cached_region.read().unwrap_or_else(|p| p.into_inner());
+            if let Some((rx_min, rx_max, ry_min, ry_max)) = *cached_region {
+                let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
+                if vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max {
+                    return ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                }
+            }
         }
     }
 
-    let segments = evaluate_implicit_curve(ic, view_bounds, grid_size, variables);
+    let key = ic.cache_key(padded_bounds, grid_size, variables);
+    let segments = evaluate_implicit_curve(ic, padded_bounds, grid_size, variables);
     *ic.cached_segments
         .write()
         .unwrap_or_else(|p| p.into_inner()) = segments;
     *ic.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *ic.cached_region.write().unwrap_or_else(|p| p.into_inner()) = Some(padded_bounds);
     ic.cached_segments.read().unwrap_or_else(|p| p.into_inner())
 }
 
@@ -137,7 +214,7 @@ pub fn evaluate_implicit_curve(
     // Build per-level segments. This is serial but cheap compared to evaluation.
     let mut per_level: ImplicitCurveSegments = ImplicitCurveSegments::new();
     let mut total = 0usize;
-    const MAX_SEGMENTS: usize = 200_000;
+    const MAX_SEGMENTS: usize = 50_000;
     for level in &levels {
         let segs = marching_squares_level(&rows, *level, x_min, y_min, dx, dy);
         total += segs.len();

@@ -221,7 +221,7 @@ impl Renderer {
         });
 
         let implicit_compute = Some(crate::implicit_compute::ImplicitComputePipeline::new(
-            device, 256,
+            device, 1024,
         ));
 
         Self {
@@ -928,15 +928,18 @@ impl Renderer {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
                     let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
-                    let grid_size = grafito_core::implicit_curve::recommended_grid_size(
+                    let quality = document.render_quality;
+                    let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
                         view_transform.screen_size.x,
                         view_transform.screen_size.y,
+                        quality,
                     );
                     let levels = grafito_core::implicit_curve::segments_or_compute(
                         ic,
                         view_bounds,
                         grid_size,
                         &document.variables,
+                        quality,
                     );
                     for (_level, segs) in levels.iter() {
                         for (a, b) in segs {
