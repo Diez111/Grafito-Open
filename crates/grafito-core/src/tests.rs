@@ -880,4 +880,92 @@ mod tests {
             std::f64::consts::TAU
         );
     }
+
+    #[test]
+    fn test_distance_constraint() {
+        let mut doc = Document::new();
+        let a = doc.add_point(Point2::new(0.0, 0.0));
+        let b = doc.add_point(Point2::new(5.0, 0.0));
+        doc.add_distance_constraint(a, b, 10.0);
+        doc.re_evaluate_constraints(&[]);
+
+        let pa = doc.point_position(a).unwrap();
+        let pb = doc.point_position(b).unwrap();
+        let d = pa.distance(&pb);
+        assert!((d - 10.0).abs() < 1e-6, "distance should be 10, got {}", d);
+    }
+
+    #[test]
+    fn test_angle_constraint() {
+        let mut doc = Document::new();
+        let l1 = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )));
+        let l2 = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+        )));
+        doc.add_angle_constraint(l1, l2, 90.0);
+        doc.re_evaluate_constraints(&[]);
+
+        let GeoObject::Line(line1) = doc.get_object(l1).unwrap() else {
+            panic!("expected line");
+        };
+        let GeoObject::Line(line2) = doc.get_object(l2).unwrap() else {
+            panic!("expected line");
+        };
+        let d1 = Point2::new(line1.end.x - line1.start.x, line1.end.y - line1.start.y);
+        let d2 = Point2::new(line2.end.x - line2.start.x, line2.end.y - line2.start.y);
+        let len1 = (d1.x * d1.x + d1.y * d1.y).sqrt();
+        let len2 = (d2.x * d2.x + d2.y * d2.y).sqrt();
+        assert!(len1 > 1e-6 && len2 > 1e-6);
+        let dot = d1.x * d2.x + d1.y * d2.y;
+        let cos_angle = dot / (len1 * len2);
+        let angle = cos_angle.clamp(-1.0, 1.0).acos().to_degrees();
+        assert!(
+            (angle - 90.0).abs() < 1e-4,
+            "angle should be 90°, got {}",
+            angle
+        );
+    }
+
+    #[test]
+    fn test_tangent_constraint() {
+        let mut doc = Document::new();
+        let circle = doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(0.0, 0.0),
+            5.0,
+        )));
+        let line = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+        )));
+        doc.add_tangent_constraint(circle, line);
+        doc.re_evaluate_constraints(&[]);
+
+        let GeoObject::Circle(c) = doc.get_object(circle).unwrap() else {
+            panic!("expected circle");
+        };
+        let GeoObject::Line(l) = doc.get_object(line).unwrap() else {
+            panic!("expected line");
+        };
+        let dx = l.end.x - l.start.x;
+        let dy = l.end.y - l.start.y;
+        let len2 = dx * dx + dy * dy;
+        let dist = if len2 < 1e-24 {
+            c.center.distance(&l.start)
+        } else {
+            ((l.end.x - l.start.x) * (l.start.y - c.center.y)
+                - (l.start.x - c.center.x) * (l.end.y - l.start.y))
+                .abs()
+                / len2.sqrt()
+        };
+        assert!(
+            (dist - c.radius).abs() < 1e-6,
+            "distance to line ({}) should equal radius ({})",
+            dist,
+            c.radius
+        );
+    }
 }

@@ -202,4 +202,12 @@ impl ConstraintGraph {
     pub fn dependents_of(&self, id: &ObjectId) -> Option<&Vec<usize>> {
         self.dependents.get(id)
     }
+
+    /// Iterate over all constraints in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = &Constraint> {
+        let mut ids: Vec<usize> = self.constraints.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(move |id| self.constraints.get(&id))
+    }
 }

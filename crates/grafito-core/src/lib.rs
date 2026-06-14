@@ -6,10 +6,13 @@ pub mod function_sampling;
 pub mod id;
 pub mod implicit_curve;
 pub mod macros;
+pub mod numeric_solver;
 pub mod object;
 pub mod parametric_sampling;
 pub mod spatial;
 pub mod validation;
+
+mod numeric_constraints;
 
 pub use constraints::*;
 pub use document::*;

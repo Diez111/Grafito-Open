@@ -1,9 +1,11 @@
 use crate::constraints::ConstraintGraph;
-use crate::{GeoObject, LineKind, ObjectId, RelationOperator};
+use crate::numeric_constraints::{AngleEq, DistanceEq, TangentEq};
+use crate::numeric_solver::{NumericSolver, SolveError, VarIndex};
+use crate::{GeoObject, LineKind, ObjectId, PointObj, RelationOperator};
 use grafito_geometry::expr::evaluate;
 use grafito_geometry::{distance_point_to_segment, Point2, Point3D, ViewTransform};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableMeta {
@@ -31,6 +33,19 @@ fn to_subscript(n: usize) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// Identifies a scalar geometric property that can participate in numeric
+/// constraint solving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObjField {
+    PointX,
+    PointY,
+    CircleRadius,
+    LineStartX,
+    LineStartY,
+    LineEndX,
+    LineEndY,
 }
 
 /// The main document containing all geometric objects.
@@ -113,6 +128,10 @@ impl Document {
                 }
             }
         }
+    }
+
+    pub fn add_point(&mut self, pos: Point2) -> ObjectId {
+        self.add_object(GeoObject::Point(PointObj::new(pos)))
     }
 
     pub fn add_object(&mut self, obj: GeoObject) -> ObjectId {
@@ -269,7 +288,274 @@ impl Document {
         self.constraints.creator_of(id)
     }
 
+    /// Collect all free numeric variables that participate in any numeric
+    /// constraint (`Distance`, `Angle`, or `Tangent`).
+    pub fn build_solver_variables(&self) -> Vec<(ObjectId, ObjField)> {
+        let numeric_ids: Vec<usize> = self
+            .constraints
+            .iter()
+            .filter(|c| Self::is_numeric_constraint_name(&c.name))
+            .map(|c| c.id)
+            .collect();
+        self.build_solver_variables_for_constraints(&numeric_ids)
+    }
+
+    fn build_solver_variables_for_constraints(
+        &self,
+        numeric_ids: &[usize],
+    ) -> Vec<(ObjectId, ObjField)> {
+        let mut seen = HashSet::new();
+        let mut vars = Vec::new();
+
+        for &id in numeric_ids {
+            let Some(cons) = self.constraints.get_constraint(id) else {
+                continue;
+            };
+            for &input in &cons.inputs {
+                if !self.constraints.is_free(&input) {
+                    continue;
+                }
+                if let Some(obj) = self.get_object(input) {
+                    match obj {
+                        GeoObject::Point(_) => {
+                            if seen.insert((input, ObjField::PointX)) {
+                                vars.push((input, ObjField::PointX));
+                            }
+                            if seen.insert((input, ObjField::PointY)) {
+                                vars.push((input, ObjField::PointY));
+                            }
+                        }
+                        GeoObject::Circle(_) if seen.insert((input, ObjField::CircleRadius)) => {
+                            vars.push((input, ObjField::CircleRadius));
+                        }
+                        GeoObject::Line(_) => {
+                            if seen.insert((input, ObjField::LineStartX)) {
+                                vars.push((input, ObjField::LineStartX));
+                            }
+                            if seen.insert((input, ObjField::LineStartY)) {
+                                vars.push((input, ObjField::LineStartY));
+                            }
+                            if seen.insert((input, ObjField::LineEndX)) {
+                                vars.push((input, ObjField::LineEndX));
+                            }
+                            if seen.insert((input, ObjField::LineEndY)) {
+                                vars.push((input, ObjField::LineEndY));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        vars
+    }
+
+    fn get_field_value(&self, id: ObjectId, field: ObjField) -> f64 {
+        match (self.get_object(id), field) {
+            (Some(GeoObject::Point(p)), ObjField::PointX) => p.position.x,
+            (Some(GeoObject::Point(p)), ObjField::PointY) => p.position.y,
+            (Some(GeoObject::Circle(c)), ObjField::CircleRadius) => c.radius,
+            (Some(GeoObject::Line(l)), ObjField::LineStartX) => l.start.x,
+            (Some(GeoObject::Line(l)), ObjField::LineStartY) => l.start.y,
+            (Some(GeoObject::Line(l)), ObjField::LineEndX) => l.end.x,
+            (Some(GeoObject::Line(l)), ObjField::LineEndY) => l.end.y,
+            _ => 0.0,
+        }
+    }
+
+    fn set_field_value(&mut self, id: ObjectId, field: ObjField, value: f64) {
+        match (self.get_object_mut(id), field) {
+            (Some(GeoObject::Point(p)), ObjField::PointX) => p.position.x = value,
+            (Some(GeoObject::Point(p)), ObjField::PointY) => p.position.y = value,
+            (Some(GeoObject::Circle(c)), ObjField::CircleRadius) => c.radius = value,
+            (Some(GeoObject::Line(l)), ObjField::LineStartX) => l.start.x = value,
+            (Some(GeoObject::Line(l)), ObjField::LineStartY) => l.start.y = value,
+            (Some(GeoObject::Line(l)), ObjField::LineEndX) => l.end.x = value,
+            (Some(GeoObject::Line(l)), ObjField::LineEndY) => l.end.y = value,
+            _ => {}
+        }
+    }
+
+    pub fn point_position(&self, id: ObjectId) -> Option<Point2> {
+        match self.get_object(id)? {
+            GeoObject::Point(p) => Some(p.position),
+            _ => None,
+        }
+    }
+
+    fn build_numeric_equations(
+        &self,
+        numeric_ids: &[usize],
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Vec<Box<dyn crate::numeric_solver::ConstraintEquation>> {
+        let mut equations: Vec<Box<dyn crate::numeric_solver::ConstraintEquation>> = Vec::new();
+        for &id in numeric_ids {
+            let Some(cons) = self.constraints.get_constraint(id) else {
+                continue;
+            };
+            match cons.name.as_str() {
+                "Distance" if cons.inputs.len() >= 2 => {
+                    let target = cons.params.get("distance").copied().unwrap_or(0.0);
+                    if let Some(eq) = DistanceEq::from_inputs(
+                        self,
+                        cons.inputs[0],
+                        cons.inputs[1],
+                        target,
+                        var_index,
+                    ) {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "Angle" if !cons.inputs.is_empty() => {
+                    let target = cons.params.get("angle").copied().unwrap_or(0.0);
+                    if let Some(eq) = AngleEq::from_inputs(self, &cons.inputs, target, var_index) {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "Tangent" if cons.inputs.len() >= 2 => {
+                    if let Some(eq) =
+                        TangentEq::from_inputs(self, cons.inputs[0], cons.inputs[1], var_index)
+                    {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                _ => {}
+            }
+        }
+        equations
+    }
+
+    fn write_solver_variables(
+        &mut self,
+        var_map: &[(ObjectId, ObjField)],
+        vars: &[f64],
+    ) -> Vec<ObjectId> {
+        let mut changed = Vec::new();
+        for ((id, field), value) in var_map.iter().zip(vars.iter()) {
+            let old = self.get_field_value(*id, *field);
+            if (old - *value).abs() > 1e-12 {
+                self.set_field_value(*id, *field, *value);
+                if changed.last() != Some(id) {
+                    changed.push(*id);
+                }
+            }
+        }
+        changed
+    }
+
+    fn is_numeric_constraint_name(name: &str) -> bool {
+        matches!(name, "Distance" | "Angle" | "Tangent")
+    }
+
+    /// Add a numeric distance constraint between two objects.
+    pub fn add_distance_constraint(&mut self, a: ObjectId, b: ObjectId, distance: f64) -> usize {
+        let mut params = HashMap::new();
+        params.insert("distance".to_string(), distance);
+        self.constraints
+            .add_constraint("Distance", vec![a, b], vec![], params)
+    }
+
+    /// Add a numeric angle constraint between two objects (lines) or three points.
+    pub fn add_angle_constraint(&mut self, a: ObjectId, b: ObjectId, angle_deg: f64) -> usize {
+        let mut params = HashMap::new();
+        params.insert("angle".to_string(), angle_deg);
+        self.constraints
+            .add_constraint("Angle", vec![a, b], vec![], params)
+    }
+
+    /// Add a numeric tangent constraint between two objects.
+    pub fn add_tangent_constraint(&mut self, a: ObjectId, b: ObjectId) -> usize {
+        self.constraints
+            .add_constraint("Tangent", vec![a, b], vec![], HashMap::new())
+    }
+
     pub fn re_evaluate_constraints(&mut self, order: &[usize]) {
+        // Numeric constraints have no outputs, so they never appear in a
+        // propagation order rooted at changed objects. Always include them.
+        let numeric_ids: Vec<usize> = self
+            .constraints
+            .iter()
+            .filter(|c| Self::is_numeric_constraint_name(&c.name))
+            .map(|c| c.id)
+            .collect();
+
+        let constructive_ids: Vec<usize> = order
+            .iter()
+            .cloned()
+            .filter(|&id| {
+                self.constraints
+                    .get_constraint(id)
+                    .map(|c| !Self::is_numeric_constraint_name(&c.name))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if numeric_ids.is_empty() {
+            self.apply_constructive_constraints(&constructive_ids);
+            return;
+        }
+
+        let var_map = self.build_solver_variables_for_constraints(&numeric_ids);
+        if var_map.is_empty() {
+            self.apply_constructive_constraints(&constructive_ids);
+            return;
+        }
+
+        let var_index: HashMap<(ObjectId, ObjField), VarIndex> = var_map
+            .iter()
+            .enumerate()
+            .map(|(i, (id, field))| ((*id, *field), i))
+            .collect();
+
+        let equations = self.build_numeric_equations(&numeric_ids, &var_index);
+        if equations.is_empty() {
+            self.apply_constructive_constraints(&constructive_ids);
+            return;
+        }
+
+        let solver = NumericSolver::default();
+        let mut changed: Vec<ObjectId> = Vec::new();
+
+        for _ in 0..5 {
+            let current_order = if changed.is_empty() {
+                constructive_ids.clone()
+            } else {
+                self.propagation_order(&changed)
+                    .into_iter()
+                    .filter(|id| !numeric_ids.contains(id))
+                    .collect()
+            };
+            self.apply_constructive_constraints(&current_order);
+
+            let mut vars: Vec<f64> = var_map
+                .iter()
+                .map(|(id, field)| self.get_field_value(*id, *field))
+                .collect();
+
+            match solver.solve(&mut vars, &equations) {
+                Ok(stats) => {
+                    changed = self.write_solver_variables(&var_map, &vars);
+                    if stats.final_residual < solver.tol && changed.is_empty() {
+                        break;
+                    }
+                }
+                Err(SolveError::MaxIterations { .. }) => break,
+                Err(_) => break,
+            }
+        }
+
+        if !changed.is_empty() {
+            let final_order: Vec<usize> = self
+                .propagation_order(&changed)
+                .into_iter()
+                .filter(|id| !numeric_ids.contains(id))
+                .collect();
+            self.apply_constructive_constraints(&final_order);
+        }
+    }
+
+    fn apply_constructive_constraints(&mut self, order: &[usize]) {
         for cons_id in order {
             if let Some(cons) = self.constraints.get_constraint(*cons_id).cloned() {
                 match cons.name.as_str() {
