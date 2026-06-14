@@ -7,7 +7,7 @@
 
 use crate::document::ObjField;
 use crate::numeric_solver::{ConstraintEquation, VarIndex};
-use crate::{GeoObject, ObjectId};
+use crate::{GeoObject, LineKind, ObjectId};
 use grafito_geometry::Point2;
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -169,6 +169,297 @@ impl ConstraintEquation for TangentEq {
         let end = Point2::new(vars[self.line_end], vars[self.line_end + 1]);
         let dist = point_to_line_distance(self.center, start, end);
         vec![dist - r]
+    }
+}
+
+/// Either a solver variable index or a constant fallback value.
+#[derive(Clone, Copy)]
+struct VarOrConst {
+    idx: Option<VarIndex>,
+    value: f64,
+}
+
+impl VarOrConst {
+    fn get(&self, vars: &[f64]) -> f64 {
+        self.idx.map_or(self.value, |i| vars[i])
+    }
+}
+
+fn field_or_const(
+    doc: &crate::Document,
+    id: ObjectId,
+    field: ObjField,
+    var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+) -> VarOrConst {
+    match var_index.get(&(id, field)) {
+        Some(&idx) => VarOrConst {
+            idx: Some(idx),
+            value: 0.0,
+        },
+        None => VarOrConst {
+            idx: None,
+            value: doc_field_value(doc, id, field),
+        },
+    }
+}
+
+fn doc_field_value(doc: &crate::Document, id: ObjectId, field: ObjField) -> f64 {
+    match (doc.get_object(id), field) {
+        (Some(GeoObject::Point(p)), ObjField::PointX) => p.position.x,
+        (Some(GeoObject::Point(p)), ObjField::PointY) => p.position.y,
+        (Some(GeoObject::Circle(c)), ObjField::CircleRadius) => c.radius,
+        (Some(GeoObject::Line(l)), ObjField::LineStartX) => l.start.x,
+        (Some(GeoObject::Line(l)), ObjField::LineStartY) => l.start.y,
+        (Some(GeoObject::Line(l)), ObjField::LineEndX) => l.end.x,
+        (Some(GeoObject::Line(l)), ObjField::LineEndY) => l.end.y,
+        _ => 0.0,
+    }
+}
+
+/// Coincident constraint between two points.
+///
+/// Equation: `[ax - bx, ay - by] = [0, 0]`.
+pub struct CoincidentEq {
+    ax: VarOrConst,
+    ay: VarOrConst,
+    bx: VarOrConst,
+    by: VarOrConst,
+}
+
+impl CoincidentEq {
+    pub fn from_inputs(
+        doc: &crate::Document,
+        a: ObjectId,
+        b: ObjectId,
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Option<Self> {
+        match (doc.get_object(a)?, doc.get_object(b)?) {
+            (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self {
+                ax: field_or_const(doc, a, ObjField::PointX, var_index),
+                ay: field_or_const(doc, a, ObjField::PointY, var_index),
+                bx: field_or_const(doc, b, ObjField::PointX, var_index),
+                by: field_or_const(doc, b, ObjField::PointY, var_index),
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl ConstraintEquation for CoincidentEq {
+    fn dimension(&self) -> usize {
+        2
+    }
+
+    fn residual(&self, vars: &[f64]) -> Vec<f64> {
+        let ax = self.ax.get(vars);
+        let ay = self.ay.get(vars);
+        let bx = self.bx.get(vars);
+        let by = self.by.get(vars);
+        vec![ax - bx, ay - by]
+    }
+}
+
+/// Horizontal line constraint.
+///
+/// Equation: `start_y - end_y = 0`.
+pub struct HorizontalEq {
+    sy: VarOrConst,
+    ey: VarOrConst,
+}
+
+impl HorizontalEq {
+    pub fn from_inputs(
+        doc: &crate::Document,
+        line: ObjectId,
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Option<Self> {
+        if !matches!(doc.get_object(line)?, GeoObject::Line(_)) {
+            return None;
+        }
+        Some(Self {
+            sy: field_or_const(doc, line, ObjField::LineStartY, var_index),
+            ey: field_or_const(doc, line, ObjField::LineEndY, var_index),
+        })
+    }
+}
+
+impl ConstraintEquation for HorizontalEq {
+    fn dimension(&self) -> usize {
+        1
+    }
+
+    fn residual(&self, vars: &[f64]) -> Vec<f64> {
+        vec![self.sy.get(vars) - self.ey.get(vars)]
+    }
+}
+
+/// Vertical line constraint.
+///
+/// Equation: `start_x - end_x = 0`.
+pub struct VerticalEq {
+    sx: VarOrConst,
+    ex: VarOrConst,
+}
+
+impl VerticalEq {
+    pub fn from_inputs(
+        doc: &crate::Document,
+        line: ObjectId,
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Option<Self> {
+        if !matches!(doc.get_object(line)?, GeoObject::Line(_)) {
+            return None;
+        }
+        Some(Self {
+            sx: field_or_const(doc, line, ObjField::LineStartX, var_index),
+            ex: field_or_const(doc, line, ObjField::LineEndX, var_index),
+        })
+    }
+}
+
+impl ConstraintEquation for VerticalEq {
+    fn dimension(&self) -> usize {
+        1
+    }
+
+    fn residual(&self, vars: &[f64]) -> Vec<f64> {
+        vec![self.sx.get(vars) - self.ex.get(vars)]
+    }
+}
+
+/// Equal length constraint between two line segments.
+///
+/// Equation: `|A - B| - |C - D| = 0`.
+pub struct EqualLengthEq {
+    a: [VarOrConst; 2],
+    b: [VarOrConst; 2],
+    c: [VarOrConst; 2],
+    d: [VarOrConst; 2],
+}
+
+impl EqualLengthEq {
+    pub fn from_inputs(
+        doc: &crate::Document,
+        line1: ObjectId,
+        line2: ObjectId,
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Option<Self> {
+        let (GeoObject::Line(l1), GeoObject::Line(l2)) =
+            (doc.get_object(line1)?, doc.get_object(line2)?)
+        else {
+            return None;
+        };
+        if l1.kind != LineKind::Segment || l2.kind != LineKind::Segment {
+            return None;
+        }
+        Some(Self {
+            a: [
+                field_or_const(doc, line1, ObjField::LineStartX, var_index),
+                field_or_const(doc, line1, ObjField::LineStartY, var_index),
+            ],
+            b: [
+                field_or_const(doc, line1, ObjField::LineEndX, var_index),
+                field_or_const(doc, line1, ObjField::LineEndY, var_index),
+            ],
+            c: [
+                field_or_const(doc, line2, ObjField::LineStartX, var_index),
+                field_or_const(doc, line2, ObjField::LineStartY, var_index),
+            ],
+            d: [
+                field_or_const(doc, line2, ObjField::LineEndX, var_index),
+                field_or_const(doc, line2, ObjField::LineEndY, var_index),
+            ],
+        })
+    }
+}
+
+impl ConstraintEquation for EqualLengthEq {
+    fn dimension(&self) -> usize {
+        1
+    }
+
+    fn residual(&self, vars: &[f64]) -> Vec<f64> {
+        let ax = self.a[0].get(vars);
+        let ay = self.a[1].get(vars);
+        let bx = self.b[0].get(vars);
+        let by = self.b[1].get(vars);
+        let cx = self.c[0].get(vars);
+        let cy = self.c[1].get(vars);
+        let dx = self.d[0].get(vars);
+        let dy = self.d[1].get(vars);
+        let len1 = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
+        let len2 = ((cx - dx).powi(2) + (cy - dy).powi(2)).sqrt();
+        vec![len1 - len2]
+    }
+}
+
+/// Symmetry constraint: point `q` is the mirror of point `p` across line `m`.
+///
+/// Residuals:
+/// - `cross(m_dir, midpoint(p, q) - m_start) = 0`
+/// - `dot(q - p, m_dir) = 0`
+pub struct SymmetryEq {
+    px: VarOrConst,
+    py: VarOrConst,
+    qx: VarOrConst,
+    qy: VarOrConst,
+    mx1: VarOrConst,
+    my1: VarOrConst,
+    mx2: VarOrConst,
+    my2: VarOrConst,
+}
+
+impl SymmetryEq {
+    pub fn from_inputs(
+        doc: &crate::Document,
+        point: ObjectId,
+        mirror_point: ObjectId,
+        mirror_line: ObjectId,
+        var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
+    ) -> Option<Self> {
+        let (GeoObject::Point(_), GeoObject::Point(_), GeoObject::Line(_)) = (
+            doc.get_object(point)?,
+            doc.get_object(mirror_point)?,
+            doc.get_object(mirror_line)?,
+        ) else {
+            return None;
+        };
+        Some(Self {
+            px: field_or_const(doc, point, ObjField::PointX, var_index),
+            py: field_or_const(doc, point, ObjField::PointY, var_index),
+            qx: field_or_const(doc, mirror_point, ObjField::PointX, var_index),
+            qy: field_or_const(doc, mirror_point, ObjField::PointY, var_index),
+            mx1: field_or_const(doc, mirror_line, ObjField::LineStartX, var_index),
+            my1: field_or_const(doc, mirror_line, ObjField::LineStartY, var_index),
+            mx2: field_or_const(doc, mirror_line, ObjField::LineEndX, var_index),
+            my2: field_or_const(doc, mirror_line, ObjField::LineEndY, var_index),
+        })
+    }
+}
+
+impl ConstraintEquation for SymmetryEq {
+    fn dimension(&self) -> usize {
+        2
+    }
+
+    fn residual(&self, vars: &[f64]) -> Vec<f64> {
+        let px = self.px.get(vars);
+        let py = self.py.get(vars);
+        let qx = self.qx.get(vars);
+        let qy = self.qy.get(vars);
+        let mx1 = self.mx1.get(vars);
+        let my1 = self.my1.get(vars);
+        let mx2 = self.mx2.get(vars);
+        let my2 = self.my2.get(vars);
+
+        let mid_x = (px + qx) * 0.5;
+        let mid_y = (py + qy) * 0.5;
+        let dir_x = mx2 - mx1;
+        let dir_y = my2 - my1;
+
+        let cross = dir_x * (mid_y - my1) - dir_y * (mid_x - mx1);
+        let dot = (qx - px) * dir_x + (qy - py) * dir_y;
+        vec![cross, dot]
     }
 }
 

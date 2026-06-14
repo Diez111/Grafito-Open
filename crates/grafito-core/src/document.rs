@@ -1,5 +1,8 @@
 use crate::constraints::ConstraintGraph;
-use crate::numeric_constraints::{AngleEq, DistanceEq, TangentEq};
+use crate::numeric_constraints::{
+    AngleEq, CoincidentEq, DistanceEq, EqualLengthEq, HorizontalEq, SymmetryEq, TangentEq,
+    VerticalEq,
+};
 use crate::numeric_solver::{NumericSolver, SolveError, VarIndex};
 use crate::{GeoObject, LineKind, ObjectId, PointObj, RelationOperator};
 use grafito_geometry::expr::evaluate;
@@ -420,6 +423,41 @@ impl Document {
                         equations.push(Box::new(eq));
                     }
                 }
+                "Coincident" if cons.inputs.len() >= 2 => {
+                    if let Some(eq) =
+                        CoincidentEq::from_inputs(self, cons.inputs[0], cons.inputs[1], var_index)
+                    {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "Horizontal" if !cons.inputs.is_empty() => {
+                    if let Some(eq) = HorizontalEq::from_inputs(self, cons.inputs[0], var_index) {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "Vertical" if !cons.inputs.is_empty() => {
+                    if let Some(eq) = VerticalEq::from_inputs(self, cons.inputs[0], var_index) {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "EqualLength" if cons.inputs.len() >= 2 => {
+                    if let Some(eq) =
+                        EqualLengthEq::from_inputs(self, cons.inputs[0], cons.inputs[1], var_index)
+                    {
+                        equations.push(Box::new(eq));
+                    }
+                }
+                "Symmetry" if cons.inputs.len() >= 3 => {
+                    if let Some(eq) = SymmetryEq::from_inputs(
+                        self,
+                        cons.inputs[0],
+                        cons.inputs[1],
+                        cons.inputs[2],
+                        var_index,
+                    ) {
+                        equations.push(Box::new(eq));
+                    }
+                }
                 _ => {}
             }
         }
@@ -445,7 +483,17 @@ impl Document {
     }
 
     fn is_numeric_constraint_name(name: &str) -> bool {
-        matches!(name, "Distance" | "Angle" | "Tangent")
+        matches!(
+            name,
+            "Distance"
+                | "Angle"
+                | "Tangent"
+                | "Coincident"
+                | "Horizontal"
+                | "Vertical"
+                | "EqualLength"
+                | "Symmetry"
+        )
     }
 
     /// Add a numeric distance constraint between two objects.
@@ -468,6 +516,46 @@ impl Document {
     pub fn add_tangent_constraint(&mut self, a: ObjectId, b: ObjectId) -> usize {
         self.constraints
             .add_constraint("Tangent", vec![a, b], vec![], HashMap::new())
+    }
+
+    /// Add a numeric coincident constraint between two points.
+    pub fn add_coincident_constraint(&mut self, a: ObjectId, b: ObjectId) -> usize {
+        self.constraints
+            .add_constraint("Coincident", vec![a, b], vec![], HashMap::new())
+    }
+
+    /// Add a numeric horizontal constraint to a line.
+    pub fn add_horizontal_constraint(&mut self, line: ObjectId) -> usize {
+        self.constraints
+            .add_constraint("Horizontal", vec![line], vec![], HashMap::new())
+    }
+
+    /// Add a numeric vertical constraint to a line.
+    pub fn add_vertical_constraint(&mut self, line: ObjectId) -> usize {
+        self.constraints
+            .add_constraint("Vertical", vec![line], vec![], HashMap::new())
+    }
+
+    /// Add a numeric equal-length constraint between two line segments.
+    pub fn add_equal_length_constraint(&mut self, line1: ObjectId, line2: ObjectId) -> usize {
+        self.constraints
+            .add_constraint("EqualLength", vec![line1, line2], vec![], HashMap::new())
+    }
+
+    /// Add a numeric symmetry constraint: `mirror_point` is the mirror of
+    /// `point` across `mirror_line`.
+    pub fn add_symmetry_constraint(
+        &mut self,
+        point: ObjectId,
+        mirror_point: ObjectId,
+        mirror_line: ObjectId,
+    ) -> usize {
+        self.constraints.add_constraint(
+            "Symmetry",
+            vec![point, mirror_point, mirror_line],
+            vec![],
+            HashMap::new(),
+        )
     }
 
     pub fn re_evaluate_constraints(&mut self, order: &[usize]) {

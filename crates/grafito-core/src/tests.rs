@@ -968,4 +968,119 @@ mod tests {
             c.radius
         );
     }
+
+    #[test]
+    fn test_coincident_constraint() {
+        let mut doc = Document::new();
+        let a = doc.add_point(Point2::new(0.0, 0.0));
+        let b = doc.add_point(Point2::new(3.0, 4.0));
+        doc.add_coincident_constraint(a, b);
+        let order = doc.constraints.get_update_order(&[a, b]);
+        doc.re_evaluate_constraints(&order);
+
+        let pa = doc.point_position(a).unwrap();
+        let pb = doc.point_position(b).unwrap();
+        assert!((pa.x - pb.x).abs() < 1e-6);
+        assert!((pa.y - pb.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_horizontal_constraint() {
+        let mut doc = Document::new();
+        let line = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+        )));
+        doc.add_horizontal_constraint(line);
+        doc.re_evaluate_constraints(&[]);
+
+        let GeoObject::Line(l) = doc.get_object(line).unwrap() else {
+            panic!("expected line");
+        };
+        assert!((l.start.y - l.end.y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_vertical_constraint() {
+        let mut doc = Document::new();
+        let line = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+        )));
+        doc.add_vertical_constraint(line);
+        doc.re_evaluate_constraints(&[]);
+
+        let GeoObject::Line(l) = doc.get_object(line).unwrap() else {
+            panic!("expected line");
+        };
+        assert!((l.start.x - l.end.x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_equal_length_constraint() {
+        let mut doc = Document::new();
+        let l1 = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(3.0, 0.0),
+        )));
+        let l2 = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 1.0),
+        )));
+        doc.add_equal_length_constraint(l1, l2);
+        doc.re_evaluate_constraints(&[]);
+
+        let GeoObject::Line(line1) = doc.get_object(l1).unwrap() else {
+            panic!("expected line");
+        };
+        let GeoObject::Line(line2) = doc.get_object(l2).unwrap() else {
+            panic!("expected line");
+        };
+        let len1 = line1.start.distance(&line1.end);
+        let len2 = line2.start.distance(&line2.end);
+        assert!(
+            (len1 - len2).abs() < 1e-6,
+            "lengths should be equal: {} vs {}",
+            len1,
+            len2
+        );
+    }
+
+    #[test]
+    fn test_symmetry_constraint() {
+        let mut doc = Document::new();
+        let p = doc.add_point(Point2::new(1.0, 2.0));
+        let q = doc.add_point(Point2::new(3.0, 4.0));
+        let mirror = doc.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )));
+        doc.add_symmetry_constraint(p, q, mirror);
+        doc.re_evaluate_constraints(&[]);
+
+        let pa = doc.point_position(p).unwrap();
+        let pb = doc.point_position(q).unwrap();
+        let GeoObject::Line(m) = doc.get_object(mirror).unwrap() else {
+            panic!("expected line");
+        };
+
+        let mid_x = (pa.x + pb.x) * 0.5;
+        let mid_y = (pa.y + pb.y) * 0.5;
+        let dir_x = m.end.x - m.start.x;
+        let dir_y = m.end.y - m.start.y;
+
+        let cross = dir_x * (mid_y - m.start.y) - dir_y * (mid_x - m.start.x);
+        assert!(
+            cross.abs() < 1e-5,
+            "midpoint should lie on mirror line, cross={}",
+            cross
+        );
+
+        let dot = (pb.x - pa.x) * dir_x + (pb.y - pa.y) * dir_y;
+        assert!(
+            dot.abs() < 1e-5,
+            "q-p should be perpendicular to mirror line, dot={}",
+            dot
+        );
+    }
 }
