@@ -22,7 +22,13 @@ num-complex.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+pollster.workspace = true
+wgpu.workspace = true
 
 [[bench]]
 name = "geometry_bench"
+harness = false
+
+[[bench]]
+name = "render_scenarios"
 harness = false

@@ -25,3 +25,7 @@ geo.workspace = true
 [[bench]]
 name = "solver_bench"
 harness = false
+
+[[bench]]
+name = "document_scenarios"
+harness = false
