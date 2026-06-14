@@ -264,6 +264,20 @@ impl ParametricComputePipeline {
         compile_expr_with_mapping(&ast, variables, &[(var, 0)], prog)
     }
 
+    fn resolve_expr(expr: &Option<String>, fallback: f64, variables: &HashMap<String, f64>) -> f64 {
+        match expr {
+            Some(e) => {
+                let vars: Vec<(String, f64)> =
+                    variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                grafito_geometry::expr::evaluate(e, &vars)
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(fallback)
+            }
+            None => fallback,
+        }
+    }
+
     /// Evaluate a 2D parametric curve on the GPU.
     pub fn evaluate_curve_2d(
         &self,
@@ -274,7 +288,9 @@ impl ParametricComputePipeline {
         variables: &HashMap<String, f64>,
     ) -> Option<Curve2DSamples> {
         let steps = steps.clamp(1, self.max_curve_samples);
-        if !pc.t_min.is_finite() || !pc.t_max.is_finite() {
+        let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+        let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+        if !t_min.is_finite() || !t_max.is_finite() {
             return None;
         }
 
@@ -286,8 +302,8 @@ impl ParametricComputePipeline {
             mode: 0,
             n: steps as u32,
             m: 0,
-            t_min: pc.t_min as f32,
-            t_max: pc.t_max as f32,
+            t_min: t_min as f32,
+            t_max: t_max as f32,
             x_min: 0.0,
             x_max: 0.0,
             y_min: 0.0,
@@ -328,7 +344,9 @@ impl ParametricComputePipeline {
         variables: &HashMap<String, f64>,
     ) -> Option<Curve3DSamples> {
         let steps = steps.clamp(1, self.max_curve_samples);
-        if !pc.t_min.is_finite() || !pc.t_max.is_finite() {
+        let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+        let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+        if !t_min.is_finite() || !t_max.is_finite() {
             return None;
         }
 
@@ -341,8 +359,8 @@ impl ParametricComputePipeline {
             mode: 1,
             n: steps as u32,
             m: 0,
-            t_min: pc.t_min as f32,
-            t_max: pc.t_max as f32,
+            t_min: t_min as f32,
+            t_max: t_max as f32,
             x_min: 0.0,
             x_max: 0.0,
             y_min: 0.0,
@@ -388,7 +406,9 @@ impl ParametricComputePipeline {
         variables: &HashMap<String, f64>,
     ) -> Option<Curve2DSamples> {
         let steps = steps.clamp(1, self.max_curve_samples);
-        if !pol.t_min.is_finite() || !pol.t_max.is_finite() {
+        let t_min = Self::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
+        let t_max = Self::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+        if !t_min.is_finite() || !t_max.is_finite() {
             return None;
         }
 
@@ -399,8 +419,8 @@ impl ParametricComputePipeline {
             mode: 2,
             n: steps as u32,
             m: 0,
-            t_min: pol.t_min as f32,
-            t_max: pol.t_max as f32,
+            t_min: t_min as f32,
+            t_max: t_max as f32,
             x_min: 0.0,
             x_max: 0.0,
             y_min: 0.0,
@@ -441,11 +461,11 @@ impl ParametricComputePipeline {
         variables: &HashMap<String, f64>,
     ) -> Option<SurfaceSamples> {
         let res = res.clamp(1, self.max_surface_res);
-        if !surf.x_min.is_finite()
-            || !surf.x_max.is_finite()
-            || !surf.y_min.is_finite()
-            || !surf.y_max.is_finite()
-        {
+        let x_min = Self::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
+        let x_max = Self::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
+        let y_min = Self::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
+        let y_max = Self::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
+        if !x_min.is_finite() || !x_max.is_finite() || !y_min.is_finite() || !y_max.is_finite() {
             return None;
         }
 
@@ -460,10 +480,10 @@ impl ParametricComputePipeline {
             m: res as u32,
             t_min: 0.0,
             t_max: 0.0,
-            x_min: surf.x_min as f32,
-            x_max: surf.x_max as f32,
-            y_min: surf.y_min as f32,
-            y_max: surf.y_max as f32,
+            x_min: x_min as f32,
+            x_max: x_max as f32,
+            y_min: y_min as f32,
+            y_max: y_max as f32,
             _pad: [0; 3],
         };
 
@@ -484,10 +504,6 @@ impl ParametricComputePipeline {
     }
 }
 
-fn cache_key(steps_or_res: usize, variables: &HashMap<String, f64>) -> (usize, u64) {
-    (steps_or_res, parametric_sampling::variables_hash(variables))
-}
-
 /// Try to populate the 2D parametric curve cache using the GPU.
 pub fn maybe_compute_curve_2d_on_gpu(
     compute: &ParametricComputePipeline,
@@ -498,7 +514,13 @@ pub fn maybe_compute_curve_2d_on_gpu(
     variables: &HashMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
-    let key = cache_key(steps, variables);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    let key = grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: parametric_sampling::variables_hash(variables),
+    };
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -525,7 +547,13 @@ pub fn maybe_compute_curve_3d_on_gpu(
     variables: &HashMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
-    let key = cache_key(steps, variables);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    let key = grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: parametric_sampling::variables_hash(variables),
+    };
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -552,7 +580,13 @@ pub fn maybe_compute_polar_on_gpu(
     variables: &HashMap<String, f64>,
 ) -> bool {
     let steps = steps.min(MAX_CURVE_STEPS);
-    let key = cache_key(steps, variables);
+    let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+    let key = grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: parametric_sampling::variables_hash(variables),
+    };
     {
         let cached_key = pol.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -581,7 +615,16 @@ pub fn maybe_compute_surface_on_gpu(
     variables: &HashMap<String, f64>,
 ) -> bool {
     let res = res.min(MAX_SURFACE_RES);
-    let key = cache_key(res, variables);
+    let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
+    let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
+    let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
+    let y_max = ParametricComputePipeline::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
+    let key = grafito_core::SurfaceCacheKey {
+        x_domain: (x_min, x_max),
+        y_domain: (y_min, y_max),
+        res,
+        variables_hash: parametric_sampling::variables_hash(variables),
+    };
     {
         let cached_key = surf.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {

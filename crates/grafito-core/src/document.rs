@@ -573,12 +573,51 @@ impl Document {
             GeoObject::Point(p) => {
                 p.position.distance(&world) <= tolerance.max(p.size as f64 / self.view.scale)
             }
-            GeoObject::Line(l) => l.distance_to_point(world) <= tolerance,
+            GeoObject::Line(l) => {
+                let start = Point2::new(
+                    self.resolve_expr(&l.start_x_expr, l.start.x),
+                    self.resolve_expr(&l.start_y_expr, l.start.y),
+                );
+                let end = Point2::new(
+                    self.resolve_expr(&l.end_x_expr, l.end.x),
+                    self.resolve_expr(&l.end_y_expr, l.end.y),
+                );
+                match l.kind {
+                    LineKind::Segment => {
+                        grafito_geometry::distance_point_to_segment(world, start, end) <= tolerance
+                    }
+                    LineKind::Ray => {
+                        grafito_geometry::distance_point_to_ray(world, start, end) <= tolerance
+                    }
+                    LineKind::Line => {
+                        grafito_geometry::distance_point_to_line(world, start, end) <= tolerance
+                    }
+                }
+            }
             GeoObject::Circle(c) => (c.center.distance(&world) - c.radius).abs() <= tolerance,
             GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                distance_point_to_polygon(world, &poly.vertices) <= tolerance
+                let resolved: Vec<Point2> = poly
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let x = self.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = self.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        Point2::new(x, y)
+                    })
+                    .collect();
+                distance_point_to_polygon(world, &resolved) <= tolerance
             }
             GeoObject::Function(f) => {
+                let x_min = self.resolve_expr(
+                    &f.domain_min_expr,
+                    f.domain_min.unwrap_or(f64::NEG_INFINITY),
+                );
+                let x_max =
+                    self.resolve_expr(&f.domain_max_expr, f.domain_max.unwrap_or(f64::INFINITY));
+                if world.x < x_min - tolerance || world.x > x_max + tolerance {
+                    return false;
+                }
                 // Evaluate function at world.x and check if world.y is close
                 if let Ok(y) =
                     grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), world.x)])
@@ -636,11 +675,13 @@ impl Document {
             }
             GeoObject::ParametricCurve2D(pc) => {
                 // Sample the curve and check distance to segments
+                let t_min = self.resolve_expr(&pc.t_min_expr, pc.t_min);
+                let t_max = self.resolve_expr(&pc.t_max_expr, pc.t_max);
                 let steps = 100;
-                let dt = (pc.t_max - pc.t_min) / steps as f64;
+                let dt = (t_max - t_min) / steps as f64;
                 let mut prev_point: Option<Point2> = None;
                 for i in 0..=steps {
-                    let t = pc.t_min + i as f64 * dt;
+                    let t = t_min + i as f64 * dt;
                     if let (Ok(x), Ok(y)) = (
                         grafito_geometry::expr::evaluate(&pc.expr_x, &[("t".to_string(), t)]),
                         grafito_geometry::expr::evaluate(&pc.expr_y, &[("t".to_string(), t)]),
@@ -660,11 +701,13 @@ impl Document {
             }
             GeoObject::PolarCurve(pol) => {
                 // Sample the curve and check distance to segments
+                let t_min = self.resolve_expr(&pol.t_min_expr, pol.t_min);
+                let t_max = self.resolve_expr(&pol.t_max_expr, pol.t_max);
                 let steps = 100;
-                let dt = (pol.t_max - pol.t_min) / steps as f64;
+                let dt = (t_max - t_min) / steps as f64;
                 let mut prev_point: Option<Point2> = None;
                 for i in 0..=steps {
-                    let t = pol.t_min + i as f64 * dt;
+                    let t = t_min + i as f64 * dt;
                     if let Ok(r) =
                         grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
                     {
@@ -784,12 +827,22 @@ impl Document {
                     p.position.x + 0.1,
                     p.position.y + 0.1,
                 ),
-                GeoObject::Line(l) => (
-                    l.start.x.min(l.end.x),
-                    l.start.y.min(l.end.y),
-                    l.start.x.max(l.end.x),
-                    l.start.y.max(l.end.y),
-                ),
+                GeoObject::Line(l) => {
+                    let start = Point2::new(
+                        self.resolve_expr(&l.start_x_expr, l.start.x),
+                        self.resolve_expr(&l.start_y_expr, l.start.y),
+                    );
+                    let end = Point2::new(
+                        self.resolve_expr(&l.end_x_expr, l.end.x),
+                        self.resolve_expr(&l.end_y_expr, l.end.y),
+                    );
+                    (
+                        start.x.min(end.x),
+                        start.y.min(end.y),
+                        start.x.max(end.x),
+                        start.y.max(end.y),
+                    )
+                }
                 GeoObject::Circle(c) => (
                     c.center.x - c.radius,
                     c.center.y - c.radius,
@@ -801,11 +854,13 @@ impl Document {
                     let mut min_y = f64::MAX;
                     let mut max_x = f64::MIN;
                     let mut max_y = f64::MIN;
-                    for v in &poly.vertices {
-                        min_x = min_x.min(v.x);
-                        min_y = min_y.min(v.y);
-                        max_x = max_x.max(v.x);
-                        max_y = max_y.max(v.y);
+                    for (i, v) in poly.vertices.iter().enumerate() {
+                        let x = self.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = self.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        min_x = min_x.min(x);
+                        min_y = min_y.min(y);
+                        max_x = max_x.max(x);
+                        max_y = max_y.max(y);
                     }
                     if poly.vertices.is_empty() {
                         continue;
@@ -813,8 +868,9 @@ impl Document {
                     (min_x, min_y, max_x, max_y)
                 }
                 GeoObject::Function(f) => {
-                    let x_min = f.domain_min.unwrap_or(-10.0);
-                    let x_max = f.domain_max.unwrap_or(10.0);
+                    let x_min =
+                        self.resolve_expr(&f.domain_min_expr, f.domain_min.unwrap_or(-10.0));
+                    let x_max = self.resolve_expr(&f.domain_max_expr, f.domain_max.unwrap_or(10.0));
                     // Sample function to estimate y bounds
                     let mut y_min = f64::MAX;
                     let mut y_max = f64::MIN;
@@ -885,14 +941,16 @@ impl Document {
                 }
                 GeoObject::ParametricCurve2D(pc) => {
                     // Sample curve to compute bounding box
+                    let t_min = self.resolve_expr(&pc.t_min_expr, pc.t_min);
+                    let t_max = self.resolve_expr(&pc.t_max_expr, pc.t_max);
                     let mut min_x = f64::MAX;
                     let mut min_y = f64::MAX;
                     let mut max_x = f64::MIN;
                     let mut max_y = f64::MIN;
                     let steps = 100;
-                    let dt = (pc.t_max - pc.t_min) / steps as f64;
+                    let dt = (t_max - t_min) / steps as f64;
                     for i in 0..=steps {
-                        let t = pc.t_min + i as f64 * dt;
+                        let t = t_min + i as f64 * dt;
                         if let (Ok(x), Ok(y)) = (
                             grafito_geometry::expr::evaluate(&pc.expr_x, &[("t".to_string(), t)]),
                             grafito_geometry::expr::evaluate(&pc.expr_y, &[("t".to_string(), t)]),
@@ -912,14 +970,16 @@ impl Document {
                 }
                 GeoObject::PolarCurve(pol) => {
                     // Sample curve to compute bounding box
+                    let t_min = self.resolve_expr(&pol.t_min_expr, pol.t_min);
+                    let t_max = self.resolve_expr(&pol.t_max_expr, pol.t_max);
                     let mut min_x = f64::MAX;
                     let mut min_y = f64::MAX;
                     let mut max_x = f64::MIN;
                     let mut max_y = f64::MIN;
                     let steps = 100;
-                    let dt = (pol.t_max - pol.t_min) / steps as f64;
+                    let dt = (t_max - t_min) / steps as f64;
                     for i in 0..=steps {
-                        let t = pol.t_min + i as f64 * dt;
+                        let t = t_min + i as f64 * dt;
                         if let Ok(r) =
                             grafito_geometry::expr::evaluate(&pol.expr_r, &[("t".to_string(), t)])
                         {
@@ -1042,6 +1102,23 @@ impl Document {
         self.spatial = crate::spatial::SpatialIndex::new();
         self.spatial_dirty = true;
         self.constraints = ConstraintGraph::new();
+    }
+
+    pub fn resolve_expr(&self, expr: &Option<String>, fallback: f64) -> f64 {
+        match expr {
+            Some(e) => {
+                let vars: Vec<(String, f64)> = self
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                match evaluate(e, &vars) {
+                    Ok(v) if v.is_finite() => v,
+                    _ => fallback,
+                }
+            }
+            None => fallback,
+        }
     }
 
     pub fn recompute_bound_parameters(&mut self) {

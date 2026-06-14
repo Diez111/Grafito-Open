@@ -798,4 +798,86 @@ mod tests {
         let key2 = surf.cached_key.read().unwrap().clone();
         assert_eq!(key1, key2, "cache key should be reused");
     }
+
+    #[test]
+    fn test_segment_expression_binding() {
+        let mut doc = Document::new();
+        let mut line = LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0));
+        line.start_x_expr = Some("a".to_string());
+        line.end_y_expr = Some("b".to_string());
+        doc.set_variable("a".to_string(), 5.0);
+        doc.set_variable("b".to_string(), 10.0);
+        assert_eq!(doc.resolve_expr(&line.start_x_expr, line.start.x), 5.0);
+        assert_eq!(doc.resolve_expr(&line.end_y_expr, line.end.y), 10.0);
+    }
+
+    #[test]
+    fn test_line_expression_binding() {
+        let mut doc = Document::new();
+        let line =
+            LineObj::new_with_kind(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0), LineKind::Line)
+                .with_start_expr("cx - 1", "cy - 1")
+                .with_end_expr("cx + 1", "cy + 1");
+        doc.set_variable("cx".to_string(), 3.0);
+        doc.set_variable("cy".to_string(), 4.0);
+        assert_eq!(doc.resolve_expr(&line.start_x_expr, line.start.x), 2.0);
+        assert_eq!(doc.resolve_expr(&line.start_y_expr, line.start.y), 3.0);
+        assert_eq!(doc.resolve_expr(&line.end_x_expr, line.end.x), 4.0);
+        assert_eq!(doc.resolve_expr(&line.end_y_expr, line.end.y), 5.0);
+    }
+
+    #[test]
+    fn test_polygon_expression_binding() {
+        let mut doc = Document::new();
+        let mut poly = PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.5, 1.0),
+        ]);
+        poly.set_vertex_expr(0, Some("px".to_string()), Some("py".to_string()));
+        poly.set_vertex_expr(2, Some("qx".to_string()), Some("qy".to_string()));
+        doc.set_variable("px".to_string(), -1.0);
+        doc.set_variable("py".to_string(), -1.0);
+        doc.set_variable("qx".to_string(), 2.0);
+        doc.set_variable("qy".to_string(), 3.0);
+        assert_eq!(doc.resolve_expr(poly.x_exprs.get(0).unwrap(), 0.0), -1.0);
+        assert_eq!(doc.resolve_expr(poly.y_exprs.get(0).unwrap(), 0.0), -1.0);
+        assert_eq!(doc.resolve_expr(poly.x_exprs.get(2).unwrap(), 0.5), 2.0);
+        assert_eq!(doc.resolve_expr(poly.y_exprs.get(2).unwrap(), 1.0), 3.0);
+    }
+
+    #[test]
+    fn test_function_domain_expression_binding() {
+        let mut doc = Document::new();
+        let mut fun = FunctionObj::new("sin(x)");
+        fun.domain_min = Some(0.0);
+        fun.domain_max = Some(1.0);
+        fun.domain_min_expr = Some("a".to_string());
+        fun.domain_max_expr = Some("b".to_string());
+        doc.set_variable("a".to_string(), -2.0);
+        doc.set_variable("b".to_string(), 2.0);
+        assert_eq!(
+            doc.resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap()),
+            -2.0
+        );
+        assert_eq!(
+            doc.resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap()),
+            2.0
+        );
+    }
+
+    #[test]
+    fn test_parametric_curve_t_range_expression_binding() {
+        let mut doc = Document::new();
+        let mut pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, 1.0);
+        pc.t_min_expr = Some("a".to_string());
+        pc.t_max_expr = Some("b".to_string());
+        doc.set_variable("a".to_string(), 0.0);
+        doc.set_variable("b".to_string(), std::f64::consts::TAU);
+        assert_eq!(doc.resolve_expr(&pc.t_min_expr, pc.t_min), 0.0);
+        assert_eq!(
+            doc.resolve_expr(&pc.t_max_expr, pc.t_max),
+            std::f64::consts::TAU
+        );
+    }
 }

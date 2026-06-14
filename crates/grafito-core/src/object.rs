@@ -426,6 +426,14 @@ pub struct LineObj {
     pub end: Point2,
     #[serde(default)]
     pub kind: LineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_x_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_y_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_x_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_y_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -443,6 +451,10 @@ impl LineObj {
             start,
             end,
             kind,
+            start_x_expr: None,
+            start_y_expr: None,
+            end_x_expr: None,
+            end_y_expr: None,
             color: Color::BLACK,
             visible: true,
             width: 2.0,
@@ -451,6 +463,18 @@ impl LineObj {
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    pub fn with_start_expr(mut self, x: &str, y: &str) -> Self {
+        self.start_x_expr = Some(x.to_string());
+        self.start_y_expr = Some(y.to_string());
+        self
+    }
+
+    pub fn with_end_expr(mut self, x: &str, y: &str) -> Self {
+        self.end_x_expr = Some(x.to_string());
+        self.end_y_expr = Some(y.to_string());
         self
     }
 
@@ -544,6 +568,10 @@ pub struct PolygonObj {
     pub id: ObjectId,
     pub label: String,
     pub vertices: Vec<Point2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub x_exprs: Vec<Option<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub y_exprs: Vec<Option<String>>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -556,11 +584,30 @@ impl PolygonObj {
             id: ObjectId::new(),
             label: String::new(),
             vertices,
+            x_exprs: Vec::new(),
+            y_exprs: Vec::new(),
             color: Color::BLACK,
             visible: true,
             width: 2.0,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.2)),
         }
+    }
+
+    pub fn with_vertex_exprs(mut self, x: &str, y: &str) -> Self {
+        self.x_exprs.push(Some(x.to_string()));
+        self.y_exprs.push(Some(y.to_string()));
+        self
+    }
+
+    pub fn set_vertex_expr(&mut self, index: usize, x: Option<String>, y: Option<String>) {
+        if index >= self.x_exprs.len() {
+            self.x_exprs.resize(index + 1, None);
+        }
+        if index >= self.y_exprs.len() {
+            self.y_exprs.resize(index + 1, None);
+        }
+        self.x_exprs[index] = x;
+        self.y_exprs[index] = y;
     }
 }
 
@@ -574,6 +621,10 @@ pub struct FunctionObj {
     pub width: f32,
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_max_expr: Option<String>,
     pub fill_color: Option<Color>,
     // Integral function: ∫_[integral_lower]^x expr(var) d(var)
     pub is_integral: bool,
@@ -596,6 +647,8 @@ impl Clone for FunctionObj {
             width: self.width,
             domain_min: self.domain_min,
             domain_max: self.domain_max,
+            domain_min_expr: self.domain_min_expr.clone(),
+            domain_max_expr: self.domain_max_expr.clone(),
             fill_color: self.fill_color,
             is_integral: self.is_integral,
             integral_var: self.integral_var.clone(),
@@ -617,6 +670,8 @@ impl PartialEq for FunctionObj {
             && self.width == other.width
             && self.domain_min == other.domain_min
             && self.domain_max == other.domain_max
+            && self.domain_min_expr == other.domain_min_expr
+            && self.domain_max_expr == other.domain_max_expr
             && self.fill_color == other.fill_color
             && self.is_integral == other.is_integral
             && self.integral_var == other.integral_var
@@ -635,6 +690,8 @@ impl FunctionObj {
             width: 2.0,
             domain_min: None,
             domain_max: None,
+            domain_min_expr: None,
+            domain_max_expr: None,
             fill_color: None,
             is_integral: false,
             integral_var: String::new(),
@@ -979,6 +1036,14 @@ pub struct Surface3DObj {
     pub x_max: f64,
     pub y_min: f64,
     pub y_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_max_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_max_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -987,7 +1052,7 @@ pub struct Surface3DObj {
     #[serde(skip)]
     pub cached_grid: RwLock<SurfaceSamples>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<(usize, u64)>>,
+    pub cached_key: RwLock<Option<SurfaceCacheKey>>,
 }
 
 impl Clone for Surface3DObj {
@@ -1000,6 +1065,10 @@ impl Clone for Surface3DObj {
             x_max: self.x_max,
             y_min: self.y_min,
             y_max: self.y_max,
+            x_min_expr: self.x_min_expr.clone(),
+            x_max_expr: self.x_max_expr.clone(),
+            y_min_expr: self.y_min_expr.clone(),
+            y_max_expr: self.y_max_expr.clone(),
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1020,6 +1089,10 @@ impl PartialEq for Surface3DObj {
             && self.x_max == other.x_max
             && self.y_min == other.y_min
             && self.y_max == other.y_max
+            && self.x_min_expr == other.x_min_expr
+            && self.x_max_expr == other.x_max_expr
+            && self.y_min_expr == other.y_min_expr
+            && self.y_max_expr == other.y_max_expr
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
@@ -1038,6 +1111,10 @@ impl Surface3DObj {
             x_max: xr.1,
             y_min: yr.0,
             y_max: yr.1,
+            x_min_expr: None,
+            x_max_expr: None,
+            y_min_expr: None,
+            y_max_expr: None,
             color: Color::BLUE,
             visible: true,
             width: 1.0,
@@ -1173,13 +1250,17 @@ pub struct ParametricCurve2DObj {
     pub expr_y: String,
     pub t_min: f64,
     pub t_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_max_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
     #[serde(skip)]
     pub cached_samples: RwLock<Curve2DSamples>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<(usize, u64)>>,
+    pub cached_key: RwLock<Option<ParametricCacheKey>>,
 }
 
 impl Clone for ParametricCurve2DObj {
@@ -1191,6 +1272,8 @@ impl Clone for ParametricCurve2DObj {
             expr_y: self.expr_y.clone(),
             t_min: self.t_min,
             t_max: self.t_max,
+            t_min_expr: self.t_min_expr.clone(),
+            t_max_expr: self.t_max_expr.clone(),
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1208,6 +1291,8 @@ impl PartialEq for ParametricCurve2DObj {
             && self.expr_y == other.expr_y
             && self.t_min == other.t_min
             && self.t_max == other.t_max
+            && self.t_min_expr == other.t_min_expr
+            && self.t_max_expr == other.t_max_expr
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
@@ -1223,6 +1308,8 @@ impl ParametricCurve2DObj {
             expr_y: expr_y.to_string(),
             t_min,
             t_max,
+            t_min_expr: None,
+            t_max_expr: None,
             color: Color::BLUE,
             visible: true,
             width: 2.0,
@@ -1254,13 +1341,17 @@ pub struct ParametricCurve3DObj {
     pub expr_z: String,
     pub t_min: f64,
     pub t_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_max_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
     #[serde(skip)]
     pub cached_samples: RwLock<Curve3DSamples>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<(usize, u64)>>,
+    pub cached_key: RwLock<Option<ParametricCacheKey>>,
 }
 
 impl Clone for ParametricCurve3DObj {
@@ -1273,6 +1364,8 @@ impl Clone for ParametricCurve3DObj {
             expr_z: self.expr_z.clone(),
             t_min: self.t_min,
             t_max: self.t_max,
+            t_min_expr: self.t_min_expr.clone(),
+            t_max_expr: self.t_max_expr.clone(),
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1291,6 +1384,8 @@ impl PartialEq for ParametricCurve3DObj {
             && self.expr_z == other.expr_z
             && self.t_min == other.t_min
             && self.t_max == other.t_max
+            && self.t_min_expr == other.t_min_expr
+            && self.t_max_expr == other.t_max_expr
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
@@ -1307,6 +1402,8 @@ impl ParametricCurve3DObj {
             expr_z: expr_z.to_string(),
             t_min,
             t_max,
+            t_min_expr: None,
+            t_max_expr: None,
             color: Color::new(1.0, 0.0, 1.0, 1.0),
             visible: true,
             width: 2.0,
@@ -1336,6 +1433,10 @@ pub struct PolarCurveObj {
     pub expr_r: String,
     pub t_min: f64,
     pub t_max: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_min_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t_max_expr: Option<String>,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -1343,7 +1444,7 @@ pub struct PolarCurveObj {
     #[serde(skip)]
     pub cached_samples: RwLock<Curve2DSamples>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<(usize, u64)>>,
+    pub cached_key: RwLock<Option<ParametricCacheKey>>,
 }
 
 impl Clone for PolarCurveObj {
@@ -1354,6 +1455,8 @@ impl Clone for PolarCurveObj {
             expr_r: self.expr_r.clone(),
             t_min: self.t_min,
             t_max: self.t_max,
+            t_min_expr: self.t_min_expr.clone(),
+            t_max_expr: self.t_max_expr.clone(),
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1371,6 +1474,8 @@ impl PartialEq for PolarCurveObj {
             && self.expr_r == other.expr_r
             && self.t_min == other.t_min
             && self.t_max == other.t_max
+            && self.t_min_expr == other.t_min_expr
+            && self.t_max_expr == other.t_max_expr
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
@@ -1386,6 +1491,8 @@ impl PolarCurveObj {
             expr_r: expr_r.to_string(),
             t_min,
             t_max,
+            t_min_expr: None,
+            t_max_expr: None,
             color: Color::new(0.0, 0.7, 0.3, 1.0),
             visible: true,
             width: 2.0,
@@ -1584,6 +1691,23 @@ pub struct FunctionCacheKey {
     pub expr: String,
     pub domain: (f64, f64),
     pub grid_size: usize,
+    pub variables_hash: u64,
+}
+
+/// Cache key for parametric curves (2D, 3D, polar).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParametricCacheKey {
+    pub t_domain: (f64, f64),
+    pub steps: usize,
+    pub variables_hash: u64,
+}
+
+/// Cache key for 3D parametric surfaces.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceCacheKey {
+    pub x_domain: (f64, f64),
+    pub y_domain: (f64, f64),
+    pub res: usize,
     pub variables_hash: u64,
 }
 

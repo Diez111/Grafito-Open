@@ -276,15 +276,34 @@ impl Renderer {
                     Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
+                    let start = Point2::new(
+                        document.resolve_expr(&l.start_x_expr, l.start.x),
+                        document.resolve_expr(&l.start_y_expr, l.start.y),
+                    );
+                    let end = Point2::new(
+                        document.resolve_expr(&l.end_x_expr, l.end.x),
+                        document.resolve_expr(&l.end_y_expr, l.end.y),
+                    );
                     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view.screen_to_world(view.screen_size);
                     let view_bounds = grafito_geometry::AABB::new(
                         Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
                         Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                     );
-                    if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
-                        let a = view.world_to_screen(start);
-                        let b = view.world_to_screen(end);
+                    let clipped = match l.kind {
+                        grafito_core::LineKind::Segment => {
+                            grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
+                        }
+                        grafito_core::LineKind::Ray => {
+                            grafito_geometry::clip_ray_to_rect(start, end, view_bounds)
+                        }
+                        grafito_core::LineKind::Line => {
+                            grafito_geometry::clip_line_to_rect(start, end, view_bounds)
+                        }
+                    };
+                    if let Some((clip_start, clip_end)) = clipped {
+                        let a = view.world_to_screen(clip_start);
+                        let b = view.world_to_screen(clip_end);
                         Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
                     }
                 }
@@ -307,7 +326,14 @@ impl Renderer {
                     let screen_verts: Vec<_> = poly
                         .vertices
                         .iter()
-                        .map(|v| view.world_to_screen(*v))
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let x =
+                                document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                            let y =
+                                document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                            view.world_to_screen(Point2::new(x, y))
+                        })
                         .collect();
                     if let Some(fill) = poly.fill_color {
                         Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
@@ -647,15 +673,34 @@ impl Renderer {
                     Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
+                    let start = Point2::new(
+                        document.resolve_expr(&l.start_x_expr, l.start.x),
+                        document.resolve_expr(&l.start_y_expr, l.start.y),
+                    );
+                    let end = Point2::new(
+                        document.resolve_expr(&l.end_x_expr, l.end.x),
+                        document.resolve_expr(&l.end_y_expr, l.end.y),
+                    );
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
                     let view_bounds = grafito_geometry::AABB::new(
                         Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
                         Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                     );
-                    if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
-                        let a = view_transform.world_to_screen(start);
-                        let b = view_transform.world_to_screen(end);
+                    let clipped = match l.kind {
+                        grafito_core::LineKind::Segment => {
+                            grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
+                        }
+                        grafito_core::LineKind::Ray => {
+                            grafito_geometry::clip_ray_to_rect(start, end, view_bounds)
+                        }
+                        grafito_core::LineKind::Line => {
+                            grafito_geometry::clip_line_to_rect(start, end, view_bounds)
+                        }
+                    };
+                    if let Some((clip_start, clip_end)) = clipped {
+                        let a = view_transform.world_to_screen(clip_start);
+                        let b = view_transform.world_to_screen(clip_end);
                         Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
                     }
                 }
@@ -684,7 +729,14 @@ impl Renderer {
                     let screen_verts: Vec<_> = poly
                         .vertices
                         .iter()
-                        .map(|v| view_transform.world_to_screen(*v))
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let x =
+                                document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                            let y =
+                                document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                            view_transform.world_to_screen(Point2::new(x, y))
+                        })
                         .collect();
                     if let Some(fill) = poly.fill_color {
                         Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
@@ -700,8 +752,10 @@ impl Renderer {
                 GeoObject::Function(fun) => {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                    let min_x = fun.domain_min.unwrap_or(world_tl.x);
-                    let max_x = fun.domain_max.unwrap_or(world_br.x);
+                    let min_x = document
+                        .resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap_or(world_tl.x));
+                    let max_x = document
+                        .resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x));
                     let domain = (min_x, max_x);
                     let grid_size =
                         grafito_core::function_sampling::recommended_grid_size_for_quality(
@@ -1173,15 +1227,29 @@ impl Renderer {
                         let mut sample_pts: Vec<Point2> = Vec::new();
                         match target_obj {
                             GeoObject::Polygon(poly) => {
-                                sample_pts.extend(poly.vertices.iter().copied())
+                                for (i, v) in poly.vertices.iter().enumerate() {
+                                    let x = document
+                                        .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                                    let y = document
+                                        .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                                    sample_pts.push(Point2::new(x, y));
+                                }
                             }
                             GeoObject::Point(p) => sample_pts.push(p.position),
                             GeoObject::Line(l) => {
+                                let start = Point2::new(
+                                    document.resolve_expr(&l.start_x_expr, l.start.x),
+                                    document.resolve_expr(&l.start_y_expr, l.start.y),
+                                );
+                                let end = Point2::new(
+                                    document.resolve_expr(&l.end_x_expr, l.end.x),
+                                    document.resolve_expr(&l.end_y_expr, l.end.y),
+                                );
                                 for i in 0..=20 {
                                     let t = i as f64 / 20.0;
                                     sample_pts.push(Point2::new(
-                                        l.start.x + t * (l.end.x - l.start.x),
-                                        l.start.y + t * (l.end.y - l.start.y),
+                                        start.x + t * (end.x - start.x),
+                                        start.y + t * (end.y - start.y),
                                     ));
                                 }
                             }
@@ -1195,8 +1263,12 @@ impl Renderer {
                                 }
                             }
                             GeoObject::Function(f) => {
-                                let x_min = f.domain_min.unwrap_or(-10.0);
-                                let x_max = f.domain_max.unwrap_or(10.0);
+                                let x_min = document.resolve_expr(
+                                    &f.domain_min_expr,
+                                    f.domain_min.unwrap_or(-10.0),
+                                );
+                                let x_max = document
+                                    .resolve_expr(&f.domain_max_expr, f.domain_max.unwrap_or(10.0));
                                 for i in 0..=50 {
                                     let x = x_min + i as f64 / 50.0 * (x_max - x_min);
                                     if let Ok(y) = grafito_geometry::expr::evaluate(
@@ -3013,6 +3085,20 @@ impl Renderer {
         screen_w: f32,
         screen_h: f32,
     ) {
+        let resolve = |expr: &Option<String>, fallback: f64| -> f64 {
+            match expr {
+                Some(e) => {
+                    let vars: Vec<(String, f64)> =
+                        variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    grafito_geometry::expr::evaluate(e, &vars)
+                        .ok()
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(fallback)
+                }
+                None => fallback,
+            }
+        };
+
         let res = surface.mesh_res.min(128);
         let grid =
             grafito_core::parametric_sampling::samples_or_compute_surface(surface, res, variables);
@@ -3021,10 +3107,10 @@ impl Renderer {
         }
         let n = grid.len().saturating_sub(1);
         let m = grid[0].len().saturating_sub(1);
-        let x_min = surface.x_min;
-        let x_max = surface.x_max;
-        let y_min = surface.y_min;
-        let y_max = surface.y_max;
+        let x_min = resolve(&surface.x_min_expr, surface.x_min);
+        let x_max = resolve(&surface.x_max_expr, surface.x_max);
+        let y_min = resolve(&surface.y_min_expr, surface.y_min);
+        let y_max = resolve(&surface.y_max_expr, surface.y_max);
         let x_step = (x_max - x_min) / n as f64;
         let y_step = (y_max - y_min) / m as f64;
 

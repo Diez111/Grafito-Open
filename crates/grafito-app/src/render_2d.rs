@@ -1049,6 +1049,15 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Line(l) => {
+                let start = Point2::new(
+                    self.document.resolve_expr(&l.start_x_expr, l.start.x),
+                    self.document.resolve_expr(&l.start_y_expr, l.start.y),
+                );
+                let end = Point2::new(
+                    self.document.resolve_expr(&l.end_x_expr, l.end.x),
+                    self.document.resolve_expr(&l.end_y_expr, l.end.y),
+                );
+
                 let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
@@ -1058,9 +1067,20 @@ impl GrafitoApp {
                 );
 
                 let stroke = Stroke::new(l.width, to_color32(l.color));
-                if let Some((start, end)) = l.clip_to_aabb(view_bounds) {
-                    let a = view.world_to_screen(start);
-                    let b = view.world_to_screen(end);
+                let clipped = match l.kind {
+                    grafito_core::LineKind::Segment => {
+                        grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Ray => {
+                        grafito_geometry::clip_ray_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Line => {
+                        grafito_geometry::clip_line_to_rect(start, end, view_bounds)
+                    }
+                };
+                if let Some((clip_start, clip_end)) = clipped {
+                    let a = view.world_to_screen(clip_start);
+                    let b = view.world_to_screen(clip_end);
                     let pa = canvas_rect.min + Vec2::new(a.x, a.y);
                     let pb = canvas_rect.min + Vec2::new(b.x, b.y);
                     painter.line_segment([pa, pb], stroke);
@@ -1073,12 +1093,12 @@ impl GrafitoApp {
                 }
                 if !l.label.is_empty() {
                     let mid = if l.kind == grafito_core::LineKind::Segment {
-                        let a = view.world_to_screen(l.start);
-                        let b = view.world_to_screen(l.end);
+                        let a = view.world_to_screen(start);
+                        let b = view.world_to_screen(end);
                         (a + b) * 0.5
                     } else {
                         // Place label near the start for rays/lines.
-                        view.world_to_screen(l.start)
+                        view.world_to_screen(start)
                     };
                     painter.text(
                         canvas_rect.min + Vec2::new(mid.x, mid.y) + Vec2::new(0.0, -8.0),
@@ -1113,8 +1133,15 @@ impl GrafitoApp {
                 let points: Vec<_> = poly
                     .vertices
                     .iter()
-                    .map(|v| {
-                        let s = view.world_to_screen(*v);
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let x = self
+                            .document
+                            .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = self
+                            .document
+                            .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        let s = view.world_to_screen(Point2::new(x, y));
                         canvas_rect.min + Vec2::new(s.x, s.y)
                     })
                     .collect();
@@ -1148,8 +1175,12 @@ impl GrafitoApp {
                 let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
-                let min_x = fun.domain_min.unwrap_or(world_tl.x);
-                let max_x = fun.domain_max.unwrap_or(world_br.x);
+                let min_x = self
+                    .document
+                    .resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap_or(world_tl.x));
+                let max_x = self
+                    .document
+                    .resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x));
 
                 let variables = &self.document.variables;
                 let samples: Vec<(f64, Option<f64>)> = if fun.is_integral {
@@ -2183,8 +2214,14 @@ impl GrafitoApp {
                     match target {
                         GeoObject::Polygon(poly) => {
                             let mut transformed_verts = Vec::new();
-                            for vert in &poly.vertices {
-                                let z = Complex64::new(vert.x, vert.y);
+                            for (i, vert) in poly.vertices.iter().enumerate() {
+                                let x = self
+                                    .document
+                                    .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), vert.x);
+                                let y = self
+                                    .document
+                                    .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), vert.y);
+                                let z = Complex64::new(x, y);
                                 vars.insert("z".to_string(), z);
 
                                 if let Ok(result) = expr.eval(&vars) {
@@ -2211,14 +2248,22 @@ impl GrafitoApp {
                             }
                         }
                         GeoObject::Line(line) => {
+                            let start = Point2::new(
+                                self.document.resolve_expr(&line.start_x_expr, line.start.x),
+                                self.document.resolve_expr(&line.start_y_expr, line.start.y),
+                            );
+                            let end = Point2::new(
+                                self.document.resolve_expr(&line.end_x_expr, line.end.x),
+                                self.document.resolve_expr(&line.end_y_expr, line.end.y),
+                            );
                             let steps = 50;
-                            let dx = (line.end.x - line.start.x) / steps as f64;
-                            let dy = (line.end.y - line.start.y) / steps as f64;
+                            let dx = (end.x - start.x) / steps as f64;
+                            let dy = (end.y - start.y) / steps as f64;
                             let mut prev: Option<Pos2> = None;
 
                             for i in 0..=steps {
-                                let x = line.start.x + i as f64 * dx;
-                                let y = line.start.y + i as f64 * dy;
+                                let x = start.x + i as f64 * dx;
+                                let y = start.y + i as f64 * dy;
                                 let z = Complex64::new(x, y);
                                 vars.insert("z".to_string(), z);
 

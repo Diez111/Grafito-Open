@@ -6,8 +6,8 @@
 //! (`grafito-render`) consume the cached samples.
 
 use crate::object::{
-    Curve2DSamples, Curve3DSamples, ParametricCurve2DObj, ParametricCurve3DObj, PolarCurveObj,
-    Surface3DObj, SurfaceSamples,
+    Curve2DSamples, Curve3DSamples, ParametricCacheKey, ParametricCurve2DObj, ParametricCurve3DObj,
+    PolarCurveObj, Surface3DObj, SurfaceCacheKey, SurfaceSamples,
 };
 use grafito_geometry::expr;
 use rayon::prelude::*;
@@ -39,6 +39,19 @@ fn finite_clamp(v: f64) -> f64 {
     }
 }
 
+fn resolve_expr(expr: Option<&str>, fallback: f64, variables: &HashMap<String, f64>) -> f64 {
+    match expr {
+        Some(e) => {
+            let vars: Vec<(String, f64)> = variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            expr::evaluate(e, &vars)
+                .ok()
+                .filter(|v| v.is_finite())
+                .unwrap_or(fallback)
+        }
+        None => fallback,
+    }
+}
+
 /// Evaluate a 2D parametric curve over its `t` domain.
 pub fn evaluate_parametric_curve_2d(
     pc: &ParametricCurve2DObj,
@@ -46,8 +59,8 @@ pub fn evaluate_parametric_curve_2d(
     variables: &HashMap<String, f64>,
 ) -> Curve2DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
-    let t_min = pc.t_min;
-    let t_max = pc.t_max;
+    let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
+    let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
     if !t_min.is_finite() || !t_max.is_finite() || t_min >= t_max {
         return Curve2DSamples::new();
     }
@@ -90,8 +103,8 @@ pub fn evaluate_parametric_curve_3d(
     variables: &HashMap<String, f64>,
 ) -> Curve3DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
-    let t_min = pc.t_min;
-    let t_max = pc.t_max;
+    let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
+    let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
     if !t_min.is_finite() || !t_max.is_finite() || t_min >= t_max {
         return Curve3DSamples::new();
     }
@@ -144,8 +157,8 @@ pub fn evaluate_polar_curve(
     variables: &HashMap<String, f64>,
 ) -> Curve2DSamples {
     let steps = steps.clamp(1, MAX_CURVE_STEPS);
-    let t_min = pol.t_min;
-    let t_max = pol.t_max;
+    let t_min = resolve_expr(pol.t_min_expr.as_deref(), pol.t_min, variables);
+    let t_max = resolve_expr(pol.t_max_expr.as_deref(), pol.t_max, variables);
     if !t_min.is_finite() || !t_max.is_finite() || t_min >= t_max {
         return Curve2DSamples::new();
     }
@@ -182,10 +195,10 @@ pub fn evaluate_surface_3d(
     variables: &HashMap<String, f64>,
 ) -> SurfaceSamples {
     let res = res.clamp(1, MAX_SURFACE_RES);
-    let x_min = surf.x_min;
-    let x_max = surf.x_max;
-    let y_min = surf.y_min;
-    let y_max = surf.y_max;
+    let x_min = resolve_expr(surf.x_min_expr.as_deref(), surf.x_min, variables);
+    let x_max = resolve_expr(surf.x_max_expr.as_deref(), surf.x_max, variables);
+    let y_min = resolve_expr(surf.y_min_expr.as_deref(), surf.y_min, variables);
+    let y_max = resolve_expr(surf.y_max_expr.as_deref(), surf.y_max, variables);
     if !x_min.is_finite()
         || !x_max.is_finite()
         || !y_min.is_finite()
@@ -230,7 +243,13 @@ pub fn samples_or_compute_curve_2d<'a>(
     steps: usize,
     variables: &HashMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve2DSamples> {
-    let key = (steps, variables_hash(variables));
+    let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
+    let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
+    let key = ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: variables_hash(variables),
+    };
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -250,7 +269,13 @@ pub fn samples_or_compute_curve_3d<'a>(
     steps: usize,
     variables: &HashMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve3DSamples> {
-    let key = (steps, variables_hash(variables));
+    let t_min = resolve_expr(pc.t_min_expr.as_deref(), pc.t_min, variables);
+    let t_max = resolve_expr(pc.t_max_expr.as_deref(), pc.t_max, variables);
+    let key = ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: variables_hash(variables),
+    };
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -270,7 +295,13 @@ pub fn samples_or_compute_polar<'a>(
     steps: usize,
     variables: &HashMap<String, f64>,
 ) -> RwLockReadGuard<'a, Curve2DSamples> {
-    let key = (steps, variables_hash(variables));
+    let t_min = resolve_expr(pol.t_min_expr.as_deref(), pol.t_min, variables);
+    let t_max = resolve_expr(pol.t_max_expr.as_deref(), pol.t_max, variables);
+    let key = ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        variables_hash: variables_hash(variables),
+    };
     {
         let cached_key = pol.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
@@ -292,7 +323,16 @@ pub fn samples_or_compute_surface<'a>(
     res: usize,
     variables: &HashMap<String, f64>,
 ) -> RwLockReadGuard<'a, SurfaceSamples> {
-    let key = (res, variables_hash(variables));
+    let x_min = resolve_expr(surf.x_min_expr.as_deref(), surf.x_min, variables);
+    let x_max = resolve_expr(surf.x_max_expr.as_deref(), surf.x_max, variables);
+    let y_min = resolve_expr(surf.y_min_expr.as_deref(), surf.y_min, variables);
+    let y_max = resolve_expr(surf.y_max_expr.as_deref(), surf.y_max, variables);
+    let key = SurfaceCacheKey {
+        x_domain: (x_min, x_max),
+        y_domain: (y_min, y_max),
+        res,
+        variables_hash: variables_hash(variables),
+    };
     {
         let cached_key = surf.cached_key.read().unwrap_or_else(|p| p.into_inner());
         if cached_key.as_ref() == Some(&key) {
