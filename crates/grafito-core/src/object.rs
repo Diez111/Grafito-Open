@@ -3,7 +3,7 @@ use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -631,9 +631,9 @@ pub struct FunctionObj {
     pub integral_var: String,
     pub integral_lower: f64,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<FunctionCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<FunctionCacheKey>>>,
     #[serde(skip)]
-    pub cached_samples: RwLock<FunctionSamples>,
+    pub cached_samples: Arc<RwLock<FunctionSamples>>,
 }
 
 impl Clone for FunctionObj {
@@ -653,9 +653,9 @@ impl Clone for FunctionObj {
             is_integral: self.is_integral,
             integral_var: self.integral_var.clone(),
             integral_lower: self.integral_lower,
-            // A clone starts with an empty cache; it will be recomputed on demand.
-            cached_key: RwLock::new(None),
-            cached_samples: RwLock::new(FunctionSamples::new()),
+            // Share the cache through Arc
+            cached_key: self.cached_key.clone(),
+            cached_samples: self.cached_samples.clone(),
         }
     }
 }
@@ -696,8 +696,8 @@ impl FunctionObj {
             is_integral: false,
             integral_var: String::new(),
             integral_lower: 0.0,
-            cached_key: RwLock::new(None),
-            cached_samples: RwLock::new(FunctionSamples::new()),
+            cached_key: Arc::new(RwLock::new(None)),
+            cached_samples: Arc::new(RwLock::new(FunctionSamples::new())),
         }
     }
 
@@ -1050,9 +1050,9 @@ pub struct Surface3DObj {
     pub solid: bool,
     pub mesh_res: usize,
     #[serde(skip)]
-    pub cached_grid: RwLock<SurfaceSamples>,
+    pub cached_grid: Arc<RwLock<SurfaceSamples>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<SurfaceCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<SurfaceCacheKey>>>,
 }
 
 impl Clone for Surface3DObj {
@@ -1074,8 +1074,8 @@ impl Clone for Surface3DObj {
             width: self.width,
             solid: self.solid,
             mesh_res: self.mesh_res,
-            cached_grid: RwLock::new(SurfaceSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_grid: self.cached_grid.clone(),
+            cached_key: self.cached_key.clone(),
         }
     }
 }
@@ -1120,8 +1120,8 @@ impl Surface3DObj {
             width: 1.0,
             solid: false,
             mesh_res: 30,
-            cached_grid: RwLock::new(SurfaceSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1264,9 +1264,9 @@ pub struct ParametricCurve2DObj {
     pub visible: bool,
     pub width: f32,
     #[serde(skip)]
-    pub cached_samples: RwLock<Curve2DSamples>,
+    pub cached_samples: Arc<RwLock<Curve2DSamples>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<ParametricCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<ParametricCacheKey>>>,
 }
 
 impl Clone for ParametricCurve2DObj {
@@ -1283,8 +1283,8 @@ impl Clone for ParametricCurve2DObj {
             color: self.color,
             visible: self.visible,
             width: self.width,
-            cached_samples: RwLock::new(Curve2DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: self.cached_samples.clone(),
+            cached_key: self.cached_key.clone(),
         }
     }
 }
@@ -1319,8 +1319,8 @@ impl ParametricCurve2DObj {
             color: Color::BLUE,
             visible: true,
             width: 2.0,
-            cached_samples: RwLock::new(Curve2DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: Arc::new(RwLock::new(Curve2DSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1355,9 +1355,9 @@ pub struct ParametricCurve3DObj {
     pub visible: bool,
     pub width: f32,
     #[serde(skip)]
-    pub cached_samples: RwLock<Curve3DSamples>,
+    pub cached_samples: Arc<RwLock<Curve3DSamples>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<ParametricCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<ParametricCacheKey>>>,
 }
 
 impl Clone for ParametricCurve3DObj {
@@ -1375,8 +1375,8 @@ impl Clone for ParametricCurve3DObj {
             color: self.color,
             visible: self.visible,
             width: self.width,
-            cached_samples: RwLock::new(Curve3DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: self.cached_samples.clone(),
+            cached_key: self.cached_key.clone(),
         }
     }
 }
@@ -1413,8 +1413,8 @@ impl ParametricCurve3DObj {
             color: Color::new(1.0, 0.0, 1.0, 1.0),
             visible: true,
             width: 2.0,
-            cached_samples: RwLock::new(Curve3DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: Arc::new(RwLock::new(Curve3DSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1448,9 +1448,9 @@ pub struct PolarCurveObj {
     pub width: f32,
     pub fill_color: Option<Color>,
     #[serde(skip)]
-    pub cached_samples: RwLock<Curve2DSamples>,
+    pub cached_samples: Arc<RwLock<Curve2DSamples>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<ParametricCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<ParametricCacheKey>>>,
 }
 
 impl Clone for PolarCurveObj {
@@ -1467,8 +1467,8 @@ impl Clone for PolarCurveObj {
             visible: self.visible,
             width: self.width,
             fill_color: self.fill_color,
-            cached_samples: RwLock::new(Curve2DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: self.cached_samples.clone(),
+            cached_key: self.cached_key.clone(),
         }
     }
 }
@@ -1503,8 +1503,8 @@ impl PolarCurveObj {
             visible: true,
             width: 2.0,
             fill_color: None,
-            cached_samples: RwLock::new(Curve2DSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: Arc::new(RwLock::new(Curve2DSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1609,9 +1609,9 @@ pub struct VectorField2DObj {
     pub visible: bool,
     pub density: usize,
     #[serde(skip)]
-    pub cached_samples: RwLock<VectorFieldSamples>,
+    pub cached_samples: Arc<RwLock<VectorFieldSamples>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<VectorFieldCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<VectorFieldCacheKey>>>,
 }
 
 impl Clone for VectorField2DObj {
@@ -1624,9 +1624,8 @@ impl Clone for VectorField2DObj {
             color: self.color,
             visible: self.visible,
             density: self.density,
-            // Un clon comienza con caché vacía; se recalculará bajo demanda.
-            cached_samples: RwLock::new(VectorFieldSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: self.cached_samples.clone(),
+            cached_key: self.cached_key.clone(),
         }
     }
 }
@@ -1653,8 +1652,8 @@ impl VectorField2DObj {
             color: Color::new(0.8, 0.4, 0.0, 1.0),
             visible: true,
             density: 15,
-            cached_samples: RwLock::new(VectorFieldSamples::new()),
-            cached_key: RwLock::new(None),
+            cached_samples: Arc::new(RwLock::new(VectorFieldSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1765,6 +1764,9 @@ pub struct SurfaceCacheKey {
 /// Cached (x, y, u, v) samples for a 2D vector field.
 pub type VectorFieldSamples = Vec<(f64, f64, f64, f64)>;
 
+/// Type alias for cached world-space region (x_min, x_max, y_min, y_max).
+pub type CachedRegion = (f64, f64, f64, f64);
+
 /// Cache key for 2D vector fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorFieldCacheKey {
@@ -1806,14 +1808,14 @@ pub struct ImplicitCurveObj {
     /// Wrapped in a lock so the GPU renderer can update it through a shared
     /// document reference.
     #[serde(skip)]
-    pub cached_segments: RwLock<ImplicitCurveSegments>,
+    pub cached_segments: Arc<RwLock<ImplicitCurveSegments>>,
     #[serde(skip)]
-    pub cached_key: RwLock<Option<ImplicitCurveCacheKey>>,
+    pub cached_key: Arc<RwLock<Option<ImplicitCurveCacheKey>>>,
     /// World-space region that was actually computed (padded/snapped view
     /// bounds). Used to decide whether a new view can reuse the cached
     /// geometry without re-evaluation.
     #[serde(skip)]
-    pub cached_region: RwLock<Option<(f64, f64, f64, f64)>>,
+    pub cached_region: Arc<RwLock<Option<CachedRegion>>>,
 }
 
 impl Clone for ImplicitCurveObj {
@@ -1829,10 +1831,9 @@ impl Clone for ImplicitCurveObj {
             width: self.width,
             contour_levels: self.contour_levels.clone(),
             contour_colors: self.contour_colors.clone(),
-            // A clone starts with an empty cache; it will be recomputed on demand.
-            cached_segments: RwLock::new(ImplicitCurveSegments::new()),
-            cached_key: RwLock::new(None),
-            cached_region: RwLock::new(None),
+            cached_segments: self.cached_segments.clone(),
+            cached_key: self.cached_key.clone(),
+            cached_region: self.cached_region.clone(),
         }
     }
 }
@@ -1865,16 +1866,43 @@ impl ImplicitCurveObj {
             width: 2.0,
             contour_levels: None,
             contour_colors: None,
-            cached_segments: RwLock::new(ImplicitCurveSegments::new()),
-            cached_key: RwLock::new(None),
-            cached_region: RwLock::new(None),
+            cached_segments: Arc::new(RwLock::new(ImplicitCurveSegments::new())),
+            cached_key: Arc::new(RwLock::new(None)),
+            cached_region: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
     }
+}
 
+fn is_variable_in_expr(var: &str, expr: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = expr[start..].find(var) {
+        let actual_pos = start + pos;
+        let before = if actual_pos == 0 {
+            None
+        } else {
+            expr.as_bytes().get(actual_pos - 1).map(|&b| b as char)
+        };
+        let after = expr
+            .as_bytes()
+            .get(actual_pos + var.len())
+            .map(|&b| b as char);
+
+        let is_before_word = before.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let is_after_word = after.is_some_and(|c| c.is_alphanumeric() || c == '_');
+
+        if !is_before_word && !is_after_word {
+            return true;
+        }
+        start = actual_pos + 1;
+    }
+    false
+}
+
+impl ImplicitCurveObj {
     pub fn cache_key(
         &self,
         view_bounds: (f64, f64, f64, f64),
@@ -1900,8 +1928,36 @@ impl ImplicitCurveObj {
         }
         let contour_colors_hash = hasher.finish();
 
+        let mut referenced = std::collections::HashSet::new();
+        let lhs_clean = grafito_geometry::expr::preprocess_expr(&self.expr_lhs);
+        if let Ok(ast_lhs) = grafito_geometry::ast::parse_ast(&lhs_clean) {
+            ast_lhs.get_variables(&mut referenced);
+        } else {
+            for k in variables.keys() {
+                if is_variable_in_expr(k, &self.expr_lhs) {
+                    referenced.insert(k.clone());
+                }
+            }
+        }
+
+        let rhs_clean = grafito_geometry::expr::preprocess_expr(&self.expr_rhs);
+        if let Ok(ast_rhs) = grafito_geometry::ast::parse_ast(&rhs_clean) {
+            ast_rhs.get_variables(&mut referenced);
+        } else {
+            for k in variables.keys() {
+                if is_variable_in_expr(k, &self.expr_rhs) {
+                    referenced.insert(k.clone());
+                }
+            }
+        }
+
         let mut hasher = DefaultHasher::new();
-        for (k, v) in variables.iter() {
+        let mut sorted_vars: Vec<(&String, &f64)> = variables
+            .iter()
+            .filter(|(k, _)| referenced.contains(*k))
+            .collect();
+        sorted_vars.sort_by(|a, b| a.0.cmp(b.0));
+        for (k, v) in sorted_vars {
             k.hash(&mut hasher);
             v.to_bits().hash(&mut hasher);
         }

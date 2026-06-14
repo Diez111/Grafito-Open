@@ -106,7 +106,7 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
             case OP_DIV: {
                 sp = sp - 2;
                 let denom = stack[sp + 1];
-                if denom != 0.0 {
+                if abs(denom) > 1e-10 {
                     stack[sp] = stack[sp] / denom;
                 } else {
                     stack[sp] = 0.0;
@@ -115,7 +115,23 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
             }
             case OP_POW: {
                 sp = sp - 2;
-                stack[sp] = pow(stack[sp], stack[sp + 1]);
+                let b = stack[sp];
+                let e = stack[sp + 1];
+                if b < 0.0 {
+                    if floor(e) == e {
+                        let is_even = abs(e % 2.0) < 0.001;
+                        if is_even {
+                            stack[sp] = pow(-b, e);
+                        } else {
+                            stack[sp] = -pow(-b, e);
+                        }
+                    } else {
+                        var zero = 0.0;
+                        stack[sp] = zero / zero;
+                    }
+                } else {
+                    stack[sp] = pow(b, e);
+                }
                 sp = sp + 1;
             }
             case OP_NEG: {

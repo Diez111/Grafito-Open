@@ -158,6 +158,8 @@ impl GrafitoApp {
                 renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
                 buffers_2d: None,
                 buffers_3d: None,
+                cache_2d: None,
+                cache_3d: None,
             };
             render_state
                 .renderer

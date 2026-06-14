@@ -245,21 +245,23 @@ pub fn evaluate_surface_3d(
         .into_par_iter()
         .map(|i| {
             let x = x_min + i as f64 * dx;
-            (0..=res)
-                .map(|j| {
-                    let y = y_min + j as f64 * dy;
-                    ast.as_ref()
-                        .map(|a| finite_clamp(a.eval_2d("x", x, "y", y)))
-                        .or_else(|| {
-                            compiled.as_ref().and_then(|c| {
-                                c.eval(&[("x".to_string(), x), ("y".to_string(), y)])
-                                    .ok()
-                                    .map(finite_clamp)
-                            })
+            let mut row = Vec::with_capacity(res + 1);
+            for j in 0..=res {
+                let y = y_min + j as f64 * dy;
+                let val = ast
+                    .as_ref()
+                    .map(|a| finite_clamp(a.eval_2d("x", x, "y", y)))
+                    .or_else(|| {
+                        compiled.as_ref().and_then(|c| {
+                            c.eval(&[("x".to_string(), x), ("y".to_string(), y)])
+                                .ok()
+                                .map(finite_clamp)
                         })
-                        .unwrap_or(f64::NAN)
-                })
-                .collect()
+                    })
+                    .unwrap_or(f64::NAN);
+                row.push(val);
+            }
+            row
         })
         .collect()
 }

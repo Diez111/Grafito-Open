@@ -16,6 +16,69 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct StyleOverride {
+    pub color: Option<Color>,
+    pub color_alpha_multiplier: Option<f32>,
+    pub width: Option<f32>,
+    pub width_scale: Option<f32>,
+    pub size_scale: Option<f32>,
+    pub hide_label: bool,
+    pub clear_fill_color: bool,
+}
+
+fn get_color(base: Color, style: Option<StyleOverride>) -> Color {
+    let mut c = base;
+    if let Some(s) = style {
+        if let Some(over) = s.color {
+            c = over;
+        }
+        if let Some(mult) = s.color_alpha_multiplier {
+            c.a = (c.a * mult).max(0.05);
+        }
+    }
+    c
+}
+
+fn get_fill_color(base: Option<Color>, style: Option<StyleOverride>) -> Option<Color> {
+    if style.is_some_and(|s| s.clear_fill_color) {
+        return None;
+    }
+    base.map(|c| get_color(c, style))
+}
+
+fn get_width(base: f32, style: Option<StyleOverride>) -> f32 {
+    let mut w = base;
+    if let Some(s) = style {
+        if let Some(over) = s.width {
+            w = over;
+        }
+        if let Some(scale) = s.width_scale {
+            w *= scale;
+        }
+    }
+    w
+}
+
+fn get_size(base: f32, style: Option<StyleOverride>) -> f32 {
+    let mut size = base;
+    if let Some(s) = style {
+        if let Some(scale) = s.size_scale {
+            size *= scale;
+        }
+    }
+    size
+}
+
+fn get_label(base: &str, style: Option<StyleOverride>) -> &str {
+    if let Some(s) = style {
+        if s.hide_label {
+            return "";
+        }
+    }
+    base
+}
+
 /// HSL to RGB conversion for domain coloring
 fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
     if s == 0.0 {
@@ -462,21 +525,26 @@ impl GrafitoApp {
             let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
             let world_br =
                 view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
-            let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+            let view_bounds = (
+                world_tl.x.min(world_br.x),
+                world_tl.x.max(world_br.x),
+                world_br.y.min(world_tl.y),
+                world_br.y.max(world_tl.y),
+            );
             let quality = self.document.render_quality;
             let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
                 canvas_rect.width(),
                 canvas_rect.height(),
                 quality,
             );
-            let variables = self.document.variables.clone();
-            for (_, obj) in self.document.objects_iter_mut() {
+            let variables = &self.document.variables;
+            for (_, obj) in self.document.objects_iter() {
                 if let GeoObject::ImplicitCurve(ic) = obj {
                     let _unused = grafito_core::implicit_curve::segments_or_compute(
                         ic,
                         view_bounds,
                         grid_size,
-                        &variables,
+                        variables,
                         quality,
                     );
                 }
@@ -509,30 +577,22 @@ impl GrafitoApp {
         }
 
         if let Some(preview) = &self.preview_object {
-            let mut preview_clone = preview.clone();
-            match &mut preview_clone {
-                GeoObject::Function(f) => {
-                    f.color = Color {
-                        r: 0.4,
-                        g: 0.4,
-                        b: 0.4,
-                        a: 0.8,
-                    };
-                    f.width = 2.5;
-                    f.label = String::new();
-                }
-                GeoObject::Point(p) => {
-                    p.color = Color {
-                        r: 0.4,
-                        g: 0.4,
-                        b: 0.4,
-                        a: 0.8,
-                    };
-                    p.label = String::new();
-                }
-                _ => {}
-            }
-            self.draw_object(painter, canvas_rect, &preview_clone);
+            let style = StyleOverride {
+                color: Some(Color {
+                    r: 0.4,
+                    g: 0.4,
+                    b: 0.4,
+                    a: 0.8,
+                }),
+                hide_label: true,
+                width: if matches!(preview, GeoObject::Function(_)) {
+                    Some(2.5)
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            self.draw_object_styled(painter, canvas_rect, preview, Some(style));
         }
     }
 
@@ -561,30 +621,38 @@ impl GrafitoApp {
 
     pub(crate) fn draw_tool_ghost(&self, painter: &egui::Painter, canvas_rect: Rect) {
         if let Some(ghost) = &self.tool_ghost {
-            let mut g = ghost.clone();
-            // Reduce opacity to create ghost/shadow effect
-            let ghost_alpha = 0.3;
-            match &mut g {
-                GeoObject::Point(p) => {
-                    p.color.a = (p.color.a * ghost_alpha).max(0.05);
-                    p.size *= 1.3;
+            let mut style = StyleOverride {
+                color_alpha_multiplier: Some(0.3),
+                ..Default::default()
+            };
+            match ghost {
+                GeoObject::Point(_) => {
+                    style.size_scale = Some(1.3);
                 }
-                GeoObject::Line(l) => {
-                    l.color.a = (l.color.a * ghost_alpha).max(0.05);
-                    l.width *= 0.7;
+                GeoObject::Line(_) => {
+                    style.width_scale = Some(0.7);
                 }
-                GeoObject::Circle(c) => {
-                    c.color.a = (c.color.a * ghost_alpha).max(0.05);
-                    c.width *= 0.7;
-                    c.fill_color = None;
+                GeoObject::Circle(_) => {
+                    style.width_scale = Some(0.7);
+                    style.clear_fill_color = true;
                 }
                 _ => {}
             }
-            self.draw_object(painter, canvas_rect, &g);
+            self.draw_object_styled(painter, canvas_rect, ghost, Some(style));
         }
     }
 
     pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
+        self.draw_object_styled(painter, canvas_rect, obj, None);
+    }
+
+    pub(crate) fn draw_object_styled(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        obj: &GeoObject,
+        style: Option<StyleOverride>,
+    ) {
         let view = self.document.view();
         let label_color = if self.dark_mode {
             Color32::WHITE
@@ -595,20 +663,24 @@ impl GrafitoApp {
             GeoObject::Point(p) => {
                 let screen = view.world_to_screen(p.position);
                 let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                let size = p.size.max(1.0);
-                let color = to_color32(p.color);
+                let size = get_size(p.size, style).max(1.0);
+                let color = to_color32(get_color(p.color, style));
+                let label = get_label(&p.label, style);
                 painter.circle_filled(pos, size, color);
-                if !p.label.is_empty() {
+                if !label.is_empty() {
                     painter.text(
                         pos + Vec2::new(size + 2.0, -size - 2.0),
                         egui::Align2::LEFT_BOTTOM,
-                        &p.label,
+                        label,
                         egui::FontId::proportional(12.0),
                         label_color,
                     );
                 }
             }
             GeoObject::Line(l) => {
+                let width = get_width(l.width, style);
+                let color = get_color(l.color, style);
+                let label = get_label(&l.label, style);
                 let start = Point2::new(
                     self.document.resolve_expr(&l.start_x_expr, l.start.x),
                     self.document.resolve_expr(&l.start_y_expr, l.start.y),
@@ -626,7 +698,7 @@ impl GrafitoApp {
                     Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                 );
 
-                let stroke = Stroke::new(l.width, to_color32(l.color));
+                let stroke = Stroke::new(width, to_color32(color));
                 let clipped = match l.kind {
                     grafito_core::LineKind::Segment => {
                         grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
@@ -646,12 +718,12 @@ impl GrafitoApp {
                     painter.line_segment([pa, pb], stroke);
 
                     // Arrowhead for vectors at the forward (t=1) end.
-                    let is_vector = l.label == "v";
+                    let is_vector = label == "v";
                     if is_vector {
-                        Self::draw_arrowhead(painter, pa, pb, l.width, to_color32(l.color));
+                        Self::draw_arrowhead(painter, pa, pb, width, to_color32(color));
                     }
                 }
-                if !l.label.is_empty() {
+                if !label.is_empty() {
                     let mid = if l.kind == grafito_core::LineKind::Segment {
                         let a = view.world_to_screen(start);
                         let b = view.world_to_screen(end);
@@ -663,7 +735,7 @@ impl GrafitoApp {
                     painter.text(
                         canvas_rect.min + Vec2::new(mid.x, mid.y) + Vec2::new(0.0, -8.0),
                         egui::Align2::CENTER_BOTTOM,
-                        &l.label,
+                        label,
                         egui::FontId::proportional(12.0),
                         label_color,
                     );
@@ -674,16 +746,20 @@ impl GrafitoApp {
                 let radius = (c.radius * view.scale) as f32;
                 let radius = radius.clamp(0.5, 50000.0);
                 let pos = canvas_rect.min + Vec2::new(center.x, center.y);
-                let stroke = Stroke::new(c.width, to_color32(c.color));
-                if let Some(fill) = c.fill_color {
+                let width = get_width(c.width, style);
+                let color = get_color(c.color, style);
+                let fill_color = get_fill_color(c.fill_color, style);
+                let label = get_label(&c.label, style);
+                let stroke = Stroke::new(width, to_color32(color));
+                if let Some(fill) = fill_color {
                     painter.circle_filled(pos, radius, to_color32(fill));
                 }
                 painter.circle_stroke(pos, radius, stroke);
-                if !c.label.is_empty() {
+                if !label.is_empty() {
                     painter.text(
                         pos + Vec2::new(radius + 2.0, -radius - 2.0),
                         egui::Align2::LEFT_BOTTOM,
-                        &c.label,
+                        label,
                         egui::FontId::proportional(12.0),
                         label_color,
                     );
@@ -705,33 +781,32 @@ impl GrafitoApp {
                         canvas_rect.min + Vec2::new(s.x, s.y)
                     })
                     .collect();
-                let stroke = Stroke::new(poly.width, to_color32(poly.color));
-                if let Some(fill) = poly.fill_color {
-                    painter.add(Shape::convex_polygon(
-                        points.clone(),
-                        to_color32(fill),
-                        stroke,
-                    ));
-                } else {
-                    painter.add(Shape::convex_polygon(
-                        points.clone(),
-                        Color32::TRANSPARENT,
-                        stroke,
-                    ));
-                }
-                if !poly.label.is_empty() {
+                let width = get_width(poly.width, style);
+                let color = get_color(poly.color, style);
+                let fill_color = get_fill_color(poly.fill_color, style);
+                let label = get_label(&poly.label, style);
+                let stroke = Stroke::new(width, to_color32(color));
+                let fill = fill_color.map(to_color32).unwrap_or(Color32::TRANSPARENT);
+                if !label.is_empty() {
                     let cx: f32 = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
                     let cy: f32 = points.iter().map(|p| p.y).sum::<f32>() / points.len() as f32;
+                    painter.add(Shape::convex_polygon(points, fill, stroke));
                     painter.text(
                         Pos2::new(cx, cy),
                         egui::Align2::CENTER_CENTER,
-                        &poly.label,
+                        label,
                         egui::FontId::proportional(12.0),
                         label_color,
                     );
+                } else {
+                    painter.add(Shape::convex_polygon(points, fill, stroke));
                 }
             }
             GeoObject::Function(fun) => {
+                let width = get_width(fun.width, style);
+                let color = get_color(fun.color, style);
+                let fill_color = get_fill_color(fun.fill_color, style);
+                let label = get_label(&fun.label, style);
                 let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
@@ -844,7 +919,7 @@ impl GrafitoApp {
                 let samples = refined_samples;
 
                 // Fill area under curve if fill_color is set
-                if let Some(fill) = fun.fill_color {
+                if let Some(fill) = fill_color {
                     let mut fill_pts: Vec<Pos2> = Vec::new();
                     // Top edge: left to right along the curve
                     for &(x, y_opt) in &samples {
@@ -876,7 +951,7 @@ impl GrafitoApp {
                     }
                 }
 
-                let stroke = Stroke::new(fun.width, to_color32(fun.color));
+                let stroke = Stroke::new(width, to_color32(color));
                 let mut optimized_points = Vec::new();
                 let mut i = 0;
                 while i < samples.len() {
@@ -940,7 +1015,7 @@ impl GrafitoApp {
                     painter.add(Shape::line(optimized_points, stroke));
                 }
 
-                if !fun.label.is_empty() {
+                if !label.is_empty() {
                     let mid_x = (min_x + max_x) * 0.5;
                     if let Ok(y) = grafito_geometry::expr::eval_function_with_vars(
                         &fun.expr,
@@ -951,7 +1026,7 @@ impl GrafitoApp {
                         painter.text(
                             canvas_rect.min + Vec2::new(s.x, s.y + 14.0),
                             egui::Align2::CENTER_TOP,
-                            &fun.label,
+                            label,
                             egui::FontId::proportional(12.0),
                             label_color,
                         );
@@ -1351,7 +1426,12 @@ impl GrafitoApp {
                 let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
-                let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                let view_bounds = (
+                    world_tl.x.min(world_br.x),
+                    world_tl.x.max(world_br.x),
+                    world_br.y.min(world_tl.y),
+                    world_br.y.max(world_tl.y),
+                );
                 let grid_size = vf.density.clamp(5, 80);
                 let dx = (world_br.x - world_tl.x) / grid_size as f64;
                 let dy = (world_br.y - world_tl.y) / grid_size as f64;
@@ -1573,9 +1653,8 @@ impl GrafitoApp {
 
                     if is_heatmap {
                         // Heat map: evaluate f(x,y) using real AST
-                        let vars_map: std::collections::HashMap<String, f64> =
-                            self.document.variables.clone();
-                        let prepared = prepare_function_ast(&cg.expr, &vars_map, &["x", "y"]);
+                        let prepared =
+                            prepare_function_ast(&cg.expr, &self.document.variables, &["x", "y"]);
 
                         if let Ok(ast) = prepared {
                             for j in 0..res {

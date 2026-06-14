@@ -301,21 +301,21 @@ impl GrafitoApp {
         }
 
         // Draw Axis Numbers
+        let precision = if major_step > 0.0 {
+            let log = major_step.log10();
+            if log < 0.0 {
+                (log.abs().ceil() as usize + 2).clamp(1, 14)
+            } else {
+                0
+            }
+        } else {
+            2
+        };
         let format_num = |v: f64| -> String {
-            if v.abs() < 1e-9 {
+            if v.abs() < major_step * 1e-5 {
                 return "0".to_string();
             }
-            let mut s = if major_step < 0.001 {
-                format!("{:.5}", v)
-            } else if major_step < 0.01 {
-                format!("{:.4}", v)
-            } else if major_step < 0.1 {
-                format!("{:.3}", v)
-            } else if major_step < 1.0 {
-                format!("{:.2}", v)
-            } else {
-                format!("{:.1}", v)
-            };
+            let mut s = format!("{:.*}", precision, v);
             if s.contains('.') {
                 s = s.trim_end_matches('0').to_string();
                 s = s.trim_end_matches('.').to_string();
@@ -343,9 +343,18 @@ impl GrafitoApp {
         if num_count_x <= 500 {
             for xi in 0..=num_count_x {
                 let x = start_x_num + xi as f64 * major_step;
-                if x.abs() < 1e-9 {
+                if x.abs() < major_step * 1e-5 {
                     continue;
                 }
+                let cam_pos = self.camera.position();
+                let dx = x - cam_pos.x as f64;
+                let dy = 0.0 - cam_pos.y as f64;
+                let dz = 0.0 - cam_pos.z as f64;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist > self.camera.distance as f64 * 1.8 {
+                    continue;
+                }
+
                 let tick_size = major_step * 0.05;
                 if let Some((a, b)) = project_segment(
                     &self.camera,
@@ -387,9 +396,18 @@ impl GrafitoApp {
         if num_count_y <= 500 {
             for yi in 0..=num_count_y {
                 let y = start_y_num + yi as f64 * major_step;
-                if y.abs() < 1e-9 {
+                if y.abs() < major_step * 1e-5 {
                     continue;
                 }
+                let cam_pos = self.camera.position();
+                let dx = 0.0 - cam_pos.x as f64;
+                let dy = y - cam_pos.y as f64;
+                let dz = 0.0 - cam_pos.z as f64;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist > self.camera.distance as f64 * 1.8 {
+                    continue;
+                }
+
                 let tick_size = major_step * 0.05;
                 if let Some((a, b)) = project_segment(
                     &self.camera,
@@ -430,9 +448,18 @@ impl GrafitoApp {
         if num_count_z <= 500 {
             for zi in 0..=num_count_z {
                 let z = start_z_num + zi as f64 * major_step;
-                if z.abs() < 1e-9 {
+                if z.abs() < major_step * 1e-5 {
                     continue;
                 }
+                let cam_pos = self.camera.position();
+                let dx = 0.0 - cam_pos.x as f64;
+                let dy = 0.0 - cam_pos.y as f64;
+                let dz = z - cam_pos.z as f64;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist > self.camera.distance as f64 * 1.8 {
+                    continue;
+                }
+
                 let tick_size = major_step * 0.05;
                 if let Some((a, b)) = project_segment(
                     &self.camera,

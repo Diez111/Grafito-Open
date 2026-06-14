@@ -483,7 +483,12 @@ pub fn maybe_compute_on_gpu(
 ) -> bool {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
     let world_br = view.screen_to_world(view.screen_size);
-    let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+    let view_bounds = (
+        world_tl.x.min(world_br.x),
+        world_tl.x.max(world_br.x),
+        world_br.y.min(world_tl.y),
+        world_br.y.max(world_tl.y),
+    );
     let padded_bounds = grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
     let grid_size = match quality {
         RenderQuality::Preview => grafito_core::implicit_curve::recommended_grid_size(
@@ -588,7 +593,7 @@ pub fn marching_squares_from_grid(
 
                     let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
                         let denom = (va - level) - (vb - level);
-                        if denom.abs() < 1e-15 {
+                        if denom.abs() < f64::EPSILON * (va.abs() + vb.abs()).max(1.0) {
                             (pa + pb) * 0.5
                         } else {
                             let t = (va - level) / denom;

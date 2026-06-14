@@ -57,6 +57,10 @@ pub enum ObjField {
     LineEndY,
 }
 
+/// Type alias for the cached variables list used in expression resolution.
+pub type CachedVarsList =
+    std::sync::Arc<std::sync::Mutex<Option<(u64, std::sync::Arc<Vec<(String, f64)>>)>>>;
+
 /// The main document containing all geometric objects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
@@ -79,6 +83,10 @@ pub struct Document {
     pub render_quality: crate::RenderQuality,
     #[serde(skip)]
     pub last_solution: HashMap<(ObjectId, ObjField), f64>,
+    #[serde(skip)]
+    pub version: u64,
+    #[serde(skip)]
+    pub cached_vars_list: CachedVarsList,
 }
 
 impl Default for Document {
@@ -97,11 +105,16 @@ impl Default for Document {
             constraints: ConstraintGraph::new(),
             render_quality: crate::RenderQuality::default(),
             last_solution: HashMap::new(),
+            version: 0,
+            cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
 
 impl Document {
+    pub fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -113,6 +126,7 @@ impl Document {
         }
 
         self.complex_base_symbol = new_symbol.to_string();
+        self.bump_version();
 
         let mut updates = Vec::new();
         for (id, obj) in &mut self.objects {
@@ -213,6 +227,7 @@ impl Document {
         self.objects.insert(id, obj);
         self.constraints.add_free_object(id);
         self.spatial_dirty = true;
+        self.bump_version();
         id
     }
 
@@ -240,6 +255,7 @@ impl Document {
     }
 
     pub fn remove_object(&mut self, id: ObjectId) -> Option<GeoObject> {
+        self.bump_version();
         self.constraints.remove_object(id);
         self.spatial_dirty = true;
         self.objects.remove(&id)
@@ -627,6 +643,10 @@ impl Document {
     }
 
     pub fn re_evaluate_constraints(&mut self, order: &[usize]) {
+        if self.constraints.constraint_count() == 0 {
+            return;
+        }
+        self.bump_version();
         // Numeric constraints have no outputs, so they never appear in a
         // propagation order rooted at changed objects. Always include them.
         let numeric_ids: Vec<usize> = self
@@ -1109,6 +1129,7 @@ impl Document {
     }
 
     pub fn get_object_mut(&mut self, id: ObjectId) -> Option<&mut GeoObject> {
+        self.bump_version();
         self.spatial_dirty = true;
         self.objects.get_mut(&id)
     }
@@ -1726,6 +1747,7 @@ impl Document {
     }
 
     pub fn clear(&mut self) {
+        self.bump_version();
         self.objects.clear();
         self.selection.clear();
         self.next_label_number.clear();
@@ -1741,11 +1763,32 @@ impl Document {
     pub fn resolve_expr(&self, expr: &Option<String>, fallback: f64) -> f64 {
         match expr {
             Some(e) => {
-                let vars: Vec<(String, f64)> = self
-                    .variables
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect();
+                let vars = {
+                    let mut cache = self.cached_vars_list.lock().unwrap();
+                    if let Some((ver, cached)) = &*cache {
+                        if *ver == self.version {
+                            cached.clone()
+                        } else {
+                            let new_vars = std::sync::Arc::new(
+                                self.variables
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), *v))
+                                    .collect::<Vec<_>>(),
+                            );
+                            *cache = Some((self.version, new_vars.clone()));
+                            new_vars
+                        }
+                    } else {
+                        let new_vars = std::sync::Arc::new(
+                            self.variables
+                                .iter()
+                                .map(|(k, v)| (k.clone(), *v))
+                                .collect::<Vec<_>>(),
+                        );
+                        *cache = Some((self.version, new_vars.clone()));
+                        new_vars
+                    }
+                };
                 match evaluate_cached(e, &vars) {
                     Ok(v) if v.is_finite() => v,
                     _ => fallback,
@@ -1790,6 +1833,7 @@ impl Document {
     pub fn set_variable(&mut self, name: String, value: f64) {
         self.variables.insert(name, value);
         self.recompute_bound_parameters();
+        self.bump_version();
     }
 
     pub fn get_variable(&self, name: &str) -> Option<f64> {
@@ -1838,6 +1882,7 @@ impl Document {
             self.spreadsheet[row].push(String::new());
         }
         self.spreadsheet[row][col] = value;
+        self.bump_version();
         Ok(())
     }
 

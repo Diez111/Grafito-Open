@@ -7,7 +7,7 @@ pub fn distance_point_to_line(p: Point2, a: Point2, b: Point2) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len_sq = dx * dx + dy * dy;
-    if len_sq == 0.0 {
+    if len_sq < 1e-12 {
         return p.distance(&a);
     }
     let cross = (p.x - a.x) * dy - (p.y - a.y) * dx;
@@ -19,7 +19,7 @@ pub fn distance_point_to_ray(p: Point2, a: Point2, b: Point2) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len_sq = dx * dx + dy * dy;
-    if len_sq == 0.0 {
+    if len_sq < 1e-12 {
         return p.distance(&a);
     }
     let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq;
@@ -37,7 +37,7 @@ pub fn distance_point_to_segment(p: Point2, a: Point2, b: Point2) -> f64 {
     let apx = p.x - a.x;
     let apy = p.y - a.y;
     let ab2 = abx * abx + aby * aby;
-    if ab2 == 0.0 {
+    if ab2 < 1e-12 {
         return p.distance(&a);
     }
     let t = ((apx * abx + apy * aby) / ab2).clamp(0.0, 1.0);
@@ -51,7 +51,7 @@ pub fn line_param_at_point(p: Point2, a: Point2, b: Point2) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
     let len_sq = dx * dx + dy * dy;
-    if len_sq == 0.0 {
+    if len_sq < 1e-12 {
         return 0.0;
     }
     ((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq
@@ -81,7 +81,7 @@ fn liang_barsky(
     let mut t1 = t_max;
 
     for i in 0..4 {
-        if p[i] == 0.0 {
+        if p[i].abs() < 1e-12 {
             if q[i] < 0.0 {
                 return None;
             }

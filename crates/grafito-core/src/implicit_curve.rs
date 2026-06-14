@@ -197,17 +197,13 @@ pub fn evaluate_implicit_curve(
         .into_par_iter()
         .map(|j| {
             let y = y_min + j as f64 * dy;
-            (0..=grid_size)
-                .map(|i| {
-                    let x = x_min + i as f64 * dx;
-                    let v = eval_cell(x, y);
-                    if v.is_finite() {
-                        v
-                    } else {
-                        f64::NAN
-                    }
-                })
-                .collect()
+            let mut row = Vec::with_capacity(grid_size + 1);
+            for i in 0..=grid_size {
+                let x = x_min + i as f64 * dx;
+                let v = eval_cell(x, y);
+                row.push(if v.is_finite() { v } else { f64::NAN });
+            }
+            row
         })
         .collect();
 
@@ -259,7 +255,7 @@ fn marching_squares_level(
         return Vec::new();
     }
 
-    let mut segments = Vec::new();
+    let mut segments = Vec::with_capacity((grid_size * 2).max(64));
     for i in 0..grid_size {
         let x0 = x_min + i as f64 * dx;
         let x1 = x0 + dx;
@@ -289,7 +285,7 @@ fn marching_squares_level(
 
             let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
                 let denom = (va - level) - (vb - level);
-                if denom.abs() < 1e-15 {
+                if denom.abs() < f64::EPSILON * (va.abs() + vb.abs()).max(1.0) {
                     (pa + pb) * 0.5
                 } else {
                     let t = (va - level) / denom;

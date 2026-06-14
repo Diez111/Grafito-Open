@@ -82,6 +82,59 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub fn get_variables(&self, vars: &mut std::collections::HashSet<String>) {
+        use Expr::*;
+        match self {
+            Const(_) => {}
+            Var(v) => {
+                vars.insert(v.clone());
+            }
+            Neg(u) | Sin(u) | Cos(u) | Tan(u) | Asin(u) | Acos(u) | Atan(u) | Exp(u) | Ln(u)
+            | Log(u) | Sqrt(u) | Abs(u) | Sinh(u) | Cosh(u) | Tanh(u) | Floor(u) | Ceil(u)
+            | Round(u) | Sec(u) | Csc(u) | Cot(u) | Asinh(u) | Acosh(u) | Atanh(u) | Sign(u)
+            | Heaviside(u) | Cbrt(u) | Re(u) | Im(u) | Arg(u) | Conj(u) | Erf(u) | Erfc(u)
+            | Gamma(u) | LnGamma(u) | Digamma(u) => {
+                u.get_variables(vars);
+            }
+            Add(a, b)
+            | Sub(a, b)
+            | Mul(a, b)
+            | Div(a, b)
+            | Pow(a, b)
+            | Atan2(a, b)
+            | Modulo(a, b)
+            | Min(a, b)
+            | Max(a, b)
+            | Beta(a, b)
+            | BesselJ(a, b)
+            | BesselY(a, b)
+            | BesselI(a, b) => {
+                a.get_variables(vars);
+                b.get_variables(vars);
+            }
+            Clamp(x, lo, hi) => {
+                x.get_variables(vars);
+                lo.get_variables(vars);
+                hi.get_variables(vars);
+            }
+            Sum(body, loop_var, start, end) | Product(body, loop_var, start, end) => {
+                let mut body_vars = std::collections::HashSet::new();
+                body.get_variables(&mut body_vars);
+                body_vars.remove(loop_var);
+                vars.extend(body_vars);
+                start.get_variables(vars);
+                end.get_variables(vars);
+            }
+            Piecewise(pieces, default) => {
+                for (c, v) in pieces {
+                    c.get_variables(vars);
+                    v.get_variables(vars);
+                }
+                default.get_variables(vars);
+            }
+        }
+    }
+
     /// Symbolic differentiation with respect to `var`.
     pub fn diff(&self, var: &str) -> Expr {
         use Expr::*;

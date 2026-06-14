@@ -243,8 +243,18 @@ impl NumericSolver {
                 }
             }
 
+            if !trial.iter().all(|&x| x.is_finite()) {
+                lambda *= self.lambda_scale;
+                continue;
+            }
+
             let r_trial = compute_residual(&trial, equations, m);
             let residual_trial = norm(&r_trial);
+
+            if !residual_trial.is_finite() {
+                lambda *= self.lambda_scale;
+                continue;
+            }
 
             if residual_trial < residual_norm {
                 vars.copy_from_slice(&trial);

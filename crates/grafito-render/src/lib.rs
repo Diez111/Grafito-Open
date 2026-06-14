@@ -961,7 +961,12 @@ impl Renderer {
                 GeoObject::ImplicitCurve(ic) => {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                    let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                    let view_bounds = (
+                        world_tl.x.min(world_br.x),
+                        world_tl.x.max(world_br.x),
+                        world_br.y.min(world_tl.y),
+                        world_br.y.max(world_tl.y),
+                    );
                     let quality = document.render_quality;
                     let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
                         view_transform.screen_size.x,
@@ -1138,7 +1143,12 @@ impl Renderer {
                 GeoObject::VectorField2D(vf) => {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                    let view_bounds = (world_tl.x, world_br.x, world_tl.y, world_br.y);
+                    let view_bounds = (
+                        world_tl.x.min(world_br.x),
+                        world_tl.x.max(world_br.x),
+                        world_br.y.min(world_tl.y),
+                        world_br.y.max(world_tl.y),
+                    );
                     let grid_size = vf.density.max(5).min(128);
                     let samples = grafito_core::vector_field_sampling::samples_or_compute(
                         vf,
@@ -1174,16 +1184,18 @@ impl Renderer {
                     let dx = (cg.x_max - cg.x_min) / res as f64;
                     let dy = (cg.y_max - cg.y_min) / res as f64;
                     if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
-                        let mut base_vars = std::collections::HashMap::new();
+                        let mut vars = std::collections::HashMap::new();
                         for (k, v) in &document.variables {
-                            base_vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+                            vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
                         }
+                        vars.insert("z".to_string(), num_complex::Complex64::default());
                         for i in 0..res {
                             let x = cg.x_min + i as f64 * dx;
                             for j in 0..res {
                                 let y = cg.y_min + j as f64 * dy;
-                                let mut vars = base_vars.clone();
-                                vars.insert("z".to_string(), num_complex::Complex64::new(x, y));
+                                if let Some(z_val) = vars.get_mut("z") {
+                                    *z_val = num_complex::Complex64::new(x, y);
+                                }
                                 if let Ok(fz) = parsed.eval(&vars) {
                                     if fz.re.is_finite() && fz.im.is_finite() {
                                         let mag = (fz.re * fz.re + fz.im * fz.im).sqrt();
@@ -1209,7 +1221,15 @@ impl Renderer {
                 }
                 GeoObject::ComplexMapping(cm) => {
                     if let Some(target_obj) = document.get_object(cm.target) {
-                        let mut sample_pts: Vec<Point2> = Vec::new();
+                        let capacity = match target_obj {
+                            GeoObject::Polygon(poly) => poly.vertices.len(),
+                            GeoObject::Point(_) => 1,
+                            GeoObject::Line(_) => 21,
+                            GeoObject::Circle(_) => 32,
+                            GeoObject::Function(_) => 51,
+                            _ => 0,
+                        };
+                        let mut sample_pts: Vec<Point2> = Vec::with_capacity(capacity);
                         match target_obj {
                             GeoObject::Polygon(poly) => {
                                 for (i, v) in poly.vertices.iter().enumerate() {
@@ -1507,11 +1527,12 @@ impl Renderer {
             if v.abs() < 1e-9 {
                 return "0".to_string();
             }
-            let mut s = format!("{:.*}", precision, v);
-            if s.contains('.') {
-                s = s.trim_end_matches('0').to_string();
-                s = s.trim_end_matches('.').to_string();
-            }
+            let s = format!("{:.*}", precision, v);
+            let s = if s.contains('.') {
+                s.trim_end_matches('0').trim_end_matches('.').to_string()
+            } else {
+                s
+            };
             if s.is_empty() || s == "-" {
                 "0".to_string()
             } else {
@@ -2516,6 +2537,35 @@ impl Renderer {
 
             if major_line_count_x <= max_lines && major_line_count_z <= max_lines {
                 // Dibujar solo major grid
+                let precision = if major_step > 0.0 {
+                    let log = major_step.log10();
+                    if log < 0.0 {
+                        (log.abs().ceil() as usize + 2).clamp(1, 14)
+                    } else {
+                        0
+                    }
+                } else {
+                    2
+                };
+                let format_num = |v: f64| -> String {
+                    if v.abs() < major_step * 1e-5 {
+                        return "0".to_string();
+                    }
+                    let s = format!("{:.*}", precision, v);
+                    let s = if s.contains('.') {
+                        s.trim_end_matches('0').trim_end_matches('.').to_string()
+                    } else {
+                        s
+                    };
+                    if s.is_empty() || s == "-" {
+                        "0".to_string()
+                    } else {
+                        s
+                    }
+                };
+
+                let cam_pos = camera.position();
+                let mut prev_screen_pos_x: Option<glam::Vec2> = None;
                 for xi in 0..=major_line_count_x {
                     let x = start_x + xi as f64 * major_step;
                     let p1 = Point3D::new(x, 0.0, start_z);
@@ -2533,21 +2583,37 @@ impl Renderer {
                     );
 
                     if x.abs() > 1e-5 {
-                        if let Some((sx, sy)) =
-                            camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
-                        {
-                            Self::add_text_screen(
-                                vertices,
-                                indices,
-                                &format!("{}", x),
-                                glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                12.0,
-                                major_color,
-                            );
+                        let dx = x - cam_pos.x as f64;
+                        let dy = 0.0 - cam_pos.y as f64;
+                        let dz = 0.0 - cam_pos.z as f64;
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist <= camera.distance as f64 * 1.8 {
+                            if let Some((sx, sy)) =
+                                camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
+                            {
+                                let current_sp = glam::Vec2::new(sx, sy);
+                                let overlap = if let Some(prev) = prev_screen_pos_x {
+                                    current_sp.distance(prev) < 45.0
+                                } else {
+                                    false
+                                };
+                                if !overlap {
+                                    prev_screen_pos_x = Some(current_sp);
+                                    Self::add_text_screen(
+                                        vertices,
+                                        indices,
+                                        &format_num(x),
+                                        glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                        12.0,
+                                        major_color,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
 
+                let mut prev_screen_pos_z: Option<glam::Vec2> = None;
                 for zi in 0..=major_line_count_z {
                     let z = start_z + zi as f64 * major_step;
                     let p1 = Point3D::new(start_x, 0.0, z);
@@ -2565,17 +2631,32 @@ impl Renderer {
                     );
 
                     if z.abs() > 1e-5 {
-                        if let Some((sx, sy)) =
-                            camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
-                        {
-                            Self::add_text_screen(
-                                vertices,
-                                indices,
-                                &format!("{}", z),
-                                glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                12.0,
-                                major_color,
-                            );
+                        let dx = 0.0 - cam_pos.x as f64;
+                        let dy = 0.0 - cam_pos.y as f64;
+                        let dz = z - cam_pos.z as f64;
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist <= camera.distance as f64 * 1.8 {
+                            if let Some((sx, sy)) =
+                                camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
+                            {
+                                let current_sp = glam::Vec2::new(sx, sy);
+                                let overlap = if let Some(prev) = prev_screen_pos_z {
+                                    current_sp.distance(prev) < 45.0
+                                } else {
+                                    false
+                                };
+                                if !overlap {
+                                    prev_screen_pos_z = Some(current_sp);
+                                    Self::add_text_screen(
+                                        vertices,
+                                        indices,
+                                        &format_num(z),
+                                        glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                        12.0,
+                                        major_color,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -2583,6 +2664,35 @@ impl Renderer {
             // Si incluso major grid es demasiado, no dibujar nada
         } else {
             // Dibujar grid completo (minor + major)
+            let precision = if major_step > 0.0 {
+                let log = major_step.log10();
+                if log < 0.0 {
+                    (log.abs().ceil() as usize + 2).clamp(1, 14)
+                } else {
+                    0
+                }
+            } else {
+                2
+            };
+            let format_num = |v: f64| -> String {
+                if v.abs() < major_step * 1e-5 {
+                    return "0".to_string();
+                }
+                let s = format!("{:.*}", precision, v);
+                let s = if s.contains('.') {
+                    s.trim_end_matches('0').trim_end_matches('.').to_string()
+                } else {
+                    s
+                };
+                if s.is_empty() || s == "-" {
+                    "0".to_string()
+                } else {
+                    s
+                }
+            };
+
+            let cam_pos = camera.position();
+            let mut prev_screen_pos_x: Option<glam::Vec2> = None;
             for xi in 0..=line_count_x {
                 let x = start_x + xi as f64 * minor_step;
                 let is_major = ((x / major_step).round() * major_step - x).abs() < minor_step * 0.1;
@@ -2599,21 +2709,37 @@ impl Renderer {
                 );
 
                 if is_major && x.abs() > 1e-5 {
-                    if let Some((sx, sy)) =
-                        camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
-                    {
-                        Self::add_text_screen(
-                            vertices,
-                            indices,
-                            &format!("{}", x),
-                            glam::Vec2::new(sx + 5.0, sy + 5.0),
-                            12.0,
-                            major_color,
-                        );
+                    let dx = x - cam_pos.x as f64;
+                    let dy = 0.0 - cam_pos.y as f64;
+                    let dz = 0.0 - cam_pos.z as f64;
+                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if dist <= camera.distance as f64 * 1.8 {
+                        if let Some((sx, sy)) =
+                            camera.project(&Point3D::new(x, 0.0, 0.0), screen_w, screen_h)
+                        {
+                            let current_sp = glam::Vec2::new(sx, sy);
+                            let overlap = if let Some(prev) = prev_screen_pos_x {
+                                current_sp.distance(prev) < 45.0
+                            } else {
+                                false
+                            };
+                            if !overlap {
+                                prev_screen_pos_x = Some(current_sp);
+                                Self::add_text_screen(
+                                    vertices,
+                                    indices,
+                                    &format_num(x),
+                                    glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                    12.0,
+                                    major_color,
+                                );
+                            }
+                        }
                     }
                 }
             }
 
+            let mut prev_screen_pos_z: Option<glam::Vec2> = None;
             for zi in 0..=line_count_z {
                 let z = start_z + zi as f64 * minor_step;
                 let is_major = ((z / major_step).round() * major_step - z).abs() < minor_step * 0.1;
@@ -2630,17 +2756,32 @@ impl Renderer {
                 );
 
                 if is_major && z.abs() > 1e-5 {
-                    if let Some((sx, sy)) =
-                        camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
-                    {
-                        Self::add_text_screen(
-                            vertices,
-                            indices,
-                            &format!("{}", z),
-                            glam::Vec2::new(sx + 5.0, sy + 5.0),
-                            12.0,
-                            major_color,
-                        );
+                    let dx = 0.0 - cam_pos.x as f64;
+                    let dy = 0.0 - cam_pos.y as f64;
+                    let dz = z - cam_pos.z as f64;
+                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if dist <= camera.distance as f64 * 1.8 {
+                        if let Some((sx, sy)) =
+                            camera.project(&Point3D::new(0.0, 0.0, z), screen_w, screen_h)
+                        {
+                            let current_sp = glam::Vec2::new(sx, sy);
+                            let overlap = if let Some(prev) = prev_screen_pos_z {
+                                current_sp.distance(prev) < 45.0
+                            } else {
+                                false
+                            };
+                            if !overlap {
+                                prev_screen_pos_z = Some(current_sp);
+                                Self::add_text_screen(
+                                    vertices,
+                                    indices,
+                                    &format_num(z),
+                                    glam::Vec2::new(sx + 5.0, sy + 5.0),
+                                    12.0,
+                                    major_color,
+                                );
+                            }
+                        }
                     }
                 }
             }
