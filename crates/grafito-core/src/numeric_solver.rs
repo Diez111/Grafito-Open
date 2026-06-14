@@ -4,7 +4,8 @@
 //! arise from 2D geometric constraints (a handful of point coordinates and radii).
 //! The Jacobian can be supplied analytically by constraint implementations or
 //! approximated with finite differences. The LM normal equations are solved with
-//! a simple dense Gaussian elimination.
+//! a simple dense Gaussian elimination with Tikhonov regularization for rank-
+//! deficient Jacobians.
 
 use rayon::prelude::*;
 
@@ -34,11 +35,28 @@ pub trait ConstraintEquation: Send + Sync {
     }
 }
 
+/// Per-variable bounds used during solving.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Bounds {
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+}
+
+impl Bounds {
+    pub fn new(lower: Option<f64>, upper: Option<f64>) -> Self {
+        Self { lower, upper }
+    }
+}
+
 /// Statistics returned by a successful solve.
 #[derive(Debug, Clone)]
 pub struct SolveStats {
     pub iterations: usize,
     pub final_residual: f64,
+    /// Rough estimate of the condition number of the last augmented normal
+    /// matrix (`J^T J + lambda I`). A value of `1.0` means the matrix was well
+    /// conditioned or regularization kept it invertible.
+    pub condition_number_estimate: f64,
 }
 
 /// Errors that can occur while solving.
@@ -46,8 +64,6 @@ pub struct SolveStats {
 pub enum SolveError {
     /// The maximum number of iterations was reached.
     MaxIterations { final_residual: f64 },
-    /// The augmented normal matrix was singular.
-    SingularJacobian,
     /// No equations were supplied or no variables were present.
     NoEquations,
 }
@@ -59,6 +75,9 @@ pub struct NumericSolver {
     pub lambda: f64,
     pub lambda_scale: f64,
     pub tol: f64,
+    /// Tikhonov regularization added to near-zero diagonal entries of the
+    /// augmented normal matrix when the Jacobian is rank deficient.
+    pub regularization: f64,
 }
 
 impl Default for NumericSolver {
@@ -68,6 +87,7 @@ impl Default for NumericSolver {
             lambda: 1e-3,
             lambda_scale: 10.0,
             tol: 1e-9,
+            regularization: 1e-12,
         }
     }
 }
@@ -85,11 +105,49 @@ impl NumericSolver {
     ///
     /// On success, `vars` is updated to the final values and statistics are
     /// returned. On failure, `vars` is left in the best state found so far.
-    #[allow(clippy::needless_range_loop)]
     pub fn solve(
         &self,
         vars: &mut [f64],
         equations: &[Box<dyn ConstraintEquation>],
+    ) -> Result<SolveStats, SolveError> {
+        self.solve_with_warm_start(vars, equations, None)
+    }
+
+    /// Solve with an optional warm-start vector.
+    ///
+    /// If `warm_start` is provided and has the same length as `vars`, its
+    /// values are copied into `vars` before the first iteration.
+    pub fn solve_with_warm_start(
+        &self,
+        vars: &mut [f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        warm_start: Option<&[f64]>,
+    ) -> Result<SolveStats, SolveError> {
+        self.solve_with_warm_start_and_bounds(vars, equations, warm_start, &[])
+    }
+
+    /// Solve with optional per-variable bounds.
+    ///
+    /// After each Levenberg-Marquardt step the trial variables are clamped to
+    /// their bounds. Missing bounds or a shorter `bounds` slice are treated as
+    /// unbounded.
+    pub fn solve_with_bounds(
+        &self,
+        vars: &mut [f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        bounds: &[Bounds],
+    ) -> Result<SolveStats, SolveError> {
+        self.solve_with_warm_start_and_bounds(vars, equations, None, bounds)
+    }
+
+    /// Solve with optional warm start and per-variable bounds.
+    #[allow(clippy::needless_range_loop)]
+    pub fn solve_with_warm_start_and_bounds(
+        &self,
+        vars: &mut [f64],
+        equations: &[Box<dyn ConstraintEquation>],
+        warm_start: Option<&[f64]>,
+        bounds: &[Bounds],
     ) -> Result<SolveStats, SolveError> {
         let m: usize = equations.iter().map(|eq| eq.dimension()).sum();
         if m == 0 || vars.is_empty() {
@@ -97,23 +155,31 @@ impl NumericSolver {
         }
 
         let n = vars.len();
+        if let Some(ws) = warm_start {
+            if ws.len() == n {
+                vars.copy_from_slice(ws);
+            }
+        }
+
         let pattern = Self::build_jacobian_pattern(equations, m, n);
 
         let mut lambda = self.lambda;
         let mut r = compute_residual(vars, equations, m);
         let mut residual_norm = norm(&r);
+        let mut condition_estimate = 1.0;
 
         for iter in 0..self.max_iter {
             if residual_norm < self.tol {
                 return Ok(SolveStats {
                     iterations: iter,
                     final_residual: residual_norm,
+                    condition_number_estimate: condition_estimate,
                 });
             }
 
             let j = Self::compute_jacobian(vars, equations, &r, m, n, &pattern);
 
-            // Build the normal equations: (J^T J + lambda*I) delta = -J^T r
+            // Build the normal equations: (J^T J + lambda I) delta = -J^T r
             let mut jtj = vec![vec![0.0; n]; n];
             for i in 0..n {
                 let mut acc = 0.0;
@@ -140,21 +206,41 @@ impl NumericSolver {
                 rhs[i] = -acc;
             }
 
-            let delta = match solve_linear_system(&jtj, &rhs) {
+            let (delta, cond) =
+                solve_linear_system_with_regularization(&jtj, &rhs, lambda, self.regularization);
+            condition_estimate = cond;
+
+            let delta = match delta {
                 Some(d) => d,
-                None => return Err(SolveError::SingularJacobian),
+                None => {
+                    // With Tikhonov regularization this should not happen,
+                    // but if it does we report max iterations with the
+                    // current residual.
+                    return Err(SolveError::MaxIterations {
+                        final_residual: residual_norm,
+                    });
+                }
             };
 
             if norm(&delta) < self.tol {
                 return Ok(SolveStats {
                     iterations: iter,
                     final_residual: residual_norm,
+                    condition_number_estimate: condition_estimate,
                 });
             }
 
             let mut trial = vars.to_vec();
             for i in 0..n {
                 trial[i] += delta[i];
+                if let Some(b) = bounds.get(i) {
+                    if let Some(lower) = b.lower {
+                        trial[i] = trial[i].max(lower);
+                    }
+                    if let Some(upper) = b.upper {
+                        trial[i] = trial[i].min(upper);
+                    }
+                }
             }
 
             let r_trial = compute_residual(&trial, equations, m);
@@ -327,8 +413,22 @@ fn compute_residual(vars: &[f64], equations: &[Box<dyn ConstraintEquation>], m: 
     r
 }
 
+/// Solve `a x = b` by Gaussian elimination with partial pivoting and
+/// Tikhonov regularization.
+///
+/// If a pivot diagonal is smaller than `reg`, it is replaced with
+/// `lambda + reg`. This keeps the normal equations invertible even when the
+/// Jacobian is rank deficient.
+///
+/// Returns the solution (if any) and a rough condition-number estimate based
+/// on the ratio of largest to smallest diagonal magnitude encountered.
 #[allow(clippy::needless_range_loop)]
-fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+fn solve_linear_system_with_regularization(
+    a: &[Vec<f64>],
+    b: &[f64],
+    lambda: f64,
+    reg: f64,
+) -> (Option<Vec<f64>>, f64) {
     let n = b.len();
     let mut aug: Vec<Vec<f64>> = a
         .iter()
@@ -340,6 +440,9 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         })
         .collect();
 
+    let mut max_diag = 0.0_f64;
+    let mut min_diag = f64::INFINITY;
+
     for col in 0..n {
         let mut max_row = col;
         let mut max_val = aug[col][col].abs();
@@ -349,10 +452,20 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
                 max_row = row;
             }
         }
-        if max_val < 1e-12 {
-            return None;
-        }
         aug.swap(col, max_row);
+
+        if aug[col][col].abs() < reg {
+            // Tikhonov regularization: push the pivot away from zero.
+            aug[col][col] = lambda + reg;
+        }
+
+        let diag_abs = aug[col][col].abs();
+        if diag_abs > max_diag {
+            max_diag = diag_abs;
+        }
+        if diag_abs < min_diag {
+            min_diag = diag_abs;
+        }
 
         for row in (col + 1)..n {
             let factor = aug[row][col] / aug[col][col];
@@ -362,15 +475,24 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         }
     }
 
+    let condition_estimate = if min_diag.is_finite() && min_diag > 0.0 {
+        max_diag / min_diag
+    } else {
+        1.0
+    };
+
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         let mut sum = aug[i][n];
         for j in (i + 1)..n {
             sum -= aug[i][j] * x[j];
         }
+        if aug[i][i].abs() < reg {
+            return (None, condition_estimate);
+        }
         x[i] = sum / aug[i][i];
     }
-    Some(x)
+    (Some(x), condition_estimate)
 }
 
 fn norm(v: &[f64]) -> f64 {
@@ -450,5 +572,61 @@ mod tests {
         assert!(stats.final_residual < 1e-9);
         assert!((vars[0] - 2.0).abs() < 1e-9);
         assert!((vars[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_solve_with_warm_start() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![
+            Box::new(CircleIntersection { offset: 0.0 }),
+            Box::new(CircleIntersection { offset: 1.0 }),
+        ];
+        let solver = NumericSolver::default();
+        let mut vars = [0.0, 0.0];
+        solver.solve(&mut vars, &equations).unwrap();
+
+        let mut vars2 = [0.0, 0.0];
+        let stats2 = solver
+            .solve_with_warm_start(&mut vars2, &equations, Some(&vars))
+            .unwrap();
+        assert!(stats2.final_residual < 1e-6);
+        assert!((vars2[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_solve_with_bounds() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![
+            Box::new(CircleIntersection { offset: 0.0 }),
+            Box::new(CircleIntersection { offset: 1.0 }),
+        ];
+        let solver = NumericSolver::default();
+        // Force the positive intersection by bounding y >= 0.
+        let mut vars = [0.0, -10.0];
+        let bounds = [Bounds::default(), Bounds::new(Some(0.0), None)];
+        let stats = solver
+            .solve_with_bounds(&mut vars, &equations, &bounds)
+            .expect("should converge");
+        assert!(stats.final_residual < 1e-6);
+        assert!(vars[1] >= -1e-9, "y should be clamped to lower bound");
+        assert!((vars[1] - 0.866_025_4).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_underdetermined_system_regularizes() {
+        // One equation, two unknowns: 2x + y = 5. The Jacobian is rank 1.
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(LinearEq {
+            a: [2.0, 1.0],
+            b: 5.0,
+        })];
+        let solver = NumericSolver::default();
+        let mut vars = [0.0, 0.0];
+        let stats = solver
+            .solve(&mut vars, &equations)
+            .expect("should converge");
+        assert!(stats.final_residual < 1e-6);
+        assert!((2.0 * vars[0] + vars[1] - 5.0).abs() < 1e-6);
+        assert!(
+            stats.condition_number_estimate.is_finite(),
+            "condition estimate should be finite"
+        );
     }
 }

@@ -33,6 +33,9 @@ pub mod vector_field_sampling;
 
 pub mod numeric_constraints;
 
+#[cfg(test)]
+mod numeric_constraints_tests;
+
 pub use constraints::*;
 pub use document::*;
 pub use id::*;

@@ -77,6 +77,8 @@ pub struct Document {
     pub constraints: ConstraintGraph,
     #[serde(skip)]
     pub render_quality: crate::RenderQuality,
+    #[serde(skip)]
+    pub last_solution: HashMap<(ObjectId, ObjField), f64>,
 }
 
 impl Default for Document {
@@ -94,6 +96,7 @@ impl Default for Document {
             complex_base_symbol: "z".to_string(),
             constraints: ConstraintGraph::new(),
             render_quality: crate::RenderQuality::default(),
+            last_solution: HashMap::new(),
         }
     }
 }
@@ -669,6 +672,10 @@ impl Document {
 
         let solver = NumericSolver::default();
         let mut changed: Vec<ObjectId> = Vec::new();
+        let bounds: Vec<crate::numeric_solver::Bounds> =
+            std::iter::repeat_with(crate::numeric_solver::Bounds::default)
+                .take(var_map.len())
+                .collect();
 
         for _ in 0..5 {
             let current_order = if changed.is_empty() {
@@ -686,8 +693,33 @@ impl Document {
                 .map(|(id, field)| self.get_field_value(*id, *field))
                 .collect();
 
-            match solver.solve(&mut vars, &equations) {
+            // Keep the stored solution in sync with the current document state
+            // before solving so that user edits are not reverted by the warm
+            // start.
+            for (id, field) in &var_map {
+                let current = self.get_field_value(*id, *field);
+                self.last_solution.insert((*id, *field), current);
+            }
+            let warm_start: Vec<f64> = var_map
+                .iter()
+                .map(|(id, field)| {
+                    self.last_solution
+                        .get(&(*id, *field))
+                        .copied()
+                        .unwrap_or_else(|| self.get_field_value(*id, *field))
+                })
+                .collect();
+
+            match solver.solve_with_warm_start_and_bounds(
+                &mut vars,
+                &equations,
+                Some(&warm_start),
+                &bounds,
+            ) {
                 Ok(stats) => {
+                    for ((id, field), value) in var_map.iter().zip(vars.iter()) {
+                        self.last_solution.insert((*id, *field), *value);
+                    }
                     changed = self.write_solver_variables(&var_map, &vars);
                     if stats.final_residual < solver.tol && changed.is_empty() {
                         break;
@@ -1703,6 +1735,7 @@ impl Document {
         self.spatial = crate::spatial::SpatialIndex::new();
         self.spatial_dirty = true;
         self.constraints = ConstraintGraph::new();
+        self.last_solution.clear();
     }
 
     pub fn resolve_expr(&self, expr: &Option<String>, fallback: f64) -> f64 {
