@@ -965,17 +965,26 @@ impl Document {
                                 if dx.abs() < 1e-12 {
                                     // Directrix is vertical => parabola opens horizontally.
                                     out.vertical = false;
-                                    out.angle = 0.0;
+                                    out.angle = if axis_dx >= 0.0 {
+                                        -std::f64::consts::FRAC_PI_2
+                                    } else {
+                                        std::f64::consts::FRAC_PI_2
+                                    };
                                 } else if dy.abs() < 1e-12 {
                                     // Directrix is horizontal => parabola opens vertically.
                                     out.vertical = true;
-                                    out.angle = 0.0;
+                                    out.angle = if axis_dy >= 0.0 {
+                                        0.0
+                                    } else {
+                                        std::f64::consts::PI
+                                    };
                                 } else {
-                                    // General directrix: store the axis direction as an
-                                    // approximation. The renderer currently ignores `angle`,
-                                    // so `vertical` is left as a best-effort flag.
+                                    // General directrix: the local parabola (t, t^2/(4p))
+                                    // opens toward +y, so rotate it so that its axis aligns
+                                    // with the focus-directrix axis.
+                                    let axis_angle = axis_dy.atan2(axis_dx);
                                     out.vertical = false;
-                                    out.angle = axis_dy.atan2(axis_dx);
+                                    out.angle = axis_angle - std::f64::consts::FRAC_PI_2;
                                 }
                             }
                         }
@@ -1006,6 +1015,7 @@ impl Document {
                                 out.b = b;
                                 let axis_angle = (f2.position.y - f1.position.y)
                                     .atan2(f2.position.x - f1.position.x);
+                                out.angle = axis_angle;
                                 out.horizontal = axis_angle.abs() < std::f64::consts::FRAC_PI_4
                                     || axis_angle.abs()
                                         > std::f64::consts::PI - std::f64::consts::FRAC_PI_4;
@@ -1223,30 +1233,37 @@ impl Document {
                 (ellipse_eq - 1.0).abs() <= tolerance / el.rx.min(el.ry)
             }
             GeoObject::Parabola(pb) => {
-                // Check if point is near the parabola
+                // Transform the test point into the parabola's local coordinate system.
                 let dx = world.x - pb.vertex.x;
                 let dy = world.y - pb.vertex.y;
-                let expected_y = if pb.vertical {
-                    pb.vertex.y + dx * dx / (4.0 * pb.p)
-                } else {
-                    pb.vertex.x + dy * dy / (4.0 * pb.p)
-                };
-                if pb.vertical {
-                    (world.y - expected_y).abs() <= tolerance
-                } else {
-                    (world.x - expected_y).abs() <= tolerance
-                }
+                let cos_a = pb.angle.cos();
+                let sin_a = pb.angle.sin();
+                let lx = dx * cos_a + dy * sin_a;
+                let ly = -dx * sin_a + dy * cos_a;
+                let p_safe = pb.p.max(1e-12);
+                let curve_y = lx * lx / (4.0 * p_safe);
+                // Approximate geometric distance by dividing the vertical residual by the
+                // derivative magnitude sqrt(1 + (x/(2p))^2).
+                let residual = (ly - curve_y).abs();
+                let denom = (1.0 + (lx / (2.0 * p_safe)).powi(2)).sqrt();
+                residual / denom.max(1.0) <= tolerance
             }
             GeoObject::Hyperbola(hb) => {
-                // Check if point is near the hyperbola
+                // Transform the test point into the hyperbola's local coordinate system.
                 let dx = world.x - hb.center.x;
                 let dy = world.y - hb.center.y;
+                let cos_a = hb.angle.cos();
+                let sin_a = hb.angle.sin();
+                let lx = dx * cos_a + dy * sin_a;
+                let ly = -dx * sin_a + dy * cos_a;
+                let a = hb.a.max(1e-12);
+                let b = hb.b.max(1e-12);
                 let hyperbola_eq = if hb.horizontal {
-                    (dx / hb.a).powi(2) - (dy / hb.b).powi(2)
+                    (lx / a).powi(2) - (ly / b).powi(2)
                 } else {
-                    (dy / hb.a).powi(2) - (dx / hb.b).powi(2)
+                    (ly / a).powi(2) - (lx / b).powi(2)
                 };
-                (hyperbola_eq - 1.0).abs() <= tolerance / hb.a.min(hb.b)
+                (hyperbola_eq - 1.0).abs() <= tolerance / a.min(b)
             }
             GeoObject::Text(txt) => {
                 // Simple bounding box check
@@ -2062,6 +2079,7 @@ fn conic_from_five_points(points: &[Point2]) -> Option<GeoObject> {
                 a: a_axis,
                 b: b_axis,
                 horizontal,
+                angle: transverse_angle,
                 color: Color::RED,
                 visible: true,
                 width: 2.0,

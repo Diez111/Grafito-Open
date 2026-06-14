@@ -995,38 +995,29 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Parabola(pb) => {
-                let _v = view.world_to_screen(pb.vertex);
                 let stroke = Stroke::new(pb.width, to_color32(pb.color));
-                let steps = 64;
-                let x_range = 10.0 / view.scale;
+                let steps = 128;
+                let range = (20.0 / view.scale).clamp(0.1, 500.0);
+                let p_safe = pb.p.max(0.001);
+                let cos_a = pb.angle.cos();
+                let sin_a = pb.angle.sin();
                 let mut prev: Option<Pos2> = None;
                 for i in 0..=steps {
-                    let t = -x_range + 2.0 * x_range * i as f64 / steps as f64;
-                    let _x = pb.vertex.x + t;
-                    let _y = if pb.vertical {
-                        pb.vertex.y + t * t / (4.0 * pb.p.max(0.001))
-                    } else {
-                        pb.vertex.y + t
-                    };
-                    let (sx, sy) = if pb.vertical {
-                        (
-                            pb.vertex.x + t,
-                            pb.vertex.y + t * t / (4.0 * pb.p.max(0.001)),
-                        )
-                    } else {
-                        (
-                            pb.vertex.x + t * t / (4.0 * pb.p.max(0.001)),
-                            pb.vertex.y + t,
-                        )
-                    };
-                    let s = view.world_to_screen(Point2::new(sx, sy));
+                    let t = -range + 2.0 * range * i as f64 / steps as f64;
+                    let lx = t;
+                    let ly = t * t / (4.0 * p_safe);
+                    let wx = pb.vertex.x + lx * cos_a - ly * sin_a;
+                    let wy = pb.vertex.y + lx * sin_a + ly * cos_a;
+                    let s = view.world_to_screen(Point2::new(wx, wy));
                     let p = canvas_rect.min + Vec2::new(s.x, s.y);
-                    if let Some(prev_p) = prev {
-                        if (p.x - prev_p.x).abs() < 300.0 {
-                            painter.line_segment([prev_p, p], stroke);
+                    if wx.is_finite() && wy.is_finite() {
+                        if let Some(prev_p) = prev {
+                            if (p.x - prev_p.x).abs() < 300.0 {
+                                painter.line_segment([prev_p, p], stroke);
+                            }
                         }
+                        prev = Some(p);
                     }
-                    prev = Some(p);
                 }
                 if !pb.label.is_empty() {
                     let s = view.world_to_screen(Point2::new(pb.vertex.x, pb.vertex.y - 1.0));
@@ -1041,38 +1032,30 @@ impl GrafitoApp {
             }
             GeoObject::Hyperbola(hb) => {
                 let stroke = Stroke::new(hb.width, to_color32(hb.color));
-                let range = 8.0 / view.scale;
                 let n = 64;
-                // Right branch
-                let mut prev: Option<Pos2> = None;
-                for i in 0..=n {
-                    let x = hb.center.x + hb.a + range * i as f64 / n as f64;
-                    let dx = x - hb.center.x;
-                    if dx > hb.a {
-                        let y_off = hb.b * ((dx / hb.a).powi(2) - 1.0).sqrt();
-                        for &sign in &[1.0f64, -1.0] {
-                            let y = hb.center.y + sign * y_off;
-                            let s = view.world_to_screen(Point2::new(x, y));
-                            let p = canvas_rect.min + Vec2::new(s.x, s.y);
-                            if let Some(prev_p) = prev {
-                                if (p.x - prev_p.x).abs() < 300.0 {
-                                    painter.line_segment([prev_p, p], stroke);
-                                }
-                            }
-                            prev = Some(p);
-                        }
-                    }
-                }
-                // Left branch
-                prev = None;
-                for i in 0..=n {
-                    let x = hb.center.x - hb.a - range * i as f64 / n as f64;
-                    let dx = (x - hb.center.x).abs();
-                    if dx > hb.a {
-                        let y_off = hb.b * ((dx / hb.a).powi(2) - 1.0).sqrt();
-                        for &sign in &[1.0f64, -1.0] {
-                            let y = hb.center.y + sign * y_off;
-                            let s = view.world_to_screen(Point2::new(x, y));
+                let epsilon = 0.05;
+                let cos_a = hb.angle.cos();
+                let sin_a = hb.angle.sin();
+                for branch in 0..2 {
+                    let t_start = -std::f64::consts::FRAC_PI_2
+                        + epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let t_end = std::f64::consts::FRAC_PI_2 - epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let mut prev: Option<Pos2> = None;
+                    for i in 0..=n {
+                        let t = t_start + (t_end - t_start) * i as f64 / n as f64;
+                        let sec = 1.0 / t.cos();
+                        let tan = t.tan();
+                        let (lx, ly) = if hb.horizontal {
+                            (hb.a * sec, hb.b * tan)
+                        } else {
+                            (hb.b * tan, hb.a * sec)
+                        };
+                        let wx = hb.center.x + lx * cos_a - ly * sin_a;
+                        let wy = hb.center.y + lx * sin_a + ly * cos_a;
+                        if wx.is_finite() && wy.is_finite() {
+                            let s = view.world_to_screen(Point2::new(wx, wy));
                             let p = canvas_rect.min + Vec2::new(s.x, s.y);
                             if let Some(prev_p) = prev {
                                 if (p.x - prev_p.x).abs() < 300.0 {

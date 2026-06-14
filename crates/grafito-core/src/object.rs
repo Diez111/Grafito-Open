@@ -1217,6 +1217,8 @@ pub struct HyperbolaObj {
     pub a: f64,
     pub b: f64,
     pub horizontal: bool,
+    #[serde(default)]
+    pub angle: f64,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -1230,6 +1232,7 @@ impl HyperbolaObj {
             a,
             b,
             horizontal: true,
+            angle: 0.0,
             color: Color::RED,
             visible: true,
             width: 2.0,

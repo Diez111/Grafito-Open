@@ -1218,4 +1218,112 @@ mod tests {
             dot
         );
     }
+
+    #[test]
+    fn test_rotated_parabola_sampling() {
+        let pb = ParabolaObj {
+            id: ObjectId::new(),
+            label: String::new(),
+            vertex: Point2::new(1.0, 2.0),
+            p: 1.0,
+            vertical: true,
+            angle: std::f64::consts::FRAC_PI_4,
+            color: Color::BLACK,
+            visible: true,
+            width: 2.0,
+        };
+        let cos_a = pb.angle.cos();
+        let sin_a = pb.angle.sin();
+
+        // Vertex maps to itself.
+        let lx0 = 0.0;
+        let ly0 = 0.0;
+        let wx0 = pb.vertex.x + lx0 * cos_a - ly0 * sin_a;
+        let wy0 = pb.vertex.y + lx0 * sin_a + ly0 * cos_a;
+        assert!((wx0 - 1.0).abs() < 1e-12);
+        assert!((wy0 - 2.0).abs() < 1e-12);
+
+        // t = 2 => local (2, 1), rotated 45 deg around vertex.
+        let t = 2.0;
+        let lx = t;
+        let ly = t * t / (4.0 * pb.p);
+        let wx = pb.vertex.x + lx * cos_a - ly * sin_a;
+        let wy = pb.vertex.y + lx * sin_a + ly * cos_a;
+        let expected = Point2::new(1.0 + 1.0 / 2f64.sqrt(), 2.0 + 3.0 / 2f64.sqrt());
+        assert!((wx - expected.x).abs() < 1e-12, "wx={}", wx);
+        assert!((wy - expected.y).abs() < 1e-12, "wy={}", wy);
+    }
+
+    #[test]
+    fn test_rotated_hyperbola_sampling() {
+        let hb = HyperbolaObj {
+            id: ObjectId::new(),
+            label: String::new(),
+            center: Point2::new(1.0, 2.0),
+            a: 2.0,
+            b: 1.0,
+            horizontal: true,
+            angle: std::f64::consts::FRAC_PI_4,
+            color: Color::BLACK,
+            visible: true,
+            width: 2.0,
+        };
+        let cos_a = hb.angle.cos();
+        let sin_a = hb.angle.sin();
+
+        // t = 0 => local (a, 0) = (2, 0), rotated 45 deg around center.
+        let lx = hb.a;
+        let ly = 0.0;
+        let wx = hb.center.x + lx * cos_a - ly * sin_a;
+        let wy = hb.center.y + lx * sin_a + ly * cos_a;
+        assert!((wx - (1.0 + 2.0 / 2f64.sqrt())).abs() < 1e-12, "wx={}", wx);
+        assert!((wy - (2.0 + 2.0 / 2f64.sqrt())).abs() < 1e-12, "wy={}", wy);
+    }
+
+    #[test]
+    fn test_conic_by_five_points_rotated() {
+        let mut doc = Document::new();
+        // Five points on an ellipse with rx=2, ry=1 rotated by 45 deg around the origin.
+        let angle = std::f64::consts::FRAC_PI_4;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        let rx = 2.0;
+        let ry = 1.0;
+        let ts = [0.0, 0.6, 1.2, 2.5, 4.0];
+        let pts: Vec<ObjectId> = ts
+            .iter()
+            .map(|&t: &f64| {
+                let cx = rx * t.cos();
+                let sy = ry * t.sin();
+                let x = cx * cos_a - sy * sin_a;
+                let y = cx * sin_a + sy * cos_a;
+                doc.add_point(Point2::new(x, y))
+            })
+            .collect();
+        let cons = doc.add_conic_by_five_points_constraint(&pts);
+        let order = doc.constraints.get_update_order(&pts);
+        doc.re_evaluate_constraints(&order);
+        let out_id = doc.constraints.get_constraint(cons).unwrap().outputs[0];
+        let obj = doc.get_object(out_id).unwrap();
+        if let GeoObject::Ellipse(e) = obj {
+            assert!((e.center.x).abs() < 1e-6);
+            assert!((e.center.y).abs() < 1e-6);
+            // The eigendecomposition may swap rx/ry and add a 90 deg phase to the angle.
+            let swapped = (e.rx - ry).abs() < 1e-6
+                && (e.ry - rx).abs() < 1e-6
+                && ((e.angle - angle).abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-6;
+            let direct = (e.rx - rx).abs() < 1e-6
+                && (e.ry - ry).abs() < 1e-6
+                && (e.angle - angle).abs() < 1e-6;
+            assert!(
+                swapped || direct,
+                "unexpected ellipse parameters: rx={}, ry={}, angle={}",
+                e.rx,
+                e.ry,
+                e.angle
+            );
+        } else {
+            panic!("expected ellipse from five points");
+        }
+    }
 }
