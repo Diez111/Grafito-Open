@@ -1,3 +1,9 @@
+//! GPU-backed canvas callbacks.
+//!
+//! Sets up the shared `GpuCanvasResources`, builds 2D/3D geometry through the
+//! `grafito_render` pipeline, and issues the `egui_wgpu` paint callbacks used
+//! by the central canvas.
+
 use egui::epaint::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
 use grafito_core::Document;

@@ -9,6 +9,7 @@ use grafito_geometry::Point2;
 use grafito_ui::Tool;
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ToolState {
     pub pending: Vec<Point2>,
     pub driver: Option<ObjectId>,
@@ -17,6 +18,7 @@ pub struct ToolState {
     pub selection_rect: Option<(Point2, Point2)>,
 }
 
+#[allow(dead_code)]
 impl ToolState {
     pub fn clear(&mut self) {
         self.pending.clear();
