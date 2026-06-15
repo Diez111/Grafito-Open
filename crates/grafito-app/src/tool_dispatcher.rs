@@ -605,6 +605,11 @@ fn handle_measure(
                     reset_tool: false,
                 };
             }
+            ToolResult {
+                objects: vec![],
+                message: Some("Selecciona un objeto o dos puntos para área".into()),
+                reset_tool: false,
+            }
         }
         "Slope" if state.pending.len() == 1 => {
             // Pendiente en el punto: si clic fue sobre Line, m; si fue sobre
