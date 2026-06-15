@@ -33,7 +33,7 @@ pub mod vector_compute;
 #[cfg(test)]
 mod tests;
 
-/// Simple lighting calculation for 3D objects
+/// Cálculo simple de iluminación para objetos 3D
 pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam::Vec3) -> Color {
     let ambient = 0.45;
     let diffuse = 0.65;
@@ -52,7 +52,7 @@ pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam
     )
 }
 
-/// A simple vertex with position and color.
+/// Un vértice simple con posición y color.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -118,6 +118,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
 impl Renderer {
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         target_format: wgpu::TextureFormat,
         sample_count: u32,
     ) -> Self {
@@ -241,16 +242,16 @@ impl Renderer {
         });
 
         let implicit_compute = Some(crate::implicit_compute::ImplicitComputePipeline::new(
-            device, 1024,
+            device, queue, 1024,
         ));
         let function_compute = Some(crate::function_compute::FunctionComputePipeline::new(
-            device, 10000,
+            device, queue, 10000,
         ));
         let parametric_compute = Some(crate::parametric_compute::ParametricComputePipeline::new(
-            device, 4000, 128,
+            device, queue, 4000, 128,
         ));
         let vector_compute = Some(crate::vector_compute::VectorComputePipeline::new(
-            device, 128,
+            device, queue, 128,
         ));
 
         Self {
@@ -278,13 +279,16 @@ impl Renderer {
         document: &Document,
         view: &ViewTransform,
         dark_mode: bool,
+        include_overlays: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
         let obj_count = document.object_count().max(1);
         let mut vertices = Vec::with_capacity(obj_count * 256);
         let mut indices = Vec::with_capacity(obj_count * 384);
 
-        Self::build_grid_static(&mut vertices, &mut indices, view, dark_mode);
-        Self::build_axes_static(&mut vertices, &mut indices, view, dark_mode);
+        if include_overlays {
+            Self::build_grid_static(&mut vertices, &mut indices, view, dark_mode);
+            Self::build_axes_static(&mut vertices, &mut indices, view, dark_mode);
+        }
 
         for (_, obj) in document.objects_iter() {
             if !obj.is_visible() {
@@ -292,9 +296,11 @@ impl Renderer {
             }
             match obj {
                 GeoObject::Point(p) => {
-                    let screen = view.world_to_screen(p.position);
-                    let size = p.size.max(1.0);
-                    Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
+                    if include_overlays {
+                        let screen = view.world_to_screen(p.position);
+                        let size = p.size.max(1.0);
+                        Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
+                    }
                 }
                 GeoObject::Line(l) => {
                     let start = Point2::new(
@@ -664,15 +670,22 @@ impl Renderer {
         }
     }
 
-    pub fn build_geometry(&self, document: &Document, dark_mode: bool) -> (Vec<Vertex>, Vec<u32>) {
+    pub fn build_geometry(
+        &self,
+        document: &Document,
+        dark_mode: bool,
+        include_overlays: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
         let obj_count = document.object_count().max(1);
         let mut vertices = Vec::with_capacity(obj_count * 256);
         let mut indices = Vec::with_capacity(obj_count * 384);
 
         let view_transform = *document.view();
 
-        self.build_grid(&mut vertices, &mut indices, &view_transform, dark_mode);
-        self.build_axes(&mut vertices, &mut indices, &view_transform, dark_mode);
+        if include_overlays {
+            self.build_grid(&mut vertices, &mut indices, &view_transform, dark_mode);
+            self.build_axes(&mut vertices, &mut indices, &view_transform, dark_mode);
+        }
 
         for (_, obj) in document.objects_iter() {
             if !obj.is_visible() {
@@ -680,9 +693,11 @@ impl Renderer {
             }
             match obj {
                 GeoObject::Point(p) => {
-                    let screen = view_transform.world_to_screen(p.position);
-                    let size = p.size.max(1.0);
-                    Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
+                    if include_overlays {
+                        let screen = view_transform.world_to_screen(p.position);
+                        let size = p.size.max(1.0);
+                        Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
+                    }
                 }
                 GeoObject::Line(l) => {
                     let start = Point2::new(
@@ -2068,45 +2083,38 @@ impl Renderer {
         dark_mode: bool,
         screen_w: f32,
         screen_h: f32,
+        include_overlays: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
         let obj_count = document.object_count().max(1);
         let mut vertices = Vec::with_capacity(obj_count * 256);
         let mut indices = Vec::with_capacity(obj_count * 384);
 
-        self.build_3d_grid(
-            &mut vertices,
-            &mut indices,
-            camera,
-            dark_mode,
-            screen_w,
-            screen_h,
-        );
-        self.build_3d_axes(
-            &mut vertices,
-            &mut indices,
-            camera,
-            dark_mode,
-            screen_w,
-            screen_h,
-        );
+        if include_overlays {
+            self.build_3d_grid(
+                &mut vertices,
+                &mut indices,
+                camera,
+                dark_mode,
+                screen_w,
+                screen_h,
+            );
+            self.build_3d_axes(
+                &mut vertices,
+                &mut indices,
+                camera,
+                dark_mode,
+                screen_w,
+                screen_h,
+            );
+        }
 
         for (_, obj) in document.objects_iter() {
             if !obj.is_visible() {
                 continue;
             }
             match obj {
-                GeoObject::Point3D(p) => {
-                    if let Some(screen_pos) = camera.project(&p.position, screen_w, screen_h) {
-                        let size = p.size.max(1.0);
-                        Self::add_rect(
-                            &mut vertices,
-                            &mut indices,
-                            glam::Vec2::new(screen_pos.0, screen_pos.1),
-                            size,
-                            size,
-                            p.color,
-                        );
-                    }
+                GeoObject::Point3D(_p) => {
+                    // Handled by CPU overlay
                 }
                 GeoObject::Segment3D(l) => {
                     Self::add_line_3d(
@@ -2599,14 +2607,7 @@ impl Renderer {
                                 };
                                 if !overlap {
                                     prev_screen_pos_x = Some(current_sp);
-                                    Self::add_text_screen(
-                                        vertices,
-                                        indices,
-                                        &format_num(x),
-                                        glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                        12.0,
-                                        major_color,
-                                    );
+                                    // CPU overlay handles text
                                 }
                             }
                         }
@@ -2647,14 +2648,7 @@ impl Renderer {
                                 };
                                 if !overlap {
                                     prev_screen_pos_z = Some(current_sp);
-                                    Self::add_text_screen(
-                                        vertices,
-                                        indices,
-                                        &format_num(z),
-                                        glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                        12.0,
-                                        major_color,
-                                    );
+                                    // CPU overlay handles text
                                 }
                             }
                         }
@@ -2725,14 +2719,7 @@ impl Renderer {
                             };
                             if !overlap {
                                 prev_screen_pos_x = Some(current_sp);
-                                Self::add_text_screen(
-                                    vertices,
-                                    indices,
-                                    &format_num(x),
-                                    glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                    12.0,
-                                    major_color,
-                                );
+                                // CPU overlay handles text
                             }
                         }
                     }
@@ -2772,14 +2759,7 @@ impl Renderer {
                             };
                             if !overlap {
                                 prev_screen_pos_z = Some(current_sp);
-                                Self::add_text_screen(
-                                    vertices,
-                                    indices,
-                                    &format_num(z),
-                                    glam::Vec2::new(sx + 5.0, sy + 5.0),
-                                    12.0,
-                                    major_color,
-                                );
+                                // CPU overlay handles text
                             }
                         }
                     }

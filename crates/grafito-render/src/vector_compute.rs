@@ -36,12 +36,12 @@ struct VectorParamsUniform {
     y_max: f32,
     nx: u32,
     ny: u32,
+    code_len: u32,
     _pad0: u32,
-    _pad1: u32,
 }
 
 impl VectorComputePipeline {
-    pub fn new(device: &wgpu::Device, max_grid: usize) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, max_grid: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Vector Field Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("vector_compute.wgsl").into()),
@@ -123,6 +123,11 @@ impl VectorComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(
+            &bytecode_buffer,
+            0,
+            &[0u8; 4096 * std::mem::size_of::<u32>()],
+        );
 
         let constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vector Compute Constants"),
@@ -189,10 +194,10 @@ impl VectorComputePipeline {
             x_max: x_max as f32,
             y_min: y_min as f32,
             y_max: y_max as f32,
-            nx: grid_size as u32,
-            ny: grid_size as u32,
+            nx: (grid_size + 1) as u32,
+            ny: (grid_size + 1) as u32,
+            code_len: prog.code.len() as u32,
             _pad0: 0,
-            _pad1: 0,
         };
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));

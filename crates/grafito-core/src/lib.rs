@@ -42,15 +42,15 @@ pub use id::*;
 pub use object::*;
 pub use spatial::*;
 
-/// Rendering quality hint used to trade fidelity for responsiveness while
-/// the user is interacting with the view.
+/// Indicador de calidad de renderizado usado para intercambiar fidelidad por
+/// capacidad de respuesta mientras el usuario interactúa con la vista.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderQuality {
     #[default]
     Normal,
-    /// Low resolution while panning / zooming.
+    /// Baja resolución mientras se panea / hace zoom.
     Preview,
-    /// High resolution once the view has been idle for a short time.
+    /// Alta resolución una vez que la vista ha estado inactiva por un breve tiempo.
     High,
 }
 

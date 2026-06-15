@@ -11,61 +11,61 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ### v0.9.16-alpha
 
-#### Added
+#### Añadido
 - Botones de toolbar para restricciones numéricas (`Distance`, `Angle`, `Tangent`, `Coincident`, `Horizontal`, `Vertical`, `EqualLength`, `Symmetry`).
 - Botones de toolbar para construcciones de cónicas (`EllipseByFoci`, `ParabolaByFocusDirectrix`, `HyperbolaByFoci`, `ConicByFivePoints`).
 - Botones de toolbar para operaciones booleanas 2D (`PolygonUnion`, `PolygonIntersection`, `PolygonDifference`, `PolygonXor`).
 - Comandos de texto para todas las nuevas herramientas anteriores.
 - Iconos vectoriales personalizados para cada nueva herramienta.
 
-#### Changed
+#### Cambiado
 - Toolbar reorganizada en secciones: básicas, 3D, construcciones, restricciones, cónicas y booleanas.
 
 ### v0.9.15-alpha
 
-#### Added
+#### Añadido
 - Renderizado de parábolas rotadas alrededor de su vértice.
 - Renderizado de hipérbolas rotadas, incluyendo ambas ramas.
 - Hit-testing actualizado para cónicas rotadas.
 
-#### Fixed
+#### Corregido
 - Corrección de discontinuidades en el trazado de hipérbolas cerca de las asíntotas.
 
 ### v0.9.14-alpha
 
-#### Added
+#### Añadido
 - Jacobianos analíticos para el solver de restricciones numéricas.
 - Caché de expresiones compiladas (`evalexpr`) para acelerar la evaluación repetida.
 - Benchmarks de rendimiento para evaluación de funciones, muestreo paramétrico y resolución de restricciones.
 
-#### Changed
+#### Cambiado
 - Mejora de convergencia del solver numérico gracias a los Jacobianos analíticos.
 
-#### Fixed
+#### Corregido
 - Invalidación de caché al modificar variables globales del documento.
 
 ### v0.9.13-alpha
 
-#### Added
+#### Añadido
 - Tests de integración headless para el modelo de documento.
 - Tests de integración headless para el renderizador GPU sin necesidad de ventana.
 - Tests CLI para el punto de entrada de `grafito-app`.
 
-#### Changed
+#### Cambiado
 - Separación de la inicialización gráfica para facilitar tests headless.
 
 ### v0.9.12-alpha
 
-#### Changed
+#### Cambiado
 - Refactorización del punto de entrada de `grafito-app` para desacoplar UI, render y CLI.
 - Modularización interna que facilita la ejecución de benchmarks y tests sin el entorno gráfico completo.
 
-#### Removed
+#### Eliminado
 - Código muerto relacionado con el antiguo bucle de eventos monolítico.
 
 ### v0.9.11-alpha
 
-#### Added
+#### Añadido
 - Restricción constructiva `EllipseByFoci` para elipses definidas por dos focos y un punto.
 - Restricción constructiva `ParabolaByFocusDirectrix` para parábolas definidas por foco y directriz.
 - Restricción constructiva `HyperbolaByFoci` para hipérbolas definidas por dos focos y un punto.
@@ -74,7 +74,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ### v0.9.10-alpha
 
-#### Added
+#### Añadido
 - Restricción numérica `Coincident` para forzar la coincidencia de dos puntos.
 - Restricción numérica `Horizontal` para alinear segmentos o rectas horizontalmente.
 - Restricción numérica `Vertical` para alinear segmentos o rectas verticalmente.
@@ -84,49 +84,49 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ### v0.9.9-alpha
 
-#### Added
+#### Añadido
 - Solver de restricciones numéricas basado en método de Newton.
 - Restricción numérica `Distance` para fijar distancias entre puntos.
 - Restricción numérica `Angle` para fijar ángulos entre rectas.
 - Restricción numérica `Tangent` para imponer tangencia entre círculos y rectas.
 - Propagación de restricciones en orden topológico según dependencias.
 
-#### Changed
+#### Cambiado
 - Refactor de parámetros de restricciones para soportar grados de libertad variables.
 
 ### v0.9.8-alpha
 
-#### Added
+#### Añadido
 - Enlace de expresiones para objetos `Line` (`start_x_expr`, `start_y_expr`, `end_x_expr`, `end_y_expr`).
 - Enlace de expresiones para polígonos (`x_exprs`, `y_exprs` por vértice).
 - Enlace de expresiones para funciones (`expr`, `domain_min_expr`, `domain_max_expr`).
 - Enlace de expresiones para curvas paramétricas 2D y polares.
 - Reevaluación automática de parámetros ligados al cambiar variables.
 
-#### Changed
+#### Cambiado
 - Separación entre valor base y expresión ligada en los objetos geométricos.
 
 ### v0.9.7-alpha
 
-#### Added
+#### Añadido
 - Pipeline de cómputo GPU `parametric_compute` para evaluación masiva de curvas paramétricas 2D.
 - Pipeline de cómputo GPU `parametric_compute` para evaluación de superficies paramétricas 3D.
 - Shader WGSL de muestreo paramétrico con soporte para expresiones en `t`, `u` y `v`.
 
-#### Changed
+#### Cambiado
 - El muestreo de curvas paramétricas usa cómputo GPU cuando está disponible, con fallback CPU.
 
 ### v0.9.6-alpha
 
-#### Added
+#### Añadido
 - Pipeline de cómputo GPU `function_compute` para evaluación masiva de funciones explícitas `y = f(x)`.
 - Shader WGSL `function_compute.wgsl` con soporte para operadores aritméticos, trigonométricos y exponenciales.
 - Caché de muestreo de funciones con clave basada en expresión, dominio y calidad.
 
-#### Changed
+#### Cambiado
 - El renderizado de funciones explícitas utiliza resultados precalculados por GPU cuando es posible.
 
-#### Fixed
+#### Corregido
 - Recálculo de funciones únicamente cuando cambian el dominio visible o los parámetros.
 
 ---

@@ -81,7 +81,7 @@ fn try_headless_renderer() -> Option<std::sync::Arc<Renderer>> {
                 .enumerate_adapters(wgpu::Backends::all())
                 .into_iter()
                 .next()?;
-            let (device, _) = pollster::block_on(adapter.request_device(
+            let (device, queue) = pollster::block_on(adapter.request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::downlevel_defaults(),
@@ -93,6 +93,7 @@ fn try_headless_renderer() -> Option<std::sync::Arc<Renderer>> {
             .ok()?;
             Some(Arc::new(Renderer::new(
                 &device,
+                &queue,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
                 1,
             )))

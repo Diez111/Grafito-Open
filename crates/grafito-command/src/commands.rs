@@ -46,6 +46,17 @@ pub fn register_gpu_function_evaluator(evaluator: Box<dyn GpuFunctionEvaluator +
     let _ = GPU_FUNCTION_EVALUATOR.set(evaluator);
 }
 
+/// Resultado de ejecutar un comando de texto.
+#[derive(Debug, Clone)]
+pub enum CommandOutcome {
+    /// Éxito sin mensaje adicional.
+    Ok,
+    /// Éxito con un mensaje para mostrar (por ejemplo, resultado CAS).
+    Message(String),
+    /// Error que debe mostrarse al usuario.
+    Error(String),
+}
+
 pub fn insert_implicit_multiplication(text: &str) -> String {
     let mut res = String::new();
     let chars: Vec<char> = text.chars().collect();
@@ -86,10 +97,106 @@ pub fn insert_implicit_multiplication(text: &str) -> String {
     res
 }
 
-pub fn process_input(document: &mut Document, input_text: &mut String) -> Option<String> {
+/// Parse a numeric command argument supporting `pi`, `2pi`, `π`, `tau`, etc.
+///
+/// Tries `f64::from_str` first, then applies implicit multiplication and
+/// evaluates with `grafito_geometry::expr::evaluate`.
+pub fn parse_numeric_arg(s: &str, variables: &HashMap<String, f64>) -> Result<f64, String> {
+    let arg = s.trim();
+    // Fast path: pure number literal
+    if let Ok(val) = arg.parse::<f64>() {
+        return Ok(val);
+    }
+    // Apply implicit multiplication (e.g., "2pi" → "2*pi", "2π" → "2*pi")
+    let expanded = insert_implicit_multiplication(arg);
+    if let Ok(val) = expanded.parse::<f64>() {
+        return Ok(val);
+    }
+    // Use the expression evaluator which handles pi, tau, etc.
+    match evaluate(
+        &expanded,
+        &variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<Vec<_>>(),
+    ) {
+        Ok(val) if val.is_finite() => Ok(val),
+        Ok(val) => Err(format!("No es finito: {}", val)),
+        Err(e) => Err(format!(
+            "No se pudo interpretar como número: '{}' ({})",
+            arg, e
+        )),
+    }
+}
+
+/// Parse attractor parameters, supporting key=value syntax.
+fn parse_attractor_params(args: &[String]) -> Vec<f64> {
+    args.iter()
+        .filter_map(|s| {
+            // Handle key=value: extract RHS
+            let rhs = s.split('=').next_back().unwrap_or(s).trim();
+            rhs.parse::<f64>().ok()
+        })
+        .collect()
+}
+
+/// Split an equation/inequality string into (lhs, rhs, operator).
+/// Handles: =, <=, >=, ==, !=, <, >
+fn split_relation(expr: &str) -> (&str, &str, RelationOperator) {
+    if let Some(pos) = split_on_standalone_eq(expr) {
+        return (pos.0.trim(), pos.1.trim(), RelationOperator::Eq);
+    }
+    // Check multi-char operators first
+    for (op_str, op) in &[
+        ("<=", RelationOperator::LessEq),
+        (">=", RelationOperator::GreaterEq),
+        ("==", RelationOperator::Eq),
+        // "!=" not yet supported by RelationOperator enum
+    ] {
+        if let Some(pos) = expr.find(op_str) {
+            return (expr[..pos].trim(), expr[pos + op_str.len()..].trim(), *op);
+        }
+    }
+    // Single-char operators
+    for (op_str, op) in &[
+        ("<", RelationOperator::Less),
+        (">", RelationOperator::Greater),
+    ] {
+        if let Some(pos) = expr.find(op_str) {
+            // Make sure it's not part of <= or >= (handled above but double-check)
+            if pos + 1 < expr.len() && expr.as_bytes()[pos + 1] == b'=' {
+                continue;
+            }
+            return (expr[..pos].trim(), expr[pos + 1..].trim(), *op);
+        }
+    }
+    (expr.trim(), "0", RelationOperator::Eq)
+}
+
+/// Split text on a standalone "=" (not part of <=, >=, ==, !=)
+fn split_on_standalone_eq(text: &str) -> Option<(&str, &str)> {
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len() {
+        if chars[i] == '=' {
+            let preceded_by_op = i > 0
+                && (chars[i - 1] == '<'
+                    || chars[i - 1] == '>'
+                    || chars[i - 1] == '='
+                    || chars[i - 1] == '!');
+            let followed_by_eq = i + 1 < chars.len() && chars[i + 1] == '=';
+            if !preceded_by_op && !followed_by_eq {
+                let byte_pos = text.chars().take(i).map(|c| c.len_utf8()).sum::<usize>();
+                return Some((&text[..byte_pos], &text[byte_pos + 1..]));
+            }
+        }
+    }
+    None
+}
+
+pub fn process_input(document: &mut Document, input_text: &mut String) -> CommandOutcome {
     let raw_text = input_text.trim().to_string();
     if raw_text.is_empty() {
-        return None;
+        return CommandOutcome::Ok;
     }
 
     // Sanitize mathematical unicode symbols and uppercase variables from virtual keyboard
@@ -101,13 +208,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         .replace("x²", "x^2")
         .replace("√", "sqrt")
         .replace("|x|", "abs(x)")
-        .replace("π", "3.14159265359")
+        .replace("π", "pi")
+        .replace("τ", "tau")
         .replace("÷", "/")
         .replace("×", "*")
         .replace("≤", "<=")
         .replace("≥", ">=");
 
-    let mut result: Option<String> = None;
+    let mut result: CommandOutcome = CommandOutcome::Ok;
 
     if let Some(mut cmd) = parse_cas_command(&text) {
         cmd.args = cmd
@@ -132,7 +240,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         ry,
                     )));
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "RegularPolygon" if cmd.args.len() >= 3 => {
@@ -148,7 +256,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         .parse::<usize>()
                         .unwrap_or(4)
                         .clamp(3, 64);
-                    let r = cmd.args[2].trim().parse::<f64>().unwrap_or(1.0);
+                    let r = parse_numeric_arg(&cmd.args[2], &document.variables).unwrap_or(1.0);
                     let cx = parts[0];
                     let cy = parts[1];
                     let verts: Vec<Point2> = (0..n)
@@ -159,7 +267,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         .collect();
                     document.add_object(GeoObject::Polygon(PolygonObj::new(verts)));
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Distance" if cmd.args.len() >= 2 => {
@@ -182,9 +290,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         });
                     document.add_distance_constraint(a, b, target);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Distance: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Angle" if cmd.args.len() >= 2 => {
                 if let (Some(a), Some(b)) = (
@@ -198,9 +311,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         .unwrap_or(0.0);
                     document.add_angle_constraint(a, b, target);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Angle: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Tangent" if cmd.args.len() == 2 => {
                 if let (Some(a), Some(b)) = (
@@ -209,9 +327,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 ) {
                     document.add_tangent_constraint(a, b);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Tangent: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Coincident" if cmd.args.len() == 2 => {
                 if let (Some(a), Some(b)) = (
@@ -220,25 +343,40 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 ) {
                     document.add_coincident_constraint(a, b);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Coincident: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Horizontal" if !cmd.args.is_empty() => {
                 if let Some(id) = find_object_by_label(document, cmd.args[0].trim()) {
                     document.add_horizontal_constraint(id);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Horizontal: no se encontró el objeto '{}'",
+                        cmd.args[0]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Vertical" if !cmd.args.is_empty() => {
                 if let Some(id) = find_object_by_label(document, cmd.args[0].trim()) {
                     document.add_vertical_constraint(id);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Vertical: no se encontró el objeto '{}'",
+                        cmd.args[0]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "EqualLength" if cmd.args.len() == 2 => {
                 if let (Some(a), Some(b)) = (
@@ -247,9 +385,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 ) {
                     document.add_equal_length_constraint(a, b);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "EqualLength: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "Symmetry" if cmd.args.len() == 3 => {
                 if let [Some(p), Some(q), Some(line)] = [
@@ -261,9 +404,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 {
                     document.add_symmetry_constraint(*p, *q, *line);
                     document.re_evaluate_constraints(&[]);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Symmetry: no se encontraron los objetos '{}', '{}' o '{}'",
+                        cmd.args[0], cmd.args[1], cmd.args[2]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "EllipseByFoci" if cmd.args.len() == 3 => {
                 let ids: Vec<Option<ObjectId>> = cmd
@@ -275,9 +423,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_ellipse_by_foci_constraint(*f1, *f2, *p);
                     let order = document.propagation_order(&[*f1, *f2, *p]);
                     document.re_evaluate_constraints(&order);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "EllipseByFoci: no se encontraron los objetos '{}', '{}' o '{}'",
+                        cmd.args[0], cmd.args[1], cmd.args[2]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "ParabolaByFocusDirectrix" if cmd.args.len() == 2 => {
                 if let (Some(focus), Some(directrix)) = (
@@ -287,9 +440,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_parabola_by_focus_directrix_constraint(focus, directrix);
                     let order = document.propagation_order(&[focus, directrix]);
                     document.re_evaluate_constraints(&order);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "ParabolaByFocusDirectrix: no se encontraron los objetos '{}' o '{}'",
+                        cmd.args[0], cmd.args[1]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "HyperbolaByFoci" if cmd.args.len() == 3 => {
                 let ids: Vec<Option<ObjectId>> = cmd
@@ -301,9 +459,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_hyperbola_by_foci_constraint(*f1, *f2, *p);
                     let order = document.propagation_order(&[*f1, *f2, *p]);
                     document.re_evaluate_constraints(&order);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "HyperbolaByFoci: no se encontraron los objetos '{}', '{}' o '{}'",
+                        cmd.args[0], cmd.args[1], cmd.args[2]
+                    ));
                 }
-                input_text.clear();
-                return None;
             }
             "ConicByFivePoints" if cmd.args.len() == 5 => {
                 let ids: Vec<Option<ObjectId>> = cmd
@@ -316,16 +479,20 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_conic_by_five_points_constraint(&ids);
                     let order = document.propagation_order(&ids);
                     document.re_evaluate_constraints(&order);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                } else {
+                    return CommandOutcome::Error(
+                        "ConicByFivePoints: no se encontraron los 5 puntos".into(),
+                    );
                 }
-                input_text.clear();
-                return None;
             }
             "PolygonUnion" if cmd.args.len() == 2 => {
                 match resolve_two_polygons(document, &cmd.args[0], &cmd.args[1]) {
                     Ok((a, b)) => {
                         add_boolean_result(document, &a.union(&b), "U");
                     }
-                    Err(msg) => result = Some(msg),
+                    Err(msg) => result = CommandOutcome::Message(msg),
                 }
                 input_text.clear();
                 return result;
@@ -335,7 +502,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     Ok((a, b)) => {
                         add_boolean_result(document, &a.intersection(&b), "I");
                     }
-                    Err(msg) => result = Some(msg),
+                    Err(msg) => result = CommandOutcome::Message(msg),
                 }
                 input_text.clear();
                 return result;
@@ -345,7 +512,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     Ok((a, b)) => {
                         add_boolean_result(document, &a.difference(&b), "D");
                     }
-                    Err(msg) => result = Some(msg),
+                    Err(msg) => result = CommandOutcome::Message(msg),
                 }
                 input_text.clear();
                 return result;
@@ -355,7 +522,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     Ok((a, b)) => {
                         add_boolean_result(document, &a.xor(&b), "X");
                     }
-                    Err(msg) => result = Some(msg),
+                    Err(msg) => result = CommandOutcome::Message(msg),
                 }
                 input_text.clear();
                 return result;
@@ -382,12 +549,13 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                                 );
                             }
                             _ => {
-                                result = Some("Translate only supports Points".into());
+                                result =
+                                    CommandOutcome::Error("Translate only supports Points".into());
                             }
                         }
                     }
                 } else {
-                    result = Some("Usage: Translate[Object, (dx,dy)]".into());
+                    result = CommandOutcome::Error("Usage: Translate[Object, (dx,dy)]".into());
                 }
                 input_text.clear();
                 return result;
@@ -395,7 +563,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             "Rotate" if cmd.args.len() == 2 => {
                 if let (Some(id), Ok(angle)) = (
                     find_object_by_label(document, &cmd.args[0]),
-                    cmd.args[1].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
                 ) {
                     if let Some(obj) = document.get_object(id) {
                         match obj {
@@ -416,23 +584,47 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                                 );
                             }
                             _ => {
-                                result = Some("Rotate only supports Points".into());
+                                result =
+                                    CommandOutcome::Error("Rotate only supports Points".into());
                             }
                         }
                     }
                 } else {
-                    result = Some("Usage: Rotate[Object, angle_degrees]".into());
+                    result = CommandOutcome::Error("Usage: Rotate[Object, angle_degrees]".into());
                 }
                 input_text.clear();
                 return result;
             }
+            "Surface3D" if cmd.args.len() >= 7 => {
+                // Parametric form: Surface3D[x(u,v), y(u,v), z(u,v), umin, umax, vmin, vmax]
+                let expr_x = cmd.args[0].trim();
+                let expr_y = cmd.args[1].trim();
+                let expr_z = cmd.args[2].trim();
+                if let (Ok(umin), Ok(umax), Ok(vmin), Ok(vmax)) = (
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
+                    parse_numeric_arg(&cmd.args[5], &document.variables),
+                    parse_numeric_arg(&cmd.args[6], &document.variables),
+                ) {
+                    let obj = GeoObject::Surface3D(Surface3DObj::new_parametric(
+                        expr_x,
+                        expr_y,
+                        expr_z,
+                        (umin, umax),
+                        (vmin, vmax),
+                    ));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                }
+            }
             "Surface3D" if cmd.args.len() >= 5 => {
                 let expr = cmd.args[0].trim();
                 if let (Ok(x_min), Ok(x_max), Ok(y_min), Ok(y_max)) = (
-                    cmd.args[1].trim().parse::<f64>(),
-                    cmd.args[2].trim().parse::<f64>(),
-                    cmd.args[3].trim().parse::<f64>(),
-                    cmd.args[4].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
                 ) {
                     let obj = GeoObject::Surface3D(Surface3DObj::new(
                         expr,
@@ -441,7 +633,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Point3D" if cmd.args.len() == 3 => {
@@ -453,7 +645,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Segment3D" if cmd.args.len() == 6 => {
@@ -471,7 +663,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Sphere" if cmd.args.len() == 4 => {
@@ -484,7 +676,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(x, y, z), r));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Cube" if cmd.args.len() == 4 => {
@@ -497,16 +689,16 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Cube3D(Cube3DObj::new(Point3D::new(x, y, z), s));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Cylinder" if cmd.args.len() == 5 => {
                 if let (Ok(x), Ok(y), Ok(z), Ok(r), Ok(h)) = (
-                    cmd.args[0].trim().parse::<f64>(),
-                    cmd.args[1].trim().parse::<f64>(),
-                    cmd.args[2].trim().parse::<f64>(),
-                    cmd.args[3].trim().parse::<f64>(),
-                    cmd.args[4].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
                 ) {
                     let obj = GeoObject::Cylinder3D(Cylinder3DObj::new(
                         Point3D::new(x, y, z),
@@ -515,16 +707,16 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Cone" if cmd.args.len() == 5 => {
                 if let (Ok(x), Ok(y), Ok(z), Ok(r), Ok(h)) = (
-                    cmd.args[0].trim().parse::<f64>(),
-                    cmd.args[1].trim().parse::<f64>(),
-                    cmd.args[2].trim().parse::<f64>(),
-                    cmd.args[3].trim().parse::<f64>(),
-                    cmd.args[4].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
                 ) {
                     let obj = GeoObject::Cone3D(Cone3DObj::new(
                         Point3D::new(x, y, z),
@@ -533,28 +725,28 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Torus" if cmd.args.len() == 5 => {
                 if let (Ok(x), Ok(y), Ok(z), Ok(rmaj), Ok(rmin)) = (
-                    cmd.args[0].trim().parse::<f64>(),
-                    cmd.args[1].trim().parse::<f64>(),
-                    cmd.args[2].trim().parse::<f64>(),
-                    cmd.args[3].trim().parse::<f64>(),
-                    cmd.args[4].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
                 ) {
                     let obj =
                         GeoObject::Torus3D(Torus3DObj::new(Point3D::new(x, y, z), rmaj, rmin));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Moebius" if cmd.args.len() == 2 => {
                 if let (Ok(r), Ok(w)) = (
-                    cmd.args[0].trim().parse::<f64>(),
-                    cmd.args[1].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
                 ) {
                     let obj = GeoObject::MoebiusStrip(MoebiusStripObj::new(
                         Point3D::new(0.0, 0.0, 0.0),
@@ -563,14 +755,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             "Tangent" => {
                 if cmd.args.len() >= 3 {
                     if let (Ok((cx, cy)), Ok(r), Ok((px, py))) = (
                         parse_point_str(&cmd.args[0]),
-                        cmd.args[1].trim().parse::<f64>(),
+                        parse_numeric_arg(&cmd.args[1], &document.variables),
                         parse_point_str(&cmd.args[2]),
                     ) {
                         let dx = px - cx;
@@ -596,7 +788,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Intersect" if cmd.args.len() == 2 => {
                 let label_a = cmd.args[0].trim();
@@ -609,7 +801,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     if let (Some(obj_a), Some(obj_b)) = (obj_a, obj_b) {
                         let pts = intersect_objects(&obj_a, &obj_b);
                         match pts.len() {
-                            0 => result = Some("No intersection".into()),
+                            0 => result = CommandOutcome::Message("No intersection".into()),
                             1 => {
                                 let p = pts[0];
                                 document.add_constructed_object(
@@ -617,7 +809,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                                     "Intersect",
                                     &[id_a, id_b],
                                 );
-                                result = Some(format!("Intersection at ({:.4}, {:.4})", p.x, p.y));
+                                result = CommandOutcome::Message(format!(
+                                    "Intersection at ({:.4}, {:.4})",
+                                    p.x, p.y
+                                ));
                             }
                             2 => {
                                 let p1 = pts[0];
@@ -632,16 +827,20 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                                     "Intersect",
                                     &[id_a, id_b],
                                 );
-                                result = Some(format!(
+                                result = CommandOutcome::Message(format!(
                                     "Two intersections: ({:.4}, {:.4}) and ({:.4}, {:.4})",
                                     p1.x, p1.y, p2.x, p2.y
                                 ));
                             }
-                            _ => result = Some("Infinite intersections (coincident)".into()),
+                            _ => {
+                                result = CommandOutcome::Message(
+                                    "Infinite intersections (coincident)".into(),
+                                )
+                            }
                         }
                     }
                 } else {
-                    result = Some("Usage: Intersect[obj1, obj2]".into());
+                    result = CommandOutcome::Error("Usage: Intersect[obj1, obj2]".into());
                 }
                 input_text.clear();
                 return result;
@@ -661,7 +860,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "AngleBisector" if cmd.args.len() == 3 => {
                 if let (Ok((x1, y1)), Ok((xv, yv)), Ok((x2, y2))) = (
@@ -689,7 +888,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Midpoint" if cmd.args.len() == 2 => {
                 let id_a = find_object_by_label(document, cmd.args[0].trim());
@@ -716,7 +915,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(obj);
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Perpendicular" if cmd.args.len() == 2 => {
                 let line_id = find_object_by_label(document, cmd.args[0].trim());
@@ -740,7 +939,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Parallel" if cmd.args.len() == 2 => {
                 let line_id = find_object_by_label(document, cmd.args[0].trim());
@@ -764,7 +963,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "PointOnObject" if cmd.args.len() == 2 => {
                 let object_id = find_object_by_label(document, cmd.args[0].trim());
@@ -786,13 +985,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "CircleByCenterRadius" if cmd.args.len() == 2 => {
                 let center_id = find_object_by_label(document, cmd.args[0].trim());
                 if let Some(center_id) = center_id {
                     if let Some(GeoObject::Point(_)) = document.get_object(center_id) {
-                        let radius = cmd.args[1].trim().parse::<f64>().unwrap_or(1.0);
+                        let radius =
+                            parse_numeric_arg(&cmd.args[1], &document.variables).unwrap_or(1.0);
                         let mut params = HashMap::new();
                         params.insert("radius".to_string(), radius);
                         document.add_constructed_object_with_params(
@@ -806,7 +1006,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "CircleByThreePoints" if cmd.args.len() == 3 => {
                 let ids: Vec<Option<ObjectId>> = cmd
@@ -837,7 +1037,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "PointExpr" if cmd.args.len() == 2 => {
                 let x_expr = cmd.args[0].trim().to_string();
@@ -848,7 +1048,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(GeoObject::Point(point));
                 document.recompute_bound_parameters();
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "CircleExpr" if cmd.args.len() == 2 => {
                 let center_arg = cmd.args[0].trim();
@@ -873,7 +1073,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(GeoObject::Circle(circle));
                 document.recompute_bound_parameters();
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Vector" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
@@ -890,7 +1090,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(obj);
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Ray" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
@@ -906,7 +1106,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Line" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
@@ -922,7 +1122,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Segment" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
@@ -938,12 +1138,12 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Parabola" if cmd.args.len() >= 2 => {
                 if let (Ok((vx, vy)), Ok(p)) = (
                     parse_point_str(&cmd.args[0]),
-                    cmd.args[1].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
                 ) {
                     document.add_object(GeoObject::Parabola(ParabolaObj::new(
                         Point2::new(vx, vy),
@@ -951,13 +1151,13 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     )));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Hyperbola" if cmd.args.len() >= 3 => {
                 if let (Ok((cx, cy)), Ok(a), Ok(b)) = (
                     parse_point_str(&cmd.args[0]),
-                    cmd.args[1].trim().parse::<f64>(),
-                    cmd.args[2].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
                 ) {
                     document.add_object(GeoObject::Hyperbola(HyperbolaObj::new(
                         Point2::new(cx, cy),
@@ -966,12 +1166,12 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     )));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Dilate" if cmd.args.len() == 3 => {
                 if let (Ok((px, py)), Ok(factor), Ok((cx, cy))) = (
                     parse_point_str(&cmd.args[0]),
-                    cmd.args[1].trim().parse::<f64>(),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
                     parse_point_str(&cmd.args[2]),
                 ) {
                     let nx = cx + (px - cx) * factor;
@@ -981,7 +1181,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Reflect" if cmd.args.len() == 3 => {
                 if let (Ok((px, py)), Ok((ax, ay)), Ok((bx, by))) = (
@@ -1004,11 +1204,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Locus" if cmd.args.len() == 2 => {
                 let expr = cmd.args[0].trim();
-                if let Ok(range) = cmd.args[1].trim().parse::<f64>() {
+                if let Ok(range) = parse_numeric_arg(&cmd.args[1], &document.variables) {
                     let steps = 200;
                     let mut vertices = Vec::new();
                     for i in 0..=steps {
@@ -1034,7 +1234,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "FunctionInspector" if cmd.args.len() == 1 => {
                 let expr = cmd.args[0].trim();
@@ -1057,7 +1257,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 for (mx, my) in &maxs {
                     res.push_str(&format!(" Max@({:.2},{:.2})", mx, my));
                 }
-                result = Some(if res.is_empty() {
+                result = CommandOutcome::Message(if res.is_empty() {
                     "No extrema found in [-10,10]".into()
                 } else {
                     res
@@ -1072,7 +1272,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.add_object(GeoObject::Function(
                     FunctionObj::new(expr).with_label(format!("N({},{})", mu, sigma)),
                 ));
-                result = Some(format!("Normal N({},{}) added", mu, sigma));
+                result = CommandOutcome::Message(format!("Normal N({},{}) added", mu, sigma));
                 input_text.clear();
                 return result;
             }
@@ -1092,7 +1292,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     result
                 };
                 let prob = comb(n, k) * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32);
-                result = Some(format!("P(X={}) = {:.6} (Binom({},{}))", k, prob, n, p));
+                result = CommandOutcome::Message(format!(
+                    "P(X={}) = {:.6} (Binom({},{}))",
+                    k, prob, n, p
+                ));
                 input_text.clear();
                 return result;
             }
@@ -1103,14 +1306,18 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 for i in 1..=k {
                     prob *= lambda / i as f64;
                 }
-                result = Some(format!("P(X={}) = {:.6} (Poisson({}))", k, prob, lambda));
+                result = CommandOutcome::Message(format!(
+                    "P(X={}) = {:.6} (Poisson({}))",
+                    k, prob, lambda
+                ));
                 input_text.clear();
                 return result;
             }
             "Curve3D" if cmd.args.len() >= 3 => {
                 let exprs = cmd.args[0].trim();
                 let t_min: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
-                let t_max: f64 = cmd.args[2].trim().parse().unwrap_or(std::f64::consts::TAU);
+                let t_max: f64 = parse_numeric_arg(&cmd.args[2], &document.variables)
+                    .unwrap_or(std::f64::consts::TAU);
                 let steps = 200;
                 let mut pts = Vec::new();
                 for i in 0..=steps {
@@ -1153,11 +1360,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "SetValue" if cmd.args.len() == 2 => {
                 if let Some(id) = find_object_by_label(document, &cmd.args[0]) {
-                    if let Ok(val) = cmd.args[1].trim().parse::<f64>() {
+                    if let Ok(val) = parse_numeric_arg(&cmd.args[1], &document.variables) {
                         document.set_variable(cmd.args[0].trim().to_string(), val);
                     } else if let Ok((x, y)) = parse_point_str(&cmd.args[1]) {
                         if let Some(GeoObject::Point(p)) = document.get_object_mut(id) {
@@ -1170,7 +1377,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     }
                 }
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
             "Extrude" if cmd.args.len() >= 2 => {
                 let height: f64 = cmd
@@ -1226,7 +1433,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         }
                     }
                 } else {
-                    result = Some("Extrude only supports Polygons with 3+ vertices".into());
+                    result = CommandOutcome::Error(
+                        "Extrude only supports Polygons with 3+ vertices".into(),
+                    );
                 }
                 input_text.clear();
                 return result;
@@ -1246,22 +1455,25 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         .count()
                         > MAX_SCRIPT_COMMANDS
                 {
-                    result = Some("Script contains too many commands".into());
+                    result = CommandOutcome::Error("Script contains too many commands".into());
                     input_text.clear();
                     return result;
                 }
                 let mut output = String::new();
                 for c in &commands {
                     let mut temp = c.clone();
-                    if let Some(res) = process_input(document, &mut temp) {
-                        output.push_str(&res);
-                        output.push('\n');
+                    match process_input(document, &mut temp) {
+                        CommandOutcome::Message(msg) | CommandOutcome::Error(msg) => {
+                            output.push_str(&msg);
+                            output.push('\n');
+                        }
+                        CommandOutcome::Ok => {}
                     }
                 }
                 result = if output.is_empty() {
-                    Some("Script executed".into())
+                    CommandOutcome::Message("Script executed".into())
                 } else {
-                    Some(output)
+                    CommandOutcome::Message(output)
                 };
                 input_text.clear();
                 return result;
@@ -1274,8 +1486,8 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .map(|(k, v)| (k.clone(), *v))
                     .collect();
                 match evaluate(expr, &vars) {
-                    Ok(val) => result = Some(format!("{} ≈ {}", expr, val)),
-                    Err(e) => result = Some(format!("Simplify error: {}", e)),
+                    Ok(val) => result = CommandOutcome::Message(format!("{} ≈ {}", expr, val)),
+                    Err(e) => result = CommandOutcome::Error(format!("Simplify error: {}", e)),
                 }
                 input_text.clear();
                 return result;
@@ -1284,117 +1496,93 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![10.0, 28.0, 8.0 / 3.0]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 if params.is_empty() {
                     input_text.clear();
-                    return Some("Error: Invalid parameters for Lorenz. Use: Lorenz[sigma, rho, beta] or Lorenz[sigma=10, rho=28, beta=8/3]".into());
+                    return CommandOutcome::Error("Error: Invalid parameters for Lorenz. Use: Lorenz[sigma, rho, beta] or Lorenz[sigma=10, rho=28, beta=8/3]".into());
                 }
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("lorenz", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Lorenz attractor created".into());
+                return CommandOutcome::Message("Lorenz attractor created".into());
             }
             "Rossler" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.2, 0.2, 5.7]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("rossler", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Rössler attractor created".into());
+                return CommandOutcome::Message("Rössler attractor created".into());
             }
             "Thomas" | "Butterfly" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.208186]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("thomas", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Thomas butterfly attractor created".into());
+                return CommandOutcome::Message("Thomas butterfly attractor created".into());
             }
             "Aizawa" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.95, 0.7, 0.6, 3.5, 0.25, 0.1]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("aizawa", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Aizawa attractor created".into());
+                return CommandOutcome::Message("Aizawa attractor created".into());
             }
             "Chen" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![35.0, 3.0, 28.0]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("chen", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Chen attractor created".into());
+                return CommandOutcome::Message("Chen attractor created".into());
             }
             "Halvorsen" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
-                    vec![1.89]
+                    vec![1.4, 0.0, 0.0, 0.0]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("halvorsen", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Halvorsen attractor created".into());
+                return CommandOutcome::Message("Halvorsen attractor created".into());
             }
             "Dadras" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![3.0, 2.7, 1.7, 2.0, 9.0]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("dadras", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Dadras attractor created".into());
+                return CommandOutcome::Message("Dadras attractor created".into());
             }
             "Chua" => {
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![15.6, 28.0, -1.143, -0.714]
                 } else {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("chua", params));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Chua attractor created".into());
+                return CommandOutcome::Message("Chua attractor created".into());
             }
             "Mandelbrot" => {
                 let max_iter = cmd
@@ -1405,7 +1593,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let obj = GeoObject::Fractal2D(Fractal2DObj::mandelbrot().with_max_iter(max_iter));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Mandelbrot fractal created".into());
+                return CommandOutcome::Message("Mandelbrot fractal created".into());
             }
             "Julia" if cmd.args.len() >= 2 => {
                 let cr: f64 = cmd.args[0].trim().parse().unwrap_or(-0.70176);
@@ -1418,20 +1606,17 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let obj = GeoObject::Fractal2D(Fractal2DObj::julia(cr, ci).with_max_iter(max_iter));
                 document.add_object(obj);
                 input_text.clear();
-                return Some(format!("Julia set c={cr}+{ci}i created"));
+                return CommandOutcome::Message(format!("Julia set c={cr}+{ci}i created"));
             }
             "BurningShip" => {
                 let obj = GeoObject::Fractal2D(Fractal2DObj::burning_ship());
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Burning Ship fractal created".into());
+                return CommandOutcome::Message("Burning Ship fractal created".into());
             }
             "Hypercube" => {
                 let angles = if cmd.args.len() >= 3 {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 } else {
                     vec![0.3, 0.5, 0.7]
                 };
@@ -1439,14 +1624,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     GeoObject::HyperSurface4D(HyperSurface4DObj::hypercube().with_rotation(angles));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Hipercubo 4D creado (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
+                return CommandOutcome::Message("Hipercubo 4D creado (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
             }
             "Hypersphere" => {
                 let angles = if cmd.args.len() >= 3 {
-                    cmd.args
-                        .iter()
-                        .filter_map(|s| s.trim().parse().ok())
-                        .collect()
+                    parse_attractor_params(&cmd.args)
                 } else {
                     vec![0.3, 0.5, 0.7]
                 };
@@ -1455,7 +1637,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 );
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Hiperesfera 4D creada (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
+                return CommandOutcome::Message("Hiperesfera 4D creada (escala=3.0). Botón derecho para orbitar, scroll para zoom.".into());
             }
             "VectorField3D" if cmd.args.len() >= 3 => {
                 let obj = GeoObject::VectorField3D(VectorField3DObj::new(
@@ -1465,7 +1647,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 ));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("3D Vector Field created".into());
+                return CommandOutcome::Message("3D Vector Field created".into());
             }
             "Histogram" if !cmd.args.is_empty() => {
                 let data = parse_brace_list(&cmd.args[0]);
@@ -1478,7 +1660,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Histogram(HistogramObj::new(data, bins));
                     document.add_object(obj);
                     input_text.clear();
-                    return Some("Histogram created".into());
+                    return CommandOutcome::Message("Histogram created".into());
                 }
             }
             "ScatterPlot" if cmd.args.len() >= 2 => {
@@ -1488,7 +1670,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::ScatterPlot(ScatterPlotObj::new(xs, ys));
                     document.add_object(obj);
                     input_text.clear();
-                    return Some("Scatter plot created".into());
+                    return CommandOutcome::Message("Scatter plot created".into());
                 }
             }
             "BoxPlot" if !cmd.args.is_empty() => {
@@ -1497,7 +1679,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::BoxPlot(BoxPlotObj::new(data));
                     document.add_object(obj);
                     input_text.clear();
-                    return Some("Box plot created".into());
+                    return CommandOutcome::Message("Box plot created".into());
                 }
             }
             "LinearRegression" if cmd.args.len() >= 2 => {
@@ -1510,7 +1692,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         ));
                         document.add_object(obj);
                         input_text.clear();
-                        return Some(format!(
+                        return CommandOutcome::Message(format!(
                             "y = {:.4}x + {:.4}, R²={:.4}",
                             slope, intercept, r2
                         ));
@@ -1521,21 +1703,21 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let data = parse_brace_list(&cmd.args[0]);
                 if let Some(m) = statistics::mean(&data) {
                     input_text.clear();
-                    return Some(format!("Mean = {:.6}", m));
+                    return CommandOutcome::Message(format!("Mean = {:.6}", m));
                 }
             }
             "Median" if !cmd.args.is_empty() => {
                 let data = parse_brace_list(&cmd.args[0]);
                 if let Some(m) = statistics::median(&data) {
                     input_text.clear();
-                    return Some(format!("Median = {:.6}", m));
+                    return CommandOutcome::Message(format!("Median = {:.6}", m));
                 }
             }
             "StdDev" if !cmd.args.is_empty() => {
                 let data = parse_brace_list(&cmd.args[0]);
                 if let Some(s) = statistics::std_dev(&data) {
                     input_text.clear();
-                    return Some(format!("StdDev = {:.6}", s));
+                    return CommandOutcome::Message(format!("StdDev = {:.6}", s));
                 }
             }
             "Correlation" if cmd.args.len() >= 2 => {
@@ -1543,14 +1725,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let ys = parse_brace_list(&cmd.args[1]);
                 if let Some(r) = statistics::pearson_correlation(&xs, &ys) {
                     input_text.clear();
-                    return Some(format!("r = {:.6}", r));
+                    return CommandOutcome::Message(format!("r = {:.6}", r));
                 }
             }
             "Determinant" if !cmd.args.is_empty() => {
                 if let Some(m) = parse_matrix_arg(&cmd.args[0]) {
                     if let Some(det) = m.determinant() {
                         input_text.clear();
-                        return Some(format!("det = {:.6}", det));
+                        return CommandOutcome::Message(format!("det = {:.6}", det));
                     }
                 }
             }
@@ -1558,7 +1740,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 if let Some(m) = parse_matrix_arg(&cmd.args[0]) {
                     if let Some(inv) = m.inverse() {
                         input_text.clear();
-                        return Some(format!("Inverse:\n{}", inv));
+                        return CommandOutcome::Message(format!("Inverse:\n{}", inv));
                     }
                 }
             }
@@ -1580,7 +1762,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Function(FunctionObj::new(&series).with_label(&label));
                     document.add_object(obj);
                     input_text.clear();
-                    return Some(format!("Taylor: {} → {}", series, label));
+                    return CommandOutcome::Message(format!("Taylor: {} → {}", series, label));
                 }
             }
             "Cardioid" if !cmd.args.is_empty() => {
@@ -1593,7 +1775,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!("Cardioid(a={}) created", a));
+                return CommandOutcome::Message(format!("Cardioid(a={}) created", a));
             }
             "Rose" if cmd.args.len() >= 3 => {
                 let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
@@ -1607,7 +1789,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!("Rose(a={}, n={}, d={}) created", a, n, d));
+                return CommandOutcome::Message(format!("Rose(a={}, n={}, d={}) created", a, n, d));
             }
             "ArchimedeanSpiral" if cmd.args.len() >= 3 => {
                 let a: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
@@ -1622,7 +1804,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Archimedean Spiral(a={}, b={}, θ={}) created",
                     a, b, max_theta
                 ));
@@ -1640,7 +1822,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Logarithmic Spiral(a={}, b={}, θ={}) created",
                     a, b, max_theta
                 ));
@@ -1660,7 +1842,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Lissajous(a={}, b={}, fx={}, fy={}, δ={}) created",
                     a, b, freq_x, freq_y, delta
                 ));
@@ -1676,7 +1858,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!("Epicycloid(r={}, k={}) created", r, k));
+                return CommandOutcome::Message(format!("Epicycloid(r={}, k={}) created", r, k));
             }
             "Hypocycloid" if cmd.args.len() >= 2 => {
                 let r: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
@@ -1689,7 +1871,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!("Hypocycloid(r={}, k={}) created", r, k));
+                return CommandOutcome::Message(format!("Hypocycloid(r={}, k={}) created", r, k));
             }
             "ODE" if cmd.args.len() >= 4 => {
                 let expr = cmd.args[0].trim();
@@ -1734,7 +1916,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "ODE solved with {} method ({} steps)",
                     method, steps
                 ));
@@ -1742,13 +1924,13 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             "ODESystem" if cmd.args.len() >= 5 => {
                 let expr1 = cmd.args[0].trim();
                 let expr2 = cmd.args[1].trim();
-                let t0: f64 = cmd.args[2].trim().parse().unwrap_or(0.0);
-                let y0_1: f64 = cmd.args[3].trim().parse().unwrap_or(1.0);
-                let y0_2: f64 = cmd.args[4].trim().parse().unwrap_or(0.0);
+                let t0: f64 = parse_numeric_arg(&cmd.args[2], &document.variables).unwrap_or(0.0);
+                let y0_1: f64 = parse_numeric_arg(&cmd.args[3], &document.variables).unwrap_or(1.0);
+                let y0_2: f64 = parse_numeric_arg(&cmd.args[4], &document.variables).unwrap_or(0.0);
                 let t_end: f64 = cmd
                     .args
                     .get(5)
-                    .and_then(|s| s.trim().parse().ok())
+                    .and_then(|s| parse_numeric_arg(s, &document.variables).ok())
                     .unwrap_or(10.0);
                 let steps: usize = cmd
                     .args
@@ -1763,8 +1945,8 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
 
                 let f = |_t: f64, state: &[f64]| -> Vec<f64> {
                     let mut vars = document.variables.clone();
-                    vars.insert("y1".to_string(), state[0]);
-                    vars.insert("y2".to_string(), state[1]);
+                    vars.insert("x".to_string(), state[0]);
+                    vars.insert("y".to_string(), state[1]);
                     let dy1 = evaluate(
                         expr1,
                         &vars
@@ -1808,7 +1990,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     document.add_object(GeoObject::Polygon(poly));
                 }
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "ODE system solved with {} method ({} steps)",
                     method, steps
                 ));
@@ -1817,59 +1999,59 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::gamma(x);
                 input_text.clear();
-                return Some(format!("Γ({}) = {:.6}", x, result));
+                return CommandOutcome::Message(format!("Γ({}) = {:.6}", x, result));
             }
             "LnGamma" if !cmd.args.is_empty() => {
                 let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::ln_gamma(x);
                 input_text.clear();
-                return Some(format!("ln(Γ({})) = {:.6}", x, result));
+                return CommandOutcome::Message(format!("ln(Γ({})) = {:.6}", x, result));
             }
             "Beta" if cmd.args.len() >= 2 => {
                 let a: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
                 let b: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::beta(a, b);
                 input_text.clear();
-                return Some(format!("B({}, {}) = {:.6}", a, b, result));
+                return CommandOutcome::Message(format!("B({}, {}) = {:.6}", a, b, result));
             }
             "BesselJ" if cmd.args.len() >= 2 => {
                 let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
                 let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::bessel_j(n, x);
                 input_text.clear();
-                return Some(format!("J_{}({}) = {:.6}", n, x, result));
+                return CommandOutcome::Message(format!("J_{}({}) = {:.6}", n, x, result));
             }
             "BesselY" if cmd.args.len() >= 2 => {
                 let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
                 let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::bessel_y(n, x);
                 input_text.clear();
-                return Some(format!("Y_{}({}) = {:.6}", n, x, result));
+                return CommandOutcome::Message(format!("Y_{}({}) = {:.6}", n, x, result));
             }
             "BesselI" if cmd.args.len() >= 2 => {
                 let n: i32 = cmd.args[0].trim().parse().unwrap_or(0);
                 let x: f64 = cmd.args[1].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::bessel_i(n, x);
                 input_text.clear();
-                return Some(format!("I_{}({}) = {:.6}", n, x, result));
+                return CommandOutcome::Message(format!("I_{}({}) = {:.6}", n, x, result));
             }
             "Erf" if !cmd.args.is_empty() => {
                 let x: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
                 let result = grafito_geometry::special_functions::erf(x);
                 input_text.clear();
-                return Some(format!("erf({}) = {:.6}", x, result));
+                return CommandOutcome::Message(format!("erf({}) = {:.6}", x, result));
             }
             "Erfc" if !cmd.args.is_empty() => {
                 let x: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
                 let result = grafito_geometry::special_functions::erfc(x);
                 input_text.clear();
-                return Some(format!("erfc({}) = {:.6}", x, result));
+                return CommandOutcome::Message(format!("erfc({}) = {:.6}", x, result));
             }
             "Digamma" if !cmd.args.is_empty() => {
                 let x: f64 = cmd.args[0].trim().parse().unwrap_or(1.0);
                 let result = grafito_geometry::special_functions::digamma(x);
                 input_text.clear();
-                return Some(format!("ψ({}) = {:.6}", x, result));
+                return CommandOutcome::Message(format!("ψ({}) = {:.6}", x, result));
             }
             "Uniform" if cmd.args.len() >= 2 => {
                 let a: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
@@ -1882,7 +2064,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pdf = grafito_geometry::statistics::uniform_pdf(x, a, b);
                 let cdf = grafito_geometry::statistics::uniform_cdf(x, a, b);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "U({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}",
                     a, b, x, pdf, x, cdf
                 ));
@@ -1897,7 +2079,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .unwrap_or(1.0);
                 let pdf = grafito_geometry::statistics::gamma_pdf(x, alpha, beta);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Gamma({},{}): PDF({}) = {:.6}",
                     alpha, beta, x, pdf
                 ));
@@ -1912,7 +2094,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .unwrap_or(0.5);
                 let pdf = grafito_geometry::statistics::beta_pdf(x, alpha, beta);
                 input_text.clear();
-                return Some(format!("Beta({},{}): PDF({}) = {:.6}", alpha, beta, x, pdf));
+                return CommandOutcome::Message(format!(
+                    "Beta({},{}): PDF({}) = {:.6}",
+                    alpha, beta, x, pdf
+                ));
             }
             "Cauchy" if cmd.args.len() >= 2 => {
                 let x0: f64 = cmd.args[0].trim().parse().unwrap_or(0.0);
@@ -1925,7 +2110,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pdf = grafito_geometry::statistics::cauchy_pdf(x, x0, gamma);
                 let cdf = grafito_geometry::statistics::cauchy_cdf(x, x0, gamma);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Cauchy({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}",
                     x0, gamma, x, pdf, x, cdf
                 ));
@@ -1941,7 +2126,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pdf = grafito_geometry::statistics::pareto_pdf(x, xm, alpha);
                 let cdf = grafito_geometry::statistics::pareto_cdf(x, xm, alpha);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Pareto({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}",
                     xm, alpha, x, pdf, x, cdf
                 ));
@@ -1956,7 +2141,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pdf = grafito_geometry::statistics::rayleigh_pdf(x, sigma);
                 let cdf = grafito_geometry::statistics::rayleigh_cdf(x, sigma);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Rayleigh({}): PDF({}) = {:.6}, CDF({}) = {:.6}",
                     sigma, x, pdf, x, cdf
                 ));
@@ -1972,7 +2157,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pdf = grafito_geometry::statistics::laplace_pdf(x, mu, b);
                 let cdf = grafito_geometry::statistics::laplace_cdf(x, mu, b);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "Laplace({},{}): PDF({}) = {:.6}, CDF({}) = {:.6}",
                     mu, b, x, pdf, x, cdf
                 ));
@@ -1988,7 +2173,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 let pmf = grafito_geometry::statistics::negative_binomial_pmf(r, p, k);
                 let cdf = grafito_geometry::statistics::negative_binomial_cdf(r, p, k);
                 input_text.clear();
-                return Some(format!(
+                return CommandOutcome::Message(format!(
                     "NegBin({},{}): PMF({}) = {:.6}, CDF({}) = {:.6}",
                     r, p, k, pmf, k, cdf
                 ));
@@ -2000,7 +2185,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::t_test_one_sample(&data, mu0)
                 {
                     input_text.clear();
-                    return Some(format!("t-test: t = {:.4}, p = {:.6}", t_stat, p_value));
+                    return CommandOutcome::Message(format!(
+                        "t-test: t = {:.4}, p = {:.6}",
+                        t_stat, p_value
+                    ));
                 }
             }
             "TTest2" if cmd.args.len() >= 2 => {
@@ -2010,7 +2198,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::t_test_two_sample(&data1, &data2)
                 {
                     input_text.clear();
-                    return Some(format!(
+                    return CommandOutcome::Message(format!(
                         "t-test (2 samples): t = {:.4}, p = {:.6}",
                         t_stat, p_value
                     ));
@@ -2024,7 +2212,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::z_test_one_sample(&data, mu0, sigma)
                 {
                     input_text.clear();
-                    return Some(format!("z-test: z = {:.4}, p = {:.6}", z_stat, p_value));
+                    return CommandOutcome::Message(format!(
+                        "z-test: z = {:.4}, p = {:.6}",
+                        z_stat, p_value
+                    ));
                 }
             }
             "ChiSqTest" if cmd.args.len() >= 2 => {
@@ -2034,7 +2225,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::chi_squared_test(&observed, &expected)
                 {
                     input_text.clear();
-                    return Some(format!("χ²-test: χ² = {:.4}, p = {:.6}", chi2, p_value));
+                    return CommandOutcome::Message(format!(
+                        "χ²-test: χ² = {:.4}, p = {:.6}",
+                        chi2, p_value
+                    ));
                 }
             }
             "ANOVA" if cmd.args.len() >= 2 => {
@@ -2047,7 +2241,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::anova_one_way(&group_refs)
                 {
                     input_text.clear();
-                    return Some(format!("ANOVA: F = {:.4}, p = {:.6}", f_stat, p_value));
+                    return CommandOutcome::Message(format!(
+                        "ANOVA: F = {:.4}, p = {:.6}",
+                        f_stat, p_value
+                    ));
                 }
             }
             "CIMean" if !cmd.args.is_empty() => {
@@ -2061,7 +2258,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     grafito_geometry::statistics::confidence_interval_mean(&data, confidence)
                 {
                     input_text.clear();
-                    return Some(format!(
+                    return CommandOutcome::Message(format!(
                         "CI ({:.0}%): [{:.4}, {:.4}, {:.4}]",
                         confidence * 100.0,
                         lower,
@@ -2084,7 +2281,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     )
                 {
                     input_text.clear();
-                    return Some(format!(
+                    return CommandOutcome::Message(format!(
                         "CI ({:.0}%): [{:.4}, {:.4}, {:.4}]",
                         confidence * 100.0,
                         lower,
@@ -2134,7 +2331,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 cg.expr = expr.to_string();
                 document.add_object(GeoObject::ComplexGrid(cg));
                 input_text.clear();
-                return Some("Complex grid created — scroll/zoom to explore".into());
+                return CommandOutcome::Message(
+                    "Complex grid created — scroll/zoom to explore".into(),
+                );
             }
             "DomainColoring" if !cmd.args.is_empty() => {
                 let x_min = cmd
@@ -2170,7 +2369,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 cg2.density = res;
                 document.add_object(GeoObject::ComplexGrid(cg2));
                 input_text.clear();
-                return Some(format!("Domain coloring ({}x{}) created", res, res));
+                return CommandOutcome::Message(format!(
+                    "Domain coloring ({}x{}) created",
+                    res, res
+                ));
             }
             "HeatMap" if !cmd.args.is_empty() => {
                 let x_min = cmd
@@ -2206,28 +2408,42 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 cg2.density = res;
                 document.add_object(GeoObject::ComplexGrid(cg2));
                 input_text.clear();
-                return Some(format!("Heat map ({}x{}) created", res, res));
+                return CommandOutcome::Message(format!("Heat map ({}x{}) created", res, res));
             }
             "PolarCurve" if cmd.args.len() >= 3 => {
                 let expr = cmd.args[0].trim();
                 let t_min = cmd.args[1].trim().parse().unwrap_or(0.0);
-                let t_max = cmd.args[2].trim().parse().unwrap_or(std::f64::consts::TAU);
+                let t_max = parse_numeric_arg(&cmd.args[2], &document.variables)
+                    .unwrap_or(std::f64::consts::TAU);
                 let obj = GeoObject::PolarCurve(PolarCurveObj::new(expr, t_min, t_max));
                 document.add_object(obj);
                 input_text.clear();
-                return Some(format!("Polar curve r = {} [{}..{}]", expr, t_min, t_max));
+                return CommandOutcome::Message(format!(
+                    "Polar curve r = {} [{}..{}]",
+                    expr, t_min, t_max
+                ));
             }
             "ParametricCurve2D" if cmd.args.len() >= 4 => {
                 let expr_x = cmd.args[0].trim();
                 let expr_y = cmd.args[1].trim();
-                let t_min = cmd.args[2].trim().parse().unwrap_or(0.0);
-                let t_max = cmd.args[3].trim().parse().unwrap_or(std::f64::consts::TAU);
+                let t_min = parse_numeric_arg(&cmd.args[2], &document.variables).unwrap_or(0.0);
+                let t_max = parse_numeric_arg(&cmd.args[3], &document.variables)
+                    .unwrap_or(std::f64::consts::TAU);
                 let obj = GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
                     expr_x, expr_y, t_min, t_max,
                 ));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Parametric curve created".into());
+                return CommandOutcome::Message("Parametric curve created".into());
+            }
+            "Function" if !cmd.args.is_empty() => {
+                let expr = cmd.args.join(", ");
+                let label = next_function_label(document);
+                document.add_object(GeoObject::Function(
+                    FunctionObj::new(&expr).with_label(&label),
+                ));
+                input_text.clear();
+                return CommandOutcome::Message(format!("Función {} → {}", expr, label));
             }
             "Piecewise" if cmd.args.len() >= 3 => {
                 let mut expr = format!("piecewise({}", cmd.args[0].trim());
@@ -2241,7 +2457,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     FunctionObj::new(&expr).with_label(&label),
                 ));
                 input_text.clear();
-                return Some(format!("Piecewise function → {}", label));
+                return CommandOutcome::Message(format!("Piecewise function → {}", label));
             }
             "VectorField2D" if cmd.args.len() >= 2 => {
                 let obj = GeoObject::VectorField2D(VectorField2DObj::new(
@@ -2250,7 +2466,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 ));
                 document.add_object(obj);
                 input_text.clear();
-                return Some("Vector field 2D created — streamlines auto-rendered".into());
+                return CommandOutcome::Message(
+                    "Vector field 2D created — streamlines auto-rendered".into(),
+                );
             }
             "PhasePortrait" if cmd.args.len() >= 2 => {
                 let mut pp = PhasePortraitObj::new(
@@ -2265,7 +2483,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 pp.color = Color::new(0.2, 0.2, 0.8, 1.0);
                 document.add_object(GeoObject::PhasePortrait(pp));
                 input_text.clear();
-                return Some("Phase portrait created".into());
+                return CommandOutcome::Message("Phase portrait created".into());
             }
             "Contour" if cmd.args.len() >= 6 => {
                 let expr = cmd.args[0].trim();
@@ -2278,41 +2496,31 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     .filter_map(|s| s.trim().parse::<f64>().ok())
                     .collect();
                 if levels.is_empty() {
-                    return None;
+                    return CommandOutcome::Ok;
                 }
-                // Split LHS/RHS on '='
-                let (lhs, rhs) = if let Some(pos) = expr.find('=') {
-                    (
-                        expr[..pos].trim().to_string(),
-                        expr[pos + 1..].trim().to_string(),
-                    )
-                } else {
-                    (expr.to_string(), "0".to_string())
-                };
-                let mut obj = ImplicitCurveObj::new(&lhs, &rhs, RelationOperator::Eq);
+                // Split LHS/RHS using relation-aware splitting
+                let (lhs, rhs, op) = split_relation(expr);
+                let mut obj = ImplicitCurveObj::new(lhs, rhs, op);
                 obj.contour_levels = Some(levels);
                 document.add_object(GeoObject::ImplicitCurve(obj));
                 input_text.clear();
-                return Some("Contour curves created".into());
+                return CommandOutcome::Message("Contour curves created".into());
             }
             "ImplicitCurve" if !cmd.args.is_empty() => {
                 let expr = cmd.args[0].trim();
-                let (lhs, rhs) = if let Some(pos) = expr.find('=') {
-                    (
-                        expr[..pos].trim().to_string(),
-                        expr[pos + 1..].trim().to_string(),
-                    )
-                } else {
-                    (expr.to_string(), "0".to_string())
-                };
-                let obj = ImplicitCurveObj::new(&lhs, &rhs, RelationOperator::Eq);
+                let (lhs, rhs, op) = split_relation(expr);
+                let obj = ImplicitCurveObj::new(lhs, rhs, op);
                 document.add_object(GeoObject::ImplicitCurve(obj));
                 input_text.clear();
-                return Some("Implicit curve created".into());
+                return CommandOutcome::Message("Implicit curve created".into());
             }
             _ => {}
         }
-        result = execute_cas_command(document, &cmd);
+        result = match execute_cas_command(document, &cmd) {
+            Some(msg) if msg.to_lowercase().contains("error") => CommandOutcome::Error(msg),
+            Some(msg) => CommandOutcome::Message(msg),
+            None => CommandOutcome::Ok,
+        };
         input_text.clear();
         return result;
     }
@@ -2320,14 +2528,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
     let text_with_implicit = insert_implicit_multiplication(&text);
     let text = text_with_implicit.as_str();
 
-    if let Some((name, rest)) = text.split_once('=') {
+    if let Some((name, rest)) = split_on_standalone_eq(text) {
         let name = name.trim();
         let rest = rest.trim();
         if name.chars().all(|c| c.is_alphabetic()) && name.len() == 1 {
             if let Ok(val) = rest.parse::<f64>() {
                 document.set_variable(name.to_string(), val);
                 input_text.clear();
-                return None;
+                return CommandOutcome::Ok;
             }
         }
         if is_function_lhs(name)
@@ -2343,11 +2551,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                 document.remove_object(id);
             }
             let final_expr = expand_all_cas(rest, document);
-            println!("final_expr for {}: {}", name, final_expr);
             let obj = GeoObject::Function(FunctionObj::new(&final_expr).with_label(name));
             document.add_object(obj);
             input_text.clear();
-            return None;
+            return CommandOutcome::Ok;
         }
         if rest.starts_with('(') && rest.ends_with(')') {
             let inner = &rest[1..rest.len() - 1];
@@ -2357,7 +2564,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(name));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
         }
@@ -2374,7 +2581,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                         GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)).with_label(name));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
         }
@@ -2384,7 +2591,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             let obj = GeoObject::Function(FunctionObj::new(rest).with_label(&label));
             document.add_object(obj);
             input_text.clear();
-            return None;
+            return CommandOutcome::Ok;
         }
 
         // Polar curve: r = f(theta) or r(theta) = f(theta)
@@ -2394,7 +2601,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             let obj = GeoObject::PolarCurve(PolarCurveObj::new(rest, t_min, t_max));
             document.add_object(obj);
             input_text.clear();
-            return None;
+            return CommandOutcome::Ok;
         }
 
         // Parametric 2D: (x(t), y(t)) = (f(t), g(t))
@@ -2415,7 +2622,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     ));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
         }
@@ -2425,7 +2632,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
             let obj = GeoObject::Function(FunctionObj::new(name).with_label(&label));
             document.add_object(obj);
             input_text.clear();
-            return None;
+            return CommandOutcome::Ok;
         }
 
         // Contour: f(x,y) = [c1, c2, c3] → multi-level implicit
@@ -2440,7 +2647,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     obj.contour_levels = Some(levels);
                     document.add_object(GeoObject::ImplicitCurve(obj));
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
         }
@@ -2448,7 +2655,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(name, rest, RelationOperator::Eq));
         document.add_object(obj);
         input_text.clear();
-        return None;
+        return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once("<=") {
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
             lhs.trim(),
@@ -2457,7 +2664,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         ));
         document.add_object(obj);
         input_text.clear();
-        return None;
+        return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once(">=") {
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
             lhs.trim(),
@@ -2466,7 +2673,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         ));
         document.add_object(obj);
         input_text.clear();
-        return None;
+        return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once('<') {
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
             lhs.trim(),
@@ -2475,7 +2682,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         ));
         document.add_object(obj);
         input_text.clear();
-        return None;
+        return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once('>') {
         let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
             lhs.trim(),
@@ -2484,14 +2691,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
         ));
         document.add_object(obj);
         input_text.clear();
-        return None;
+        return CommandOutcome::Ok;
     } else {
         if contains_var(text, 'x') {
             let label = next_function_label(document);
             let obj = GeoObject::Function(FunctionObj::new(text).with_label(label));
             document.add_object(obj);
             input_text.clear();
-            return None;
+            return CommandOutcome::Ok;
         }
         if text.starts_with('(') && text.ends_with(')') {
             let inner = &text[1..text.len() - 1];
@@ -2505,7 +2712,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Point3D(Point3DObj::new(Point3D::new(x, y, z)));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
             if parts.len() == 2 {
@@ -2513,13 +2720,19 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Option
                     let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)));
                     document.add_object(obj);
                     input_text.clear();
-                    return None;
+                    return CommandOutcome::Ok;
                 }
             }
         }
     }
     input_text.clear();
-    result
+    match result {
+        CommandOutcome::Ok => CommandOutcome::Error(format!(
+            "Comando no reconocido o argumentos inválidos: '{}'",
+            raw_text
+        )),
+        other => other,
+    }
 }
 
 fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
@@ -2697,8 +2910,6 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
             _ => "Unknown",
         };
 
-        println!("Expanding CAS: {} with args {:?}", normalized, args);
-
         let mut expr_arg = args.first().cloned().unwrap_or_default();
 
         // Try full expr_arg first (e.g. "f(x)")
@@ -2847,6 +3058,7 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "vectorfield2d" | "vector_field_2d" | "vf2d" => "VectorField2D",
             "phaseportrait" | "phase_portrait" | "phase" => "PhasePortrait",
             "contour" | "contourlines" | "contour_lines" => "Contour",
+            "function" | "func" => "Function",
             "piecewise" | "pw" => "Piecewise",
             "distance" | "dist" => "Distance",
             "angle" => "Angle",
@@ -3061,7 +3273,7 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
         "Solve" => {
             let expr_raw = expand_all_cas(cmd.args.first()?, document);
             let mut expr_clean = expr_raw.trim().to_string();
-            if let Some((lhs, rhs)) = expr_clean.split_once('=') {
+            if let Some((lhs, rhs)) = split_on_standalone_eq(&expr_clean) {
                 expr_clean = format!("({}) - ({})", lhs, rhs);
             }
             let var = cmd
@@ -3453,7 +3665,8 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
         .replace("x²", "x^2")
         .replace("√", "sqrt")
         .replace("|x|", "abs(x)")
-        .replace("π", "3.14159265359")
+        .replace("π", "pi")
+        .replace("τ", "tau")
         .replace("÷", "/")
         .replace("×", "*")
         .replace("≤", "<=")
@@ -3465,7 +3678,7 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
     let text_with_implicit = insert_implicit_multiplication(&text);
     let text = text_with_implicit.as_str();
 
-    if let Some((name, rest)) = text.split_once('=') {
+    if let Some((name, rest)) = split_on_standalone_eq(text) {
         let name = name.trim();
         let rest = rest.trim();
         if is_function_lhs(name)

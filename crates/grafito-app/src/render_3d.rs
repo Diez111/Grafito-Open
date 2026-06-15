@@ -147,7 +147,14 @@ impl GrafitoApp {
         }
     }
 
-    pub fn draw_3d_grid(&self, painter: &egui::Painter, canvas: Rect, w: f32, h: f32) {
+    pub fn draw_3d_grid(
+        &self,
+        painter: &egui::Painter,
+        canvas: Rect,
+        w: f32,
+        h: f32,
+        overlay_only: bool,
+    ) {
         let origin = canvas.min;
 
         // Dynamic step calculation based on camera distance
@@ -194,7 +201,7 @@ impl GrafitoApp {
         let line_count_x = ((end_x - start_x) / major_step).round() as i64;
         let line_count_z = ((end_z - start_z) / major_step).round() as i64;
 
-        if self.show_grid && line_count_x <= 200 && line_count_z <= 200 {
+        if self.show_grid && line_count_x <= 2000 && line_count_z <= 2000 {
             // Draw grid lines parallel to Z axis (varying z, fixed x)
             for xi in 0..=line_count_x {
                 let x = start_x + xi as f64 * major_step;
@@ -202,10 +209,12 @@ impl GrafitoApp {
                 let p1 = Point3D::new(x, 0.0, start_z);
                 let p2 = Point3D::new(x, 0.0, end_z);
                 if let Some((a, b)) = project_segment(&self.camera, &p1, &p2, w, h) {
-                    painter.line_segment(
-                        [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                        stroke,
-                    );
+                    if !overlay_only {
+                        painter.line_segment(
+                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                            stroke,
+                        );
+                    }
                 }
             }
 
@@ -216,10 +225,12 @@ impl GrafitoApp {
                 let p1 = Point3D::new(start_x, 0.0, z);
                 let p2 = Point3D::new(end_x, 0.0, z);
                 if let Some((a, b)) = project_segment(&self.camera, &p1, &p2, w, h) {
-                    painter.line_segment(
-                        [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                        stroke,
-                    );
+                    if !overlay_only {
+                        painter.line_segment(
+                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                            stroke,
+                        );
+                    }
                 }
             }
         }
@@ -238,10 +249,12 @@ impl GrafitoApp {
             w,
             h,
         ) {
-            painter.line_segment(
-                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                red_stroke,
-            );
+            if !overlay_only {
+                painter.line_segment(
+                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                    red_stroke,
+                );
+            }
         }
         // Y Axis (vertical)
         if let Some((a, b)) = project_segment(
@@ -251,10 +264,12 @@ impl GrafitoApp {
             w,
             h,
         ) {
-            painter.line_segment(
-                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                green_stroke,
-            );
+            if !overlay_only {
+                painter.line_segment(
+                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                    green_stroke,
+                );
+            }
         }
         // Z Axis
         if let Some((a, b)) = project_segment(
@@ -264,10 +279,12 @@ impl GrafitoApp {
             w,
             h,
         ) {
-            painter.line_segment(
-                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                blue_stroke,
-            );
+            if !overlay_only {
+                painter.line_segment(
+                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                    blue_stroke,
+                );
+            }
         }
 
         // Axis labels
@@ -340,7 +357,7 @@ impl GrafitoApp {
         let end_x_num = ((center_x + view_range) / major_step).ceil() * major_step;
         let num_count_x = ((end_x_num - start_x_num) / major_step).round() as i64;
         let mut prev_screen_pos: Option<Vec2> = None;
-        if num_count_x <= 500 {
+        if num_count_x <= 2000 {
             for xi in 0..=num_count_x {
                 let x = start_x_num + xi as f64 * major_step;
                 if x.abs() < major_step * 1e-5 {
@@ -363,10 +380,12 @@ impl GrafitoApp {
                     w,
                     h,
                 ) {
-                    painter.line_segment(
-                        [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                        tick_stroke,
-                    );
+                    if !overlay_only {
+                        painter.line_segment(
+                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                            tick_stroke,
+                        );
+                    }
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(x, 0.0, 0.0), w, h) {
                     let sp = Vec2::new(pos.0, pos.1);
@@ -393,7 +412,7 @@ impl GrafitoApp {
         let end_y_num = ((center_y + view_range) / major_step).ceil() * major_step;
         let num_count_y = ((end_y_num - start_y_num) / major_step).round() as i64;
         let mut prev_screen_pos: Option<Vec2> = None;
-        if num_count_y <= 500 {
+        if num_count_y <= 2000 {
             for yi in 0..=num_count_y {
                 let y = start_y_num + yi as f64 * major_step;
                 if y.abs() < major_step * 1e-5 {
@@ -416,10 +435,12 @@ impl GrafitoApp {
                     w,
                     h,
                 ) {
-                    painter.line_segment(
-                        [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                        tick_stroke,
-                    );
+                    if !overlay_only {
+                        painter.line_segment(
+                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                            tick_stroke,
+                        );
+                    }
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(0.0, y, 0.0), w, h) {
                     let sp = Vec2::new(pos.0, pos.1);
@@ -445,7 +466,7 @@ impl GrafitoApp {
         let end_z_num = ((center_z + view_range) / major_step).ceil() * major_step;
         let num_count_z = ((end_z_num - start_z_num) / major_step).round() as i64;
         let mut prev_screen_pos: Option<Vec2> = None;
-        if num_count_z <= 500 {
+        if num_count_z <= 2000 {
             for zi in 0..=num_count_z {
                 let z = start_z_num + zi as f64 * major_step;
                 if z.abs() < major_step * 1e-5 {
@@ -468,10 +489,12 @@ impl GrafitoApp {
                     w,
                     h,
                 ) {
-                    painter.line_segment(
-                        [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                        tick_stroke,
-                    );
+                    if !overlay_only {
+                        painter.line_segment(
+                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                            tick_stroke,
+                        );
+                    }
                 }
                 if let Some(pos) = self.camera.project(&Point3D::new(0.0, 0.0, z), w, h) {
                     let sp = Vec2::new(pos.0, pos.1);
@@ -504,7 +527,14 @@ impl GrafitoApp {
         }
     }
 
-    pub fn draw_3d_objects(&mut self, painter: &egui::Painter, canvas: Rect, w: f32, h: f32) {
+    pub fn draw_3d_objects(
+        &mut self,
+        painter: &egui::Painter,
+        canvas: Rect,
+        w: f32,
+        h: f32,
+        overlay_only: bool,
+    ) {
         let origin = canvas.min;
         let label_color = if self.dark_mode {
             Color32::WHITE
@@ -613,10 +643,12 @@ impl GrafitoApp {
                 }
                 GeoObject::Segment3D(l) => {
                     if let Some((a, b)) = project_segment(&self.camera, &l.a, &l.b, w, h) {
-                        painter.line_segment(
-                            [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                            Stroke::new(l.width, to_color32(l.color)),
-                        );
+                        if !overlay_only {
+                            painter.line_segment(
+                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                Stroke::new(l.width, to_color32(l.color)),
+                            );
+                        }
                         if !l.label.is_empty() {
                             let mid = (a.0 + b.0) * 0.5;
                             let mid_y = (a.1 + b.1) * 0.5;
@@ -658,13 +690,15 @@ impl GrafitoApp {
                                     grafito_render::calculate_lighting(s.color, normal, light_dir);
                                 let stroke = Stroke::new(s.width, to_color32(lit_color));
 
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(p1.0, p1.1),
-                                        origin + Vec2::new(p2.0, p2.1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(p1.0, p1.1),
+                                            origin + Vec2::new(p2.0, p2.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
@@ -716,13 +750,15 @@ impl GrafitoApp {
                             let lit_color =
                                 grafito_render::calculate_lighting(cube.color, normal, light_dir);
                             let stroke = Stroke::new(cube.width, to_color32(lit_color));
-                            painter.line_segment(
-                                [
-                                    origin + Vec2::new(pa.0, pa.1),
-                                    origin + Vec2::new(pb.0, pb.1),
-                                ],
-                                stroke,
-                            );
+                            if !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pa.0, pa.1),
+                                        origin + Vec2::new(pb.0, pb.1),
+                                    ],
+                                    stroke,
+                                );
+                            }
                         }
                     }
                     if !cube.label.is_empty() {
@@ -764,10 +800,12 @@ impl GrafitoApp {
                                 light_dir,
                             );
                             let stroke = Stroke::new(py.width, to_color32(lit_color));
-                            painter.line_segment(
-                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
-                                stroke,
-                            );
+                            if !overlay_only {
+                                painter.line_segment(
+                                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                    stroke,
+                                );
+                            }
                         }
                     }
 
@@ -789,10 +827,12 @@ impl GrafitoApp {
                                 light_dir,
                             );
                             let stroke = Stroke::new(py.width, to_color32(lit_color));
-                            painter.line_segment(
-                                [origin + Vec2::new(a.0, a.1), origin + Vec2::new(ap.0, ap.1)],
-                                stroke,
-                            );
+                            if !overlay_only {
+                                painter.line_segment(
+                                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(ap.0, ap.1)],
+                                    stroke,
+                                );
+                            }
                         }
                     }
 
@@ -830,13 +870,15 @@ impl GrafitoApp {
                         let lit_color =
                             grafito_render::calculate_lighting(cone.color, base_normal, light_dir);
                         let stroke = Stroke::new(cone.width, to_color32(lit_color));
-                        painter.line_segment(
-                            [
-                                origin + Vec2::new(base_pts[i].0, base_pts[i].1),
-                                origin + Vec2::new(base_pts[j].0, base_pts[j].1),
-                            ],
-                            stroke,
-                        );
+                        if !overlay_only {
+                            painter.line_segment(
+                                [
+                                    origin + Vec2::new(base_pts[i].0, base_pts[i].1),
+                                    origin + Vec2::new(base_pts[j].0, base_pts[j].1),
+                                ],
+                                stroke,
+                            );
+                        }
                     }
 
                     // Lines from base to apex (calculate lateral surface normal)
@@ -857,13 +899,15 @@ impl GrafitoApp {
                                     light_dir,
                                 );
                                 let stroke = Stroke::new(cone.width, to_color32(lit_color));
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(bp.0, bp.1),
-                                        origin + Vec2::new(ap.0, ap.1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(bp.0, bp.1),
+                                            origin + Vec2::new(ap.0, ap.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
@@ -907,13 +951,15 @@ impl GrafitoApp {
                             let lit_color =
                                 grafito_render::calculate_lighting(cyl.color, normal, light_dir);
                             let stroke = Stroke::new(cyl.width, to_color32(lit_color));
-                            painter.line_segment(
-                                [
-                                    origin + Vec2::new(pts[i].0, pts[i].1),
-                                    origin + Vec2::new(pts[j].0, pts[j].1),
-                                ],
-                                stroke,
-                            );
+                            if !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pts[i].0, pts[i].1),
+                                        origin + Vec2::new(pts[j].0, pts[j].1),
+                                    ],
+                                    stroke,
+                                );
+                            }
                         }
                     }
 
@@ -960,13 +1006,15 @@ impl GrafitoApp {
                                     light_dir,
                                 );
                                 let stroke = Stroke::new(cyl.width, to_color32(lit_color));
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(ca.0, ca.1),
-                                        origin + Vec2::new(cb.0, cb.1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(ca.0, ca.1),
+                                            origin + Vec2::new(cb.0, cb.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1015,22 +1063,26 @@ impl GrafitoApp {
                     for i in 0..steps_u {
                         for j in 0..steps_v {
                             if valid[i][j] && valid[i + 1][j] {
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                        origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                            origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                             if valid[i][j] && valid[i][j + 1] {
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                        origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                            origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1059,26 +1111,30 @@ impl GrafitoApp {
                     for i in 0..steps_u {
                         for j in 0..=steps_v {
                             if valid[i][j] && valid[i + 1][j] {
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                        origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                            origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
                     for i in 0..=steps_u {
                         for j in 0..steps_v {
                             if valid[i][j] && valid[i][j + 1] {
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                        origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                            origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                         }
                     }
@@ -1260,13 +1316,15 @@ impl GrafitoApp {
                                             self.camera.project(&Point3D::new(x, z, y), w, h)
                                         {
                                             if let Some(pp) = prev {
-                                                painter.line_segment(
-                                                    [
-                                                        origin + Vec2::new(pp.0, pp.1),
-                                                        origin + Vec2::new(pt.0, pt.1),
-                                                    ],
-                                                    stroke,
-                                                );
+                                                if !overlay_only {
+                                                    painter.line_segment(
+                                                        [
+                                                            origin + Vec2::new(pp.0, pp.1),
+                                                            origin + Vec2::new(pt.0, pt.1),
+                                                        ],
+                                                        stroke,
+                                                    );
+                                                }
                                             }
                                             prev = Some(pt);
                                             continue;
@@ -1304,13 +1362,15 @@ impl GrafitoApp {
                                             self.camera.project(&Point3D::new(x, z, y), w, h)
                                         {
                                             if let Some(pp) = prev {
-                                                painter.line_segment(
-                                                    [
-                                                        origin + Vec2::new(pp.0, pp.1),
-                                                        origin + Vec2::new(pt.0, pt.1),
-                                                    ],
-                                                    stroke,
-                                                );
+                                                if !overlay_only {
+                                                    painter.line_segment(
+                                                        [
+                                                            origin + Vec2::new(pp.0, pp.1),
+                                                            origin + Vec2::new(pt.0, pt.1),
+                                                        ],
+                                                        stroke,
+                                                    );
+                                                }
                                             }
                                             prev = Some(pt);
                                             continue;
@@ -1358,13 +1418,15 @@ impl GrafitoApp {
                         {
                             if let Some(pt) = self.camera.project(&Point3D::new(*x, *z, *y), w, h) {
                                 if let Some(pp) = prev {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pp.0, pp.1),
-                                            origin + Vec2::new(pt.0, pt.1),
-                                        ],
-                                        stroke,
-                                    );
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(pp.0, pp.1),
+                                                origin + Vec2::new(pt.0, pt.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
                                 }
                                 prev = Some(pt);
                                 continue;
@@ -1547,13 +1609,15 @@ impl GrafitoApp {
                         let scaled_pt = Point3D::new(pt.x * 0.2, pt.y * 0.2, pt.z * 0.2);
                         if let Some(sp) = self.camera.project(&scaled_pt, w, h) {
                             if let Some(pp) = prev {
-                                painter.line_segment(
-                                    [
-                                        origin + Vec2::new(pp.0, pp.1),
-                                        origin + Vec2::new(sp.0, sp.1),
-                                    ],
-                                    stroke,
-                                );
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pp.0, pp.1),
+                                            origin + Vec2::new(sp.0, sp.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
                             }
                             prev = Some(sp);
                         } else {
@@ -1631,13 +1695,15 @@ impl GrafitoApp {
                                     self.camera.project(&projected[a], w, h),
                                     self.camera.project(&projected[b], w, h),
                                 ) {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pa.0, pa.1),
-                                            origin + Vec2::new(pb.0, pb.1),
-                                        ],
-                                        stroke,
-                                    );
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(pa.0, pa.1),
+                                                origin + Vec2::new(pb.0, pb.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
                                 }
                             }
                             if !hs.label.is_empty() {
@@ -1692,13 +1758,15 @@ impl GrafitoApp {
                                 for pt in ring {
                                     if let Some(sp) = self.camera.project(pt, w, h) {
                                         if let Some(pp) = prev {
-                                            painter.line_segment(
-                                                [
-                                                    origin + Vec2::new(pp.0, pp.1),
-                                                    origin + Vec2::new(sp.0, sp.1),
-                                                ],
-                                                stroke,
-                                            );
+                                            if !overlay_only {
+                                                painter.line_segment(
+                                                    [
+                                                        origin + Vec2::new(pp.0, pp.1),
+                                                        origin + Vec2::new(sp.0, sp.1),
+                                                    ],
+                                                    stroke,
+                                                );
+                                            }
                                         }
                                         prev = Some(sp);
                                     } else {
@@ -1712,13 +1780,15 @@ impl GrafitoApp {
                                     if let Some(pt) = ring.get(j) {
                                         if let Some(sp) = self.camera.project(pt, w, h) {
                                             if let Some(pp) = prev {
-                                                painter.line_segment(
-                                                    [
-                                                        origin + Vec2::new(pp.0, pp.1),
-                                                        origin + Vec2::new(sp.0, sp.1),
-                                                    ],
-                                                    stroke,
-                                                );
+                                                if !overlay_only {
+                                                    painter.line_segment(
+                                                        [
+                                                            origin + Vec2::new(pp.0, pp.1),
+                                                            origin + Vec2::new(sp.0, sp.1),
+                                                        ],
+                                                        stroke,
+                                                    );
+                                                }
                                             }
                                             prev = Some(sp);
                                         } else {
@@ -1774,13 +1844,15 @@ impl GrafitoApp {
                                     self.camera.project(&start, w, h),
                                     self.camera.project(&end, w, h),
                                 ) {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pa.0, pa.1),
-                                            origin + Vec2::new(pb.0, pb.1),
-                                        ],
-                                        stroke,
-                                    );
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(pa.0, pa.1),
+                                                origin + Vec2::new(pb.0, pb.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
                                 }
                             }
                         }

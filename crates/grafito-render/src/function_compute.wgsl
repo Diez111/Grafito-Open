@@ -14,8 +14,7 @@ struct FunctionParams {
     x_min: f32,
     x_max: f32,
     n: u32,
-    // padding to 16-byte alignment
-    _pad: u32,
+    code_len: u32,
 };
 
 @group(0) @binding(0)
@@ -59,7 +58,7 @@ fn eval_bytecode(x: f32) -> f32 {
     var stack: array<f32, STACK_SIZE>;
     var sp: i32 = 0;
 
-    let len = arrayLength(&bytecode);
+    let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
@@ -96,7 +95,8 @@ fn eval_bytecode(x: f32) -> f32 {
                 if abs(denom) > 1e-10 {
                     stack[sp] = stack[sp] / denom;
                 } else {
-                    stack[sp] = 0.0;
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
                 }
                 sp = sp + 1;
             }
@@ -205,11 +205,11 @@ fn eval_bytecode(x: f32) -> f32 {
 
 @compute @workgroup_size(64)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x > params.n {
+    if gid.x >= params.n {
         return;
     }
 
-    let n = f32(params.n);
+    let n = f32(params.n - 1u);
     let x = params.x_min + f32(gid.x) * (params.x_max - params.x_min) / n;
     values[gid.x] = eval_bytecode(x);
 }

@@ -223,13 +223,13 @@ struct GridParamsUniform {
     y_min: f32,
     y_max: f32,
     grid_size: u32,
+    code_len: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 impl ImplicitComputePipeline {
-    pub fn new(device: &wgpu::Device, max_grid: usize) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, max_grid: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Implicit Curve Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("implicit_compute.wgsl").into()),
@@ -311,6 +311,11 @@ impl ImplicitComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(
+            &bytecode_buffer,
+            0,
+            &[0u8; 4096 * std::mem::size_of::<u32>()],
+        );
 
         let constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Implicit Compute Constants"),
@@ -364,8 +369,9 @@ impl ImplicitComputePipeline {
             grafito_geometry::expr::prepare_function_ast(&ic.expr_rhs, variables, &["x", "y"])
                 .ok()?;
 
-        // Build lhs - rhs.
-        let combined = grafito_geometry::ast::Expr::Sub(Box::new(lhs_ast), Box::new(rhs_ast));
+        // Build lhs - rhs and simplify (e.g., eliminate "x - 0" → "x")
+        let combined =
+            grafito_geometry::ast::Expr::Sub(Box::new(lhs_ast), Box::new(rhs_ast)).simplify();
 
         let mut prog = BytecodeProgram::default();
         compile_expr(&combined, variables, &mut prog).ok()?;
@@ -380,10 +386,10 @@ impl ImplicitComputePipeline {
             x_max: x_max as f32,
             y_min: y_min as f32,
             y_max: y_max as f32,
-            grid_size: grid_size as u32,
+            grid_size: (grid_size + 1) as u32,
+            code_len: prog.code.len() as u32,
             _pad0: 0,
             _pad1: 0,
-            _pad2: 0,
         };
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
@@ -427,7 +433,7 @@ impl ImplicitComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg = (grid_size as u32).div_ceil(16).max(1);
+            let wg = (grid_size as u32 + 1).div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg, wg, 1);
         }
         encoder.copy_buffer_to_buffer(

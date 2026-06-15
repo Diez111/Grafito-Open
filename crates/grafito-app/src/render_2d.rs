@@ -516,7 +516,12 @@ impl GrafitoApp {
         );
     }
 
-    pub(crate) fn draw_objects(&mut self, painter: &egui::Painter, canvas_rect: Rect) {
+    pub(crate) fn draw_objects(
+        &mut self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        overlay_only: bool,
+    ) {
         // Pre-compute (or reuse cached) implicit-curve geometry before the
         // immutable draw pass. The cache lives inside each ImplicitCurveObj and
         // is invalidated only when expression, view bounds or variables change.
@@ -573,7 +578,7 @@ impl GrafitoApp {
             ) {
                 continue;
             }
-            self.draw_object(painter, canvas_rect, obj);
+            self.draw_object_styled(painter, canvas_rect, obj, None, overlay_only);
         }
 
         if let Some(preview) = &self.preview_object {
@@ -592,7 +597,7 @@ impl GrafitoApp {
                 },
                 ..Default::default()
             };
-            self.draw_object_styled(painter, canvas_rect, preview, Some(style));
+            self.draw_object_styled(painter, canvas_rect, preview, Some(style), false);
         }
     }
 
@@ -638,12 +643,12 @@ impl GrafitoApp {
                 }
                 _ => {}
             }
-            self.draw_object_styled(painter, canvas_rect, ghost, Some(style));
+            self.draw_object_styled(painter, canvas_rect, ghost, Some(style), false);
         }
     }
 
     pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
-        self.draw_object_styled(painter, canvas_rect, obj, None);
+        self.draw_object_styled(painter, canvas_rect, obj, None, false);
     }
 
     pub(crate) fn draw_object_styled(
@@ -652,6 +657,7 @@ impl GrafitoApp {
         canvas_rect: Rect,
         obj: &GeoObject,
         style: Option<StyleOverride>,
+        overlay_only: bool,
     ) {
         let view = self.document.view();
         let label_color = if self.dark_mode {
@@ -715,11 +721,13 @@ impl GrafitoApp {
                     let b = view.world_to_screen(clip_end);
                     let pa = canvas_rect.min + Vec2::new(a.x, a.y);
                     let pb = canvas_rect.min + Vec2::new(b.x, b.y);
-                    painter.line_segment([pa, pb], stroke);
+                    if !overlay_only {
+                        painter.line_segment([pa, pb], stroke);
+                    }
 
                     // Arrowhead for vectors at the forward (t=1) end.
                     let is_vector = label == "v";
-                    if is_vector {
+                    if is_vector && !overlay_only {
                         Self::draw_arrowhead(painter, pa, pb, width, to_color32(color));
                     }
                 }
@@ -751,10 +759,12 @@ impl GrafitoApp {
                 let fill_color = get_fill_color(c.fill_color, style);
                 let label = get_label(&c.label, style);
                 let stroke = Stroke::new(width, to_color32(color));
-                if let Some(fill) = fill_color {
-                    painter.circle_filled(pos, radius, to_color32(fill));
+                if !overlay_only {
+                    if let Some(fill) = fill_color {
+                        painter.circle_filled(pos, radius, to_color32(fill));
+                    }
+                    painter.circle_stroke(pos, radius, stroke);
                 }
-                painter.circle_stroke(pos, radius, stroke);
                 if !label.is_empty() {
                     painter.text(
                         pos + Vec2::new(radius + 2.0, -radius - 2.0),
@@ -787,10 +797,12 @@ impl GrafitoApp {
                 let label = get_label(&poly.label, style);
                 let stroke = Stroke::new(width, to_color32(color));
                 let fill = fill_color.map(to_color32).unwrap_or(Color32::TRANSPARENT);
+                if !overlay_only {
+                    painter.add(Shape::convex_polygon(points.clone(), fill, stroke));
+                }
                 if !label.is_empty() {
                     let cx: f32 = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
                     let cy: f32 = points.iter().map(|p| p.y).sum::<f32>() / points.len() as f32;
-                    painter.add(Shape::convex_polygon(points, fill, stroke));
                     painter.text(
                         Pos2::new(cx, cy),
                         egui::Align2::CENTER_CENTER,
@@ -798,8 +810,6 @@ impl GrafitoApp {
                         egui::FontId::proportional(12.0),
                         label_color,
                     );
-                } else {
-                    painter.add(Shape::convex_polygon(points, fill, stroke));
                 }
             }
             GeoObject::Function(fun) => {

@@ -33,14 +33,14 @@ fn snap_world_to_grid(world: Point2, scale: f64) -> Point2 {
 }
 
 impl GrafitoApp {
-    fn handle_canvas_primary_click(&mut self, world: Point2) {
+    fn handle_canvas_primary_click(&mut self, world: Point2, time: f64) {
         if !matches!(self.pending_action, PendingAction::None) {
             let tolerance = 10.0 / self.document.view().scale;
             if let Some(id) = self.document.pick_object(world, tolerance) {
                 self.document.clear_selection();
                 self.document.select(id);
                 self.selected_object = Some(id);
-                self.handle_pending_object_click(id);
+                self.handle_pending_object_click(id, time);
             }
             return;
         }
@@ -95,25 +95,29 @@ impl GrafitoApp {
             Tool::Point3D | Tool::Sphere3D | Tool::Cube3D => {}
             Tool::Attractor => {
                 let mut cmd = "Lorenz[]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::Fractal => {
                 let mut cmd = "Mandelbrot[]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::Histogram => {
                 let mut cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::ScatterPlot => {
                 let mut cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
@@ -126,7 +130,8 @@ impl GrafitoApp {
                         "Tangent[({:.2}, {:.2}), 1, ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
-                    commands::process_input(&mut self.document, &mut cmd);
+                    let outcome = commands::process_input(&mut self.document, &mut cmd);
+                    self.handle_command_outcome(outcome, time, &cmd);
                     self.pending_points.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
@@ -141,7 +146,8 @@ impl GrafitoApp {
                         "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
-                    commands::process_input(&mut self.document, &mut cmd);
+                    let outcome = commands::process_input(&mut self.document, &mut cmd);
+                    self.handle_command_outcome(outcome, time, &cmd);
                     self.pending_points.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
@@ -149,19 +155,22 @@ impl GrafitoApp {
             }
             Tool::DomainColoring => {
                 let mut cmd = "DomainColoring[z^2 + 1, -3, 3, -3, 3, 200]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::HeatMap => {
                 let mut cmd = "HeatMap[x^2 + y^2, -5, 5, -5, 5, 150]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::ComplexGrid => {
                 let mut cmd = "ComplexGrid[sin(z), -3, 3, -3, 3]".to_string();
-                commands::process_input(&mut self.document, &mut cmd);
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
@@ -406,7 +415,7 @@ impl GrafitoApp {
                 } else {
                     world
                 };
-                self.handle_canvas_primary_click(world);
+                self.handle_canvas_primary_click(world, ui.ctx().input(|i| i.time));
             }
         }
 

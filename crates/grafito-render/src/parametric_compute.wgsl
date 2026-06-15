@@ -23,9 +23,9 @@ struct Params {
     x_max: f32,
     y_min: f32,
     y_max: f32,
+    code_len: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 @group(0) @binding(0)
@@ -75,7 +75,7 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
     var stack: array<f32, STACK_SIZE>;
     var sp: i32 = 0;
 
-    let len = arrayLength(&bytecode);
+    let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
@@ -115,7 +115,8 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
                 if abs(denom) > 1e-10 {
                     stack[sp] = stack[sp] / denom;
                 } else {
-                    stack[sp] = 0.0;
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
                 }
                 sp = sp + 1;
             }
@@ -233,11 +234,11 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if params.mode == 3u {
         // Surface mode: 2D grid over (x, y).
-        if gid.x > params.n || gid.y > params.m {
+        if gid.x >= params.n || gid.y >= params.m {
             return;
         }
-        let nx = f32(params.n);
-        let ny = f32(params.m);
+        let nx = f32(params.n - 1u);
+        let ny = f32(params.m - 1u);
         let x = params.x_min + f32(gid.x) * (params.x_max - params.x_min) / nx;
         let y = params.y_min + f32(gid.y) * (params.y_max - params.y_min) / ny;
         let z = eval_bytecode(x, y).v2;
@@ -247,10 +248,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Curve modes: 1D dispatch over t.
-    if gid.x > params.n {
+    if gid.x >= params.n {
         return;
     }
-    let n = f32(params.n);
+    let n = f32(params.n - 1u);
     let t = params.t_min + f32(gid.x) * (params.t_max - params.t_min) / n;
     let r = eval_bytecode(t, 0.0);
 

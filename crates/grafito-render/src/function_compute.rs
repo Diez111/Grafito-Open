@@ -56,11 +56,11 @@ struct FunctionParamsUniform {
     x_min: f32,
     x_max: f32,
     n: u32,
-    _pad: u32,
+    code_len: u32,
 }
 
 impl FunctionComputePipeline {
-    pub fn new(device: &wgpu::Device, max_grid: usize) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, max_grid: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Function Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("function_compute.wgsl").into()),
@@ -142,6 +142,11 @@ impl FunctionComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(
+            &bytecode_buffer,
+            0,
+            &[0u8; 4096 * std::mem::size_of::<u32>()],
+        );
 
         let constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Function Compute Constants"),
@@ -201,8 +206,8 @@ impl FunctionComputePipeline {
         let params = FunctionParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,
-            n: grid_size as u32,
-            _pad: 0,
+            n: (grid_size + 1) as u32,
+            code_len: prog.code.len() as u32,
         };
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
@@ -333,6 +338,10 @@ pub fn maybe_compute_function_on_gpu(
     grid_size: usize,
     variables: &HashMap<String, f64>,
 ) -> bool {
+    if fun.is_integral {
+        // Integral functions need adaptive quadrature; GPU only evaluates the integrand.
+        return false;
+    }
     let padded_domain = function_sampling::padded_snapped_domain(domain, 2.0, 64);
     let key = function_sampling::cache_key(fun, padded_domain, grid_size, variables);
 

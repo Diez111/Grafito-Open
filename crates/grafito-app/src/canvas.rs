@@ -29,7 +29,7 @@ pub struct Cache3DKey {
 }
 
 pub struct GpuCanvasResources {
-    pub renderer: Arc<RwLock<Renderer>>,
+    pub renderer: Arc<RwLock<Option<Renderer>>>,
     pub buffers_2d: Option<PersistentBuffers>,
     pub buffers_3d: Option<PersistentBuffers>,
     pub cache_2d: Option<Cache2DKey>,
@@ -78,9 +78,12 @@ impl CallbackTrait for CanvasCallback {
         }
 
         let (vertices, indices) = {
-            let Ok(renderer) = resources.renderer.read() else {
+            let Ok(renderer_lock) = resources.renderer.read() else {
                 log::warn!("Renderer lock poisoned in prepare (2D)");
                 return vec![];
+            };
+            let Some(renderer) = renderer_lock.as_ref() else {
+                return vec![]; // Still compiling in background
             };
 
             let sw = self.document.view().screen_size.x;
@@ -130,10 +133,15 @@ impl CallbackTrait for CanvasCallback {
                         }
                         grafito_core::GeoObject::Function(fun) => {
                             if let Some(compute) = function_comp {
-                                let domain = (
+                                let min_x = self.document.resolve_expr(
+                                    &fun.domain_min_expr,
                                     fun.domain_min.unwrap_or(world_tl.x),
+                                );
+                                let max_x = self.document.resolve_expr(
+                                    &fun.domain_max_expr,
                                     fun.domain_max.unwrap_or(world_br.x),
                                 );
+                                let domain = (min_x, max_x);
                                 let _ =
                                     grafito_render::function_compute::maybe_compute_function_on_gpu(
                                         compute,
@@ -215,7 +223,7 @@ impl CallbackTrait for CanvasCallback {
 
             #[cfg(feature = "profile")]
             puffin::profile_scope!("geometry_build");
-            renderer.build_geometry(&self.document, self.dark_mode)
+            renderer.build_geometry(&self.document, self.dark_mode, false)
         };
 
         log::debug!(
@@ -241,6 +249,10 @@ impl CallbackTrait for CanvasCallback {
         let index_data = bytemuck::cast_slice(&indices);
         let vertex_size = vertex_data.len();
         let index_size = index_data.len();
+
+        let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Canvas Callback Encoder"),
+        });
 
         let buffers = resources.buffers_2d.get_or_insert_with(|| {
             let vb = device.create_buffer(&wgpu::BufferDescriptor {
@@ -291,7 +303,7 @@ impl CallbackTrait for CanvasCallback {
         buffers.index_count = indices.len() as u32;
 
         resources.cache_2d = Some(current_key);
-        vec![]
+        vec![encoder.finish()]
     }
 
     fn paint(
@@ -314,18 +326,17 @@ impl CallbackTrait for CanvasCallback {
             return;
         }
 
-        let Ok(renderer) = resources.renderer.read() else {
-            return;
-        };
-
-        // egui-wgpu already sets the viewport/scissor to the PaintCallback rect
-        // before invoking this callback, so we render directly into that region.
-        log::debug!("CanvasCallback paint: index_count={}", buffers.index_count);
-        render_pass.set_pipeline(&renderer.pipeline);
-        render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+        if let Ok(renderer_lock) = resources.renderer.read() {
+            if let Some(renderer) = renderer_lock.as_ref() {
+                log::debug!("CanvasCallback paint: index_count={}", buffers.index_count);
+                render_pass.set_pipeline(&renderer.pipeline);
+                render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            }
+        }
     }
 }
 
@@ -368,9 +379,12 @@ impl CallbackTrait for Canvas3DCallback {
         }
 
         let (vertices, indices) = {
-            let Ok(renderer) = resources.renderer.read() else {
+            let Ok(renderer_lock) = resources.renderer.read() else {
                 log::warn!("Renderer lock poisoned in prepare (3D)");
                 return vec![];
+            };
+            let Some(renderer) = renderer_lock.as_ref() else {
+                return vec![]; // Still compiling in background
             };
 
             let mvp =
@@ -385,6 +399,42 @@ impl CallbackTrait for Canvas3DCallback {
             );
 
             #[cfg(feature = "profile")]
+            puffin::profile_scope!("gpu_compute_3d");
+            let parametric_comp = renderer.parametric_compute.as_ref();
+            for (_, obj) in self.document.objects_iter() {
+                match obj {
+                    grafito_core::GeoObject::ParametricCurve3D(pc) => {
+                        if let Some(compute) = parametric_comp {
+                            let _ =
+                                grafito_render::parametric_compute::maybe_compute_curve_3d_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    pc,
+                                    4000,
+                                    &self.document.variables,
+                                );
+                        }
+                    }
+                    grafito_core::GeoObject::Surface3D(su) => {
+                        if let Some(compute) = parametric_comp {
+                            let res = su.mesh_res.min(128);
+                            let _ =
+                                grafito_render::parametric_compute::maybe_compute_surface_on_gpu(
+                                    compute,
+                                    device,
+                                    queue,
+                                    su,
+                                    res,
+                                    &self.document.variables,
+                                );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            #[cfg(feature = "profile")]
             puffin::profile_scope!("geometry_build_3d");
             renderer.build_3d_geometry(
                 &self.document,
@@ -392,6 +442,7 @@ impl CallbackTrait for Canvas3DCallback {
                 self.dark_mode,
                 self.screen_w,
                 self.screen_h,
+                false,
             )
         };
 
@@ -491,7 +542,10 @@ impl CallbackTrait for Canvas3DCallback {
             return;
         }
 
-        let Ok(renderer) = resources.renderer.read() else {
+        let Ok(renderer_lock) = resources.renderer.read() else {
+            return;
+        };
+        let Some(renderer) = renderer_lock.as_ref() else {
             return;
         };
 

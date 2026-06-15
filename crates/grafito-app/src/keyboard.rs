@@ -331,11 +331,13 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 );
                                 if resp.clicked() {
                                     app.save_state();
-                                    app.cas_result = commands::process_input(
+                                    let input_was = app.input_text.clone();
+                                    let outcome = commands::process_input(
                                         &mut app.document,
                                         &mut app.input_text,
-                                    )
-                                    .unwrap_or_default();
+                                    );
+                                    let time = ui.ctx().input(|i| i.time);
+                                    app.handle_command_outcome(outcome, time, &input_was);
                                 }
                             }
                         });

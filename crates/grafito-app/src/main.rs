@@ -1,4 +1,4 @@
-//! Grafito Desktop Application — Main entry point
+//! Aplicación de escritorio Grafito — Punto de entrada principal
 
 #![allow(
     clippy::needless_range_loop,

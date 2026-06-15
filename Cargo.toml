@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Workspace-level release smoke tests for Grafito"
+description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
 members = ["crates/grafito-app", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-render", "crates/grafito-ui"]

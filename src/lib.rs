@@ -1,4 +1,4 @@
-//! Workspace-level release tests for Grafito.
+//! Pruebas de release a nivel workspace para Grafito.
 //!
-//! This crate exists only to host integration tests that exercise the
-//! release binary across the workspace.
+//! Este crate existe únicamente para alojar tests de integración que ejercitan
+//! el binario de release a través del workspace.

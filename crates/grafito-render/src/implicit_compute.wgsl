@@ -16,10 +16,9 @@ struct GridParams {
     y_min: f32,
     y_max: f32,
     grid_size: u32,
-    // padding to 16-byte alignment
+    code_len: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 @group(0) @binding(0)
@@ -63,7 +62,7 @@ fn eval_bytecode(x: f32, y: f32) -> f32 {
     var stack: array<f32, STACK_SIZE>;
     var sp: i32 = 0;
 
-    let len = arrayLength(&bytecode);
+    let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
@@ -103,7 +102,8 @@ fn eval_bytecode(x: f32, y: f32) -> f32 {
                 if abs(denom) > 1e-10 {
                     stack[sp] = stack[sp] / denom;
                 } else {
-                    stack[sp] = 0.0;
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
                 }
                 sp = sp + 1;
             }
@@ -213,14 +213,14 @@ fn eval_bytecode(x: f32, y: f32) -> f32 {
 
 @compute @workgroup_size(16, 16)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x > params.grid_size || gid.y > params.grid_size {
+    if gid.x >= params.grid_size || gid.y >= params.grid_size {
         return;
     }
 
-    let gs = f32(params.grid_size);
+    let gs = f32(params.grid_size - 1u);
     let x = params.x_min + f32(gid.x) * (params.x_max - params.x_min) / gs;
     let y = params.y_min + f32(gid.y) * (params.y_max - params.y_min) / gs;
 
-    let idx = gid.y * (params.grid_size + 1u) + gid.x;
+    let idx = gid.y * params.grid_size + gid.x;
     values[idx] = eval_bytecode(x, y);
 }

@@ -45,11 +45,17 @@ struct ParametricParamsUniform {
     x_max: f32,
     y_min: f32,
     y_max: f32,
-    _pad: [u32; 3],
+    code_len: u32,
+    _pad: [u32; 2],
 }
 
 impl ParametricComputePipeline {
-    pub fn new(device: &wgpu::Device, max_curve_samples: usize, max_surface_res: usize) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        max_curve_samples: usize,
+        max_surface_res: usize,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Parametric Compute Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("parametric_compute.wgsl").into()),
@@ -133,6 +139,11 @@ impl ParametricComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        queue.write_buffer(
+            &bytecode_buffer,
+            0,
+            &[0u8; 4096 * std::mem::size_of::<u32>()],
+        );
 
         let constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Parametric Compute Constants"),
@@ -219,11 +230,11 @@ impl ParametricComputePipeline {
             cpass.set_bind_group(0, &bind_group, &[]);
 
             if params.mode == 3 {
-                let wg = (params.n + 1).div_ceil(16).max(1);
-                let wg_y = (params.m + 1).div_ceil(16).max(1);
+                let wg = params.n.div_ceil(16).max(1);
+                let wg_y = params.m.div_ceil(16).max(1);
                 cpass.dispatch_workgroups(wg, wg_y, 1);
             } else {
-                let wg = (params.n + 1).div_ceil(64).max(1);
+                let wg = params.n.div_ceil(64).max(1);
                 cpass.dispatch_workgroups(wg, 1, 1);
             }
         }
@@ -300,7 +311,7 @@ impl ParametricComputePipeline {
 
         let params = ParametricParamsUniform {
             mode: 0,
-            n: steps as u32,
+            n: (steps + 1) as u32,
             m: 0,
             t_min: t_min as f32,
             t_max: t_max as f32,
@@ -308,7 +319,8 @@ impl ParametricComputePipeline {
             x_max: 0.0,
             y_min: 0.0,
             y_max: 0.0,
-            _pad: [0; 3],
+            code_len: prog.code.len() as u32,
+            _pad: [0; 2],
         };
 
         let output_count = (steps + 1) * 2;
@@ -357,7 +369,7 @@ impl ParametricComputePipeline {
 
         let params = ParametricParamsUniform {
             mode: 1,
-            n: steps as u32,
+            n: (steps + 1) as u32,
             m: 0,
             t_min: t_min as f32,
             t_max: t_max as f32,
@@ -365,7 +377,8 @@ impl ParametricComputePipeline {
             x_max: 0.0,
             y_min: 0.0,
             y_max: 0.0,
-            _pad: [0; 3],
+            code_len: prog.code.len() as u32,
+            _pad: [0; 2],
         };
 
         let output_count = (steps + 1) * 3;
@@ -417,7 +430,7 @@ impl ParametricComputePipeline {
 
         let params = ParametricParamsUniform {
             mode: 2,
-            n: steps as u32,
+            n: (steps + 1) as u32,
             m: 0,
             t_min: t_min as f32,
             t_max: t_max as f32,
@@ -425,7 +438,8 @@ impl ParametricComputePipeline {
             x_max: 0.0,
             y_min: 0.0,
             y_max: 0.0,
-            _pad: [0; 3],
+            code_len: prog.code.len() as u32,
+            _pad: [0; 2],
         };
 
         let output_count = (steps + 1) * 2;
@@ -476,15 +490,16 @@ impl ParametricComputePipeline {
 
         let params = ParametricParamsUniform {
             mode: 3,
-            n: res as u32,
-            m: res as u32,
+            n: (res + 1) as u32,
+            m: (res + 1) as u32,
             t_min: 0.0,
             t_max: 0.0,
             x_min: x_min as f32,
             x_max: x_max as f32,
             y_min: y_min as f32,
             y_max: y_max as f32,
-            _pad: [0; 3],
+            code_len: prog.code.len() as u32,
+            _pad: [0; 2],
         };
 
         let output_count = (res + 1) * (res + 1);

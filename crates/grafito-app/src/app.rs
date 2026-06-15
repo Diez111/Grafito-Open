@@ -13,9 +13,43 @@ use grafito_core::{
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
 use grafito_ui::Tool;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use grafito_command::commands::{register_gpu_function_evaluator, GpuFunctionEvaluator};
+
 const MAX_UNDO: usize = 50;
+
+/// Evaluador GPU para la ruta híbrida de integrales definidas.
+struct AppGpuFunctionEvaluator {
+    renderer: Arc<RwLock<Option<grafito_render::Renderer>>>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+}
+
+impl GpuFunctionEvaluator for AppGpuFunctionEvaluator {
+    fn evaluate_function_batch(
+        &self,
+        expr: &str,
+        a: f64,
+        b: f64,
+        samples: usize,
+        variables: &std::collections::HashMap<String, f64>,
+    ) -> Option<Vec<f64>> {
+        let renderer_lock = self.renderer.read().ok()?;
+        let renderer = renderer_lock.as_ref()?;
+        let pipeline = renderer.function_compute.as_ref()?;
+        let grid_size = samples.saturating_sub(1).max(1);
+        pipeline.evaluate_expr(
+            &self.device,
+            &self.queue,
+            expr,
+            (a, b),
+            grid_size,
+            variables,
+        )
+    }
+}
 
 /// Pending interactive action that requires selecting objects on the canvas.
 #[derive(Debug, Clone, Default)]
@@ -144,18 +178,36 @@ pub struct GrafitoApp {
     pub last_interaction_time: Instant,
     pub is_view_changing: bool,
     pub pending_action: PendingAction,
+    pub toasts: grafito_ui::toast::ToastManager,
 }
 
 impl GrafitoApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         if let Some(render_state) = &cc.wgpu_render_state {
-            let renderer = grafito_render::Renderer::new(
-                &render_state.device,
-                render_state.target_format,
-                MSAA_SAMPLES as u32,
-            );
+            let renderer: Arc<RwLock<Option<grafito_render::Renderer>>> =
+                Arc::new(RwLock::new(None));
+            let renderer_clone = Arc::clone(&renderer);
+            let device_clone = Arc::clone(&render_state.device);
+            let queue_clone = Arc::clone(&render_state.queue);
+            let target_format = render_state.target_format;
+            let egui_ctx = cc.egui_ctx.clone();
+
+            std::thread::spawn(move || {
+                let new_renderer = grafito_render::Renderer::new(
+                    &device_clone,
+                    &queue_clone,
+                    target_format,
+                    crate::MSAA_SAMPLES as u32,
+                );
+                if let Ok(mut lock) = renderer_clone.write() {
+                    *lock = Some(new_renderer);
+                }
+                egui_ctx.request_repaint();
+                log::info!("Background shader compilation finished.");
+            });
+
             let resources = crate::canvas::GpuCanvasResources {
-                renderer: std::sync::Arc::new(std::sync::RwLock::new(renderer)),
+                renderer: Arc::clone(&renderer),
                 buffers_2d: None,
                 buffers_3d: None,
                 cache_2d: None,
@@ -166,6 +218,11 @@ impl GrafitoApp {
                 .write()
                 .callback_resources
                 .insert(resources);
+            register_gpu_function_evaluator(Box::new(AppGpuFunctionEvaluator {
+                renderer,
+                device: Arc::clone(&render_state.device),
+                queue: Arc::clone(&render_state.queue),
+            }));
         }
         let mut document = Document::new();
         document.set_view(ViewTransform::new(1280.0, 720.0));
@@ -253,6 +310,7 @@ impl GrafitoApp {
             last_interaction_time: Instant::now(),
             is_view_changing: false,
             pending_action: PendingAction::None,
+            toasts: grafito_ui::toast::ToastManager::default(),
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
@@ -274,6 +332,34 @@ impl GrafitoApp {
         self.redo_stack.clear();
         if self.undo_stack.len() > MAX_UNDO {
             self.undo_stack.remove(0);
+        }
+    }
+
+    pub(crate) fn handle_command_outcome(
+        &mut self,
+        outcome: grafito_command::commands::CommandOutcome,
+        time: f64,
+        input_was: &str,
+    ) {
+        match outcome {
+            grafito_command::commands::CommandOutcome::Ok => {}
+            grafito_command::commands::CommandOutcome::Message(msg) => {
+                self.cas_result = msg.clone();
+                if !msg.is_empty() {
+                    if self.cas_history.len() > 20 {
+                        self.cas_history.remove(0);
+                    }
+                    self.cas_history.push(format!("> {}\n  {}", input_was, msg));
+                }
+            }
+            grafito_command::commands::CommandOutcome::Error(msg) => {
+                self.cas_result = msg.clone();
+                self.toasts.push(
+                    format!("Error: {}", msg),
+                    grafito_ui::toast::ToastKind::Error,
+                    time,
+                );
+            }
         }
     }
 
@@ -529,7 +615,7 @@ impl GrafitoApp {
         Some(angle)
     }
 
-    pub(crate) fn handle_pending_object_click(&mut self, id: ObjectId) {
+    pub(crate) fn handle_pending_object_click(&mut self, id: ObjectId, time: f64) {
         use std::mem;
         let action = mem::take(&mut self.pending_action);
         match action {
@@ -794,7 +880,8 @@ impl GrafitoApp {
                     let cmd_name = action.boolean_cmd_name().unwrap_or("PolygonUnion");
                     let mut cmd = format!("{}[{}, {}]", cmd_name, first_label, second_label);
                     self.save_state();
-                    let _ = crate::commands::process_input(&mut self.document, &mut cmd);
+                    let outcome = crate::commands::process_input(&mut self.document, &mut cmd);
+                    self.handle_command_outcome(outcome, time, &cmd);
                 } else {
                     self.pending_action = action.with_boolean_first(id);
                     return;
@@ -1045,12 +1132,19 @@ impl eframe::App for GrafitoApp {
                                 },
                             );
                             ui.painter().add(egui::epaint::Shape::Callback(callback));
+
+                            // Overlay only: text, points, grid, axes drawn by CPU on top of GPU
+                            let mut painter = ui.painter().clone();
+                            painter.set_clip_rect(canvas_rect);
+                            self.draw_grid(&painter, canvas_rect);
+                            self.draw_axes(&painter, canvas_rect);
+                            self.draw_objects(&painter, canvas_rect, true);
                         } else {
                             let mut painter = ui.painter().clone();
                             painter.set_clip_rect(canvas_rect);
                             self.draw_grid(&painter, canvas_rect);
                             self.draw_axes(&painter, canvas_rect);
-                            self.draw_objects(&painter, canvas_rect);
+                            self.draw_objects(&painter, canvas_rect, false);
                         }
 
                         // Tool ghost and preview are transient overlays, render with CPU on top.
@@ -1107,9 +1201,13 @@ impl eframe::App for GrafitoApp {
                             },
                         );
                         ui.painter().add(egui::epaint::Shape::Callback(callback));
+
+                        // Overlay only: text, points, and labels drawn by CPU on top of GPU
+                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
+                        self.draw_3d_objects(ui.painter(), canvas_rect, w, h, true);
                     } else {
-                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h);
-                        self.draw_3d_objects(ui.painter(), canvas_rect, w, h);
+                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
+                        self.draw_3d_objects(ui.painter(), canvas_rect, w, h, false);
                     }
 
                     // Draw 3D tool ghost on top with CPU painter
@@ -1141,6 +1239,13 @@ impl eframe::App for GrafitoApp {
         }
 
         crate::ui::draw_color_picker(self, ctx);
+
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-12.0, -12.0))
+            .show(ctx, |ui| {
+                let time = ui.ctx().input(|i| i.time);
+                self.toasts.draw(ui, time);
+            });
     }
 }
 
@@ -1184,11 +1289,26 @@ pub fn run_app() -> Result<(), eframe::Error> {
         }
     }
 
+    let icon = {
+        let image_data = include_bytes!("../../../assets/grafito-icon-256x256.png");
+        let image = image::load_from_memory(image_data)
+            .expect("Failed to load icon")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        egui::IconData {
+            rgba: image.into_raw(),
+            width,
+            height,
+        }
+    };
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
             .with_decorations(true)
-            .with_transparent(false),
+            .with_transparent(false)
+            .with_app_id("grafito")
+            .with_icon(std::sync::Arc::new(icon)),
         multisampling: crate::MSAA_SAMPLES,
         ..Default::default()
     };

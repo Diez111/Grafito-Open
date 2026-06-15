@@ -79,6 +79,13 @@ pub enum Expr {
     Product(Box<Expr>, String, Box<Expr>, Box<Expr>),
     // Piecewise
     Piecewise(Vec<(Box<Expr>, Box<Expr>)>, Box<Expr>), // conditions+values, default
+    // Comparison / relational operators (evaluate to 0.0 or 1.0)
+    Lt(Box<Expr>, Box<Expr>),
+    Gt(Box<Expr>, Box<Expr>),
+    Le(Box<Expr>, Box<Expr>),
+    Ge(Box<Expr>, Box<Expr>),
+    Eq(Box<Expr>, Box<Expr>),
+    Ne(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -108,7 +115,13 @@ impl Expr {
             | Beta(a, b)
             | BesselJ(a, b)
             | BesselY(a, b)
-            | BesselI(a, b) => {
+            | BesselI(a, b)
+            | Lt(a, b)
+            | Gt(a, b)
+            | Le(a, b)
+            | Ge(a, b)
+            | Eq(a, b)
+            | Ne(a, b) => {
                 a.get_variables(vars);
                 b.get_variables(vars);
             }
@@ -496,6 +509,7 @@ impl Expr {
                     )),
                 )
             }
+            Lt(_, _) | Gt(_, _) | Le(_, _) | Ge(_, _) | Eq(_, _) | Ne(_, _) => Const(0.0),
             Piecewise(pieces, default) => Piecewise(
                 pieces
                     .iter()
@@ -542,6 +556,30 @@ impl Expr {
                 Box::new(b.substitute_vars(vars, ignore)),
             ),
             Pow(a, b) => Pow(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Lt(a, b) => Lt(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Gt(a, b) => Gt(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Le(a, b) => Le(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Ge(a, b) => Ge(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Eq(a, b) => Eq(
+                Box::new(a.substitute_vars(vars, ignore)),
+                Box::new(b.substitute_vars(vars, ignore)),
+            ),
+            Ne(a, b) => Ne(
                 Box::new(a.substitute_vars(vars, ignore)),
                 Box::new(b.substitute_vars(vars, ignore)),
             ),
@@ -786,6 +824,52 @@ impl Expr {
                 }
                 default.eval_2d(var1, val1, var2, val2)
             }
+            Lt(a, b) => {
+                if a.eval_2d(var1, val1, var2, val2) < b.eval_2d(var1, val1, var2, val2) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Gt(a, b) => {
+                if a.eval_2d(var1, val1, var2, val2) > b.eval_2d(var1, val1, var2, val2) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Le(a, b) => {
+                if a.eval_2d(var1, val1, var2, val2) <= b.eval_2d(var1, val1, var2, val2) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ge(a, b) => {
+                if a.eval_2d(var1, val1, var2, val2) >= b.eval_2d(var1, val1, var2, val2) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Eq(a, b) => {
+                if (a.eval_2d(var1, val1, var2, val2) - b.eval_2d(var1, val1, var2, val2)).abs()
+                    < 1e-12
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ne(a, b) => {
+                if (a.eval_2d(var1, val1, var2, val2) - b.eval_2d(var1, val1, var2, val2)).abs()
+                    < 1e-12
+                {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
         }
     }
 
@@ -945,6 +1029,64 @@ impl Expr {
                 n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
                 u.eval_3d(var1, val1, var2, val2, var3, val3),
             ),
+            Lt(a, b) => {
+                if a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    < b.eval_3d(var1, val1, var2, val2, var3, val3)
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Gt(a, b) => {
+                if a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    > b.eval_3d(var1, val1, var2, val2, var3, val3)
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Le(a, b) => {
+                if a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    <= b.eval_3d(var1, val1, var2, val2, var3, val3)
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ge(a, b) => {
+                if a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    >= b.eval_3d(var1, val1, var2, val2, var3, val3)
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Eq(a, b) => {
+                if (a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    - b.eval_3d(var1, val1, var2, val2, var3, val3))
+                .abs()
+                    < 1e-12
+                {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ne(a, b) => {
+                if (a.eval_3d(var1, val1, var2, val2, var3, val3)
+                    - b.eval_3d(var1, val1, var2, val2, var3, val3))
+                .abs()
+                    < 1e-12
+                {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
             Sum(_, _, _, _) => f64::NAN, // expanded by preprocess_expr before AST eval
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
@@ -1072,6 +1214,48 @@ impl Expr {
                 n.eval_at(var, value) as i32,
                 u.eval_at(var, value),
             ),
+            Lt(a, b) => {
+                if a.eval_at(var, value) < b.eval_at(var, value) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Gt(a, b) => {
+                if a.eval_at(var, value) > b.eval_at(var, value) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Le(a, b) => {
+                if a.eval_at(var, value) <= b.eval_at(var, value) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ge(a, b) => {
+                if a.eval_at(var, value) >= b.eval_at(var, value) {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Eq(a, b) => {
+                if (a.eval_at(var, value) - b.eval_at(var, value)).abs() < 1e-12 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Ne(a, b) => {
+                if (a.eval_at(var, value) - b.eval_at(var, value)).abs() < 1e-12 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
             Sum(_, _, _, _) => f64::NAN,
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
@@ -1659,6 +1843,36 @@ impl Expr {
                 a.to_expr_string_paren(3),
                 b.to_expr_string_paren(4)
             ),
+            Lt(a, b) => format!(
+                "{} < {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
+            Gt(a, b) => format!(
+                "{} > {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
+            Le(a, b) => format!(
+                "{} <= {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
+            Ge(a, b) => format!(
+                "{} >= {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
+            Eq(a, b) => format!(
+                "{} == {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
+            Ne(a, b) => format!(
+                "{} != {}",
+                a.to_expr_string_paren(0),
+                b.to_expr_string_paren(0)
+            ),
             Sin(u) => format!("sin({})", u.to_expr_string()),
             Cos(u) => format!("cos({})", u.to_expr_string()),
             Tan(u) => format!("tan({})", u.to_expr_string()),
@@ -1795,6 +2009,7 @@ impl Expr {
             Pow(_, _) => 4,
             Mul(_, _) | Div(_, _) => 2,
             Add(_, _) | Sub(_, _) => 1,
+            Lt(_, _) | Gt(_, _) | Le(_, _) | Ge(_, _) | Eq(_, _) | Ne(_, _) => 0,
             Neg(_) => 3,
         };
         if prec < min_prec {
@@ -2025,7 +2240,13 @@ impl Expr {
             | Beta(a, b)
             | BesselJ(a, b)
             | BesselY(a, b)
-            | BesselI(a, b) => a.contains_var(var) || b.contains_var(var),
+            | BesselI(a, b)
+            | Lt(a, b)
+            | Gt(a, b)
+            | Le(a, b)
+            | Ge(a, b)
+            | Eq(a, b)
+            | Ne(a, b) => a.contains_var(var) || b.contains_var(var),
             Clamp(a, b, c) => a.contains_var(var) || b.contains_var(var) || c.contains_var(var),
             Sum(body, _, _, _) | Product(body, _, _, _) => body.contains_var(var),
             Piecewise(cases, default) => {
@@ -2163,7 +2384,7 @@ pub fn parse_ast(expr: &str) -> Result<Expr, String> {
     // Preprocess: replace common math notations
     let expr = preprocess(expr);
     let mut tokens = tokenize(&expr);
-    let result = parse_add_sub(&mut tokens, 0)?;
+    let result = parse_cmp(&mut tokens, 0)?;
     if !tokens.is_empty() {
         return Err(format!("Unexpected tokens remaining: {:?}", tokens));
     }
@@ -2183,6 +2404,7 @@ fn preprocess(expr: &str) -> String {
     // Replace π with pi literal value
     let expr = expr.replace("π", "3.141592653589793");
     let expr = replace_standalone(&expr, "pi", "3.141592653589793");
+    let expr = replace_standalone(&expr, "tau", "6.283185307179586");
     let expr = replace_standalone(&expr, "e", "2.718281828459045");
     // Handle implicit multiplication: 2x -> 2*x, x2 -> x^2? No, keep simple
     expr
@@ -2253,7 +2475,7 @@ fn tokenize(expr: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        if "+-*/^(),".contains(c) {
+        if "+-*/^(),<>=!".contains(c) {
             if !current.is_empty() {
                 tokens.push(current.clone());
                 current.clear();
@@ -2284,7 +2506,49 @@ fn tokenize(expr: &str) -> Vec<String> {
     if !current.is_empty() {
         tokens.push(current);
     }
-    tokens
+    // Combine two-character operators: <=, >=, ==, !=
+    // Also discard standalone "=" tokens (assignment, not a valid expression operator).
+    let mut combined = Vec::with_capacity(tokens.len());
+    let mut j = 0;
+    while j < tokens.len() {
+        if j + 1 < tokens.len() {
+            let pair = (tokens[j].as_str(), tokens[j + 1].as_str());
+            match pair {
+                ("<", "=") | (">", "=") | ("=", "=") | ("!", "=") => {
+                    combined.push(format!("{}{}", pair.0, pair.1));
+                    j += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // Discard standalone "=" — it's an assignment operator, not a valid expression token
+        if tokens[j] != "=" {
+            combined.push(tokens[j].clone());
+        }
+        j += 1;
+    }
+    combined
+}
+
+fn parse_cmp(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
+    check_depth(depth)?;
+    let mut lhs = parse_add_sub(tokens, depth + 1)?;
+    while !tokens.is_empty() {
+        let op = match tokens[0].as_str() {
+            "<" => Expr::Lt,
+            ">" => Expr::Gt,
+            "<=" => Expr::Le,
+            ">=" => Expr::Ge,
+            "==" => Expr::Eq,
+            "!=" => Expr::Ne,
+            _ => break,
+        };
+        tokens.remove(0);
+        let rhs = parse_add_sub(tokens, depth + 1)?;
+        lhs = op(Box::new(lhs), Box::new(rhs));
+    }
+    Ok(lhs)
 }
 
 fn parse_add_sub(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
@@ -2361,7 +2625,7 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
     let token = tokens.remove(0);
     // Parenthesized expression
     if token == "(" {
-        let inner = parse_add_sub(tokens, depth + 1)?;
+        let inner = parse_cmp(tokens, depth + 1)?;
         if tokens.is_empty() || tokens[0] != ")" {
             return Err("Missing closing parenthesis".into());
         }
@@ -2377,10 +2641,10 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
         // Check if it's a function call (next token is "(")
         if !tokens.is_empty() && tokens[0] == "(" {
             tokens.remove(0); // consume "("
-            let mut args = vec![parse_add_sub(tokens, depth + 1)?];
+            let mut args = vec![parse_cmp(tokens, depth + 1)?];
             while !tokens.is_empty() && tokens[0] == "," {
                 tokens.remove(0);
-                args.push(parse_add_sub(tokens, depth + 1)?);
+                args.push(parse_cmp(tokens, depth + 1)?);
             }
             if tokens.is_empty() || tokens[0] != ")" {
                 return Err(format!(
@@ -2540,12 +2804,10 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
                         return Err("piecewise requires at least 1 argument".into());
                     }
                     let mut pieces = Vec::new();
-                    let mut i = 0;
-                    while i + 1 < args.len() {
+                    while args.len() >= 2 {
                         let cond = args.remove(0);
                         let val = args.remove(0);
                         pieces.push((Box::new(cond), Box::new(val)));
-                        i += 2;
                     }
                     let default = if args.is_empty() {
                         Expr::Const(0.0)
@@ -2750,5 +3012,57 @@ mod tests {
         let expr = parse_ast("sin(x)^2 + cos(x)^2").unwrap();
         let simplified = expr.simplify();
         assert_eq!(simplified.to_expr_string(), "1");
+    }
+
+    #[test]
+    fn test_comparison_lt_gt() {
+        let lt = parse_ast("x<0").unwrap();
+        assert_eq!(lt.eval_at("x", -1.0), 1.0);
+        assert_eq!(lt.eval_at("x", 0.0), 0.0);
+        assert_eq!(lt.eval_at("x", 1.0), 0.0);
+
+        let gt = parse_ast("x>0").unwrap();
+        assert_eq!(gt.eval_at("x", -1.0), 0.0);
+        assert_eq!(gt.eval_at("x", 1.0), 1.0);
+
+        let le = parse_ast("x<=0").unwrap();
+        assert_eq!(le.eval_at("x", 0.0), 1.0);
+        assert_eq!(le.eval_at("x", 0.001), 0.0);
+
+        let ge = parse_ast("x>=0").unwrap();
+        assert_eq!(ge.eval_at("x", 0.0), 1.0);
+        assert_eq!(ge.eval_at("x", -0.001), 0.0);
+
+        let eq = parse_ast("x==2").unwrap();
+        assert_eq!(eq.eval_at("x", 2.0), 1.0);
+        assert_eq!(eq.eval_at("x", 2.1), 0.0);
+
+        let ne = parse_ast("x!=2").unwrap();
+        assert_eq!(ne.eval_at("x", 2.0), 0.0);
+        assert_eq!(ne.eval_at("x", 2.1), 1.0);
+    }
+
+    #[test]
+    fn test_piecewise_with_comparisons() {
+        let pw = parse_ast("piecewise(x<0, x^2, x>=0, sqrt(x))").unwrap();
+        assert!((pw.eval_at("x", -1.0) - 1.0).abs() < 1e-9);
+        assert!((pw.eval_at("x", 0.0) - 0.0).abs() < 1e-9);
+        assert!((pw.eval_at("x", 1.0) - 1.0).abs() < 1e-9);
+        assert!((pw.eval_at("x", 4.0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_standalone_eq_discarded() {
+        // Verify that standalone "=" is discarded during tokenization
+        // and == is correctly combined
+        let t1 = tokenize("x = 5");
+        let t2 = tokenize("x == 5");
+        let t3 = tokenize("x <= 5");
+        // Standalone = should be filtered out: ["x", "5"]
+        assert_eq!(t1, vec!["x", "5"], "standalone = should be discarded");
+        // == should be combined: ["x", "==", "5"]
+        assert_eq!(t2, vec!["x", "==", "5"], "== should be preserved");
+        // <= should be preserved: ["x", "<=", "5"]
+        assert_eq!(t3, vec!["x", "<=", "5"], "<= should be preserved");
     }
 }

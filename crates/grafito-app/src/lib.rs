@@ -1,8 +1,9 @@
-//! Grafito Desktop Application — thin module root.
+//! Aplicación de escritorio Grafito — raíz de módulos.
 //!
-//! The application's logic is split into focused modules:
-//! `app`, `canvas`, `input`, `ui`, `commands`, and `utils`. The legacy render
-//! helpers and tool dispatcher remain as crate-internal modules.
+//! La lógica de la aplicación está dividida en módulos específicos:
+//! `app`, `canvas`, `input`, `ui`, `commands` y `utils`. Los helpers de
+//! renderizado legado y el despachador de herramientas permanecen como
+//! módulos internos del crate.
 
 pub(crate) mod algebra;
 pub(crate) mod app;
@@ -21,10 +22,10 @@ pub(crate) mod utils;
 #[cfg(test)]
 mod tests;
 
-/// MSAA sample count used by the GPU renderer and the eframe surface.
+/// Cantidad de muestras MSAA usada por el renderizador GPU y la superficie de eframe.
 pub const MSAA_SAMPLES: u16 = 4;
 
-/// Current 2D/3D view mode.
+/// Modo de vista 2D/3D actual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     D2,

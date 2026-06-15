@@ -386,6 +386,7 @@ fn setup_math_context() -> HashMapContext {
         }),
     );
     let _ = ctx.set_value("pi".into(), Value::Float(std::f64::consts::PI));
+    let _ = ctx.set_value("tau".into(), Value::Float(std::f64::consts::TAU));
     let _ = ctx.set_value("e".into(), Value::Float(std::f64::consts::E));
     ctx
 }

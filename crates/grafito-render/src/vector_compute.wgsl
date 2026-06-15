@@ -18,9 +18,8 @@ struct Params {
     y_max: f32,
     nx: u32,
     ny: u32,
-    // padding to 32-byte alignment
+    code_len: u32,
     _pad0: u32,
-    _pad1: u32,
 };
 
 @group(0) @binding(0)
@@ -69,7 +68,7 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
     var stack: array<f32, STACK_SIZE>;
     var sp: i32 = 0;
 
-    let len = arrayLength(&bytecode);
+    let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
@@ -109,7 +108,8 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
                 if abs(denom) > 1e-10 {
                     stack[sp] = stack[sp] / denom;
                 } else {
-                    stack[sp] = 0.0;
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
                 }
                 sp = sp + 1;
             }
@@ -222,12 +222,12 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
 
 @compute @workgroup_size(16, 16)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x > params.nx || gid.y > params.ny {
+    if gid.x >= params.nx || gid.y >= params.ny {
         return;
     }
 
-    let nx = f32(params.nx);
-    let ny = f32(params.ny);
+    let nx = f32(params.nx - 1u);
+    let ny = f32(params.ny - 1u);
     let x = params.x_min + f32(gid.x) * (params.x_max - params.x_min) / nx;
     let y = params.y_min + f32(gid.y) * (params.y_max - params.y_min) / ny;
 

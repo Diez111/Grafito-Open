@@ -24,6 +24,7 @@ pub use commands::{parse_point_str, parse_preview, process_input};
 #[cfg(test)]
 mod tests {
     use super::process_input;
+    use crate::commands::CommandOutcome;
     use grafito_core::{Document, GeoObject, LineObj, PointObj};
     use grafito_geometry::Point2;
 
@@ -34,7 +35,7 @@ mod tests {
 
         let result = process_input(&mut doc, &mut input);
 
-        assert!(result.is_none());
+        assert!(matches!(result, CommandOutcome::Ok));
         assert!(input.is_empty());
         assert!(doc
             .objects_iter()
@@ -46,7 +47,10 @@ mod tests {
         let mut doc = Document::new();
         let mut input = "Solve[x^2-4, x, -3, 3]".to_string();
 
-        let result = process_input(&mut doc, &mut input).expect("solve should return text");
+        let result = match process_input(&mut doc, &mut input) {
+            CommandOutcome::Message(msg) => msg,
+            other => panic!("solve should return a message, got {:?}", other),
+        };
 
         assert!(result.contains("Graficado"));
         assert!(doc
@@ -62,7 +66,10 @@ mod tests {
         let mut doc = Document::new();
         let mut input = "Histogram[{1,2,2,3,4}, 3]".to_string();
 
-        let result = process_input(&mut doc, &mut input).expect("histogram should return text");
+        let result = match process_input(&mut doc, &mut input) {
+            CommandOutcome::Message(msg) => msg,
+            other => panic!("histogram should return a message, got {:?}", other),
+        };
 
         assert!(result.contains("Histogram"));
         assert!(doc
@@ -77,7 +84,7 @@ mod tests {
 
         let result = process_input(&mut doc, &mut input);
 
-        assert!(result.is_some());
+        assert!(matches!(result, CommandOutcome::Message(_)));
         assert!(doc
             .objects_iter()
             .any(|(_, obj)| matches!(obj, GeoObject::PhasePortrait(_))));

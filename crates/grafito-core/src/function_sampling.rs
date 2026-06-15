@@ -11,6 +11,8 @@ use grafito_geometry::expr;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+use grafito_geometry::expr::eval_integral_batch;
+
 /// Expand a 1D visible domain by `pad_factor` and snap to a coarse grid so that
 /// small pans do not invalidate the cache.
 pub fn padded_snapped_domain(domain: (f64, f64), pad_factor: f64, snap_cells: usize) -> (f64, f64) {
@@ -103,6 +105,9 @@ pub fn cache_key(
         domain,
         grid_size,
         variables_hash: hasher.finish(),
+        is_integral: fun.is_integral,
+        integral_var: fun.integral_var.clone(),
+        integral_lower: fun.integral_lower,
     }
 }
 
@@ -122,6 +127,30 @@ fn evaluate_function_samples(
         return Vec::new();
     }
     let dx = (max - min) / grid_size as f64;
+
+    if fun.is_integral {
+        let xs = (0..=grid_size).map(|i| min + i as f64 * dx);
+        let ys = eval_integral_batch(
+            &fun.expr,
+            &fun.integral_var,
+            fun.integral_lower,
+            xs,
+            variables,
+        );
+        return (0..=grid_size)
+            .into_par_iter()
+            .map(|i| {
+                let x = min + i as f64 * dx;
+                let y = ys
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .filter(|v| v.is_finite() && v.abs() < 1e6);
+                (x, y)
+            })
+            .collect();
+    }
+
     let parsed_ast = expr::prepare_function_ast(&fun.expr, variables, &["x"]).ok();
     let compiled = parsed_ast
         .is_none()

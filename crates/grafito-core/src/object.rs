@@ -1044,6 +1044,23 @@ pub struct Surface3DObj {
     pub y_min_expr: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y_max_expr: Option<String>,
+    /// Parametric surface: x(u,v), y(u,v), z(u,v)
+    #[serde(default)]
+    pub is_parametric: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expr_x: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expr_y: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expr_z: String,
+    #[serde(default)]
+    pub u_min: f64,
+    #[serde(default)]
+    pub u_max: f64,
+    #[serde(default)]
+    pub v_min: f64,
+    #[serde(default)]
+    pub v_max: f64,
     pub color: Color,
     pub visible: bool,
     pub width: f32,
@@ -1069,6 +1086,14 @@ impl Clone for Surface3DObj {
             x_max_expr: self.x_max_expr.clone(),
             y_min_expr: self.y_min_expr.clone(),
             y_max_expr: self.y_max_expr.clone(),
+            is_parametric: self.is_parametric,
+            expr_x: self.expr_x.clone(),
+            expr_y: self.expr_y.clone(),
+            expr_z: self.expr_z.clone(),
+            u_min: self.u_min,
+            u_max: self.u_max,
+            v_min: self.v_min,
+            v_max: self.v_max,
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1093,6 +1118,14 @@ impl PartialEq for Surface3DObj {
             && self.x_max_expr == other.x_max_expr
             && self.y_min_expr == other.y_min_expr
             && self.y_max_expr == other.y_max_expr
+            && self.is_parametric == other.is_parametric
+            && self.expr_x == other.expr_x
+            && self.expr_y == other.expr_y
+            && self.expr_z == other.expr_z
+            && self.u_min == other.u_min
+            && self.u_max == other.u_max
+            && self.v_min == other.v_min
+            && self.v_max == other.v_max
             && self.color == other.color
             && self.visible == other.visible
             && self.width == other.width
@@ -1115,6 +1148,51 @@ impl Surface3DObj {
             x_max_expr: None,
             y_min_expr: None,
             y_max_expr: None,
+            is_parametric: false,
+            expr_x: String::new(),
+            expr_y: String::new(),
+            expr_z: String::new(),
+            u_min: 0.0,
+            u_max: 0.0,
+            v_min: 0.0,
+            v_max: 0.0,
+            color: Color::BLUE,
+            visible: true,
+            width: 1.0,
+            solid: false,
+            mesh_res: 30,
+            cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
+            cached_key: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn new_parametric(
+        expr_x: impl Into<String>,
+        expr_y: impl Into<String>,
+        expr_z: impl Into<String>,
+        u_domain: (f64, f64),
+        v_domain: (f64, f64),
+    ) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            expr: String::new(),
+            x_min: 0.0,
+            x_max: 0.0,
+            y_min: 0.0,
+            y_max: 0.0,
+            x_min_expr: None,
+            x_max_expr: None,
+            y_min_expr: None,
+            y_max_expr: None,
+            is_parametric: true,
+            expr_x: expr_x.into(),
+            expr_y: expr_y.into(),
+            expr_z: expr_z.into(),
+            u_min: u_domain.0,
+            u_max: u_domain.1,
+            v_min: v_domain.0,
+            v_max: v_domain.1,
             color: Color::BLUE,
             visible: true,
             width: 1.0,
@@ -1715,7 +1793,7 @@ impl PhasePortraitObj {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum RelationOperator {
     Eq,
     Less,
@@ -1742,6 +1820,9 @@ pub struct FunctionCacheKey {
     pub domain: (f64, f64),
     pub grid_size: usize,
     pub variables_hash: u64,
+    pub is_integral: bool,
+    pub integral_var: String,
+    pub integral_lower: f64,
 }
 
 /// Cache key for parametric curves (2D, 3D, polar).
@@ -1825,7 +1906,7 @@ impl Clone for ImplicitCurveObj {
             label: self.label.clone(),
             expr_lhs: self.expr_lhs.clone(),
             expr_rhs: self.expr_rhs.clone(),
-            operator: self.operator.clone(),
+            operator: self.operator,
             color: self.color,
             visible: self.visible,
             width: self.width,
@@ -1966,7 +2047,7 @@ impl ImplicitCurveObj {
         ImplicitCurveCacheKey {
             expr_lhs: self.expr_lhs.clone(),
             expr_rhs: self.expr_rhs.clone(),
-            operator: self.operator.clone(),
+            operator: self.operator,
             contour_levels_hash,
             contour_colors_hash,
             view_bounds,

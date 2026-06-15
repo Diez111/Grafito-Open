@@ -87,11 +87,10 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 if execute_cas && !app.input_text.is_empty() {
                     app.save_state();
                     let mut cmd = app.input_text.clone();
-                    app.cas_result = crate::commands::process_input(&mut app.document, &mut cmd).unwrap_or_default();
-                    if !app.cas_result.is_empty() {
-                        if app.cas_history.len() > 20 { app.cas_history.remove(0); }
-                        app.cas_history.push(format!("> {}\n  {}", app.input_text, app.cas_result));
-                    }
+                    let input_was = app.input_text.clone();
+                    let outcome = crate::commands::process_input(&mut app.document, &mut cmd);
+                    let time = ui.ctx().input(|i| i.time);
+                    app.handle_command_outcome(outcome, time, &input_was);
                     app.input_text.clear();
                 }
             });

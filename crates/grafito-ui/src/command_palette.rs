@@ -1,4 +1,4 @@
-//! Grafito Command Palette — Ctrl+K quick command search.
+//! Paleta de Comandos de Grafito — búsqueda rápida de comandos con Ctrl+K.
 
 pub struct PaletteCommand {
     pub name: &'static str,
@@ -11,110 +11,110 @@ pub fn all_commands() -> Vec<PaletteCommand> {
         // Basic tools
         PaletteCommand {
             name: "Point Tool",
-            category: "Tools",
-            syntax_hint: "Click on canvas | (x, y)",
+            category: "Herramientas",
+            syntax_hint: "Clic en el lienzo | (x, y)",
         },
         PaletteCommand {
             name: "Line Tool",
-            category: "Tools",
-            syntax_hint: "Click two points | A = (x1,y1), B = (x2,y2)",
+            category: "Herramientas",
+            syntax_hint: "Clic dos puntos | A = (x1,y1), B = (x2,y2)",
         },
         PaletteCommand {
             name: "Circle Tool",
-            category: "Tools",
-            syntax_hint: "Click center + edge | Circle[(x,y), r]",
+            category: "Herramientas",
+            syntax_hint: "Clic centro + borde | Circle[(x,y), r]",
         },
         PaletteCommand {
             name: "Polygon Tool",
-            category: "Tools",
-            syntax_hint: "Click vertices",
+            category: "Herramientas",
+            syntax_hint: "Clic vértices",
         },
         PaletteCommand {
             name: "Function Tool",
-            category: "Tools",
+            category: "Herramientas",
             syntax_hint: "f(x) = expr",
         },
         // 2D Geometry
         PaletteCommand {
             name: "Ellipse",
-            category: "Create",
+            category: "Crear",
             syntax_hint: "Ellipse[(cx,cy), rx, ry]",
         },
         PaletteCommand {
             name: "Parabola",
-            category: "Create",
+            category: "Crear",
             syntax_hint: "Parabola[(vx,vy), p]",
         },
         PaletteCommand {
             name: "Hyperbola",
-            category: "Create",
+            category: "Crear",
             syntax_hint: "Hyperbola[(cx,cy), a, b]",
         },
         PaletteCommand {
             name: "RegularPolygon",
-            category: "Create",
+            category: "Crear",
             syntax_hint: "RegularPolygon[(cx,cy), n, r]",
         },
         // Transformations
         PaletteCommand {
             name: "Translate",
-            category: "Transform",
+            category: "Transformar",
             syntax_hint: "Translate[obj, (dx,dy)]",
         },
         PaletteCommand {
             name: "Rotate",
-            category: "Transform",
+            category: "Transformar",
             syntax_hint: "Rotate[obj, angle_deg]",
         },
         PaletteCommand {
             name: "Dilate",
-            category: "Transform",
+            category: "Transformar",
             syntax_hint: "Dilate[obj, factor, (cx,cy)]",
         },
         PaletteCommand {
             name: "Reflect",
-            category: "Transform",
+            category: "Transformar",
             syntax_hint: "Reflect[obj, (ax,ay), (bx,by)]",
         },
         // Construction
         PaletteCommand {
             name: "Tangent",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Tangent[(cx,cy), r, (px,py)]",
         },
         PaletteCommand {
             name: "PerpendicularBisector",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "PerpendicularBisector[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
             name: "AngleBisector",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "AngleBisector[p1, vertex, p2]",
         },
         PaletteCommand {
             name: "Midpoint",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Midpoint[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
             name: "Line",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Line[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
             name: "Segment",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Segment[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
             name: "Vector",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Vector[(x1,y1), (x2,y2)]",
         },
         PaletteCommand {
             name: "Ray",
-            category: "Construct",
+            category: "Construir",
             syntax_hint: "Ray[(x1,y1), (x2,y2)]",
         },
         // CAS
@@ -177,115 +177,115 @@ pub fn all_commands() -> Vec<PaletteCommand> {
         // Probability
         PaletteCommand {
             name: "Normal",
-            category: "Probability",
+            category: "Probabilidad",
             syntax_hint: "Normal[mu, sigma]",
         },
         PaletteCommand {
             name: "Binomial",
-            category: "Probability",
+            category: "Probabilidad",
             syntax_hint: "Binomial[n, p, k]",
         },
         PaletteCommand {
             name: "Poisson",
-            category: "Probability",
+            category: "Probabilidad",
             syntax_hint: "Poisson[lambda, k]",
         },
         // Statistics
         PaletteCommand {
             name: "Histogram",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "Histogram[{data}, bins]",
         },
         PaletteCommand {
             name: "ScatterPlot",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "ScatterPlot[{xs}, {ys}]",
         },
         PaletteCommand {
             name: "BoxPlot",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "BoxPlot[{data}]",
         },
         PaletteCommand {
             name: "LinearRegression",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "LinearRegression[{xs}, {ys}]",
         },
         PaletteCommand {
             name: "Mean",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "Mean[{data}]",
         },
         PaletteCommand {
             name: "Median",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "Median[{data}]",
         },
         PaletteCommand {
             name: "StdDev",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "StdDev[{data}]",
         },
         PaletteCommand {
             name: "Correlation",
-            category: "Statistics",
+            category: "Estadística",
             syntax_hint: "Correlation[{xs}, {ys}]",
         },
         // Attractors
         PaletteCommand {
             name: "Lorenz",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Lorenz[] | Lorenz[sigma, rho, beta]",
         },
         PaletteCommand {
             name: "Rossler",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Rossler[] | Rossler[a, b, c]",
         },
         PaletteCommand {
             name: "Thomas (Butterfly)",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Thomas[] | Butterfly[]",
         },
         PaletteCommand {
             name: "Aizawa",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Aizawa[]",
         },
         PaletteCommand {
             name: "Chen",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Chen[]",
         },
         PaletteCommand {
             name: "Halvorsen",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Halvorsen[]",
         },
         PaletteCommand {
             name: "Dadras",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Dadras[]",
         },
         PaletteCommand {
             name: "Chua",
-            category: "Attractors",
+            category: "Atractores",
             syntax_hint: "Chua[]",
         },
         // Fractals
         PaletteCommand {
             name: "Mandelbrot",
-            category: "Fractals",
+            category: "Fractales",
             syntax_hint: "Mandelbrot[] | Mandelbrot[max_iter]",
         },
         PaletteCommand {
             name: "Julia",
-            category: "Fractals",
+            category: "Fractales",
             syntax_hint: "Julia[cr, ci] | Julia[cr, ci, max_iter]",
         },
         PaletteCommand {
             name: "BurningShip",
-            category: "Fractals",
+            category: "Fractales",
             syntax_hint: "BurningShip[]",
         },
         // 4D
@@ -323,39 +323,39 @@ pub fn all_commands() -> Vec<PaletteCommand> {
         // File
         PaletteCommand {
             name: "Save",
-            category: "File",
-            syntax_hint: "Save current document",
+            category: "Archivo",
+            syntax_hint: "Guardar documento actual",
         },
         PaletteCommand {
             name: "Export SVG",
-            category: "File",
-            syntax_hint: "Export vector graphics",
+            category: "Archivo",
+            syntax_hint: "Exportar gráficos vectoriales",
         },
         PaletteCommand {
             name: "Export PNG",
-            category: "File",
-            syntax_hint: "Export raster image",
+            category: "Archivo",
+            syntax_hint: "Exportar imagen raster",
         },
         PaletteCommand {
             name: "Export TikZ",
-            category: "File",
-            syntax_hint: "Export LaTeX TikZ code",
+            category: "Archivo",
+            syntax_hint: "Exportar código LaTeX TikZ",
         },
         // View
         PaletteCommand {
             name: "Zoom to Fit",
-            category: "View",
-            syntax_hint: "Fit all objects in view",
+            category: "Vista",
+            syntax_hint: "Ajustar todos los objetos a la vista",
         },
         PaletteCommand {
             name: "Toggle Grid",
-            category: "View",
-            syntax_hint: "Show/hide coordinate grid",
+            category: "Vista",
+            syntax_hint: "Mostrar/ocultar cuadrícula",
         },
         PaletteCommand {
             name: "Toggle Dark Mode",
-            category: "View",
-            syntax_hint: "Switch light/dark theme",
+            category: "Vista",
+            syntax_hint: "Cambiar tema claro/oscuro",
         },
     ]
 }
@@ -388,7 +388,7 @@ impl CommandPaletteState {
 
         let mut selected_command = None;
 
-        egui::Window::new("Command Palette")
+        egui::Window::new("Paleta de Comandos")
             .collapsible(false)
             .resizable(false)
             .default_pos([ctx.screen_rect().width() * 0.3, 100.0])
@@ -412,7 +412,7 @@ impl CommandPaletteState {
                 // Command list
                 let filtered = self.filtered_commands();
                 if filtered.is_empty() {
-                    ui.label("No commands found");
+                    ui.label("No se encontraron comandos");
                 } else {
                     egui::ScrollArea::vertical()
                         .max_height(400.0)

@@ -1452,4 +1452,111 @@ mod tests {
             panic!("expected ellipse from five points");
         }
     }
+
+    #[test]
+    fn test_cpu_function_evaluation_no_cross_contamination() {
+        let vars = std::collections::HashMap::new();
+        let domain = (-std::f64::consts::PI, std::f64::consts::PI);
+        let grid_size = 100;
+
+        // Evaluate x^2 first.
+        let fun_x2 = FunctionObj::new("x^2");
+        drop(function_sampling::samples_or_compute(
+            &fun_x2, domain, grid_size, &vars,
+        ));
+
+        // Immediately evaluate sin(x) on the CPU fallback path and verify the
+        // samples stay inside the expected range.
+        let fun_sin = FunctionObj::new("sin(x)");
+        let samples = function_sampling::samples_or_compute(&fun_sin, domain, grid_size, &vars);
+        assert!(!samples.is_empty(), "sin(x) should produce samples");
+        for (x, y_opt) in samples.iter() {
+            if let Some(y) = y_opt {
+                assert!(
+                    y.abs() <= 1.0 + 1e-6,
+                    "sin({}) = {} is outside [-1, 1]",
+                    x,
+                    y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_integral_function_sampling() {
+        // ∫₀ˣ t² dt = x³/3
+        let fun = FunctionObj::new("x^2").as_integral("x", 0.0);
+        let domain = (0.0, 3.0);
+        let grid_size = 100;
+        let vars = HashMap::new();
+        let samples = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
+        assert!(!samples.is_empty(), "integral samples should not be empty");
+
+        let expected_at_3 = 9.0; // 3³/3
+        let (_, y_at_3) = samples
+            .iter()
+            .min_by(|(x, _), (x2, _)| (x - 3.0).abs().partial_cmp(&(x2 - 3.0).abs()).unwrap())
+            .expect("sample near x=3");
+        let y_at_3 = y_at_3.expect("integral should be finite near x=3");
+        assert!(
+            (y_at_3 - expected_at_3).abs() < 0.05,
+            "integral of x^2 from 0 to 3 should be ~9, got {}",
+            y_at_3
+        );
+
+        // Check intermediate point x=1 → 1/3
+        let (_, y_at_1) = samples
+            .iter()
+            .min_by(|(x, _), (x2, _)| (x - 1.0).abs().partial_cmp(&(x2 - 1.0).abs()).unwrap())
+            .expect("sample near x=1");
+        let y_at_1 = y_at_1.expect("integral should be finite near x=1");
+        assert!(
+            (y_at_1 - 1.0 / 3.0).abs() < 0.05,
+            "integral at x=1 should be ~1/3, got {}",
+            y_at_1
+        );
+    }
+
+    #[test]
+    fn test_piecewise_function_sampling() {
+        // piecewise(x<0, x^2, x>=0, sqrt(x))
+        let fun = FunctionObj::new("piecewise(x<0, x^2, x>=0, sqrt(x))");
+        let domain = (-2.0, 2.0);
+        let grid_size = 200;
+        let vars = HashMap::new();
+        let samples = function_sampling::samples_or_compute(&fun, domain, grid_size, &vars);
+        assert!(!samples.is_empty(), "piecewise samples should not be empty");
+
+        // At x=-1 (x<0 true): should return (-1)^2 = 1
+        let (x_at, y_at) = samples
+            .iter()
+            .min_by(|(x, _), (x2, _)| (x + 1.0).abs().partial_cmp(&(x2 + 1.0).abs()).unwrap())
+            .expect("sample near x=-1");
+        let y_neg1 = y_at.expect(&format!(
+            "piecewise should be finite at x={}, sample={}",
+            x_at, x_at
+        ));
+        assert!(
+            (y_neg1 - 1.0).abs() < 0.15,
+            "piecewise at x={} should be ~1, got {}",
+            x_at,
+            y_neg1
+        );
+
+        // At x=1 (x<0 false, x>=0 true): should return sqrt(1) = 1
+        let (x_at2, y_at2) = samples
+            .iter()
+            .min_by(|(x, _), (x2, _)| (x - 1.0).abs().partial_cmp(&(x2 - 1.0).abs()).unwrap())
+            .expect("sample near x=1");
+        let y_pos1 = y_at2.expect(&format!(
+            "piecewise should be finite at x={}, sample={}",
+            x_at2, x_at2
+        ));
+        assert!(
+            (y_pos1 - 1.0).abs() < 0.15,
+            "piecewise at x={} should be ~1, got {}",
+            x_at2,
+            y_pos1
+        );
+    }
 }

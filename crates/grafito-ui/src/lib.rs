@@ -90,7 +90,7 @@ pub fn algebra_view(
                                             egui::Button::new(egui::RichText::new("🗑").size(14.0))
                                                 .frame(false),
                                         )
-                                        .on_hover_text("Delete object")
+                                        .on_hover_text("Eliminar objeto")
                                         .clicked()
                                     {
                                         actions.push(AlgebraAction::Delete(id));
@@ -101,7 +101,7 @@ pub fn algebra_view(
                                             egui::Button::new(egui::RichText::new(eye).size(14.0))
                                                 .frame(false),
                                         )
-                                        .on_hover_text("Toggle visibility")
+                                        .on_hover_text("Alternar visibilidad")
                                         .clicked()
                                     {
                                         actions.push(AlgebraAction::ToggleVisibility(id));
@@ -115,7 +115,7 @@ pub fn algebra_view(
                     if is_selected {
                         ui.add_space(16.0);
                         ui.label(
-                            egui::RichText::new("Properties")
+                            egui::RichText::new("Propiedades")
                                 .color(Color32::from_gray(120))
                                 .size(14.0),
                         );
@@ -126,12 +126,12 @@ pub fn algebra_view(
                                 ui.add_space(24.0);
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        egui::RichText::new(format!("Type: {}", obj.name()))
+                                        egui::RichText::new(format!("Tipo: {}", obj.name()))
                                             .size(13.0),
                                     );
                                     ui.add_space(4.0);
                                     ui.label(
-                                        egui::RichText::new(format!("Label: {}", obj.label()))
+                                        egui::RichText::new(format!("Etiqueta: {}", obj.label()))
                                             .size(13.0),
                                     );
                                     ui.add_space(4.0);
@@ -179,17 +179,17 @@ pub fn algebra_view(
 
 /// Display the Properties panel for a selected object.
 pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
-    ui.heading("Properties");
+    ui.heading("Propiedades");
     ui.separator();
     if let Some(obj) = document.get_object_mut(id) {
         // Basic properties
-        ui.label(egui::RichText::new(format!("Type: {}", obj.name())).strong());
+        ui.label(egui::RichText::new(format!("Tipo: {}", obj.name())).strong());
         ui.add_space(4.0);
 
         // Editable label
         let mut label = obj.label().to_string();
         ui.horizontal(|ui| {
-            ui.label("Label:");
+            ui.label("Etiqueta:");
             if ui.text_edit_singleline(&mut label).changed() {
                 obj.set_label(label);
             }
@@ -215,12 +215,12 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
                 ))
                 .size(20.0),
         );
-        if ui.add(color_btn).on_hover_text("Change color").clicked() {
+        if ui.add(color_btn).on_hover_text("Cambiar color").clicked() {
             // TODO: Open color picker
         }
 
         ui.separator();
-        ui.label(egui::RichText::new("Measurements").strong());
+        ui.label(egui::RichText::new("Mediciones").strong());
         ui.add_space(4.0);
 
         // Measurements
@@ -230,43 +230,43 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
         match obj {
             grafito_core::GeoObject::Point(p) => {
                 ui.label(format!(
-                    "Position: ({}, {})",
+                    "Posición: ({}, {})",
                     px(p.position.x),
                     px(p.position.y)
                 ));
             }
             grafito_core::GeoObject::Line(l) => {
                 let kind_str = match l.kind {
-                    grafito_core::LineKind::Segment => "Segment",
-                    grafito_core::LineKind::Ray => "Ray",
-                    grafito_core::LineKind::Line => "Line",
+                    grafito_core::LineKind::Segment => "Segmento",
+                    grafito_core::LineKind::Ray => "Semirrecta",
+                    grafito_core::LineKind::Line => "Recta",
                 };
-                ui.label(format!("Kind: {}", kind_str));
-                ui.label(format!("Start: ({}, {})", px(l.start.x), px(l.start.y)));
-                ui.label(format!("End: ({}, {})", px(l.end.x), px(l.end.y)));
-                ui.label(format!("Length: {}", px(l.start.distance(&l.end))));
+                ui.label(format!("Tipo: {}", kind_str));
+                ui.label(format!("Inicio: ({}, {})", px(l.start.x), px(l.start.y)));
+                ui.label(format!("Fin: ({}, {})", px(l.end.x), px(l.end.y)));
+                ui.label(format!("Longitud: {}", px(l.start.distance(&l.end))));
             }
             grafito_core::GeoObject::Circle(c) => {
-                ui.label(format!("Center: ({}, {})", px(c.center.x), px(c.center.y)));
-                ui.label(format!("Radius: {}", px(c.radius)));
+                ui.label(format!("Centro: ({}, {})", px(c.center.x), px(c.center.y)));
+                ui.label(format!("Radio: {}", px(c.radius)));
                 ui.label(format!(
-                    "Area: {}",
+                    "Área: {}",
                     px(std::f64::consts::PI * c.radius * c.radius)
                 ));
                 ui.label(format!(
-                    "Circumference: {}",
+                    "Circunferencia: {}",
                     px(2.0 * std::f64::consts::PI * c.radius)
                 ));
             }
             grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                ui.label(format!("Vertices: {}", poly.vertices.len()));
+                ui.label(format!("Vértices: {}", poly.vertices.len()));
                 let mut perimeter = 0.0;
                 for i in 0..poly.vertices.len() {
                     let a = poly.vertices[i];
                     let b = poly.vertices[(i + 1) % poly.vertices.len()];
                     perimeter += a.distance(&b);
                 }
-                ui.label(format!("Perimeter: {}", px(perimeter)));
+                ui.label(format!("Perímetro: {}", px(perimeter)));
                 // Shoelace area
                 let mut area = 0.0;
                 for i in 0..poly.vertices.len() {
@@ -274,26 +274,26 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
                     let b = poly.vertices[(i + 1) % poly.vertices.len()];
                     area += a.x * b.y - b.x * a.y;
                 }
-                ui.label(format!("Area: {}", px(area.abs() * 0.5)));
+                ui.label(format!("Área: {}", px(area.abs() * 0.5)));
             }
             grafito_core::GeoObject::Function(f) => {
-                ui.label(format!("Expression: {}", f.expr));
+                ui.label(format!("Expresión: {}", f.expr));
                 if let Some(min) = f.domain_min {
-                    ui.label(format!("Domain min: {}", px(min)));
+                    ui.label(format!("Dominio mín: {}", px(min)));
                 }
                 if let Some(max) = f.domain_max {
-                    ui.label(format!("Domain max: {}", px(max)));
+                    ui.label(format!("Dominio máx: {}", px(max)));
                 }
             }
             grafito_core::GeoObject::Ellipse(e) => {
-                ui.label(format!("Center: ({}, {})", px(e.center.x), px(e.center.y)));
-                ui.label(format!("Semi-major (rx): {}", px(e.rx)));
-                ui.label(format!("Semi-minor (ry): {}", px(e.ry)));
-                ui.label(format!("Area: {}", px(std::f64::consts::PI * e.rx * e.ry)));
+                ui.label(format!("Centro: ({}, {})", px(e.center.x), px(e.center.y)));
+                ui.label(format!("Semieje mayor (rx): {}", px(e.rx)));
+                ui.label(format!("Semieje menor (ry): {}", px(e.ry)));
+                ui.label(format!("Área: {}", px(std::f64::consts::PI * e.rx * e.ry)));
             }
             grafito_core::GeoObject::Point3D(p) => {
                 ui.label(format!(
-                    "Position: ({}, {}, {})",
+                    "Posición: ({}, {}, {})",
                     px(p.position.x),
                     px(p.position.y),
                     px(p.position.z)
@@ -301,38 +301,38 @@ pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
             }
             grafito_core::GeoObject::Sphere3D(s) => {
                 ui.label(format!(
-                    "Center: ({}, {}, {})",
+                    "Centro: ({}, {}, {})",
                     px(s.center.x),
                     px(s.center.y),
                     px(s.center.z)
                 ));
-                ui.label(format!("Radius: {}", px(s.radius)));
+                ui.label(format!("Radio: {}", px(s.radius)));
                 ui.label(format!(
-                    "Volume: {}",
+                    "Volumen: {}",
                     px(4.0 / 3.0 * std::f64::consts::PI * s.radius.powi(3))
                 ));
                 ui.label(format!(
-                    "Surface Area: {}",
+                    "Área superficial: {}",
                     px(4.0 * std::f64::consts::PI * s.radius.powi(2))
                 ));
             }
             grafito_core::GeoObject::Cube3D(c) => {
                 ui.label(format!(
-                    "Center: ({}, {}, {})",
+                    "Centro: ({}, {}, {})",
                     px(c.center.x),
                     px(c.center.y),
                     px(c.center.z)
                 ));
-                ui.label(format!("Size: {}", px(c.size)));
-                ui.label(format!("Volume: {}", px(c.size.powi(3))));
-                ui.label(format!("Surface Area: {}", px(6.0 * c.size.powi(2))));
+                ui.label(format!("Tamaño: {}", px(c.size)));
+                ui.label(format!("Volumen: {}", px(c.size.powi(3))));
+                ui.label(format!("Área superficial: {}", px(6.0 * c.size.powi(2))));
             }
             _ => {
-                ui.label("No measurements available");
+                ui.label("No hay mediciones disponibles");
             }
         }
     } else {
-        ui.label("No object selected");
+        ui.label("Ningún objeto seleccionado");
     }
 }
 
@@ -342,26 +342,26 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
     ui.horizontal_wrapped(|ui| {
         // Basic tools (work in both modes)
-        tool_btn(ui, current_tool, Tool::Select, "Select", "F1");
+        tool_btn(ui, current_tool, Tool::Select, "Seleccionar", "F1");
         if !is_3d {
-            tool_btn(ui, current_tool, Tool::Point, "Point", "F2");
+            tool_btn(ui, current_tool, Tool::Point, "Punto", "F2");
         }
-        tool_btn(ui, current_tool, Tool::Line, "Line", "F3");
-        tool_btn(ui, current_tool, Tool::Circle, "Circle", "F4");
-        tool_btn(ui, current_tool, Tool::Polygon, "Polygon", "F5");
-        tool_btn(ui, current_tool, Tool::Function, "Function", "F6");
+        tool_btn(ui, current_tool, Tool::Line, "Recta", "F3");
+        tool_btn(ui, current_tool, Tool::Circle, "Circunferencia", "F4");
+        tool_btn(ui, current_tool, Tool::Polygon, "Polígono", "F5");
+        tool_btn(ui, current_tool, Tool::Function, "Función", "F6");
 
         ui.separator();
 
         // 3D-specific tools (only in 3D mode)
         if is_3d {
-            tool_btn(ui, current_tool, Tool::Point3D, "Point 3D", "F7");
-            tool_btn(ui, current_tool, Tool::Sphere3D, "Sphere", "F8");
-            tool_btn(ui, current_tool, Tool::Cube3D, "Cube", "F9");
+            tool_btn(ui, current_tool, Tool::Point3D, "Punto 3D", "F7");
+            tool_btn(ui, current_tool, Tool::Sphere3D, "Esfera", "F8");
+            tool_btn(ui, current_tool, Tool::Cube3D, "Cubo", "F9");
         }
 
         // Advanced tools (insert commands, work in both modes)
-        tool_btn(ui, current_tool, Tool::Attractor, "Attractor", "");
+        tool_btn(ui, current_tool, Tool::Attractor, "Atractor", "");
         tool_btn(ui, current_tool, Tool::Fractal, "Fractal", "");
 
         // Visualization tools (only in 2D mode)
@@ -373,51 +373,57 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
 
         // Statistics tools (only in 2D mode)
         if !is_3d {
-            tool_btn(ui, current_tool, Tool::Histogram, "Histogram", "");
-            tool_btn(ui, current_tool, Tool::ScatterPlot, "Scatter", "");
+            tool_btn(ui, current_tool, Tool::Histogram, "Histograma", "");
+            tool_btn(ui, current_tool, Tool::ScatterPlot, "Dispersión", "");
 
             ui.separator();
 
             // Construction tools (only in 2D mode)
-            tool_btn(ui, current_tool, Tool::Segment, "Seg", "");
-            tool_btn(ui, current_tool, Tool::Ray, "Ray", "");
-            tool_btn(ui, current_tool, Tool::Vector, "Vec", "");
-            tool_btn(ui, current_tool, Tool::RegularPolygon, "RegPoly", "");
-            tool_btn(ui, current_tool, Tool::Tangent, "Tangent", "");
+            tool_btn(ui, current_tool, Tool::Segment, "Segmento", "");
+            tool_btn(ui, current_tool, Tool::Ray, "Semirrecta", "");
+            tool_btn(ui, current_tool, Tool::Vector, "Vector", "");
+            tool_btn(ui, current_tool, Tool::RegularPolygon, "PolígReg", "");
+            tool_btn(ui, current_tool, Tool::Tangent, "Tangente", "");
             tool_btn(ui, current_tool, Tool::Perpendicular, "Perpendicular", "");
 
             ui.separator();
 
             // Numeric constraints (only in 2D mode)
-            tool_btn(ui, current_tool, Tool::Distance, "Dist", "");
-            tool_btn(ui, current_tool, Tool::Angle, "Angle", "");
-            tool_btn(ui, current_tool, Tool::Tangent, "Tangent", "");
-            tool_btn(ui, current_tool, Tool::Coincident, "Coincident", "");
+            tool_btn(ui, current_tool, Tool::Distance, "Distancia", "");
+            tool_btn(ui, current_tool, Tool::Angle, "Ángulo", "");
+            tool_btn(ui, current_tool, Tool::Tangent, "Tangente", "");
+            tool_btn(ui, current_tool, Tool::Coincident, "Coincidente", "");
             tool_btn(ui, current_tool, Tool::Horizontal, "Horizontal", "");
             tool_btn(ui, current_tool, Tool::Vertical, "Vertical", "");
-            tool_btn(ui, current_tool, Tool::EqualLength, "EqLength", "");
-            tool_btn(ui, current_tool, Tool::Symmetry, "Symmetry", "");
+            tool_btn(ui, current_tool, Tool::EqualLength, "LongIgual", "");
+            tool_btn(ui, current_tool, Tool::Symmetry, "Simetría", "");
 
             ui.separator();
 
             // Conic constructions (only in 2D mode)
-            tool_btn(ui, current_tool, Tool::EllipseByFoci, "Ellipse", "");
+            tool_btn(ui, current_tool, Tool::EllipseByFoci, "Elipse", "");
             tool_btn(
                 ui,
                 current_tool,
                 Tool::ParabolaByFocusDirectrix,
-                "Parabola",
+                "Parábola",
                 "",
             );
-            tool_btn(ui, current_tool, Tool::HyperbolaByFoci, "Hyperbola", "");
-            tool_btn(ui, current_tool, Tool::ConicByFivePoints, "Conic5", "");
+            tool_btn(ui, current_tool, Tool::HyperbolaByFoci, "Hipérbola", "");
+            tool_btn(ui, current_tool, Tool::ConicByFivePoints, "Cónica5", "");
 
             ui.separator();
 
             // Polygon boolean operations (only in 2D mode)
-            tool_btn(ui, current_tool, Tool::PolygonUnion, "Union", "");
-            tool_btn(ui, current_tool, Tool::PolygonIntersection, "Intersect", "");
-            tool_btn(ui, current_tool, Tool::PolygonDifference, "Diff", "");
+            tool_btn(ui, current_tool, Tool::PolygonUnion, "Unión", "");
+            tool_btn(
+                ui,
+                current_tool,
+                Tool::PolygonIntersection,
+                "Intersección",
+                "",
+            );
+            tool_btn(ui, current_tool, Tool::PolygonDifference, "Diferencia", "");
             tool_btn(ui, current_tool, Tool::PolygonXor, "Xor", "");
         }
     })
@@ -876,7 +882,7 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
 
     response.on_hover_ui(|ui| {
         ui.label(egui::RichText::new(name).strong());
-        ui.label(egui::RichText::new(format!("Shortcut: {}", _key)).weak());
+        ui.label(egui::RichText::new(format!("Atajo: {}", _key)).weak());
     })
 }
 

@@ -9,12 +9,12 @@
 ```
 grafito/
 ├── crates/
-│   ├── grafito-app/        # eframe desktop app — UI, input, rendering orchestration
-│   ├── grafito-core/       # Document model, 32+ geometric object types, spatial index, constraints
-│   ├── grafito-geometry/   # Math engine: CAS, statistics, ODE, fractals, attractors, curves, booleans
-│   ├── grafito-render/     # wgpu GPU pipeline — 2D/3D tessellation, compute shaders, lighting
-│   ├── grafito-ui/         # egui components — toolbar, command palette, properties, color picker, themes
-│   └── grafito-command/    # Shared text command processor for desktop and FFI frontends
+│   ├── grafito-app/        # Aplicación de escritorio eframe — UI, entrada, orquestación de renderizado
+│   ├── grafito-core/       # Modelo de documento, 32+ tipos de objetos geométricos, índice espacial, restricciones
+│   ├── grafito-geometry/   # Motor matemático: CAS, estadística, EDO, fractales, atractores, curvas, booleanas
+│   ├── grafito-render/     # Pipeline GPU wgpu — teselado 2D/3D, shaders de cómputo, iluminación
+│   ├── grafito-ui/         # Componentes egui — barra de herramientas, paleta de comandos, propiedades, selector de color, temas
+│   └── grafito-command/    # Procesador compartido de comandos de texto para frontends de escritorio y FFI
 └── assets/                 # WGSL shaders
 ```
 
