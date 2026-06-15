@@ -13,7 +13,7 @@ fn test_renderer_builds_geometry_for_function() {
     doc.set_view(view_800x600());
     doc.add_object(GeoObject::Function(FunctionObj::new("sin(x)")));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(!vertices.is_empty(), "function should produce vertices");
     assert!(!indices.is_empty(), "function should produce indices");
 }
@@ -29,7 +29,7 @@ fn test_renderer_builds_geometry_for_parametric_curve() {
         std::f64::consts::TAU,
     )));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "parametric curve should produce vertices"
@@ -62,7 +62,7 @@ fn test_renderer_builds_geometry_for_vector_field() {
     doc.set_view(view_800x600());
     doc.add_object(GeoObject::VectorField2D(VectorField2DObj::new("x", "y")));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(!vertices.is_empty(), "vector field should produce vertices");
     assert!(!indices.is_empty(), "vector field should produce indices");
 }
@@ -84,7 +84,7 @@ fn test_renderer_builds_geometry_for_boolean_polygon() {
     ]);
     doc.add_object(GeoObject::Polygon(poly));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "boolean polygon should produce vertices"
@@ -144,7 +144,7 @@ fn test_renderer_builds_geometry_for_implicit_curve() {
         RelationOperator::Eq,
     )));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "implicit curve should produce vertices"
@@ -161,7 +161,7 @@ fn test_renderer_builds_geometry_for_attractor_in_2d() {
         vec![10.0, 28.0, 8.0 / 3.0],
     )));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "attractor should produce vertices in 2D view"
@@ -180,7 +180,7 @@ fn test_renderer_builds_geometry_for_integral_function() {
     let fun = FunctionObj::new("x^2").as_integral("x", 0.0);
     doc.add_object(GeoObject::Function(fun));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "integral function should produce vertices"
@@ -199,7 +199,7 @@ fn test_renderer_builds_geometry_for_piecewise_function() {
         "piecewise(x<0, x^2, x>=0, sqrt(x))",
     )));
 
-    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false);
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, true);
     assert!(
         !vertices.is_empty(),
         "piecewise function should produce vertices"

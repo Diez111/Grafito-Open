@@ -8,7 +8,7 @@ mod tests {
     fn test_build_geometry_empty_document() {
         let doc = Document::new();
         let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false);
+        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
 
         assert!(
             !vertices.is_empty(),
@@ -23,7 +23,7 @@ mod tests {
         doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
 
         let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false);
+        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
@@ -38,7 +38,7 @@ mod tests {
         )));
 
         let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false);
+        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
@@ -53,7 +53,7 @@ mod tests {
         )));
 
         let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false);
+        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
@@ -69,7 +69,7 @@ mod tests {
         ])));
 
         let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false);
+        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
@@ -145,7 +145,7 @@ mod tests {
             let mut single_doc = Document::new();
             single_doc.set_view(ViewTransform::new(800.0, 600.0));
             single_doc.add_object(obj.clone());
-            let (v, _i) = crate::Renderer::build_geometry_static(&single_doc, &view, false);
+            let (v, _i) = crate::Renderer::build_geometry_static(&single_doc, &view, false, true);
             assert!(
                 !v.is_empty(),
                 "{} should render: got empty vertices",

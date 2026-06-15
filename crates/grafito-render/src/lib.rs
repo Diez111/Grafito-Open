@@ -1,6 +1,6 @@
 //! Grafito Render — Renderizador 2D/3D acelerado por GPU con wgpu.
 //!
-//! Este crate convierte un [`Document`](grafito_core::Document) en geometría
+//! Este crate convierte un [`Document`] en geometría
 //! lista para GPU, gestiona los pipelines de cómputo (`function_compute`,
 //! `implicit_compute`, `parametric_compute`) y proporciona utilidades de
 //! iluminación y vértices.
@@ -2545,32 +2545,7 @@ impl Renderer {
 
             if major_line_count_x <= max_lines && major_line_count_z <= max_lines {
                 // Dibujar solo major grid
-                let precision = if major_step > 0.0 {
-                    let log = major_step.log10();
-                    if log < 0.0 {
-                        (log.abs().ceil() as usize + 2).clamp(1, 14)
-                    } else {
-                        0
-                    }
-                } else {
-                    2
-                };
-                let format_num = |v: f64| -> String {
-                    if v.abs() < major_step * 1e-5 {
-                        return "0".to_string();
-                    }
-                    let s = format!("{:.*}", precision, v);
-                    let s = if s.contains('.') {
-                        s.trim_end_matches('0').trim_end_matches('.').to_string()
-                    } else {
-                        s
-                    };
-                    if s.is_empty() || s == "-" {
-                        "0".to_string()
-                    } else {
-                        s
-                    }
-                };
+
 
                 let cam_pos = camera.position();
                 let mut prev_screen_pos_x: Option<glam::Vec2> = None;
@@ -2658,32 +2633,7 @@ impl Renderer {
             // Si incluso major grid es demasiado, no dibujar nada
         } else {
             // Dibujar grid completo (minor + major)
-            let precision = if major_step > 0.0 {
-                let log = major_step.log10();
-                if log < 0.0 {
-                    (log.abs().ceil() as usize + 2).clamp(1, 14)
-                } else {
-                    0
-                }
-            } else {
-                2
-            };
-            let format_num = |v: f64| -> String {
-                if v.abs() < major_step * 1e-5 {
-                    return "0".to_string();
-                }
-                let s = format!("{:.*}", precision, v);
-                let s = if s.contains('.') {
-                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                } else {
-                    s
-                };
-                if s.is_empty() || s == "-" {
-                    "0".to_string()
-                } else {
-                    s
-                }
-            };
+
 
             let cam_pos = camera.position();
             let mut prev_screen_pos_x: Option<glam::Vec2> = None;

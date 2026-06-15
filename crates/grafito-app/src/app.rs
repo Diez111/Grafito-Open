@@ -4,7 +4,7 @@
 //! `eframe::App::update` loop that dispatches rendering to focused UI modules.
 
 use crate::utils::{configure_modern_style, load_config, save_config, AppConfig};
-use crate::{ViewMode, MSAA_SAMPLES};
+use crate::ViewMode;
 use egui::{Color32, Key, Pos2};
 use grafito_core::{
     CircleObj, Cube3DObj, Document, EllipseObj, FunctionObj, GeoObject, LineObj, ObjectId,
