@@ -559,16 +559,50 @@ impl GrafitoApp {
         }
 
         // ── Hover Analytics (Dynamic Inspector) ───────────────────────────────
-        self.hovered_analysis = None;
         if !panning
             && !self.is_view_changing
             && response.hover_pos().is_some()
             && self.current_view != crate::ViewMode::D3
         {
             if let Some(world) = world_at_pointer {
+                let current_time = ui.ctx().input(|i| i.time);
                 let pixel_tolerance = 15.0 / self.document.view().scale;
-                self.update_hover_analysis(world, pixel_tolerance);
+                
+                let mut reset = true;
+                if let Some(cand_pos) = self.hover_candidate_pos {
+                    if cand_pos.distance(&world) <= (2.0 / self.document.view().scale) {
+                        reset = false;
+                    }
+                }
+                
+                if reset {
+                    self.hover_candidate_pos = Some(world);
+                    self.hover_candidate_time = current_time;
+                    self.hover_cached_analysis = None;
+                    self.hovered_analysis = None;
+                } else if current_time - self.hover_candidate_time >= 0.15 {
+                    if self.hover_cached_analysis.is_none() {
+                        self.hovered_analysis = None;
+                        self.update_hover_analysis(world, pixel_tolerance);
+                        self.hover_cached_analysis = Some(self.hovered_analysis.clone());
+                    } else {
+                        self.hovered_analysis = self.hover_cached_analysis.as_ref().unwrap().clone();
+                    }
+                } else {
+                    self.hovered_analysis = None;
+                }
+                
+                if self.hover_cached_analysis.is_none() {
+                    let time_left = 0.15 - (current_time - self.hover_candidate_time);
+                    if time_left > 0.0 {
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(time_left));
+                    }
+                }
             }
+        } else {
+            self.hovered_analysis = None;
+            self.hover_candidate_pos = None;
+            self.hover_cached_analysis = None;
         }
 
         // ── Clicks (ignore if this was a pan gesture) ────────────────────────

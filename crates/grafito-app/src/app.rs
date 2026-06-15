@@ -181,6 +181,9 @@ pub struct GrafitoApp {
     pub pending_action: PendingAction,
     pub toasts: grafito_ui::toast::ToastManager,
     pub hovered_analysis: Option<HoveredAnalysis>,
+    pub hover_candidate_pos: Option<Point2>,
+    pub hover_candidate_time: f64,
+    pub hover_cached_analysis: Option<Option<HoveredAnalysis>>,
 }
 
 #[derive(Debug, Clone)]
@@ -336,6 +339,9 @@ impl GrafitoApp {
             pending_action: PendingAction::None,
             toasts: grafito_ui::toast::ToastManager::default(),
             hovered_analysis: None,
+            hover_candidate_pos: None,
+            hover_candidate_time: 0.0,
+            hover_cached_analysis: None,
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
