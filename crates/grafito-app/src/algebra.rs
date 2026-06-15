@@ -264,24 +264,31 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         );
                     }
                     
+                    let (mut animating, min, max, step) = {
+                        let meta = app.document.variable_meta.get(name).unwrap();
+                        (meta.animating, meta.min, meta.max, meta.step)
+                    };
+                    
+                    ui.horizontal(|ui| {
+                        ui.add_space(5.0);
+                        
+                        // Botón de Play/Pause
+                        let play_icon = if animating { "⏸" } else { "▶" };
+                        if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
+                            animating = !animating;
+                        }
+                        
+                        ui.label(egui::RichText::new(name).size(12.0));
+                        
+                        let sl = egui::Slider::new(&mut v, min..=max).step_by(step);
+                        if ui.add_sized([100.0, 16.0], sl).changed() {
+                            app.document.set_variable(name.clone(), v);
+                            app.document.recompute_bound_parameters();
+                        }
+                    });
+                    
                     if let Some(meta) = app.document.variable_meta.get_mut(name) {
-                        ui.horizontal(|ui| {
-                            ui.add_space(5.0);
-                            
-                            // Botón de Play/Pause
-                            let play_icon = if meta.animating { "⏸" } else { "▶" };
-                            if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
-                                meta.animating = !meta.animating;
-                            }
-                            
-                            ui.label(egui::RichText::new(name).size(12.0));
-                            
-                            let sl = egui::Slider::new(&mut v, meta.min..=meta.max).step_by(meta.step);
-                            if ui.add_sized([100.0, 16.0], sl).changed() {
-                                app.document.set_variable(name.clone(), v);
-                                app.document.recompute_bound_parameters();
-                            }
-                        });
+                        meta.animating = animating;
                     }
                 }
             }

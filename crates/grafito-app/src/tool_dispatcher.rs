@@ -175,6 +175,8 @@ pub fn dispatch_tool(
                     max: 5.0,
                     step: 0.1,
                     visible: true,
+                    animating: false,
+                    animation_speed: 1.0,
                 },
             );
             ToolResult {
