@@ -1824,6 +1824,7 @@ name = "grafito-command"
 version = "0.9.0-beta.1"
 dependencies = [
  "geo",
+ "glam",
  "grafito-core",
  "grafito-geometry",
 ]

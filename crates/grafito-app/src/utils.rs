@@ -6,6 +6,8 @@
 use egui::Color32;
 use grafito_geometry::Color;
 
+use crate::snap::SnapConfig;
+
 pub(crate) fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
         (c.r * 255.0) as u8,
@@ -52,6 +54,8 @@ pub(crate) struct AppConfig {
     pub(crate) dark_mode: bool,
     pub(crate) show_grid: bool,
     pub(crate) snap_to_grid: bool,
+    #[serde(default)]
+    pub(crate) snap: SnapConfig,
 }
 
 impl Default for AppConfig {
@@ -60,6 +64,7 @@ impl Default for AppConfig {
             dark_mode: false,
             show_grid: true,
             snap_to_grid: false,
+            snap: SnapConfig::default(),
         }
     }
 }

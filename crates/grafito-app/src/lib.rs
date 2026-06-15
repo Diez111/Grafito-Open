@@ -15,7 +15,9 @@ pub(crate) mod keyboard;
 pub(crate) mod panels;
 pub(crate) mod render_2d;
 pub(crate) mod render_3d;
+pub(crate) mod snap;
 pub(crate) mod tool_dispatcher;
+pub mod tools_panel;
 pub(crate) mod ui;
 pub(crate) mod utils;
 

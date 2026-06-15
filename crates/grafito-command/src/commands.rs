@@ -1,5 +1,6 @@
 use geo::BooleanOps;
 use grafito_core::{
+    analyzable::{self, default_analysis_features},
     Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
     Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
     HyperbolaObj, ImplicitCurveObj, LineKind, LineObj, MoebiusStripObj, ObjectId, ParabolaObj,
@@ -7,6 +8,7 @@ use grafito_core::{
     RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj,
     Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
+use grafito_geometry::analysis::{analyze_intersection, AnalysisFeature, IntersectionCurve};
 use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::matrices::{taylor_series, Matrix};
@@ -298,6 +300,158 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                         cmd.args[0], cmd.args[1]
                     ));
                 }
+            }
+            "Root" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::Root],
+                    "Raíz",
+                );
+            }
+            "Extremum" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::LocalMaximum, AnalysisFeature::LocalMinimum],
+                    "Extremo",
+                );
+            }
+            "Inflection" | "Inflexion" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::Inflection],
+                    "Inflexión",
+                );
+            }
+            "YIntercept" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::YIntercept],
+                    "Intersección Y",
+                );
+            }
+            "XIntercept" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::XIntercept, AnalysisFeature::Root],
+                    "Intersección X",
+                );
+            }
+            "Centroid" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &[AnalysisFeature::Centroid],
+                    "Centroide",
+                );
+            }
+            "Analyze" | "Analizar" if cmd.args.len() == 1 => {
+                return run_analysis_command(
+                    document,
+                    input_text,
+                    cmd.args[0].trim(),
+                    &default_analysis_features(),
+                    "Análisis",
+                );
+            }
+            "Intersect" if cmd.args.len() == 2 => {
+                let id1 = find_object_by_label(document, cmd.args[0].trim());
+                let id2 = find_object_by_label(document, cmd.args[1].trim());
+                if let (Some(i1), Some(i2)) = (id1, id2) {
+                    let o1 = document.get_object(i1).cloned();
+                    let o2 = document.get_object(i2).cloned();
+                    if let (Some(a), Some(b)) = (o1, o2) {
+                        let view = *document.view();
+                        let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                        let world_br = view.screen_to_world(glam::Vec2::new(
+                            view.screen_size.x,
+                            view.screen_size.y,
+                        ));
+                        let view_bounds = (
+                            world_tl.x.min(world_br.x),
+                            world_tl.x.max(world_br.x),
+                            world_tl.y.min(world_br.y),
+                            world_tl.y.max(world_br.y),
+                        );
+                        let vars = document.variables.clone();
+                        let curve_a = object_to_intersection_curve(&a);
+                        let curve_b = object_to_intersection_curve(&b);
+                        if let (Some(ca), Some(cb)) = (curve_a, curve_b) {
+                            let pts = analyze_intersection(&ca, &cb, view_bounds, &vars);
+                            if pts.is_empty() {
+                                input_text.clear();
+                                return CommandOutcome::Message(
+                                    "Intersect: no se encontraron puntos".into(),
+                                );
+                            }
+                            for p in &pts {
+                                let mut pt = PointObj::new(*p);
+                                pt.color = grafito_geometry::Color::new(0.9, 0.4, 0.9, 1.0);
+                                pt.size = 7.0;
+                                document.add_object(GeoObject::Point(pt));
+                            }
+                            input_text.clear();
+                            return CommandOutcome::Message(format!(
+                                "Intersect: {} punto(s) creado(s)",
+                                pts.len()
+                            ));
+                        }
+                        // Fallback: barrido numérico Function × Function legacy.
+                        if let (GeoObject::Function(f1), GeoObject::Function(f2)) = (&a, &b) {
+                            let mut inters = Vec::new();
+                            let steps = 400;
+                            let mut prev_diff: Option<f64> = None;
+                            let mut prev_x = 0.0;
+                            let mut vars2 = HashMap::new();
+                            for i in 0..=steps {
+                                let x = -20.0 + (40.0 * i as f64) / steps as f64;
+                                vars2.insert("x".to_string(), x);
+                                let v: Vec<_> =
+                                    vars2.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                                if let (Ok(y1), Ok(y2)) =
+                                    (evaluate(&f1.expr, &v), evaluate(&f2.expr, &v))
+                                {
+                                    let diff = y1 - y2;
+                                    if let Some(pd) = prev_diff {
+                                        if pd * diff < 0.0 {
+                                            let root_x = prev_x - pd * (x - prev_x) / (diff - pd);
+                                            vars2.insert("x".to_string(), root_x);
+                                            let v2: Vec<_> = vars2
+                                                .iter()
+                                                .map(|(k, v)| (k.clone(), *v))
+                                                .collect();
+                                            if let Ok(root_y) = evaluate(&f1.expr, &v2) {
+                                                inters.push(Point2::new(root_x, root_y));
+                                            }
+                                        }
+                                    }
+                                    prev_diff = Some(diff);
+                                    prev_x = x;
+                                }
+                            }
+                            for r in inters {
+                                document.add_object(GeoObject::Point(PointObj::new(r)));
+                            }
+                            input_text.clear();
+                            return CommandOutcome::Message(
+                                "Intersect: intersecciones (barrido) creadas".into(),
+                            );
+                        }
+                    }
+                }
+                return CommandOutcome::Error(
+                    "Intersect: objetos no compatibles o no encontrados".into(),
+                );
             }
             "Angle" if cmd.args.len() >= 2 => {
                 if let (Some(a), Some(b)) = (
@@ -1663,6 +1817,22 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     return CommandOutcome::Message("Histogram created".into());
                 }
             }
+            "Image" if !cmd.args.is_empty() => {
+                let path = cmd.args[0].trim().trim_matches('"').to_string();
+                // La decodificación de la imagen se delega al renderer; aquí
+                // registramos el path como un TextObj informativo para que
+                // aparezca en el panel de álgebra y se pueda referenciar por
+                // etiqueta. Cuando se añada `ImageObj` al modelo, esta lógica
+                // se sustituye por `document.add_object(ImageObj::new(path))`.
+                let mut info = PointObj::new(Point2::new(0.0, 0.0));
+                info.label = format!("Image[{}]", path);
+                document.add_object(GeoObject::Point(info));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Image: '{}' registrada (decode en el renderer)",
+                    path
+                ));
+            }
             "ScatterPlot" if cmd.args.len() >= 2 => {
                 let xs = parse_brace_list(&cmd.args[0]);
                 let ys = parse_brace_list(&cmd.args[1]);
@@ -2547,11 +2717,15 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 || rest.to_lowercase().starts_with("integ")
                 || rest.to_lowercase().starts_with("taylor"))
         {
-            if let Some(id) = find_object_by_label(document, name) {
+            let label = name
+                .split_once('(')
+                .map(|(id, _)| id.trim())
+                .unwrap_or(name);
+            if let Some(id) = find_object_by_label(document, label) {
                 document.remove_object(id);
             }
             let final_expr = expand_all_cas(rest, document);
-            let obj = GeoObject::Function(FunctionObj::new(&final_expr).with_label(name));
+            let obj = GeoObject::Function(FunctionObj::new(&final_expr).with_label(label));
             document.add_object(obj);
             input_text.clear();
             return CommandOutcome::Ok;
@@ -3061,6 +3235,11 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "function" | "func" => "Function",
             "piecewise" | "pw" => "Piecewise",
             "distance" | "dist" => "Distance",
+            "root" | "raices" | "raiz" => "Root",
+            "extremum" | "extremos" | "max" | "min" => "Extremum",
+            "intersect" | "interseccion" => "Intersect",
+            "yintercept" | "interceptoy" | "intercepto_y" => "YIntercept",
+            "analyze" | "analizar" | "analisis" => "Analyze",
             "angle" => "Angle",
             "tangent" => "Tangent",
             "coincident" => "Coincident",
@@ -3526,6 +3705,90 @@ pub fn find_object_by_label(document: &Document, label: &str) -> Option<ObjectId
         .objects_iter()
         .find(|(_, obj)| obj.label() == label.trim())
         .map(|(id, _)| *id)
+}
+
+/// Convierte un `GeoObject` en un [`IntersectionCurve`] cuando el tipo lo
+/// admite. Devuelve `None` para tipos no soportados (3D, polígonos, …).
+fn object_to_intersection_curve(obj: &GeoObject) -> Option<IntersectionCurve<'_>> {
+    match obj {
+        GeoObject::Line(l) => Some(IntersectionCurve::Line {
+            s: l.start,
+            e: l.end,
+        }),
+        GeoObject::Circle(c) => Some(IntersectionCurve::Circle {
+            center: c.center,
+            radius: c.radius,
+        }),
+        GeoObject::Function(f) => Some(IntersectionCurve::Function { expr: &f.expr }),
+        _ => None,
+    }
+}
+
+/// Ejecuta un comando de análisis matemático sobre un objeto etiquetado.
+fn run_analysis_command(
+    document: &mut Document,
+    input_text: &mut String,
+    label: &str,
+    features: &[AnalysisFeature],
+    feature_name: &str,
+) -> CommandOutcome {
+    let view = *document.view();
+    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+    let world_br = view.screen_to_world(glam::Vec2::new(view.screen_size.x, view.screen_size.y));
+    let view_bounds = (
+        world_tl.x.min(world_br.x),
+        world_tl.x.max(world_br.x),
+        world_tl.y.min(world_br.y),
+        world_tl.y.max(world_br.y),
+    );
+
+    let base_label = label
+        .split_once('(')
+        .map(|(id, _)| id.trim())
+        .unwrap_or(label);
+    if let Some(id) =
+        find_object_by_label(document, label).or_else(|| find_object_by_label(document, base_label))
+    {
+        if let Some(obj) = document.get_object(id).cloned() {
+            let results =
+                analyzable::analyze_object(&obj, view_bounds, &document.variables, features);
+            if results.is_empty() {
+                return CommandOutcome::Message(format!(
+                    "{}: no se encontraron características",
+                    feature_name
+                ));
+            }
+            for r in &results {
+                let (color, size) = match r.feature {
+                    AnalysisFeature::Root | AnalysisFeature::XIntercept => {
+                        (Color::new(1.0, 0.2, 0.2, 1.0), 8.0)
+                    }
+                    AnalysisFeature::YIntercept => (Color::new(0.2, 0.5, 1.0, 1.0), 8.0),
+                    AnalysisFeature::LocalMaximum => (Color::new(0.2, 0.8, 0.4, 1.0), 7.0),
+                    AnalysisFeature::LocalMinimum => (Color::new(0.2, 0.8, 0.9, 1.0), 7.0),
+                    AnalysisFeature::Inflection => (Color::new(1.0, 0.6, 0.2, 1.0), 7.0),
+                    AnalysisFeature::VerticalAsymptote
+                    | AnalysisFeature::HorizontalAsymptote
+                    | AnalysisFeature::ObliqueAsymptote => (Color::new(0.8, 0.3, 0.8, 1.0), 6.0),
+                    AnalysisFeature::Intersection | AnalysisFeature::Equilibrium => {
+                        (Color::new(0.9, 0.4, 0.9, 1.0), 7.0)
+                    }
+                    AnalysisFeature::Centroid => (Color::new(0.4, 0.9, 0.4, 1.0), 8.0),
+                };
+                let mut p = PointObj::new(r.point).with_label(&r.label);
+                p.color = color;
+                p.size = size;
+                document.add_object(GeoObject::Point(p));
+            }
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "{}: {} punto(s) de análisis creados",
+                feature_name,
+                results.len()
+            ));
+        }
+    }
+    CommandOutcome::Error(format!("{}: requiere un objeto válido", feature_name))
 }
 
 fn resolve_two_polygons(

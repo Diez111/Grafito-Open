@@ -125,6 +125,28 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                             THEME_LIGHT.apply(ui.ctx());
                         }
                     }
+
+                    ui.add_space(8.0);
+                    let is_3d = app.current_view == ViewMode::D3;
+                    let toggle_text = if is_3d { "2D Vista" } else { "3D Vista" };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(toggle_text)
+                                    .color(if is_3d {
+                                        Color32::from_rgb(16, 185, 129)
+                                    } else {
+                                        accent
+                                    })
+                                    .strong(),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Cambiar entre vista 2D y 3D")
+                        .clicked()
+                    {
+                        app.current_view = if is_3d { ViewMode::D2 } else { ViewMode::D3 };
+                    }
                 });
             });
         });
@@ -148,6 +170,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
     let tabs: &[(&str, &str, &str)] = &[
         ("Álgebra", "∑", "Objetos, variables, comandos"),
+        ("Herram.", "🛠", "Herramientas de construcción y análisis"),
         ("CAS", "⌨", "Cálculo simbólico paso a paso"),
         ("Tabla", "☰", "Valores numéricos x|f(x)"),
         ("Hoja", "⊞", "Hoja de cálculo"),
@@ -203,7 +226,8 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                     if resp.clicked() {
                         app.sidebar_tab = i;
-                        if i == 3 {
+                        if i == 4 {
+                            // index 4 is now Hoja
                             app.show_spreadsheet = false; // Never auto-open right panel when switching to Hoja
                         }
                     }
@@ -318,22 +342,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     h.to_string()
                 } else {
                     match app.current_view {
-                        ViewMode::D2 => match app.current_tool {
-                            Tool::Select => {
-                                "↖ Seleccionar: clic objeto, arrastrar vacío para mover vista"
-                            }
-                            Tool::Point => "· Punto: clic para crear",
-                            Tool::Line => "╱ Recta: clic en dos puntos",
-                            Tool::Circle => "○ Círculo: clic centro, clic borde",
-                            Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar",
-                            Tool::Function => "f(x) Función: escribe en la entrada",
-                            Tool::Distance => "↔ Distancia: clic en dos puntos",
-                            Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos",
-                            Tool::Slider => "═ Deslizador: clic para crear variable",
-                            Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente",
-                            _ => "Espacio / clic medio: mover vista",
-                        }
-                        .to_string(),
+                        ViewMode::D2 => status_hint_for_tool(app.current_tool),
                         ViewMode::D3 => {
                             "3D: clic izq pan (Select), der orbitar, rueda zoom".to_string()
                         }
@@ -351,6 +360,50 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 });
             });
         });
+}
+
+fn status_hint_for_tool(tool: Tool) -> String {
+    match tool {
+        Tool::Select => "↖ Seleccionar: clic objeto, arrastrar vacío para mover vista".to_string(),
+        Tool::Point => "· Punto: clic para crear".to_string(),
+        Tool::Point3D => "· Punto 3D: clic para crear".to_string(),
+        Tool::Line => "╱ Recta: clic en dos puntos".to_string(),
+        Tool::Segment => "─ Segmento: clic en dos puntos".to_string(),
+        Tool::Ray => "→ Semirrecta: clic origen, clic dirección".to_string(),
+        Tool::Vector => "⇒ Vector: clic origen, clic extremo".to_string(),
+        Tool::Circle => "○ Círculo: clic centro, clic borde".to_string(),
+        Tool::Polygon => "△ Polígono: clic vértices, clic der para cerrar".to_string(),
+        Tool::RegularPolygon => "⬡ Polígono regular: clic centro, clic vértice".to_string(),
+        Tool::Function => "f(x) Función: clic para crear y editar".to_string(),
+        Tool::Distance => "↔ Distancia: clic en dos puntos".to_string(),
+        Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos".to_string(),
+        Tool::Area => "⬜ Área: clic en polígono o círculo".to_string(),
+        Tool::Slope => "m Pendiente: clic en recta".to_string(),
+        Tool::Slider => "═ Deslizador: clic para crear variable".to_string(),
+        Tool::Locus => "⌒ Locus: selecciona punto móvil, luego dependiente".to_string(),
+        Tool::Midpoint => "M Punto medio: clic en dos puntos".to_string(),
+        Tool::Perpendicular => "⟂ Perpendicular: clic en dos puntos".to_string(),
+        Tool::Tangent => "⌒ Tangente: selecciona círculo y recta".to_string(),
+        Tool::Root => "x₀ Raíces: clic en una función".to_string(),
+        Tool::Extremum => "max Extremos: clic en una función".to_string(),
+        Tool::Intersect => "× Intersección: clic en dos objetos".to_string(),
+        Tool::Coincident => "● Coincidente: selecciona dos puntos".to_string(),
+        Tool::Horizontal => "─ Horizontal: selecciona una recta".to_string(),
+        Tool::Vertical => "│ Vertical: selecciona una recta".to_string(),
+        Tool::EqualLength => "= Longitud igual: selecciona dos segmentos".to_string(),
+        Tool::Symmetry => "⇄ Simetría: punto, imagen, eje".to_string(),
+        Tool::EllipseByFoci => "⬭ Elipse: dos focos y un punto".to_string(),
+        Tool::ParabolaByFocusDirectrix => "⩗ Parábola: foco y directriz".to_string(),
+        Tool::HyperbolaByFoci => "⩘ Hipérbola: dos focos y un punto".to_string(),
+        Tool::ConicByFivePoints => "C5 Cónica: cinco puntos".to_string(),
+        Tool::PolygonUnion => "∪ Unión: dos polígonos".to_string(),
+        Tool::PolygonIntersection => "∩ Intersección: dos polígonos".to_string(),
+        Tool::PolygonDifference => "\\ Diferencia: dos polígonos".to_string(),
+        Tool::PolygonXor => "⊕ XOR: dos polígonos".to_string(),
+        Tool::Sphere3D => "◯ Esfera 3D: clic centro y borde".to_string(),
+        Tool::Cube3D => "□ Cubo 3D: clic centro y borde".to_string(),
+        _ => "Espacio / clic medio: mover vista".to_string(),
+    }
 }
 
 pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {

@@ -7,6 +7,26 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
+#### Añadido
+- Motor de análisis matemático unificado en `grafito-geometry` (`analysis.rs`): raíces, extremos, puntos de inflexión, interceptos, asíntotas y Taylor para funciones explícitas, curvas paramétricas 2D, curvas polares, curvas implícitas y campos vectoriales 2D.
+- Puente `grafito-core/src/analyzable.rs` para analizar cualquier `GeoObject` desde la UI y los comandos.
+- Comandos de análisis: `Root`, `Extremum`, `Inflection`, `YIntercept` y `Analyze` (con alias en español).
+- Herramientas de toolbar: `Root`, `Extremum`, `Inflection`, `YIntercept`, `Analyze`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve`, `VectorField2D`.
+- Tests de integración para comandos de análisis en `crates/grafito-command/tests/analysis_commands.rs`.
+- Tool ghost universal: preview translúcido para `Function`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve`, `VectorField2D`, `Segment`, `Ray`, `Vector` y `RegularPolygon`.
+- Atajos de teclado para análisis: `R` (Raíz), `E` (Extremo), `N` (Inflexión), `Ctrl+Y` (Intersección Y), `Ctrl+A` (Analizar).
+- Unificación parcial del estado pendiente: `Line`, `Circle`, `Polygon`, `Tangent` y `Perpendicular` ahora usan `ToolState.pending` y comparten el mismo ghost preview.
+
+#### Corregido
+- `unwrap()` críticos en `app.rs` (acción `Symmetry`, icono fallback).
+- Botón `Tangent` duplicado en la toolbar.
+- Clamp de componentes de color en `render_2d::to_color32` para evitar overflows.
+- Grilla logarítmica que fallaba con dominios visibles negativos.
+- Renderizado de parábolas degeneradas (`p <= 0`).
+- Dominio de `acos` en la herramienta `Angle` (clamp a `[-1, 1]`).
+- Normalización de comandos `YIntercept` y `Analyze` en el parser CAS.
+- Etiquetado de funciones creadas con `f(x) = ...` ahora usa solo `f`, permitiendo `Root[f]`.
+
 ## [0.9.0-beta.1] - 2026-06-14
 
 ### v0.9.16-alpha

@@ -388,10 +388,27 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
 
             ui.separator();
 
+            // Analysis tools (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::Root, "Raíz", "R");
+            tool_btn(ui, current_tool, Tool::Extremum, "Extremo", "E");
+            tool_btn(ui, current_tool, Tool::Inflection, "Inflexión", "N");
+            tool_btn(ui, current_tool, Tool::YIntercept, "InterY", "Ctrl+Y");
+            tool_btn(ui, current_tool, Tool::XIntercept, "InterX", "I");
+            tool_btn(ui, current_tool, Tool::Analyze, "Analizar", "Ctrl+A");
+
+            ui.separator();
+
+            // Curve creators (only in 2D mode)
+            tool_btn(ui, current_tool, Tool::ParametricCurve2D, "Param2D", "");
+            tool_btn(ui, current_tool, Tool::PolarCurve, "Polar", "");
+            tool_btn(ui, current_tool, Tool::ImplicitCurve, "Implícita", "");
+            tool_btn(ui, current_tool, Tool::VectorField2D, "CampoVec", "");
+
+            ui.separator();
+
             // Numeric constraints (only in 2D mode)
             tool_btn(ui, current_tool, Tool::Distance, "Distancia", "");
             tool_btn(ui, current_tool, Tool::Angle, "Ángulo", "");
-            tool_btn(ui, current_tool, Tool::Tangent, "Tangente", "");
             tool_btn(ui, current_tool, Tool::Coincident, "Coincidente", "");
             tool_btn(ui, current_tool, Tool::Horizontal, "Horizontal", "");
             tool_btn(ui, current_tool, Tool::Vertical, "Vertical", "");
@@ -867,6 +884,112 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
                 text_color,
             );
         }
+        Tool::Root => {
+            painter.circle_filled(c - egui::vec2(6.0, 0.0), 3.0, text_color);
+            painter.circle_filled(c + egui::vec2(6.0, 0.0), 3.0, text_color);
+            painter.text(
+                c - egui::vec2(0.0, 8.0),
+                egui::Align2::CENTER_CENTER,
+                "x₀",
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::Extremum => {
+            painter.circle_filled(c - egui::vec2(0.0, 6.0), 3.0, text_color);
+            painter.text(
+                c + egui::vec2(0.0, 8.0),
+                egui::Align2::CENTER_CENTER,
+                "max",
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::Intersect => {
+            painter.line_segment([c - egui::vec2(8.0, 8.0), c + egui::vec2(8.0, 8.0)], stroke);
+            painter.line_segment(
+                [c - egui::vec2(8.0, -8.0), c + egui::vec2(8.0, -8.0)],
+                stroke,
+            );
+            painter.circle_filled(c, 3.0, text_color);
+        }
+        Tool::Inflection => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "I",
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::YIntercept => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "Y₀",
+                egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::XIntercept => {
+            painter.line_segment(
+                [c - egui::vec2(10.0, 0.0), c + egui::vec2(10.0, 0.0)],
+                stroke,
+            );
+            painter.circle_filled(c, 3.0, text_color);
+            painter.text(
+                c - egui::vec2(0.0, 12.0),
+                egui::Align2::CENTER_CENTER,
+                "X₀",
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::Analyze => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "A",
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::ParametricCurve2D => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "(t)",
+                egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::PolarCurve => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "r(θ)",
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::ImplicitCurve => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "f=0",
+                egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
+        Tool::VectorField2D => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "VF",
+                egui::FontId::new(11.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
         Tool::Image => {
             painter.rect_stroke(
                 egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)),
@@ -905,6 +1028,18 @@ pub enum Tool {
     Fractal,
     Histogram,
     ScatterPlot,
+    Root,
+    Extremum,
+    Inflection,
+    YIntercept,
+    XIntercept,
+    Analyze,
+    Intersect,
+    // Curve creators
+    ParametricCurve2D,
+    PolarCurve,
+    ImplicitCurve,
+    VectorField2D,
     // Construction tools
     Segment,
     Ray,
@@ -946,6 +1081,66 @@ pub enum Tool {
 }
 
 impl Tool {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::Point => "Point",
+            Tool::Line => "Line",
+            Tool::Circle => "Circle",
+            Tool::Polygon => "Polygon",
+            Tool::Function => "Function",
+            Tool::Point3D => "Point3D",
+            Tool::Sphere3D => "Sphere3D",
+            Tool::Cube3D => "Cube3D",
+            Tool::Attractor => "Attractor",
+            Tool::Fractal => "Fractal",
+            Tool::Histogram => "Histogram",
+            Tool::ScatterPlot => "ScatterPlot",
+            Tool::Root => "Root",
+            Tool::Extremum => "Extremum",
+            Tool::Inflection => "Inflection",
+            Tool::YIntercept => "YIntercept",
+            Tool::XIntercept => "XIntercept",
+            Tool::Analyze => "Analyze",
+            Tool::Intersect => "Intersect",
+            Tool::ParametricCurve2D => "ParametricCurve2D",
+            Tool::PolarCurve => "PolarCurve",
+            Tool::ImplicitCurve => "ImplicitCurve",
+            Tool::VectorField2D => "VectorField2D",
+            Tool::Segment => "Segment",
+            Tool::Ray => "Ray",
+            Tool::Vector => "Vector",
+            Tool::RegularPolygon => "RegularPolygon",
+            Tool::Tangent => "Tangent",
+            Tool::Perpendicular => "Perpendicular",
+            Tool::Locus => "Locus",
+            Tool::Midpoint => "Midpoint",
+            Tool::Distance => "Distance",
+            Tool::Angle => "Angle",
+            Tool::Area => "Area",
+            Tool::Slope => "Slope",
+            Tool::Slider => "Slider",
+            Tool::Button => "Button",
+            Tool::Image => "Image",
+            Tool::DomainColoring => "DomainColoring",
+            Tool::HeatMap => "HeatMap",
+            Tool::ComplexGrid => "ComplexGrid",
+            Tool::Coincident => "Coincident",
+            Tool::Horizontal => "Horizontal",
+            Tool::Vertical => "Vertical",
+            Tool::EqualLength => "EqualLength",
+            Tool::Symmetry => "Symmetry",
+            Tool::EllipseByFoci => "EllipseByFoci",
+            Tool::ParabolaByFocusDirectrix => "ParabolaByFocusDirectrix",
+            Tool::HyperbolaByFoci => "HyperbolaByFoci",
+            Tool::ConicByFivePoints => "ConicByFivePoints",
+            Tool::PolygonUnion => "PolygonUnion",
+            Tool::PolygonIntersection => "PolygonIntersection",
+            Tool::PolygonDifference => "PolygonDifference",
+            Tool::PolygonXor => "PolygonXor",
+        }
+    }
+
     pub fn cursor_icon(&self) -> egui::CursorIcon {
         match self {
             Tool::Select => egui::CursorIcon::Default,
@@ -960,6 +1155,17 @@ impl Tool {
             | Tool::Fractal
             | Tool::Histogram
             | Tool::ScatterPlot
+            | Tool::Root
+            | Tool::Extremum
+            | Tool::Inflection
+            | Tool::YIntercept
+            | Tool::XIntercept
+            | Tool::Analyze
+            | Tool::Intersect
+            | Tool::ParametricCurve2D
+            | Tool::PolarCurve
+            | Tool::ImplicitCurve
+            | Tool::VectorField2D
             | Tool::Segment
             | Tool::Ray
             | Tool::Vector

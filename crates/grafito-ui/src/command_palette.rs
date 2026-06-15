@@ -158,6 +158,68 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             category: "CAS",
             syntax_hint: "Taylor[expr, x, x0, order]",
         },
+        // Análisis
+        PaletteCommand {
+            name: "Root",
+            category: "Análisis",
+            syntax_hint: "Root[f]",
+        },
+        PaletteCommand {
+            name: "Extremum",
+            category: "Análisis",
+            syntax_hint: "Extremum[f]",
+        },
+        PaletteCommand {
+            name: "Inflection",
+            category: "Análisis",
+            syntax_hint: "Inflection[f]",
+        },
+        PaletteCommand {
+            name: "YIntercept",
+            category: "Análisis",
+            syntax_hint: "YIntercept[f]",
+        },
+        PaletteCommand {
+            name: "XIntercept",
+            category: "Análisis",
+            syntax_hint: "XIntercept[f]  (raíces con cualquier curva)",
+        },
+        PaletteCommand {
+            name: "Intersect",
+            category: "Análisis",
+            syntax_hint: "Intersect[a, b]  (cualquier par de curvas)",
+        },
+        PaletteCommand {
+            name: "Analyze",
+            category: "Análisis",
+            syntax_hint: "Analyze[f]",
+        },
+        PaletteCommand {
+            name: "Image",
+            category: "Crear",
+            syntax_hint: "Image[ruta/al/archivo.png]  o  clic en el lienzo",
+        },
+        // Curvas avanzadas
+        PaletteCommand {
+            name: "ParametricCurve2D",
+            category: "Crear",
+            syntax_hint: "ParametricCurve2D[x(t), y(t), t0, t1]",
+        },
+        PaletteCommand {
+            name: "PolarCurve",
+            category: "Crear",
+            syntax_hint: "PolarCurve[r(t), t0, t1]",
+        },
+        PaletteCommand {
+            name: "ImplicitCurve",
+            category: "Crear",
+            syntax_hint: "ImplicitCurve[f(x,y) = c]",
+        },
+        PaletteCommand {
+            name: "VectorField2D",
+            category: "Crear",
+            syntax_hint: "VectorField2D[u(x,y), v(x,y)]",
+        },
         // Matrices
         PaletteCommand {
             name: "Determinant",

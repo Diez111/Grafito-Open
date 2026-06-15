@@ -36,6 +36,10 @@ grafito/
 | Expansión | `Expand[(a+b)(c+d)]` | Distribución algebraica | Simbólica |
 | Simplificación | `Simplify[expr]` | Constant folding + identidades | 2-pass |
 | Serie de Taylor | `Taylor[expr, x, x₀, n]` | Diferenciación simbólica + factorial | Orden n |
+| Raíces / interceptos | `Root[f]`, `YIntercept[f]` | Newton/bisección + refinamiento | 1e-9 |
+| Extremos | `Extremum[f]` | Raíces de la derivada primera | 1e-9 |
+| Inflexiones | `Inflection[f]` | Raíces de la derivada segunda | 1e-9 |
+| Análisis completo | `Analyze[f]` | Todas las características anteriores combinadas | 1e-9 |
 | Matrices | `Determinant[[...]]`, `Inverse[[...]]` | Eliminación Gaussiana con pivoteo parcial | ~1e-15 |
 
 ### Motor de Expresiones

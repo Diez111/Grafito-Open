@@ -146,6 +146,7 @@ pub struct GrafitoApp {
     pub animation_running: bool,
     pub show_grid: bool,
     pub snap_to_grid: bool,
+    pub snap_config: crate::snap::SnapConfig,
     pub exam_mode: bool,
     pub dark_mode: bool,
     pub pending_points: Vec<Point2>,
@@ -179,9 +180,31 @@ pub struct GrafitoApp {
     pub is_view_changing: bool,
     pub pending_action: PendingAction,
     pub toasts: grafito_ui::toast::ToastManager,
+    pub hovered_analysis: Option<HoveredAnalysis>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HoveredAnalysis {
+    pub point: Point2,
+    pub label: String,
+    pub is_snap: bool,
+    pub feature: Option<grafito_geometry::analysis::AnalysisFeature>,
+    pub snap_kind: Option<crate::snap::SnapKind>,
 }
 
 impl GrafitoApp {
+    /// Limpia todo el estado transitorio de herramientas (puntos pendientes,
+    /// objetos driver/driven, rectángulos de selección y outcome de comandos).
+    pub fn reset_tool_input(&mut self) {
+        self.pending_points.clear();
+        self.pending_points_3d.clear();
+        self.tool_state.pending.clear();
+        self.tool_state.driver = None;
+        self.tool_state.driven = None;
+        self.tool_state.measure_src = None;
+        self.tool_state.selection_rect = None;
+        self.tool_state.last_outcome = None;
+    }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         if let Some(render_state) = &cc.wgpu_render_state {
             let renderer: Arc<RwLock<Option<grafito_render::Renderer>>> =
@@ -279,6 +302,7 @@ impl GrafitoApp {
             animation_running: false,
             show_grid: config.show_grid,
             snap_to_grid: config.snap_to_grid,
+            snap_config: config.snap,
             exam_mode: false,
             dark_mode,
             pending_points: Vec::new(),
@@ -311,6 +335,7 @@ impl GrafitoApp {
             is_view_changing: false,
             pending_action: PendingAction::None,
             toasts: grafito_ui::toast::ToastManager::default(),
+            hovered_analysis: None,
             color_favorites: [
                 grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
                 grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
@@ -495,87 +520,87 @@ impl GrafitoApp {
         Some(match &self.pending_action {
             PendingAction::None => return None,
             PendingAction::Distance { first } if first.is_none() => {
-                "Select first point for distance constraint".to_string()
+                "Distancia: selecciona el primer punto".to_string()
             }
-            PendingAction::Distance { .. } => {
-                "Select second point for distance constraint".to_string()
-            }
+            PendingAction::Distance { .. } => "Distancia: selecciona el segundo punto".to_string(),
             PendingAction::Angle { first } if first.is_none() => {
-                "Select first line for angle constraint".to_string()
+                "Ángulo: selecciona la primera recta".to_string()
             }
-            PendingAction::Angle { .. } => "Select second line for angle constraint".to_string(),
+            PendingAction::Angle { .. } => "Ángulo: selecciona la segunda recta".to_string(),
             PendingAction::Tangent { first } if first.is_none() => {
-                "Select circle for tangent constraint".to_string()
+                "Tangente: selecciona la circunferencia".to_string()
             }
-            PendingAction::Tangent { .. } => "Select line for tangent constraint".to_string(),
+            PendingAction::Tangent { .. } => "Tangente: selecciona la recta".to_string(),
             PendingAction::Coincident { first } if first.is_none() => {
-                "Select first point for coincident constraint".to_string()
+                "Coincidente: selecciona el primer punto".to_string()
             }
             PendingAction::Coincident { .. } => {
-                "Select second point for coincident constraint".to_string()
+                "Coincidente: selecciona el segundo punto".to_string()
             }
-            PendingAction::Horizontal { .. } => "Select line for horizontal constraint".to_string(),
-            PendingAction::Vertical { .. } => "Select line for vertical constraint".to_string(),
+            PendingAction::Horizontal { .. } => "Horizontal: selecciona una recta".to_string(),
+            PendingAction::Vertical { .. } => "Vertical: selecciona una recta".to_string(),
             PendingAction::EqualLength { first } if first.is_none() => {
-                "Select first segment for equal length constraint".to_string()
+                "Longitud igual: selecciona el primer segmento".to_string()
             }
             PendingAction::EqualLength { .. } => {
-                "Select second segment for equal length constraint".to_string()
+                "Longitud igual: selecciona el segundo segmento".to_string()
             }
             PendingAction::Symmetry { point, .. } if point.is_none() => {
-                "Select point for symmetry constraint".to_string()
+                "Simetría: selecciona el punto original".to_string()
             }
             PendingAction::Symmetry { mirror_point, .. } if mirror_point.is_none() => {
-                "Select mirror point for symmetry constraint".to_string()
+                "Simetría: selecciona el punto imagen".to_string()
             }
             PendingAction::Symmetry { line, .. } if line.is_none() => {
-                "Select mirror line for symmetry constraint".to_string()
+                "Simetría: selecciona el eje".to_string()
             }
-            PendingAction::Symmetry { .. } => "Confirm symmetry constraint".to_string(),
+            PendingAction::Symmetry { .. } => "Simetría: confirma la restricción".to_string(),
             PendingAction::EllipseByFoci { f1, .. } if f1.is_none() => {
-                "Select first focus for ellipse".to_string()
+                "Elipse: selecciona el primer foco".to_string()
             }
             PendingAction::EllipseByFoci { f2, .. } if f2.is_none() => {
-                "Select second focus for ellipse".to_string()
+                "Elipse: selecciona el segundo foco".to_string()
             }
-            PendingAction::EllipseByFoci { .. } => "Select point on ellipse".to_string(),
+            PendingAction::EllipseByFoci { .. } => "Elipse: selecciona un punto".to_string(),
             PendingAction::ParabolaByFocusDirectrix { focus, .. } if focus.is_none() => {
-                "Select focus for parabola".to_string()
+                "Parábola: selecciona el foco".to_string()
             }
             PendingAction::ParabolaByFocusDirectrix { directrix, .. } if directrix.is_none() => {
-                "Select directrix line for parabola".to_string()
+                "Parábola: selecciona la directriz".to_string()
             }
-            PendingAction::ParabolaByFocusDirectrix { .. } => "Confirm parabola".to_string(),
+            PendingAction::ParabolaByFocusDirectrix { .. } => "Parábola: confirma".to_string(),
             PendingAction::HyperbolaByFoci { f1, .. } if f1.is_none() => {
-                "Select first focus for hyperbola".to_string()
+                "Hipérbola: selecciona el primer foco".to_string()
             }
             PendingAction::HyperbolaByFoci { f2, .. } if f2.is_none() => {
-                "Select second focus for hyperbola".to_string()
+                "Hipérbola: selecciona el segundo foco".to_string()
             }
-            PendingAction::HyperbolaByFoci { .. } => "Select point on hyperbola".to_string(),
+            PendingAction::HyperbolaByFoci { .. } => "Hipérbola: selecciona un punto".to_string(),
             PendingAction::ConicByFivePoints { points } => {
-                format!("Select point {} of 5 for conic", points.len() + 1)
+                format!("Cónica: selecciona el punto {} de 5", points.len() + 1)
             }
             PendingAction::BooleanUnion { first } if first.is_none() => {
-                "Select first polygon for union".to_string()
+                "Unión: selecciona el primer polígono".to_string()
             }
-            PendingAction::BooleanUnion { .. } => "Select second polygon for union".to_string(),
+            PendingAction::BooleanUnion { .. } => {
+                "Unión: selecciona el segundo polígono".to_string()
+            }
             PendingAction::BooleanIntersection { first } if first.is_none() => {
-                "Select first polygon for intersection".to_string()
+                "Intersección: selecciona el primer polígono".to_string()
             }
             PendingAction::BooleanIntersection { .. } => {
-                "Select second polygon for intersection".to_string()
+                "Intersección: selecciona el segundo polígono".to_string()
             }
             PendingAction::BooleanDifference { first } if first.is_none() => {
-                "Select first polygon for difference".to_string()
+                "Diferencia: selecciona el primer polígono".to_string()
             }
             PendingAction::BooleanDifference { .. } => {
-                "Select second polygon for difference".to_string()
+                "Diferencia: selecciona el segundo polígono".to_string()
             }
             PendingAction::BooleanXor { first } if first.is_none() => {
-                "Select first polygon for xor".to_string()
+                "XOR: selecciona el primer polígono".to_string()
             }
-            PendingAction::BooleanXor { .. } => "Select second polygon for xor".to_string(),
+            PendingAction::BooleanXor { .. } => "XOR: selecciona el segundo polígono".to_string(),
         })
     }
 
@@ -759,14 +784,18 @@ impl GrafitoApp {
                         line,
                     };
                     return;
-                } else {
+                } else if let (Some(p), Some(m)) = (point, mirror_point) {
                     self.save_state();
-                    self.document.add_symmetry_constraint(
-                        point.unwrap(),
-                        mirror_point.unwrap(),
-                        id,
-                    );
+                    self.document.add_symmetry_constraint(p, m, id);
                     self.re_evaluate_constraints(&[]);
+                } else {
+                    // Estado inconsistente: devolver la acción para reintentar
+                    self.pending_action = PendingAction::Symmetry {
+                        point,
+                        mirror_point,
+                        line,
+                    };
+                    return;
                 }
             }
             PendingAction::EllipseByFoci { f1, f2 } => {
@@ -962,7 +991,7 @@ impl eframe::App for GrafitoApp {
         if ctx.input(|i| i.key_pressed(Key::F1)) {
             self.current_tool = Tool::Select;
             self.tool_ghost = None;
-            self.pending_points.clear();
+            self.reset_tool_input();
         }
         if ctx.input(|i| i.key_pressed(Key::F2)) {
             self.current_tool = Tool::Point;
@@ -971,26 +1000,81 @@ impl eframe::App for GrafitoApp {
         if ctx.input(|i| i.key_pressed(Key::F3)) {
             self.current_tool = Tool::Line;
             self.tool_ghost = None;
-            self.pending_points.clear();
+            self.reset_tool_input();
         }
         if ctx.input(|i| i.key_pressed(Key::F4)) {
             self.current_tool = Tool::Circle;
             self.tool_ghost = None;
-            self.pending_points.clear();
+            self.reset_tool_input();
         }
         if ctx.input(|i| i.key_pressed(Key::F5)) {
             self.current_tool = Tool::Polygon;
             self.tool_ghost = None;
-            self.pending_points.clear();
+            self.reset_tool_input();
         }
         if ctx.input(|i| i.key_pressed(Key::F6)) {
             self.current_tool = Tool::Function;
             self.tool_ghost = None;
         }
+        if ctx.input(|i| i.key_pressed(Key::R) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Root;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::E) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Extremum;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::I) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::XIntercept;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::X) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Intersect;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::N) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Inflection;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::S) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Segment;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Y) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Ray;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::V) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Vector;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::M) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.current_tool = Tool::Midpoint;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl) {
+            self.current_tool = Tool::YIntercept;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
+        if ctx.input(|i| i.key_pressed(Key::A) && i.modifiers.ctrl) {
+            self.current_tool = Tool::Analyze;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+        }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.current_tool = Tool::Select;
             self.tool_ghost = None;
-            self.pending_points.clear();
+            self.reset_tool_input();
             self.clear_pending_action();
         }
         // Log axis toggles: Shift+L = X, Shift+K = Y, Shift+J = both
@@ -1006,6 +1090,11 @@ impl eframe::App for GrafitoApp {
             v.x_log = both;
             v.y_log = both;
         }
+        // G: toggle snap-to-grid (sin modificadores).
+        if ctx.input(|i| i.key_pressed(Key::G) && !i.modifiers.ctrl && !i.modifiers.alt) {
+            self.snap_to_grid = !self.snap_to_grid;
+            self.snap_config.snap_to_grid = self.snap_to_grid;
+        }
         // Ctrl+S: save, Ctrl+O: load
         if ctx.input(|i| i.key_pressed(Key::S) && i.modifiers.ctrl && !i.modifiers.shift) {
             self.save_to_file();
@@ -1019,6 +1108,7 @@ impl eframe::App for GrafitoApp {
                 dark_mode: self.dark_mode,
                 show_grid: self.show_grid,
                 snap_to_grid: self.snap_to_grid,
+                snap: self.snap_config.clone(),
             });
         }
 
@@ -1031,10 +1121,11 @@ impl eframe::App for GrafitoApp {
             self.sync_pending_action_with_tool();
             match self.sidebar_tab {
                 0 => crate::algebra::draw_algebra_panel(self, ctx),
-                1 => crate::panels::draw_cas_panel(self, ctx),
-                2 => crate::panels::draw_table_panel(self, ctx),
-                3 => crate::panels::draw_spreadsheet_panel(self, ctx),
-                4 => crate::panels::draw_view_panel(self, ctx),
+                1 => crate::tools_panel::draw_tools_panel(self, ctx),
+                2 => crate::panels::draw_cas_panel(self, ctx),
+                3 => crate::panels::draw_table_panel(self, ctx),
+                4 => crate::panels::draw_spreadsheet_panel(self, ctx),
+                5 => crate::panels::draw_view_panel(self, ctx),
                 _ => crate::panels::draw_empty_panel(self, ctx),
             }
 
@@ -1124,6 +1215,12 @@ impl eframe::App for GrafitoApp {
                             glam::Vec2::new(canvas_size.x, canvas_size.y);
 
                         if self.use_gpu && canvas_size.x > 0.0 && canvas_size.y > 0.0 {
+                            // Draw grid and axes BEFORE the GPU callback so they are underneath
+                            let mut painter = ui.painter().clone();
+                            painter.set_clip_rect(canvas_rect);
+                            self.draw_grid(&painter, canvas_rect);
+                            self.draw_axes(&painter, canvas_rect);
+
                             let callback = egui_wgpu::Callback::new_paint_callback(
                                 canvas_rect,
                                 crate::canvas::CanvasCallback {
@@ -1133,11 +1230,7 @@ impl eframe::App for GrafitoApp {
                             );
                             ui.painter().add(egui::epaint::Shape::Callback(callback));
 
-                            // Overlay only: text, points, grid, axes drawn by CPU on top of GPU
-                            let mut painter = ui.painter().clone();
-                            painter.set_clip_rect(canvas_rect);
-                            self.draw_grid(&painter, canvas_rect);
-                            self.draw_axes(&painter, canvas_rect);
+                            // Overlay only: text, points drawn by CPU on top of GPU
                             self.draw_objects(&painter, canvas_rect, true);
                         } else {
                             let mut painter = ui.painter().clone();
@@ -1190,6 +1283,9 @@ impl eframe::App for GrafitoApp {
                     }
 
                     if self.use_gpu {
+                        // Draw 3D grid BEFORE the GPU callback
+                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
+
                         let callback = egui_wgpu::Callback::new_paint_callback(
                             canvas_rect,
                             crate::canvas::Canvas3DCallback {
@@ -1203,7 +1299,6 @@ impl eframe::App for GrafitoApp {
                         ui.painter().add(egui::epaint::Shape::Callback(callback));
 
                         // Overlay only: text, points, and labels drawn by CPU on top of GPU
-                        self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
                         self.draw_3d_objects(ui.painter(), canvas_rect, w, h, true);
                     } else {
                         self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
@@ -1291,14 +1386,20 @@ pub fn run_app() -> Result<(), eframe::Error> {
 
     let icon = {
         let image_data = include_bytes!("../../../assets/grafito-icon-256x256.png");
-        let image = image::load_from_memory(image_data)
-            .expect("Failed to load icon")
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        egui::IconData {
-            rgba: image.into_raw(),
-            width,
-            height,
+        match image::load_from_memory(image_data) {
+            Ok(img) => {
+                let img = img.into_rgba8();
+                let (width, height) = img.dimensions();
+                egui::IconData {
+                    rgba: img.into_raw(),
+                    width,
+                    height,
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to load icon: {}. Using fallback.", e);
+                egui::IconData::default()
+            }
         }
     };
 

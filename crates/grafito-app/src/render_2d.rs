@@ -9,10 +9,10 @@ use grafito_geometry::{Color, Point2};
 
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
-        (c.r * 255.0) as u8,
-        (c.g * 255.0) as u8,
-        (c.b * 255.0) as u8,
-        (c.a * 255.0) as u8,
+        (c.r * 255.0).clamp(0.0, 255.0) as u8,
+        (c.g * 255.0).clamp(0.0, 255.0) as u8,
+        (c.b * 255.0).clamp(0.0, 255.0) as u8,
+        (c.a * 255.0).clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -174,32 +174,43 @@ impl GrafitoApp {
 
         // Vertical grid lines
         if view.x_log {
-            let min_pow = world_tl.x.max(1e-300).log10().floor() as i32 - 1;
-            let max_pow = world_br.x.max(1e-300).log10().ceil() as i32 + 1;
-            for pow in min_pow..=max_pow {
-                let x = 10_f64.powf(pow as f64);
-                let a = view.world_to_screen(Point2::new(x, world_br.y));
-                let b = view.world_to_screen(Point2::new(x, world_tl.y));
-                painter.line_segment(
-                    [
-                        canvas_rect.min + Vec2::new(a.x, a.y),
-                        canvas_rect.min + Vec2::new(b.x, b.y),
-                    ],
-                    grid_stroke,
-                );
-                // Minor grid at 2..9 * 10^pow
-                if pow < max_pow {
-                    for k in 2..=9 {
-                        let xm = k as f64 * 10_f64.powf(pow as f64);
-                        let am = view.world_to_screen(Point2::new(xm, world_br.y));
-                        let bm = view.world_to_screen(Point2::new(xm, world_tl.y));
-                        painter.line_segment(
-                            [
-                                canvas_rect.min + Vec2::new(am.x, am.y),
-                                canvas_rect.min + Vec2::new(bm.x, bm.y),
-                            ],
-                            minor_stroke,
-                        );
+            let x_min = world_tl.x.min(world_br.x);
+            let x_max = world_tl.x.max(world_br.x);
+            if x_max > 0.0 {
+                let positive_min = x_min.max(1e-12);
+                let min_pow = positive_min.log10().floor() as i32 - 1;
+                let max_pow = x_max.log10().ceil() as i32 + 1;
+                for pow in min_pow..=max_pow {
+                    let x = 10_f64.powf(pow as f64);
+                    if x < positive_min || x > x_max {
+                        continue;
+                    }
+                    let a = view.world_to_screen(Point2::new(x, world_br.y));
+                    let b = view.world_to_screen(Point2::new(x, world_tl.y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        grid_stroke,
+                    );
+                    // Minor grid at 2..9 * 10^pow
+                    if pow < max_pow {
+                        for k in 2..=9 {
+                            let xm = k as f64 * 10_f64.powf(pow as f64);
+                            if xm < positive_min || xm > x_max {
+                                continue;
+                            }
+                            let am = view.world_to_screen(Point2::new(xm, world_br.y));
+                            let bm = view.world_to_screen(Point2::new(xm, world_tl.y));
+                            painter.line_segment(
+                                [
+                                    canvas_rect.min + Vec2::new(am.x, am.y),
+                                    canvas_rect.min + Vec2::new(bm.x, bm.y),
+                                ],
+                                minor_stroke,
+                            );
+                        }
                     }
                 }
             }
@@ -234,31 +245,43 @@ impl GrafitoApp {
 
         // Horizontal grid lines
         if view.y_log {
-            let min_pow = world_br.y.max(1e-300).log10().floor() as i32 - 1;
-            let max_pow = world_tl.y.max(1e-300).log10().ceil() as i32 + 1;
-            for pow in min_pow..=max_pow {
-                let y = 10_f64.powf(pow as f64);
-                let a = view.world_to_screen(Point2::new(world_tl.x, y));
-                let b = view.world_to_screen(Point2::new(world_br.x, y));
-                painter.line_segment(
-                    [
-                        canvas_rect.min + Vec2::new(a.x, a.y),
-                        canvas_rect.min + Vec2::new(b.x, b.y),
-                    ],
-                    grid_stroke,
-                );
-                if pow < max_pow {
-                    for k in 2..=9 {
-                        let ym = k as f64 * 10_f64.powf(pow as f64);
-                        let am = view.world_to_screen(Point2::new(world_tl.x, ym));
-                        let bm = view.world_to_screen(Point2::new(world_br.x, ym));
-                        painter.line_segment(
-                            [
-                                canvas_rect.min + Vec2::new(am.x, am.y),
-                                canvas_rect.min + Vec2::new(bm.x, bm.y),
-                            ],
-                            minor_stroke,
-                        );
+            let y_min = world_tl.y.min(world_br.y);
+            let y_max = world_tl.y.max(world_br.y);
+            if y_max > 0.0 {
+                let positive_min = y_min.max(1e-12);
+                let min_pow = positive_min.log10().floor() as i32 - 1;
+                let max_pow = y_max.log10().ceil() as i32 + 1;
+                for pow in min_pow..=max_pow {
+                    let y = 10_f64.powf(pow as f64);
+                    if y < positive_min || y > y_max {
+                        continue;
+                    }
+                    let a = view.world_to_screen(Point2::new(world_tl.x, y));
+                    let b = view.world_to_screen(Point2::new(world_br.x, y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        grid_stroke,
+                    );
+                    // Minor grid at 2..9 * 10^pow
+                    if pow < max_pow {
+                        for k in 2..=9 {
+                            let ym = k as f64 * 10_f64.powf(pow as f64);
+                            if ym < positive_min || ym > y_max {
+                                continue;
+                            }
+                            let am = view.world_to_screen(Point2::new(world_tl.x, ym));
+                            let bm = view.world_to_screen(Point2::new(world_br.x, ym));
+                            painter.line_segment(
+                                [
+                                    canvas_rect.min + Vec2::new(am.x, am.y),
+                                    canvas_rect.min + Vec2::new(bm.x, bm.y),
+                                ],
+                                minor_stroke,
+                            );
+                        }
                     }
                 }
             }
@@ -599,10 +622,73 @@ impl GrafitoApp {
             };
             self.draw_object_styled(painter, canvas_rect, preview, Some(style), false);
         }
+
+        // Draw hover analytics
+        if let Some(hover) = &self.hovered_analysis {
+            let view = *self.document.view();
+            let screen_pos = view.world_to_screen(hover.point);
+            let pos = canvas_rect.min + egui::Vec2::new(screen_pos.x, screen_pos.y);
+
+            let color =
+                Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
+            let radius = if hover.is_snap { 6.0 } else { 4.0 };
+            painter.circle_filled(pos, radius, color);
+            painter.circle_stroke(
+                pos,
+                radius + 1.0,
+                egui::Stroke::new(1.0, egui::Color32::WHITE),
+            );
+
+            let font = egui::FontId::proportional(14.0);
+            painter.text(
+                pos + egui::Vec2::new(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                &hover.label,
+                font,
+                color,
+            );
+        }
     }
 
     pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
         // Disabled
+    }
+
+    fn hovered_analysis_color(
+        is_snap: bool,
+        feature: Option<grafito_geometry::analysis::AnalysisFeature>,
+        snap_kind: Option<crate::snap::SnapKind>,
+    ) -> egui::Color32 {
+        use crate::snap::SnapKind;
+        use egui::Color32;
+        use grafito_geometry::analysis::AnalysisFeature;
+        if is_snap {
+            match feature {
+                Some(AnalysisFeature::Root) | Some(AnalysisFeature::XIntercept) => {
+                    Color32::from_rgb(255, 100, 100)
+                }
+                Some(AnalysisFeature::YIntercept) => Color32::from_rgb(100, 180, 255),
+                Some(AnalysisFeature::LocalMaximum) => Color32::from_rgb(74, 222, 128),
+                Some(AnalysisFeature::LocalMinimum) => Color32::from_rgb(34, 211, 238),
+                Some(AnalysisFeature::Inflection) => Color32::from_rgb(251, 146, 60),
+                Some(AnalysisFeature::Centroid) => Color32::from_rgb(120, 220, 120),
+                Some(AnalysisFeature::Intersection) | Some(AnalysisFeature::Equilibrium) => {
+                    Color32::from_rgb(220, 100, 220)
+                }
+                _ => Color32::from_rgb(255, 100, 100),
+            }
+        } else {
+            // El snap no es a una característica, pero el cursor está cerca
+            // de algo: diferenciamos por `SnapKind` para que el usuario vea
+            // visualmente qué tipo de snap aplicó.
+            match snap_kind {
+                Some(SnapKind::Axis) => Color32::from_rgb(180, 180, 255),
+                Some(SnapKind::Grid) => Color32::from_rgb(180, 180, 180),
+                Some(SnapKind::Object) => Color32::from_rgb(200, 200, 120),
+                Some(SnapKind::Curve) => Color32::from_rgb(160, 220, 200),
+                _ => Color32::from_rgb(160, 160, 160),
+            }
+        }
     }
 
     fn draw_arrowhead(painter: &egui::Painter, from: Pos2, to: Pos2, width: f32, color: Color32) {
@@ -641,6 +727,10 @@ impl GrafitoApp {
                     style.width_scale = Some(0.7);
                     style.clear_fill_color = true;
                 }
+                GeoObject::Polygon(_) => {
+                    style.width_scale = Some(0.7);
+                    style.color_alpha_multiplier = Some(0.2);
+                }
                 _ => {}
             }
             self.draw_object_styled(painter, canvas_rect, ghost, Some(style), false);
@@ -673,6 +763,31 @@ impl GrafitoApp {
                 let color = to_color32(get_color(p.color, style));
                 let label = get_label(&p.label, style);
                 painter.circle_filled(pos, size, color);
+                // Marcas de eje para puntos de intercepto (cerca de x=0 o y=0).
+                let axis_tol = 1e-6f64.max(2.0 / view.scale);
+                let tick_world = 6.0 / view.scale;
+                if p.position.x.abs() <= axis_tol {
+                    let a = view.world_to_screen(Point2::new(-tick_world, p.position.y));
+                    let b = view.world_to_screen(Point2::new(tick_world, p.position.y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        Stroke::new(1.5, color),
+                    );
+                }
+                if p.position.y.abs() <= axis_tol {
+                    let a = view.world_to_screen(Point2::new(p.position.x, -tick_world));
+                    let b = view.world_to_screen(Point2::new(p.position.x, tick_world));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        Stroke::new(1.5, color),
+                    );
+                }
                 if !label.is_empty() {
                     painter.text(
                         pos + Vec2::new(size + 2.0, -size - 2.0),
@@ -1081,10 +1196,13 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Parabola(pb) => {
+                if pb.p <= 0.0 {
+                    return;
+                }
                 let stroke = Stroke::new(pb.width, to_color32(pb.color));
                 let steps = 128;
                 let range = (20.0 / view.scale).clamp(0.1, 500.0);
-                let p_safe = pb.p.max(0.001);
+                let p_safe = pb.p;
                 let cos_a = pb.angle.cos();
                 let sin_a = pb.angle.sin();
                 let mut prev: Option<Pos2> = None;

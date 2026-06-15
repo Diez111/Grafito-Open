@@ -2,7 +2,9 @@
 //!
 //! Este crate es el único punto de entrada en Rust para los comandos de texto
 //! usados por los frontends de escritorio y FFI. Aquí viven el parseo de
-//! comandos, la construcción geométrica, el despacho del CAS y la estadística.
+//! comandos, la construcción geométrica, el despacho del CAS, la estadística
+//! y los comandos de análisis matemático (`Root`, `Extremum`, `Inflection`,
+//! `YIntercept`, `Analyze`).
 //!
 //! # Ejemplo mínimo
 //!

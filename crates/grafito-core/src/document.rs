@@ -1265,11 +1265,25 @@ impl Document {
                 if world.x < x_min - tolerance || world.x > x_max + tolerance {
                     return false;
                 }
-                // Evaluate function at world.x and check if world.y is close
-                if let Ok(y) =
-                    grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), world.x)])
-                {
-                    (world.y - y).abs() <= tolerance
+                if let (Ok(y0), Ok(y1), Ok(y2)) = (
+                    grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), world.x)]),
+                    grafito_geometry::expr::evaluate(
+                        &f.expr,
+                        &[("x".to_string(), world.x - tolerance * 2.0)],
+                    ),
+                    grafito_geometry::expr::evaluate(
+                        &f.expr,
+                        &[("x".to_string(), world.x + tolerance * 2.0)],
+                    ),
+                ) {
+                    // Check horizontal distance (if within y range of nearby x)
+                    let min_y = y1.min(y2).min(y0) - tolerance * 2.0;
+                    let max_y = y1.max(y2).max(y0) + tolerance * 2.0;
+                    if world.y >= min_y && world.y <= max_y {
+                        return true;
+                    }
+                    // Fallback to strict vertical distance if curve is very flat
+                    (world.y - y0).abs() <= tolerance * 2.0
                 } else {
                     false
                 }

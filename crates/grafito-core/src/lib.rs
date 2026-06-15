@@ -2,7 +2,8 @@
 //!
 //! Este crate define el modelo central de Grafito: el [`Document`], los 32 tipos
 //! de objetos geométricos representados por [`GeoObject`], los índices
-//! espaciales y los dos sistemas de restricciones (constructivas y numéricas).
+//! espaciales, los dos sistemas de restricciones (constructivas y numéricas)
+//! y el puente de análisis matemático ([`analyzable`]).
 //!
 //! # Ejemplo mínimo
 //!
@@ -18,6 +19,7 @@
 //! assert!(doc.get_object(id).is_some());
 //! ```
 
+pub mod analyzable;
 pub mod constraints;
 pub mod document;
 pub mod function_sampling;

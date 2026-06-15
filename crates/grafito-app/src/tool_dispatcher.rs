@@ -4,6 +4,7 @@
 //! render_2d.rs, render_3d.rs, lib.rs, bridge.rs, and dto.rs.
 //! Adding a new tool only requires adding one arm here + one Tool variant.
 
+use grafito_command::commands::CommandOutcome;
 use grafito_core::{Document, GeoObject, ObjectId};
 use grafito_geometry::Point2;
 use grafito_ui::Tool;
@@ -16,6 +17,7 @@ pub struct ToolState {
     pub driven: Option<ObjectId>,
     pub measure_src: Option<ObjectId>,
     pub selection_rect: Option<(Point2, Point2)>,
+    pub last_outcome: Option<CommandOutcome>,
 }
 
 #[allow(dead_code)]
@@ -26,6 +28,7 @@ impl ToolState {
         self.driven = None;
         self.measure_src = None;
         self.selection_rect = None;
+        self.last_outcome = None;
     }
 }
 
@@ -111,7 +114,7 @@ pub fn dispatch_tool(
         Tool::Attractor => {
             let cmd = "Lorenz[]".to_string();
             let mut c = cmd;
-            grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(grafito_command::commands::process_input(document, &mut c));
             ToolResult {
                 objects: vec![],
                 message: Some("Lorenz attractor created".into()),
@@ -121,7 +124,7 @@ pub fn dispatch_tool(
         Tool::Fractal => {
             let cmd = "Mandelbrot[]".to_string();
             let mut c = cmd;
-            grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(grafito_command::commands::process_input(document, &mut c));
             ToolResult {
                 objects: vec![],
                 message: Some("Mandelbrot fractal created".into()),
@@ -131,7 +134,7 @@ pub fn dispatch_tool(
         Tool::Histogram => {
             let cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
             let mut c = cmd;
-            grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(grafito_command::commands::process_input(document, &mut c));
             ToolResult {
                 objects: vec![],
                 message: Some("Histogram created".into()),
@@ -141,7 +144,7 @@ pub fn dispatch_tool(
         Tool::ScatterPlot => {
             let cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
             let mut c = cmd;
-            grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(grafito_command::commands::process_input(document, &mut c));
             ToolResult {
                 objects: vec![],
                 message: Some("Scatter plot created".into()),
@@ -189,11 +192,29 @@ pub fn dispatch_tool(
                 reset_tool: true,
             }
         }
-        Tool::Image => ToolResult {
-            objects: vec![],
-            message: None,
-            reset_tool: false,
-        },
+        Tool::Image => {
+            // Abrimos un file dialog de forma asíncrona (rfd).
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Imagen", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
+                .pick_file()
+            {
+                let path_str = path.to_string_lossy().to_string();
+                let mut c = format!("Image[{}]", path_str);
+                let outcome = grafito_command::commands::process_input(document, &mut c);
+                state.last_outcome = Some(outcome);
+                ToolResult {
+                    objects: vec![],
+                    message: Some(format!("Imagen '{}' cargada", path_str)),
+                    reset_tool: true,
+                }
+            } else {
+                ToolResult {
+                    objects: vec![],
+                    message: Some("Selección cancelada".into()),
+                    reset_tool: false,
+                }
+            }
+        }
         Tool::DomainColoring | Tool::HeatMap | Tool::ComplexGrid => {
             let cmd = match tool {
                 Tool::DomainColoring => "DomainColoring[z^2+1, -2, 2, -2, 2]".to_string(),
@@ -201,10 +222,133 @@ pub fn dispatch_tool(
                 _ => "ComplexGrid[z^3-1, -2, 2, -2, 2]".to_string(),
             };
             let mut c = cmd;
-            grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(grafito_command::commands::process_input(document, &mut c));
             ToolResult {
                 objects: vec![],
                 message: Some("Visualization created".into()),
+                reset_tool: true,
+            }
+        }
+        Tool::Root
+        | Tool::Extremum
+        | Tool::Inflection
+        | Tool::YIntercept
+        | Tool::XIntercept
+        | Tool::Analyze => {
+            let tolerance = 10.0 / document.view().scale;
+            if let Some(id) = document.pick_object(world, tolerance) {
+                if let Some(obj) = document.get_object(id) {
+                    let label = obj.label().to_string();
+                    let cmd = match tool {
+                        Tool::Root => format!("Root[{}]", label),
+                        Tool::Extremum => format!("Extremum[{}]", label),
+                        Tool::Inflection => format!("Inflection[{}]", label),
+                        Tool::YIntercept => format!("YIntercept[{}]", label),
+                        Tool::XIntercept => format!("XIntercept[{}]", label),
+                        Tool::Analyze => format!("Analyze[{}]", label),
+                        _ => unreachable!(),
+                    };
+                    let mut c = cmd;
+                    let outcome = grafito_command::commands::process_input(document, &mut c);
+                    state.last_outcome = Some(outcome);
+                    return ToolResult {
+                        objects: vec![],
+                        message: Some(format!("Analizado: {}", label)),
+                        reset_tool: true,
+                    };
+                }
+            }
+            ToolResult {
+                objects: vec![],
+                message: Some("Selecciona una función o curva".into()),
+                reset_tool: false,
+            }
+        }
+        Tool::Intersect => {
+            let tolerance = 10.0 / document.view().scale;
+            if let Some(id) = document.pick_object(world, tolerance) {
+                if state.driver.is_none() {
+                    state.driver = Some(id);
+                    return ToolResult {
+                        objects: vec![],
+                        message: Some("Selecciona el segundo objeto".into()),
+                        reset_tool: false,
+                    };
+                } else if state.driver != Some(id) {
+                    if let Some(id1) = state.driver.take() {
+                        let id2 = id;
+                        let l1 = document
+                            .get_object(id1)
+                            .map(|o| o.label().to_string())
+                            .unwrap_or_default();
+                        let l2 = document
+                            .get_object(id2)
+                            .map(|o| o.label().to_string())
+                            .unwrap_or_default();
+                        let mut c = format!("Intersect[{}, {}]", l1, l2);
+                        let outcome = grafito_command::commands::process_input(document, &mut c);
+                        state.last_outcome = Some(outcome);
+                        return ToolResult {
+                            objects: vec![],
+                            message: Some("Intersección calculada".into()),
+                            reset_tool: true,
+                        };
+                    }
+                }
+            }
+            ToolResult {
+                objects: vec![],
+                message: Some(
+                    if state.driver.is_none() {
+                        "Selecciona primer objeto"
+                    } else {
+                        "Selecciona segundo objeto"
+                    }
+                    .into(),
+                ),
+                reset_tool: false,
+            }
+        }
+        Tool::ParametricCurve2D => {
+            let mut c = "ParametricCurve2D[cos(t), sin(t), 0, 2*pi]".to_string();
+            let outcome = grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(outcome);
+            ToolResult {
+                objects: vec![],
+                message: Some("Curva paramétrica creada".into()),
+                reset_tool: true,
+            }
+        }
+        Tool::PolarCurve => {
+            let mut c = "PolarCurve[1 - cos(t), 0, 2*pi]".to_string();
+            let outcome = grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(outcome);
+            ToolResult {
+                objects: vec![],
+                message: Some("Curva polar creada".into()),
+                reset_tool: true,
+            }
+        }
+        Tool::ImplicitCurve => {
+            let mut c = format!(
+                "ImplicitCurve[(x - {:.2})^2 + (y - {:.2})^2 = 4]",
+                world.x, world.y
+            );
+            let outcome = grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(outcome);
+            ToolResult {
+                objects: vec![],
+                message: Some("Curva implícita creada".into()),
+                reset_tool: true,
+            }
+        }
+        Tool::VectorField2D => {
+            let mut c = "VectorField2D[x, y]".to_string();
+            let outcome = grafito_command::commands::process_input(document, &mut c);
+            state.last_outcome = Some(outcome);
+            ToolResult {
+                objects: vec![],
+                message: Some("Campo vectorial creado".into()),
                 reset_tool: true,
             }
         }
@@ -295,154 +439,275 @@ fn handle_locus(state: &mut ToolState, _world: Point2) -> ToolResult {
 fn handle_measure(
     state: &mut ToolState,
     document: &mut Document,
-    _world: Point2,
+    world: Point2,
     measure_type: &str,
 ) -> ToolResult {
-    state.pending.push(_world);
+    // Si el clic fue sobre un objeto existente, lo guardamos también para
+    // poder hacer medidas polimórficas.
+    let tolerance = 10.0 / document.view().scale;
+    let picked = document.pick_object(world, tolerance);
+    state.pending.push(world);
+
+    let picked_some = picked.is_some();
     match measure_type {
         "Distance" if state.pending.len() == 2 => {
             let a = state.pending[0];
             let b = state.pending[1];
             let d = a.distance(&b);
             let mid = Point2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5);
-            // Visual: dotted measurement line
             let mut line = grafito_core::LineObj::new(a, b);
             line.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.9);
             line.width = 1.5;
             document.add_object(grafito_core::GeoObject::Line(line));
-            // Label with distance value
             let txt = grafito_core::TextObj::new(format!("{:.3}", d), mid);
             document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
             ToolResult {
                 objects: vec![],
-                message: Some(format!("Distance = {:.3}", d)),
+                message: Some(format!(
+                    "Distancia = {:.3} (entre puntos{})",
+                    d,
+                    if picked_some { " sobre objetos" } else { "" }
+                )),
                 reset_tool: false,
             }
         }
         "Angle" if state.pending.len() == 3 => {
-            let a = state.pending[0];
-            let b = state.pending[1];
-            let c = state.pending[2];
-            // Visual: two rays from vertex
-            let mut ray1 = grafito_core::LineObj::new_with_kind(b, a, grafito_core::LineKind::Ray);
+            // Vértice = clic 1; brazo 1 = clic 2; brazo 2 = clic 3.
+            // Si el clic 2/3 fue sobre una Line existente, usamos la dirección
+            // de esa línea en lugar del punto crudo, dando ángulos correctos
+            // cuando el usuario quiere medir entre rectas.
+            let vertex = state.pending[0];
+            let arm1 = resolve_arm(document, state.pending[1]);
+            let arm2 = resolve_arm(document, state.pending[2]);
+            let mut ray1 = grafito_core::LineObj::new_with_kind(
+                vertex,
+                Point2::new(
+                    vertex.x + (arm1.x - vertex.x) * 10.0,
+                    vertex.y + (arm1.y - vertex.y) * 10.0,
+                ),
+                grafito_core::LineKind::Ray,
+            );
             ray1.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray1.width = 1.5;
             document.add_object(grafito_core::GeoObject::Line(ray1));
-            let mut ray2 = grafito_core::LineObj::new_with_kind(b, c, grafito_core::LineKind::Ray);
+            let mut ray2 = grafito_core::LineObj::new_with_kind(
+                vertex,
+                Point2::new(
+                    vertex.x + (arm2.x - vertex.x) * 10.0,
+                    vertex.y + (arm2.y - vertex.y) * 10.0,
+                ),
+                grafito_core::LineKind::Ray,
+            );
             ray2.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray2.width = 1.5;
             document.add_object(grafito_core::GeoObject::Line(ray2));
-            // Compute angle
-            let v1 = (a.x - b.x, a.y - b.y);
-            let v2 = (c.x - b.x, c.y - b.y);
-            let dot = v1.0 * v2.0 + v1.1 * v2.1;
-            let m1 = (v1.0 * v1.0 + v1.1 * v1.1).sqrt();
-            let m2 = (v2.0 * v2.0 + v2.1 * v2.1).sqrt();
+            let v1x = arm1.x - vertex.x;
+            let v1y = arm1.y - vertex.y;
+            let v2x = arm2.x - vertex.x;
+            let v2y = arm2.y - vertex.y;
+            let dot = v1x * v2x + v1y * v2y;
+            let m1 = (v1x * v1x + v1y * v1y).sqrt();
+            let m2 = (v2x * v2x + v2y * v2y).sqrt();
             let angle = if m1 < 1e-12 || m2 < 1e-12 {
                 0.0
             } else {
-                (dot / (m1 * m2)).acos().to_degrees()
+                (dot / (m1 * m2)).clamp(-1.0, 1.0).acos().to_degrees()
             };
-            // Label at vertex offset
-            let lbl_pos = Point2::new(b.x + 0.3, b.y + 0.3);
+            let lbl_pos = Point2::new(vertex.x + 0.3, vertex.y + 0.3);
             let txt = grafito_core::TextObj::new(format!("{:.1}°", angle), lbl_pos);
             document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
             ToolResult {
                 objects: vec![],
-                message: Some(format!("Angle = {:.1}°", angle)),
+                message: Some(format!("Ángulo = {:.1}°", angle)),
                 reset_tool: false,
             }
         }
-        "Area" if state.pending.len() == 1 => {
-            // Area: click on a polygon or circle
-            let tolerance = 10.0 / document.view().scale;
-            if let Some(id) = document.pick_object(state.pending[0], tolerance) {
+        "Area" if state.pending.len() == 2 => {
+            // Dos clics: si el primero fue sobre Polygon/Circle → área del
+            // objeto. Si fue sobre Function → integral entre los dos x.
+            let p1 = state.pending[0];
+            let p2 = state.pending[1];
+            if let Some(id) = document.pick_object(p1, tolerance) {
                 let obj = document.get_object(id).cloned();
                 if let Some(obj) = obj {
-                    let (area, center) = match &obj {
-                        grafito_core::GeoObject::Circle(c) => {
-                            (std::f64::consts::PI * c.radius * c.radius, c.center)
-                        }
+                    let (area, label) = match &obj {
+                        grafito_core::GeoObject::Circle(c) => (
+                            std::f64::consts::PI * c.radius * c.radius,
+                            format!(
+                                "Área círculo = {:.3}",
+                                std::f64::consts::PI * c.radius * c.radius
+                            ),
+                        ),
                         grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
                             let a = polygon_area(&poly.vertices);
-                            let cx = poly.vertices.iter().map(|v| v.x).sum::<f64>()
-                                / poly.vertices.len() as f64;
-                            let cy = poly.vertices.iter().map(|v| v.y).sum::<f64>()
-                                / poly.vertices.len() as f64;
-                            (a, Point2::new(cx, cy))
+                            (a, format!("Área polígono = {:.3}", a))
                         }
-                        _ => (0.0, state.pending[0]),
+                        grafito_core::GeoObject::Function(f) => {
+                            // Integral entre x1 y x2.
+                            let lo = p1.x.min(p2.x);
+                            let hi = p1.x.max(p2.x);
+                            let integral = grafito_geometry::integral::eval_integral_hybrid(
+                                |x| {
+                                    grafito_geometry::expr::eval_function_with_vars(
+                                        &f.expr,
+                                        x,
+                                        &document.variables,
+                                    )
+                                    .unwrap_or(0.0)
+                                },
+                                lo,
+                                hi,
+                                200,
+                            );
+                            let a = integral.abs();
+                            (a, format!("Área bajo curva = {:.3}", a))
+                        }
+                        _ => (0.0, String::new()),
                     };
                     if area > 0.0 {
-                        let txt = grafito_core::TextObj::new(format!("Area = {:.3}", area), center);
+                        let center = match &obj {
+                            grafito_core::GeoObject::Circle(c) => c.center,
+                            grafito_core::GeoObject::Polygon(poly) => {
+                                let n = poly.vertices.len() as f64;
+                                Point2::new(
+                                    poly.vertices.iter().map(|v| v.x).sum::<f64>() / n,
+                                    poly.vertices.iter().map(|v| v.y).sum::<f64>() / n,
+                                )
+                            }
+                            _ => Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5),
+                        };
+                        let label_for_text = label.clone();
+                        let txt = grafito_core::TextObj::new(label_for_text, center);
                         document.add_object(grafito_core::GeoObject::Text(txt));
                         state.pending.clear();
                         return ToolResult {
                             objects: vec![],
-                            message: Some(format!("Area = {:.3}", area)),
+                            message: Some(label),
                             reset_tool: true,
                         };
                     }
                 }
             }
+            state.pending.clear();
             ToolResult {
                 objects: vec![],
-                message: Some("Click on a polygon or circle".into()),
+                message: Some("Clic 1 sobre Polygon/Circle/Function".into()),
                 reset_tool: false,
             }
         }
         "Slope" if state.pending.len() == 1 => {
-            let tolerance = 10.0 / document.view().scale;
-            if let Some(id) = document.pick_object(state.pending[0], tolerance) {
+            // Pendiente en el punto: si clic fue sobre Line, m; si fue sobre
+            // Function, derivada numérica.
+            if let Some(id) = document.pick_object(world, tolerance) {
                 let obj = document.get_object(id).cloned();
-                if let Some(grafito_core::GeoObject::Line(l)) = obj {
-                    let slope = if (l.end.x - l.start.x).abs() < 1e-12 {
-                        f64::INFINITY
-                    } else {
-                        (l.end.y - l.start.y) / (l.end.x - l.start.x)
-                    };
-                    let mid = Point2::new(
-                        (l.start.x + l.end.x) * 0.5,
-                        (l.start.y + l.end.y) * 0.5 + 0.3,
-                    );
-                    let s = if slope.is_infinite() {
-                        "∞".to_string()
-                    } else {
-                        format!("{:.3}", slope)
-                    };
-                    let txt = grafito_core::TextObj::new(format!("m = {}", s), mid);
-                    document.add_object(grafito_core::GeoObject::Text(txt));
-                    state.pending.clear();
-                    return ToolResult {
-                        objects: vec![],
-                        message: Some(format!("Slope = {}", s)),
-                        reset_tool: true,
-                    };
+                if let Some(obj) = obj {
+                    match &obj {
+                        grafito_core::GeoObject::Line(l) => {
+                            let slope = if (l.end.x - l.start.x).abs() < 1e-12 {
+                                f64::INFINITY
+                            } else {
+                                (l.end.y - l.start.y) / (l.end.x - l.start.x)
+                            };
+                            let mid = Point2::new(
+                                (l.start.x + l.end.x) * 0.5,
+                                (l.start.y + l.end.y) * 0.5 + 0.3,
+                            );
+                            let s = if slope.is_infinite() {
+                                "∞".to_string()
+                            } else {
+                                format!("{:.3}", slope)
+                            };
+                            let txt = grafito_core::TextObj::new(format!("m = {}", s), mid);
+                            document.add_object(grafito_core::GeoObject::Text(txt));
+                            state.pending.clear();
+                            return ToolResult {
+                                objects: vec![],
+                                message: Some(format!("Pendiente = {}", s)),
+                                reset_tool: true,
+                            };
+                        }
+                        grafito_core::GeoObject::Function(f) => {
+                            // Derivada numérica con paso adaptativo.
+                            let h = (world.x.abs().max(1.0) * 1e-5).max(1e-12);
+                            let f1 = grafito_geometry::expr::eval_function_with_vars(
+                                &f.expr,
+                                world.x - h,
+                                &document.variables,
+                            )
+                            .unwrap_or(f64::NAN);
+                            let f2 = grafito_geometry::expr::eval_function_with_vars(
+                                &f.expr,
+                                world.x + h,
+                                &document.variables,
+                            )
+                            .unwrap_or(f64::NAN);
+                            let slope = if f1.is_finite() && f2.is_finite() {
+                                (f2 - f1) / (2.0 * h)
+                            } else {
+                                f64::NAN
+                            };
+                            let s = if slope.is_finite() {
+                                format!("{:.3}", slope)
+                            } else {
+                                "∞".to_string()
+                            };
+                            let txt = grafito_core::TextObj::new(
+                                format!("f'({:.2}) = {}", world.x, s),
+                                Point2::new(world.x + 0.3, world.y + 0.3),
+                            );
+                            document.add_object(grafito_core::GeoObject::Text(txt));
+                            state.pending.clear();
+                            return ToolResult {
+                                objects: vec![],
+                                message: Some(format!("f'({:.2}) = {}", world.x, s)),
+                                reset_tool: true,
+                            };
+                        }
+                        _ => {}
+                    }
                 }
             }
+            state.pending.clear();
             ToolResult {
                 objects: vec![],
-                message: Some("Click on a line".into()),
+                message: Some("Clic sobre Line o Function".into()),
                 reset_tool: false,
             }
         }
+        "Area" => ToolResult {
+            // Primer clic: esperando el segundo para definir el intervalo.
+            objects: vec![],
+            reset_tool: false,
+            message: Some("Clic 2: define el intervalo o el objeto".into()),
+        },
         _ => ToolResult {
             objects: vec![],
             reset_tool: false,
-            message: Some(format!(
-                "Click {} point(s)",
-                if state.pending.len() == 1 {
-                    "2nd"
-                } else if measure_type == "Angle" {
-                    "3rd"
-                } else {
-                    "on object"
-                }
-            )),
+            message: Some(match measure_type {
+                "Distance" => "Clic 2do punto".into(),
+                "Angle" => "Clic sobre el segundo brazo".into(),
+                "Slope" => "Clic sobre Line o Function".into(),
+                _ => "Clic siguiente".into(),
+            }),
         },
     }
+}
+
+/// Resuelve un clic a un "brazo" del ángulo: si el clic está sobre una
+/// `Line` existente, devuelve el extremo más cercano de la línea, dando así
+/// un ángulo correcto entre dos rectas. Si no, devuelve el punto crudo.
+fn resolve_arm(document: &mut Document, click: Point2) -> Point2 {
+    let tolerance = 10.0 / document.view().scale;
+    if let Some(id) = document.pick_object(click, tolerance) {
+        if let Some(grafito_core::GeoObject::Line(l)) = document.get_object(id) {
+            let d_start = l.start.distance(&click);
+            let d_end = l.end.distance(&click);
+            return if d_start < d_end { l.start } else { l.end };
+        }
+    }
+    click
 }
 
 fn polygon_area(vertices: &[Point2]) -> f64 {

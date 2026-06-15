@@ -1,8 +1,10 @@
 //! Grafito Geometry — Primitivas matemáticas y geometría computacional.
 //!
 //! Contiene el motor matemático: álgebra simbólica (CAS), evaluación de
-//! expresiones, estadística, probabilidad, ODE, curvas especiales, atractores,
-//! fractales, matrices y operaciones booleanas 2D sobre polígonos.
+//! expresiones, análisis numérico de funciones y curvas (raíces, extremos,
+//! inflexiones, interceptos, asíntotas, Taylor), estadística, probabilidad,
+//! ODE, curvas especiales, atractores, fractales, matrices y operaciones
+//! booleanas 2D sobre polígonos.
 //!
 //! # Ejemplo mínimo
 //!
@@ -15,6 +17,7 @@
 //! assert!((y - 4.0).abs() < 1e-9);
 //! ```
 
+pub mod analysis;
 pub mod ast;
 pub mod attractors;
 pub mod boolean;

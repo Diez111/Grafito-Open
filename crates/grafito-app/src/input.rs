@@ -7,8 +7,10 @@ use crate::{commands, GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
-    CircleObj, GeoObject, LineObj, Point3DObj, PointObj, PolygonObj, RenderQuality,
+    CircleObj, FunctionObj, GeoObject, ImplicitCurveObj, LineObj, ParametricCurve2DObj, Point3DObj,
+    PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality, VectorField2DObj,
 };
+use grafito_geometry::analysis::AnalysisResult;
 use grafito_geometry::{Camera3D, Point2, Point3D};
 use grafito_ui::Tool;
 use std::time::Instant;
@@ -64,35 +66,76 @@ impl GrafitoApp {
                 self.tool_ghost = None;
             }
             Tool::Line => {
-                self.pending_points.push(world);
-                if self.pending_points.len() == 2 {
-                    let a = self.pending_points[0];
-                    let b = self.pending_points[1];
+                self.tool_state.pending.push(world);
+                if self.tool_state.pending.len() == 2 {
+                    let a = self.tool_state.pending[0];
+                    let b = self.tool_state.pending[1];
                     self.save_state();
                     self.document
                         .add_object(GeoObject::Line(LineObj::new(a, b)));
-                    self.pending_points.clear();
+                    self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
             }
             Tool::Circle => {
-                self.pending_points.push(world);
-                if self.pending_points.len() == 2 {
-                    let center = self.pending_points[0];
-                    let edge = self.pending_points[1];
+                self.tool_state.pending.push(world);
+                if self.tool_state.pending.len() == 2 {
+                    let center = self.tool_state.pending[0];
+                    let edge = self.tool_state.pending[1];
                     let radius = center.distance(&edge);
                     self.save_state();
                     self.document
                         .add_object(GeoObject::Circle(CircleObj::new(center, radius)));
-                    self.pending_points.clear();
+                    self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
             }
             Tool::Polygon => {
-                self.pending_points.push(world);
+                self.tool_state.pending.push(world);
             }
-            Tool::Function => {}
-            Tool::Point3D | Tool::Sphere3D | Tool::Cube3D => {}
+            Tool::Function => {
+                let mut cmd = "y = x^2".to_string();
+                let outcome = commands::process_input(&mut self.document, &mut cmd);
+                self.handle_command_outcome(outcome, time, &cmd);
+                self.current_tool = Tool::Select;
+            }
+            Tool::Point3D => {
+                let p3 = Point3D::new(world.x, world.y, 0.0);
+                self.save_state();
+                self.document
+                    .add_object(GeoObject::Point3D(grafito_core::Point3DObj::new(p3)));
+                self.tool_ghost = None;
+            }
+            Tool::Sphere3D => {
+                let p3 = Point3D::new(world.x, world.y, 0.0);
+                self.pending_points_3d.push(p3);
+                if self.pending_points_3d.len() == 2 {
+                    let center = self.pending_points_3d[0];
+                    let edge = self.pending_points_3d[1];
+                    let radius = center.distance(&edge);
+                    self.save_state();
+                    self.document
+                        .add_object(GeoObject::Sphere3D(grafito_core::Sphere3DObj::new(
+                            center, radius,
+                        )));
+                    self.pending_points_3d.clear();
+                    self.tool_ghost = None;
+                }
+            }
+            Tool::Cube3D => {
+                let p3 = Point3D::new(world.x, world.y, 0.0);
+                self.pending_points_3d.push(p3);
+                if self.pending_points_3d.len() == 2 {
+                    let p1 = self.pending_points_3d[0];
+                    let p2 = self.pending_points_3d[1];
+                    let size = p1.distance(&p2);
+                    self.save_state();
+                    self.document
+                        .add_object(GeoObject::Cube3D(grafito_core::Cube3DObj::new(p1, size)));
+                    self.pending_points_3d.clear();
+                    self.tool_ghost = None;
+                }
+            }
             Tool::Attractor => {
                 let mut cmd = "Lorenz[]".to_string();
                 let outcome = commands::process_input(&mut self.document, &mut cmd);
@@ -122,33 +165,33 @@ impl GrafitoApp {
                 self.current_tool = Tool::Select;
             }
             Tool::Tangent => {
-                self.pending_points.push(world);
-                if self.pending_points.len() == 2 {
-                    let p1 = self.pending_points[0];
-                    let p2 = self.pending_points[1];
+                self.tool_state.pending.push(world);
+                if self.tool_state.pending.len() == 2 {
+                    let p1 = self.tool_state.pending[0];
+                    let p2 = self.tool_state.pending[1];
                     let mut cmd = format!(
                         "Tangent[({:.2}, {:.2}), 1, ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
                     let outcome = commands::process_input(&mut self.document, &mut cmd);
                     self.handle_command_outcome(outcome, time, &cmd);
-                    self.pending_points.clear();
+                    self.tool_state.pending.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
                 }
             }
             Tool::Perpendicular => {
-                self.pending_points.push(world);
-                if self.pending_points.len() == 2 {
-                    let p1 = self.pending_points[0];
-                    let p2 = self.pending_points[1];
+                self.tool_state.pending.push(world);
+                if self.tool_state.pending.len() == 2 {
+                    let p1 = self.tool_state.pending[0];
+                    let p2 = self.tool_state.pending[1];
                     let mut cmd = format!(
                         "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
                     let outcome = commands::process_input(&mut self.document, &mut cmd);
                     self.handle_command_outcome(outcome, time, &cmd);
-                    self.pending_points.clear();
+                    self.tool_state.pending.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
                 }
@@ -186,7 +229,18 @@ impl GrafitoApp {
             | Tool::Segment
             | Tool::Ray
             | Tool::Vector
-            | Tool::RegularPolygon => {
+            | Tool::Root
+            | Tool::Extremum
+            | Tool::Inflection
+            | Tool::YIntercept
+            | Tool::XIntercept
+            | Tool::Analyze
+            | Tool::Intersect
+            | Tool::RegularPolygon
+            | Tool::ParametricCurve2D
+            | Tool::PolarCurve
+            | Tool::ImplicitCurve
+            | Tool::VectorField2D => {
                 let mut state = self.tool_state.clone();
                 let result = crate::tool_dispatcher::dispatch_tool(
                     self.current_tool,
@@ -200,6 +254,9 @@ impl GrafitoApp {
                 }
                 if let Some(msg) = result.message {
                     self.cas_result = msg;
+                }
+                if let Some(outcome) = self.tool_state.last_outcome.take() {
+                    self.handle_command_outcome(outcome, time, self.current_tool.name());
                 }
                 for obj in result.objects {
                     self.document.add_object(obj);
@@ -235,6 +292,36 @@ impl GrafitoApp {
                     self.tool_ghost = Some(GeoObject::Line(LineObj::new(*first, world)));
                 }
             }
+            Tool::Segment => {
+                if let Some(first) = pts.first() {
+                    self.tool_ghost = Some(GeoObject::Line(grafito_core::LineObj::new_with_kind(
+                        *first,
+                        world,
+                        grafito_core::LineKind::Segment,
+                    )));
+                }
+            }
+            Tool::Ray => {
+                if let Some(first) = pts.first() {
+                    self.tool_ghost = Some(GeoObject::Line(grafito_core::LineObj::new_with_kind(
+                        *first,
+                        world,
+                        grafito_core::LineKind::Ray,
+                    )));
+                }
+            }
+            Tool::Vector => {
+                if let Some(first) = pts.first() {
+                    self.tool_ghost = Some(GeoObject::Line(
+                        grafito_core::LineObj::new_with_kind(
+                            *first,
+                            world,
+                            grafito_core::LineKind::Segment,
+                        )
+                        .with_label("v"),
+                    ));
+                }
+            }
             Tool::Circle | Tool::Tangent => {
                 if let Some(center) = pts.first() {
                     let radius = center.distance(&world);
@@ -246,11 +333,49 @@ impl GrafitoApp {
                     self.tool_ghost = Some(GeoObject::Line(LineObj::new(*last, world)));
                 }
             }
+            Tool::RegularPolygon => {
+                if let Some(center) = pts.first() {
+                    let radius = center.distance(&world);
+                    let start_angle = (world.y - center.y).atan2(world.x - center.x);
+                    let n = 5;
+                    let verts: Vec<Point2> = (0..n)
+                        .map(|i| {
+                            let angle = start_angle + i as f64 / n as f64 * std::f64::consts::TAU;
+                            Point2::new(
+                                center.x + radius * angle.cos(),
+                                center.y + radius * angle.sin(),
+                            )
+                        })
+                        .collect();
+                    self.tool_ghost = Some(GeoObject::Polygon(PolygonObj::new(verts)));
+                }
+            }
+            Tool::Sphere3D => {
+                if let Some(center) = self.pending_points_3d.first() {
+                    let c2 = Point2::new(center.x, center.y);
+                    let radius = c2.distance(&world);
+                    self.tool_ghost = Some(GeoObject::Circle(CircleObj::new(c2, radius)));
+                    // Draw 2D circle as ghost proxy
+                }
+            }
+            Tool::Cube3D => {
+                self.tool_ghost = Some(GeoObject::Point(PointObj::new(world)));
+            }
             Tool::Angle if pts.len() == 1 => {
                 self.tool_ghost = Some(GeoObject::Line(LineObj::new(pts[0], world)));
             }
             Tool::Angle if pts.len() == 2 => {
+                // Show the two lines of the angle
                 self.tool_ghost = Some(GeoObject::Line(LineObj::new(pts[1], world)));
+            }
+            Tool::Area
+            | Tool::Slope
+            | Tool::Root
+            | Tool::Extremum
+            | Tool::Inflection
+            | Tool::YIntercept
+            | Tool::Analyze => {
+                // These tools highlight hovered items via hovered_analysis.
             }
             Tool::Slider => {
                 let bar = LineObj::new(
@@ -258,6 +383,34 @@ impl GrafitoApp {
                     Point2::new(world.x + 1.5, world.y),
                 );
                 self.tool_ghost = Some(GeoObject::Line(bar));
+            }
+            Tool::Function => {
+                self.tool_ghost = Some(GeoObject::Function(FunctionObj::new("x^2")));
+            }
+            Tool::ParametricCurve2D => {
+                self.tool_ghost = Some(GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+                    "cos(t)",
+                    "sin(t)",
+                    0.0,
+                    std::f64::consts::TAU,
+                )));
+            }
+            Tool::PolarCurve => {
+                self.tool_ghost = Some(GeoObject::PolarCurve(PolarCurveObj::new(
+                    "1 - cos(t)",
+                    0.0,
+                    std::f64::consts::TAU,
+                )));
+            }
+            Tool::ImplicitCurve => {
+                self.tool_ghost = Some(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                    "x^2 + y^2",
+                    "4",
+                    RelationOperator::Eq,
+                )));
+            }
+            Tool::VectorField2D => {
+                self.tool_ghost = Some(GeoObject::VectorField2D(VectorField2DObj::new("x", "y")));
             }
             Tool::Locus => {}
             _ => {}
@@ -321,7 +474,7 @@ impl GrafitoApp {
 
         // Right-click is reserved for polygon closing / cancel when a polygon is in progress.
         let can_pan_with_right =
-            self.current_tool != Tool::Polygon || self.pending_points.is_empty();
+            self.current_tool != Tool::Polygon || self.tool_state.pending.is_empty();
         let pan_button_pressed = pointer_in_canvas
             && (pointer.button_down(PointerButton::Middle)
                 || (pointer.button_down(PointerButton::Secondary) && can_pan_with_right));
@@ -401,6 +554,21 @@ impl GrafitoApp {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
             }
+        } else {
+            ui.ctx().set_cursor_icon(self.current_tool.cursor_icon());
+        }
+
+        // ── Hover Analytics (Dynamic Inspector) ───────────────────────────────
+        self.hovered_analysis = None;
+        if !panning
+            && !self.is_view_changing
+            && response.hover_pos().is_some()
+            && self.current_view != crate::ViewMode::D3
+        {
+            if let Some(world) = world_at_pointer {
+                let pixel_tolerance = 15.0 / self.document.view().scale;
+                self.update_hover_analysis(world, pixel_tolerance);
+            }
         }
 
         // ── Clicks (ignore if this was a pan gesture) ────────────────────────
@@ -426,16 +594,16 @@ impl GrafitoApp {
                 self.current_tool = Tool::Select;
                 return;
             }
-            if self.current_tool == Tool::Polygon && self.pending_points.len() >= 3 {
+            if self.current_tool == Tool::Polygon && self.tool_state.pending.len() >= 3 {
                 self.save_state();
-                let vertices = self.pending_points.clone();
+                let vertices = self.tool_state.pending.clone();
                 self.document
                     .add_object(GeoObject::Polygon(PolygonObj::new(vertices)));
-                self.pending_points.clear();
+                self.tool_state.pending.clear();
                 self.tool_ghost = None;
-            } else if !self.pending_points.is_empty() {
+            } else if !self.tool_state.pending.is_empty() {
                 // Cancel single pending point (Line/Circle first point)
-                self.pending_points.clear();
+                self.tool_state.pending.clear();
                 self.tool_ghost = None;
             }
         }
@@ -484,6 +652,178 @@ impl GrafitoApp {
             self.last_mouse_pos = Some(pos);
         }
     }
+
+    fn update_hover_analysis(&mut self, world: Point2, pixel_tolerance: f64) {
+        use crate::snap::{snap_point, SnapOverrides};
+        use grafito_core::analyzable::evaluate_curve_at;
+
+        // 1) Snap jerárquico: característica > curva > objeto > eje > cuadrícula.
+        let snap = snap_point(
+            world,
+            &self.document,
+            self.document.view().scale,
+            &self.snap_config,
+            SnapOverrides::default(),
+        );
+        match snap.kind {
+            crate::snap::SnapKind::Free => {
+                // Sin snap: medir la distancia a la curva del primer objeto bajo
+                // el cursor, si está cerca.
+                let mut handled = false;
+                for (_, obj) in self.document.objects_iter() {
+                    if !obj.is_visible() {
+                        continue;
+                    }
+                    let vars = self.document.variables.clone();
+                    if let Some(y_curve) = evaluate_curve_at(obj, world, &vars) {
+                        let y_match = match obj {
+                            GeoObject::Function(_) => (y_curve - world.y).abs() <= pixel_tolerance,
+                            _ => y_curve.abs() <= pixel_tolerance,
+                        };
+                        if y_match {
+                            self.hovered_analysis = Some(crate::app::HoveredAnalysis {
+                                point: world,
+                                label: format!("({:.2}, {:.2})", world.x, world.y),
+                                is_snap: false,
+                                feature: None,
+                                snap_kind: Some(snap.kind),
+                            });
+                            handled = true;
+                            break;
+                        }
+                    }
+                }
+                if !handled {
+                    self.hovered_analysis = Some(crate::app::HoveredAnalysis {
+                        point: world,
+                        label: format!("({:.2}, {:.2})", world.x, world.y),
+                        is_snap: false,
+                        feature: None,
+                        snap_kind: Some(snap.kind),
+                    });
+                }
+            }
+            _ => {
+                let is_snap = matches!(
+                    snap.kind,
+                    crate::snap::SnapKind::Feature | crate::snap::SnapKind::Axis
+                );
+                self.hovered_analysis = Some(crate::app::HoveredAnalysis {
+                    point: snap.point,
+                    label: snap.label.clone(),
+                    is_snap,
+                    feature: snap.feature,
+                    snap_kind: Some(snap.kind),
+                });
+            }
+        }
+
+        // 2) Objetos geométricos simples: medidas al hover (longitud de
+        // segmento, radio, conteo de vértices) — solo si el snap no produjo
+        // un resultado más específico.
+        if matches!(
+            self.hovered_analysis,
+            None | Some(crate::app::HoveredAnalysis {
+                snap_kind: None | Some(crate::snap::SnapKind::Free),
+                ..
+            })
+        ) {
+            for (_, obj) in self.document.objects_iter() {
+                let label = match obj {
+                    GeoObject::Point(p) if p.position.distance(&world) <= pixel_tolerance => {
+                        Some(format!("Punto: ({:.2}, {:.2})", p.position.x, p.position.y))
+                    }
+                    GeoObject::Line(l) => {
+                        let d = point_to_line_distance(world, l.start, l.end);
+                        if d <= pixel_tolerance {
+                            let len = l.start.distance(&l.end);
+                            Some(format!("Longitud: {:.2}", len))
+                        } else {
+                            None
+                        }
+                    }
+                    GeoObject::Circle(c) => {
+                        let d = world.distance(&c.center);
+                        if (d - c.radius).abs() <= pixel_tolerance {
+                            Some(format!("Radio: {:.2}", c.radius))
+                        } else {
+                            None
+                        }
+                    }
+                    GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                        if point_inside_polygon(world, &poly.vertices) {
+                            Some(format!("Vértices: {}", poly.vertices.len()))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(text) = label {
+                    self.hovered_analysis = Some(crate::app::HoveredAnalysis {
+                        point: world,
+                        label: text,
+                        is_snap: false,
+                        feature: None,
+                        snap_kind: Some(crate::snap::SnapKind::Object),
+                    });
+                    return;
+                }
+            }
+        }
+        let _ = pixel_tolerance;
+    }
+}
+
+#[allow(dead_code)]
+fn find_nearest_feature(
+    results: &[AnalysisResult],
+    world: Point2,
+    tolerance: f64,
+) -> Option<AnalysisResult> {
+    let mut best: Option<AnalysisResult> = None;
+    let mut best_dist = tolerance;
+    for r in results {
+        let dist = r.point.distance(&world);
+        if dist < best_dist {
+            best_dist = dist;
+            best = Some(r.clone());
+        }
+    }
+    best
+}
+
+fn point_to_line_distance(p: Point2, a: Point2, b: Point2) -> f64 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let len2 = abx * abx + aby * aby;
+    if len2 == 0.0 {
+        return (apx * apx + apy * apy).sqrt();
+    }
+    let t = ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0);
+    let closest_x = a.x + t * abx;
+    let closest_y = a.y + t * aby;
+    let dx = p.x - closest_x;
+    let dy = p.y - closest_y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn point_inside_polygon(p: Point2, vertices: &[Point2]) -> bool {
+    let mut inside = false;
+    let mut j = vertices.len() - 1;
+    for i in 0..vertices.len() {
+        let pi = vertices[i];
+        let pj = vertices[j];
+        if ((pi.y > p.y) != (pj.y > p.y))
+            && (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 impl GrafitoApp {
