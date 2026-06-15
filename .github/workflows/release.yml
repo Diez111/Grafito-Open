@@ -51,7 +51,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
-          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE dist/ 2>/dev/null || true
+          cp README.md CHANGELOG.md LICENSE dist/ 2>/dev/null || true
           cd dist
           if [[ "${{ matrix.archive }}" == *.zip ]]; then
             7z a ../${{ matrix.archive }} *

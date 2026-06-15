@@ -29,6 +29,12 @@ echo "Copying binary..."
 cp "$TARGET_DIR/grafito" "$BUILD_DIR/usr/bin/"
 chmod 755 "$BUILD_DIR/usr/bin/grafito"
 
+# Copy license
+echo "Copying license..."
+mkdir -p "$BUILD_DIR/usr/share/doc/grafito"
+cp ../LICENSE "$BUILD_DIR/usr/share/doc/grafito/"
+cp "$DEBIAN_DIR/copyright" "$BUILD_DIR/usr/share/doc/grafito/"
+
 # Copy icons
 echo "Copying icons..."
 for size in 16 32 48 64 128 256 512; do

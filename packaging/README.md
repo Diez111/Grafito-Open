@@ -85,4 +85,6 @@ Para actualizar la versión:
 
 ## Licencia
 
-Ver LICENSE en el directorio raíz del proyecto.
+Ver [LICENSE](../LICENSE) en el directorio raíz del proyecto. Grafito está
+distribuido bajo la **GNU General Public License, versión 3 o (a su
+elección) cualquier versión posterior**.

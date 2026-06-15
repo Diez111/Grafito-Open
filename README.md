@@ -510,8 +510,19 @@ cargo run -p grafito-app --release
 
 ## Licencia
 
-Licenciado bajo:
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+Licenciado bajo la **GNU General Public License, versión 3 o (a su elección) cualquier versión posterior**.
 
-a elección del usuario.
+El texto completo de la licencia está disponible en [LICENSE](LICENSE).
+
+Este es software libre: puede redistribuirlo y/o modificarlo bajo los
+términos de la GNU General Public License publicada por la Free Software
+Foundation, ya sea la versión 3 de la Licencia, o (a su elección)
+cualquier versión posterior.
+
+Este programa se distribuye con la esperanza de que sea útil, pero
+SIN NINGUNA GARANTÍA; sin siquiera la garantía implícita de
+COMERCIABILIDAD o IDONEIDAD PARA UN PROPÓSITO PARTICULAR. Vea la
+GNU General Public License para más detalles.
+
+Debería haber recibido una copia de la GNU General Public License
+junto con este programa. Si no, vea <https://www.gnu.org/licenses/>.
