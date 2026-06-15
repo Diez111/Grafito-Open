@@ -143,7 +143,6 @@ pub struct GrafitoApp {
     pub previous_tool: Tool,
     pub current_view: ViewMode,
     pub camera: Camera3D,
-    pub animation_running: bool,
     pub show_grid: bool,
     pub snap_to_grid: bool,
     pub snap_config: crate::snap::SnapConfig,
@@ -302,7 +301,6 @@ impl GrafitoApp {
             previous_tool: Tool::default(),
             current_view: ViewMode::D2,
             camera: Camera3D::new(1280.0 / 720.0),
-            animation_running: false,
             show_grid: config.show_grid,
             snap_to_grid: config.snap_to_grid,
             snap_config: config.snap,
@@ -980,6 +978,40 @@ impl eframe::App for GrafitoApp {
         {
             self.is_view_changing = false;
             self.document.render_quality = RenderQuality::High;
+        }
+
+        let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
+        let mut any_animating = false;
+        let mut changes = Vec::new();
+
+        for (name, meta) in &self.document.variable_meta {
+            if meta.animating && meta.animation_speed != 0.0 {
+                any_animating = true;
+                if let Some(&current_val) = self.document.variables.get(name) {
+                    let mut next_val = current_val + meta.animation_speed * dt;
+                    let mut next_speed = meta.animation_speed;
+                    if next_val > meta.max {
+                        next_val = meta.max;
+                        next_speed = -meta.animation_speed;
+                    } else if next_val < meta.min {
+                        next_val = meta.min;
+                        next_speed = -meta.animation_speed;
+                    }
+                    changes.push((name.clone(), next_val, next_speed));
+                }
+            }
+        }
+
+        for (name, new_val, new_speed) in changes {
+            self.document.variables.insert(name.clone(), new_val);
+            if let Some(meta) = self.document.variable_meta.get_mut(&name) {
+                meta.animation_speed = new_speed;
+            }
+        }
+
+        if any_animating {
+            self.document.bump_version();
+            ctx.request_repaint();
         }
 
         // Keyboard shortcuts

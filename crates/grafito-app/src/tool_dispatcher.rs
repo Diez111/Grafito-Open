@@ -524,77 +524,84 @@ fn handle_measure(
                 reset_tool: false,
             }
         }
-        "Area" if state.pending.len() == 2 => {
-            // Dos clics: si el primero fue sobre Polygon/Circle → área del
-            // objeto. Si fue sobre Function → integral entre los dos x.
-            let p1 = state.pending[0];
-            let p2 = state.pending[1];
-            if let Some(id) = document.pick_object(p1, tolerance) {
-                let obj = document.get_object(id).cloned();
-                if let Some(obj) = obj {
-                    let (area, label) = match &obj {
-                        grafito_core::GeoObject::Circle(c) => (
-                            std::f64::consts::PI * c.radius * c.radius,
-                            format!(
-                                "Área círculo = {:.3}",
-                                std::f64::consts::PI * c.radius * c.radius
+        "Area" => {
+            if state.pending.len() == 1 {
+                let p1 = state.pending[0];
+                if let Some(id) = document.pick_object(p1, tolerance) {
+                    if let Some(obj) = document.get_object(id).cloned() {
+                        let (area, label, center) = match &obj {
+                            grafito_core::GeoObject::Circle(c) => (
+                                std::f64::consts::PI * c.radius * c.radius,
+                                format!("Área círculo = {:.3}", std::f64::consts::PI * c.radius * c.radius),
+                                Some(c.center)
                             ),
-                        ),
-                        grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                            let a = polygon_area(&poly.vertices);
-                            (a, format!("Área polígono = {:.3}", a))
-                        }
-                        grafito_core::GeoObject::Function(f) => {
-                            // Integral entre x1 y x2.
-                            let lo = p1.x.min(p2.x);
-                            let hi = p1.x.max(p2.x);
-                            let integral = grafito_geometry::integral::eval_integral_hybrid(
-                                |x| {
-                                    grafito_geometry::expr::eval_function_with_vars(
-                                        &f.expr,
-                                        x,
-                                        &document.variables,
-                                    )
-                                    .unwrap_or(0.0)
-                                },
-                                lo,
-                                hi,
-                                200,
-                            );
-                            let a = integral.abs();
-                            (a, format!("Área bajo curva = {:.3}", a))
-                        }
-                        _ => (0.0, String::new()),
-                    };
-                    if area > 0.0 {
-                        let center = match &obj {
-                            grafito_core::GeoObject::Circle(c) => c.center,
-                            grafito_core::GeoObject::Polygon(poly) => {
+                            grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                                let a = polygon_area(&poly.vertices);
                                 let n = poly.vertices.len() as f64;
-                                Point2::new(
+                                let center = Point2::new(
                                     poly.vertices.iter().map(|v| v.x).sum::<f64>() / n,
                                     poly.vertices.iter().map(|v| v.y).sum::<f64>() / n,
-                                )
+                                );
+                                (a, format!("Área polígono = {:.3}", a), Some(center))
                             }
-                            _ => Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5),
+                            _ => (0.0, String::new(), None),
                         };
-                        let label_for_text = label.clone();
-                        let txt = grafito_core::TextObj::new(label_for_text, center);
+                        
+                        if area > 0.0 {
+                            let txt = grafito_core::TextObj::new(label.clone(), center.unwrap());
+                            document.add_object(grafito_core::GeoObject::Text(txt));
+                            state.pending.clear();
+                            return ToolResult {
+                                objects: vec![],
+                                message: Some(label),
+                                reset_tool: false,
+                            };
+                        }
+                    }
+                }
+                return ToolResult {
+                    objects: vec![],
+                    message: Some("Selecciona el segundo punto para área bajo la curva".into()),
+                    reset_tool: false,
+                };
+            } else if state.pending.len() == 2 {
+                let p1 = state.pending[0];
+                let p2 = state.pending[1];
+                if let Some(id) = document.pick_object(p1, tolerance) {
+                    if let Some(grafito_core::GeoObject::Function(f)) = document.get_object(id) {
+                        let lo = p1.x.min(p2.x);
+                        let hi = p1.x.max(p2.x);
+                        let integral = grafito_geometry::integral::eval_integral_hybrid(
+                            |x| {
+                                grafito_geometry::expr::eval_function_with_vars(
+                                    &f.expr,
+                                    x,
+                                    &document.variables,
+                                )
+                                .unwrap_or(0.0)
+                            },
+                            lo,
+                            hi,
+                            200,
+                        );
+                        let a = integral.abs();
+                        let label = format!("Área bajo curva = {:.3}", a);
+                        let txt = grafito_core::TextObj::new(label.clone(), Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5));
                         document.add_object(grafito_core::GeoObject::Text(txt));
                         state.pending.clear();
                         return ToolResult {
                             objects: vec![],
                             message: Some(label),
-                            reset_tool: true,
+                            reset_tool: false,
                         };
                     }
                 }
-            }
-            state.pending.clear();
-            ToolResult {
-                objects: vec![],
-                message: Some("Clic 1 sobre Polygon/Circle/Function".into()),
-                reset_tool: false,
+                state.pending.clear();
+                return ToolResult {
+                    objects: vec![],
+                    message: Some("Se requiere una función para integral".into()),
+                    reset_tool: false,
+                };
             }
         }
         "Slope" if state.pending.len() == 1 => {

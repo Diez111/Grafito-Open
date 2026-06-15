@@ -611,12 +611,16 @@ impl GrafitoApp {
         if response.clicked_by(PointerButton::Primary) && is_click {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("input_click");
-            if let Some(world) = world_at_pointer {
-                let world = if self.snap_to_grid {
-                    snap_world_to_grid(world, self.document.view().scale)
-                } else {
-                    world
-                };
+            if let Some(mut world) = world_at_pointer {
+                if let Some(hover) = &self.hovered_analysis {
+                    if hover.is_snap {
+                        world = hover.point;
+                    } else if self.snap_to_grid {
+                        world = snap_world_to_grid(world, self.document.view().scale);
+                    }
+                } else if self.snap_to_grid {
+                    world = snap_world_to_grid(world, self.document.view().scale);
+                }
                 self.handle_canvas_primary_click(world, ui.ctx().input(|i| i.time));
             }
         }
@@ -666,12 +670,16 @@ impl GrafitoApp {
         }
 
         // ── Tool ghost preview ───────────────────────────────────────────────
-        if let Some(world) = world_at_pointer {
-            let world = if self.snap_to_grid {
-                snap_world_to_grid(world, self.document.view().scale)
-            } else {
-                world
-            };
+        if let Some(mut world) = world_at_pointer {
+            if let Some(hover) = &self.hovered_analysis {
+                if hover.is_snap {
+                    world = hover.point;
+                } else if self.snap_to_grid {
+                    world = snap_world_to_grid(world, self.document.view().scale);
+                }
+            } else if self.snap_to_grid {
+                world = snap_world_to_grid(world, self.document.view().scale);
+            }
             self.update_tool_ghost(world);
         }
 

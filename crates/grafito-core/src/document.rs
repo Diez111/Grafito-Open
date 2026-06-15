@@ -23,6 +23,14 @@ pub struct VariableMeta {
     pub max: f64,
     pub step: f64,
     pub visible: bool,
+    #[serde(default)]
+    pub animating: bool,
+    #[serde(default = "default_animation_speed")]
+    pub animation_speed: f64,
+}
+
+fn default_animation_speed() -> f64 {
+    1.0
 }
 
 fn to_subscript(n: usize) -> String {

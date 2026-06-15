@@ -243,29 +243,46 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.add_space(6.0);
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Variables").size(11.0).color(Color32::from_gray(130)));
-                ui.checkbox(&mut app.animation_running, egui::RichText::new("Animación").size(12.0));
-                let vars: Vec<(String,f64)> = app.document.variables.clone().into_iter().collect();
+                
+                let vars: Vec<(String, f64)> = app.document.variables.clone().into_iter().collect();
                 for (name, val) in &vars {
                     let mut v = *val;
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        ui.label(egui::RichText::new(name).size(12.0));
-                        let sl = egui::Slider::new(&mut v,-10.0..=10.0).step_by(0.1);
-                        if ui.add_sized([100.0, 16.0], sl).changed() {
-                            app.document.set_variable(name.clone(), v);
-                            app.document.recompute_bound_parameters();
-                        }
-                    });
-                }
-                if app.animation_running {
-                    for (name,_) in &vars {
-                        if let Some(v) = app.document.variables.get(name) {
-                            let nv = (v + 0.02) % 20.0 - 10.0;
-                            app.document.set_variable(name.clone(), nv);
-                            app.document.recompute_bound_parameters();
-                        }
+                    
+                    // Asegurar que exista la meta-data de la variable (valores por defecto)
+                    if !app.document.variable_meta.contains_key(name) {
+                        app.document.variable_meta.insert(
+                            name.clone(),
+                            grafito_core::VariableMeta {
+                                position: grafito_geometry::Point2::new(0.0, 0.0),
+                                min: -10.0,
+                                max: 10.0,
+                                step: 0.1,
+                                visible: true,
+                                animating: false,
+                                animation_speed: 1.0,
+                            },
+                        );
                     }
-                    ctx.request_repaint();
+                    
+                    if let Some(meta) = app.document.variable_meta.get_mut(name) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(5.0);
+                            
+                            // Botón de Play/Pause
+                            let play_icon = if meta.animating { "⏸" } else { "▶" };
+                            if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
+                                meta.animating = !meta.animating;
+                            }
+                            
+                            ui.label(egui::RichText::new(name).size(12.0));
+                            
+                            let sl = egui::Slider::new(&mut v, meta.min..=meta.max).step_by(meta.step);
+                            if ui.add_sized([100.0, 16.0], sl).changed() {
+                                app.document.set_variable(name.clone(), v);
+                                app.document.recompute_bound_parameters();
+                            }
+                        });
+                    }
                 }
             }
         });
