@@ -579,7 +579,31 @@ impl GrafitoApp {
             }
         }
 
-        for (_, obj) in self.document.objects_iter() {
+        let mut hovered_object_for_tool = None;
+        if matches!(
+            self.current_tool,
+            grafito_ui::Tool::Root
+                | grafito_ui::Tool::Extremum
+                | grafito_ui::Tool::Inflection
+                | grafito_ui::Tool::YIntercept
+                | grafito_ui::Tool::XIntercept
+                | grafito_ui::Tool::Analyze
+                | grafito_ui::Tool::Intersect
+                | grafito_ui::Tool::Distance
+                | grafito_ui::Tool::Angle
+                | grafito_ui::Tool::Area
+                | grafito_ui::Tool::Slope
+        ) {
+            if let Some(pos) = self.last_mouse_pos {
+                let view = *self.document.view();
+                let local = pos - canvas_rect.min;
+                let world = view.screen_to_world(GlamVec2::new(local.x, local.y));
+                let tolerance = 10.0 / view.scale;
+                hovered_object_for_tool = self.document.pick_object(world, tolerance);
+            }
+        }
+
+        for (id, obj) in self.document.objects_iter() {
             if !obj.is_visible() {
                 continue;
             }
@@ -601,7 +625,20 @@ impl GrafitoApp {
             ) {
                 continue;
             }
-            self.draw_object_styled(painter, canvas_rect, obj, None, overlay_only);
+            
+            let is_tool_hovered = hovered_object_for_tool == Some(*id);
+            let is_driver = self.tool_state.driver == Some(*id);
+            
+            let style = if is_tool_hovered || is_driver {
+                Some(StyleOverride {
+                    width_scale: Some(1.5),
+                    color: Some(Color { r: 0.8, g: 0.8, b: 0.0, a: 1.0 }),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+            self.draw_object_styled(painter, canvas_rect, obj, style, overlay_only);
         }
 
         if let Some(preview) = &self.preview_object {
