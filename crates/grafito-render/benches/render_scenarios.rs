@@ -46,7 +46,7 @@ fn bench_build_geometry_many_objects(c: &mut Criterion) {
     c.bench_function("build_geometry_many_objects", |b| {
         b.iter(|| {
             let (vertices, indices) =
-                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false);
+                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false, true);
             black_box((vertices.len(), indices.len()));
         })
     });
@@ -55,7 +55,7 @@ fn bench_build_geometry_many_objects(c: &mut Criterion) {
 fn bench_build_geometry_with_functions(c: &mut Criterion) {
     let mut doc = Document::new();
     for i in 0..10 {
-        doc.add_object(GeoObject::Function(FunctionObj::new(&format!(
+        doc.add_object(GeoObject::Function(FunctionObj::new(format!(
             "sin({}*x)",
             i + 1
         ))));
@@ -65,7 +65,7 @@ fn bench_build_geometry_with_functions(c: &mut Criterion) {
     c.bench_function("build_geometry_with_functions", |b| {
         b.iter(|| {
             let (vertices, indices) =
-                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false);
+                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false, true);
             black_box((vertices.len(), indices.len()));
         })
     });
@@ -131,6 +131,7 @@ fn bench_build_geometry_with_parametrics(c: &mut Criterion) {
                     false,
                     800.0,
                     600.0,
+                    true,
                 );
                 black_box((vertices.len(), indices.len()));
             })
@@ -164,7 +165,7 @@ fn bench_build_geometry_with_vector_fields(c: &mut Criterion) {
     c.bench_function("build_geometry_with_vector_fields", |b| {
         b.iter(|| {
             let (vertices, indices) =
-                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false);
+                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false, true);
             black_box((vertices.len(), indices.len()));
         })
     });

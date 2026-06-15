@@ -187,7 +187,7 @@ fn make_large_document() -> Document {
                 Point2::new(1.0, 1.0),
                 Point2::new(0.0, 1.0),
             ])),
-            _ => GeoObject::Function(FunctionObj::new(&format!("sin({}*x)", i))),
+            _ => GeoObject::Function(FunctionObj::new(format!("sin({}*x)", i))),
         };
         ids.push(doc.add_object(obj));
     }

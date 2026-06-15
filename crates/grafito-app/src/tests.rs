@@ -22,7 +22,7 @@ fn test_save_load_roundtrip() {
         Point2::new(0.0, 0.0),
         5.0,
     )));
-    doc.set_variable("a".into(), 3.14);
+    doc.set_variable("a".into(), 42.0);
 
     let tmp = std::env::temp_dir().join("grafito_test_roundtrip.json");
     crate::export::save_document(&doc, &tmp.to_string_lossy()).expect("save failed");
@@ -30,7 +30,7 @@ fn test_save_load_roundtrip() {
     let _ = std::fs::remove_file(&tmp);
 
     assert_eq!(loaded.object_count(), 2);
-    assert_eq!(loaded.get_variable("a"), Some(3.14));
+    assert_eq!(loaded.get_variable("a"), Some(42.0));
 }
 
 #[test]

@@ -975,8 +975,8 @@ mod tests {
         doc.set_variable("py".to_string(), -1.0);
         doc.set_variable("qx".to_string(), 2.0);
         doc.set_variable("qy".to_string(), 3.0);
-        assert_eq!(doc.resolve_expr(poly.x_exprs.get(0).unwrap(), 0.0), -1.0);
-        assert_eq!(doc.resolve_expr(poly.y_exprs.get(0).unwrap(), 0.0), -1.0);
+        assert_eq!(doc.resolve_expr(poly.x_exprs.first().unwrap(), 0.0), -1.0);
+        assert_eq!(doc.resolve_expr(poly.y_exprs.first().unwrap(), 0.0), -1.0);
         assert_eq!(doc.resolve_expr(poly.x_exprs.get(2).unwrap(), 0.5), 2.0);
         assert_eq!(doc.resolve_expr(poly.y_exprs.get(2).unwrap(), 1.0), 3.0);
     }
@@ -1532,10 +1532,8 @@ mod tests {
             .iter()
             .min_by(|(x, _), (x2, _)| (x + 1.0).abs().partial_cmp(&(x2 + 1.0).abs()).unwrap())
             .expect("sample near x=-1");
-        let y_neg1 = y_at.expect(&format!(
-            "piecewise should be finite at x={}, sample={}",
-            x_at, x_at
-        ));
+        let y_neg1 = y_at
+            .unwrap_or_else(|| panic!("piecewise should be finite at x={}, sample={}", x_at, x_at));
         assert!(
             (y_neg1 - 1.0).abs() < 0.15,
             "piecewise at x={} should be ~1, got {}",
@@ -1548,10 +1546,12 @@ mod tests {
             .iter()
             .min_by(|(x, _), (x2, _)| (x - 1.0).abs().partial_cmp(&(x2 - 1.0).abs()).unwrap())
             .expect("sample near x=1");
-        let y_pos1 = y_at2.expect(&format!(
-            "piecewise should be finite at x={}, sample={}",
-            x_at2, x_at2
-        ));
+        let y_pos1 = y_at2.unwrap_or_else(|| {
+            panic!(
+                "piecewise should be finite at x={}, sample={}",
+                x_at2, x_at2
+            )
+        });
         assert!(
             (y_pos1 - 1.0).abs() < 0.15,
             "piecewise at x={} should be ~1, got {}",

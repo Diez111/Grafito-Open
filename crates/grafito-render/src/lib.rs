@@ -295,12 +295,10 @@ impl Renderer {
                 continue;
             }
             match obj {
-                GeoObject::Point(p) => {
-                    if include_overlays {
-                        let screen = view.world_to_screen(p.position);
-                        let size = p.size.max(1.0);
-                        Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
-                    }
+                GeoObject::Point(p) if include_overlays => {
+                    let screen = view.world_to_screen(p.position);
+                    let size = p.size.max(1.0);
+                    Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
                     let start = Point2::new(
@@ -692,12 +690,10 @@ impl Renderer {
                 continue;
             }
             match obj {
-                GeoObject::Point(p) => {
-                    if include_overlays {
-                        let screen = view_transform.world_to_screen(p.position);
-                        let size = p.size.max(1.0);
-                        Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
-                    }
+                GeoObject::Point(p) if include_overlays => {
+                    let screen = view_transform.world_to_screen(p.position);
+                    let size = p.size.max(1.0);
+                    Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
                 }
                 GeoObject::Line(l) => {
                     let start = Point2::new(
@@ -2546,7 +2542,6 @@ impl Renderer {
             if major_line_count_x <= max_lines && major_line_count_z <= max_lines {
                 // Dibujar solo major grid
 
-
                 let cam_pos = camera.position();
                 let mut prev_screen_pos_x: Option<glam::Vec2> = None;
                 for xi in 0..=major_line_count_x {
@@ -2633,7 +2628,6 @@ impl Renderer {
             // Si incluso major grid es demasiado, no dibujar nada
         } else {
             // Dibujar grid completo (minor + major)
-
 
             let cam_pos = camera.position();
             let mut prev_screen_pos_x: Option<glam::Vec2> = None;

@@ -50,7 +50,7 @@ fn bench_geometry_building(c: &mut Criterion) {
     c.bench_function("geometry_build_50_objects", |b| {
         b.iter(|| {
             let (vertices, indices) =
-                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false);
+                Renderer::build_geometry_static(black_box(&doc), black_box(&view), false, true);
             black_box((vertices.len(), indices.len()))
         })
     });

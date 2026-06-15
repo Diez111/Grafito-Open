@@ -1,5 +1,5 @@
 use grafito_command::commands::{process_input, CommandOutcome};
-use grafito_core::{Document, GeoObject, ImplicitCurveObj};
+use grafito_core::{Document, GeoObject};
 
 #[test]
 fn test_unknown_command_returns_error() {

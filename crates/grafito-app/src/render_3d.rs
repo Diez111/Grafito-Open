@@ -1062,27 +1062,23 @@ impl GrafitoApp {
                     }
                     for i in 0..steps_u {
                         for j in 0..steps_v {
-                            if valid[i][j] && valid[i + 1][j] {
-                                if !overlay_only {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                            origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
-                                        ],
-                                        stroke,
-                                    );
-                                }
+                            if valid[i][j] && valid[i + 1][j] && !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                        origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
+                                    ],
+                                    stroke,
+                                );
                             }
-                            if valid[i][j] && valid[i][j + 1] {
-                                if !overlay_only {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                            origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
-                                        ],
-                                        stroke,
-                                    );
-                                }
+                            if valid[i][j] && valid[i][j + 1] && !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                        origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
+                                    ],
+                                    stroke,
+                                );
                             }
                         }
                     }
@@ -1110,31 +1106,27 @@ impl GrafitoApp {
                     }
                     for i in 0..steps_u {
                         for j in 0..=steps_v {
-                            if valid[i][j] && valid[i + 1][j] {
-                                if !overlay_only {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                            origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
-                                        ],
-                                        stroke,
-                                    );
-                                }
+                            if valid[i][j] && valid[i + 1][j] && !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                        origin + Vec2::new(pts[i + 1][j].0, pts[i + 1][j].1),
+                                    ],
+                                    stroke,
+                                );
                             }
                         }
                     }
                     for i in 0..=steps_u {
                         for j in 0..steps_v {
-                            if valid[i][j] && valid[i][j + 1] {
-                                if !overlay_only {
-                                    painter.line_segment(
-                                        [
-                                            origin + Vec2::new(pts[i][j].0, pts[i][j].1),
-                                            origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
-                                        ],
-                                        stroke,
-                                    );
-                                }
+                            if valid[i][j] && valid[i][j + 1] && !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pts[i][j].0, pts[i][j].1),
+                                        origin + Vec2::new(pts[i][j + 1].0, pts[i][j + 1].1),
+                                    ],
+                                    stroke,
+                                );
                             }
                         }
                     }
