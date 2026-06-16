@@ -7,8 +7,9 @@ use crate::{commands, GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
-    CircleObj, FunctionObj, GeoObject, ImplicitCurveObj, LineObj, ParametricCurve2DObj, Point3DObj,
-    PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality, VectorField2DObj,
+    CircleObj, FunctionObj, GeoObject, ImplicitCurveObj, LineObj, ParametricCurve2DObj, PencilObj,
+    Point3DObj, PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality,
+    VectorField2DObj,
 };
 use grafito_geometry::analysis::AnalysisResult;
 use grafito_geometry::{Camera3D, Point2, Point3D};
@@ -57,6 +58,21 @@ impl GrafitoApp {
                 } else {
                     self.document.clear_selection();
                     self.selected_object = None;
+                }
+            }
+            Tool::Pencil => {
+                // El Pencil se construye en `response.drag_stopped`, no con un
+                // clic simple. Aquí no hacemos nada.
+            }
+            Tool::Eraser => {
+                // Clic simple: borrar el objeto bajo el cursor (si hay).
+                let tolerance = 10.0 / self.document.view().scale;
+                if let Some(id) = self.document.pick_object(world, tolerance) {
+                    self.save_state();
+                    self.document.remove_object(id);
+                    if self.selected_object == Some(id) {
+                        self.selected_object = None;
+                    }
                 }
             }
             Tool::Point => {
@@ -263,6 +279,8 @@ impl GrafitoApp {
                 }
             }
             Tool::Coincident
+            | Tool::DistanceConstraint
+            | Tool::AngleConstraint
             | Tool::Horizontal
             | Tool::Vertical
             | Tool::EqualLength
@@ -413,6 +431,11 @@ impl GrafitoApp {
                 self.tool_ghost = Some(GeoObject::VectorField2D(VectorField2DObj::new("x", "y")));
             }
             Tool::Locus => {}
+            Tool::Eraser => {
+                // El borrador muestra un anillo de tamaño variable según la
+                // tolerancia de selección; no dibuja objetos.
+                self.tool_ghost = None;
+            }
             _ => {}
         }
     }
@@ -449,6 +472,66 @@ impl GrafitoApp {
             self.is_view_changing = true;
             self.last_interaction_time = Instant::now();
             self.document.render_quality = RenderQuality::Preview;
+
+            // Inicio de Pencil: crear el PencilObj directamente en el
+            // documento con el primer punto. De este modo el usuario ve
+            // el trazo en tiempo real sin "ghost": cada tick del drag
+            // añade un punto al PencilObj existente. Sin Space (que panea).
+            // Solo creamos si no hay ya un PencilObj en curso (caso
+            // touch/stylus que ya creó uno con `button_down`).
+            if self.current_tool == Tool::Pencil
+                && response.drag_started_by(PointerButton::Primary)
+                && !space_pressed
+                && !self.tool_state.drawing_pencil.is_some()
+            {
+                self.save_state();
+                if let Some(pos) = current_pos {
+                    let local = pos - canvas_rect.min;
+                    let world = self
+                        .document
+                        .view()
+                        .screen_to_world(GlamVec2::new(local.x, local.y));
+                    let mut pencil = PencilObj::new(vec![world]);
+                    pencil.color = self.color_favorites[0];
+                    pencil.width = 2.0;
+                    let id = self.document.add_object(GeoObject::Pencil(pencil));
+                    self.tool_state.drawing_pencil = Some(id);
+                }
+            }
+        }
+
+        // ── Compatibilidad con tabletas gráficas (stylus) ────────────────
+        // Las tabletas y pantallas táctiles emiten presión desde el primer
+        // frame, sin movimiento significativo, por lo que egui no marca
+        // `drag_started`/`dragged_by` con la suficiente rapidez. Para que
+        // el Pencil funcione con stylus, detectamos el botón presionado
+        // directamente con `pointer.button_down(...)` y creamos el
+        // PencilObj en el frame actual. Space anula el comportamiento
+        // (pan universal). Solo Primary, Secondary y Middle disparan el
+        // Pencil para que la goma lateral del stylus (Secondary) también
+        // dibuje.
+        if !space_pressed
+            && pointer_in_canvas
+            && (pointer.button_down(PointerButton::Primary)
+                || pointer.button_down(PointerButton::Secondary)
+                || pointer.button_down(PointerButton::Middle))
+            && !self.tool_state.drawing_pencil.is_some()
+            && self.current_tool == Tool::Pencil
+        {
+            self.save_state();
+            if let Some(pos) = current_pos {
+                let local = pos - canvas_rect.min;
+                let world = self
+                    .document
+                    .view()
+                    .screen_to_world(GlamVec2::new(local.x, local.y));
+                let mut pencil = PencilObj::new(vec![world]);
+                pencil.color = self.color_favorites[0];
+                pencil.width = 2.0;
+                let id = self.document.add_object(GeoObject::Pencil(pencil));
+                self.tool_state.drawing_pencil = Some(id);
+                self.is_view_changing = true;
+            }
         }
 
         let drag_distance = self
@@ -473,9 +556,15 @@ impl GrafitoApp {
         let mut pan_delta = Vec2::ZERO;
 
         // Right-click is reserved for polygon closing / cancel when a polygon is in progress.
+        // Si la herramienta es Pencil o Eraser, **bloqueamos el pan con
+        // Middle/Secondary** porque el botón lateral del stylus suele
+        // emitir Secondary y queremos que sirva para borrar/dibujar, no
+        // para mover la vista. Con Space+Primary sigue siendo pan.
+        let drawing_tool = matches!(self.current_tool, Tool::Pencil | Tool::Eraser);
         let can_pan_with_right =
             self.current_tool != Tool::Polygon || self.tool_state.pending.is_empty();
-        let pan_button_pressed = pointer_in_canvas
+        let pan_button_pressed = !drawing_tool
+            && pointer_in_canvas
             && (pointer.button_down(PointerButton::Middle)
                 || (pointer.button_down(PointerButton::Secondary) && can_pan_with_right));
 
@@ -484,7 +573,8 @@ impl GrafitoApp {
             panning = true;
             pan_delta = response.drag_delta();
         }
-        // 2. Middle/right button drag: universal pan (direct pointer reading)
+        // 2. Middle/right button drag: universal pan (direct pointer reading).
+        //    Bloqueado durante Pencil/Eraser (ver `pan_button_pressed`).
         else if pan_button_pressed {
             let delta = pointer.delta();
             if delta != Vec2::ZERO {
@@ -493,13 +583,17 @@ impl GrafitoApp {
             }
         }
         // 3. Primary drag: pan unless we are moving a free point in Select mode
+        //    o dibujando con Pencil/Eraser (donde el arrastre primario es
+        //    para acumular puntos del trazo o borrar, no para mover la
+        //    vista).
         else if response.dragged_by(PointerButton::Primary) {
             let moving_point = self.current_tool == Tool::Select
                 && self
                     .selected_object
                     .map(|id| self.document.is_free_object(&id))
                     .unwrap_or(false);
-            if !moving_point {
+            let drawing = drawing_tool;
+            if !moving_point && !drawing {
                 panning = true;
                 pan_delta = response.drag_delta();
             }
@@ -515,6 +609,75 @@ impl GrafitoApp {
             self.document
                 .view_mut()
                 .pan(GlamVec2::new(pan_delta.x, pan_delta.y));
+        }
+
+        // ── Pencil: añadir puntos al PencilObj vivo durante el drag ───────
+        // Pencil no usa pan durante el arrastre. Modificamos el PencilObj
+        // directamente en el documento para que se vea en tiempo real.
+        // Aceptamos Primary, Secondary y Middle como botones de dibujo
+        // para máxima compatibilidad con stylus (botón lateral del
+        // lápiz óptico).
+        if !panning
+            && self.current_tool == Tool::Pencil
+            && (pointer.button_down(PointerButton::Primary)
+                || pointer.button_down(PointerButton::Secondary)
+                || pointer.button_down(PointerButton::Middle))
+        {
+            if let (Some(pencil_id), Some(pos)) = (self.tool_state.drawing_pencil, current_pos) {
+                let local = pos - canvas_rect.min;
+                let world = self
+                    .document
+                    .view()
+                    .screen_to_world(GlamVec2::new(local.x, local.y));
+                // Throttling: solo añadimos un punto si está al menos a
+                // `min_step` unidades del último (en coords del mundo).
+                let min_step = 0.01 / self.document.view().scale.max(1e-3);
+                if let Some(obj) = self.document.get_object_mut(pencil_id) {
+                    if let GeoObject::Pencil(p) = obj {
+                        let should_push = p
+                            .points
+                            .last()
+                            .map(|last| last.distance(&world) >= min_step)
+                            .unwrap_or(true);
+                        if should_push {
+                            p.push(world);
+                        }
+                    }
+                }
+                // Forzamos repintado para que el PencilObj actualizado se vea.
+                self.is_view_changing = true;
+            }
+        }
+
+        // ── Eraser: borrar el objeto bajo el cursor durante el arrastre ─────
+        // Igual que Pencil, no debe paneo con arrastre primario. Borra cada
+        // objeto que esté dentro de la tolerancia en cada tick del drag.
+        // Aceptamos cualquier botón de dibujo (compatibilidad con stylus).
+        if !panning
+            && self.current_tool == Tool::Eraser
+            && (pointer.button_down(PointerButton::Primary)
+                || pointer.button_down(PointerButton::Secondary)
+                || pointer.button_down(PointerButton::Middle))
+        {
+            if let Some(pos) = current_pos {
+                let local = pos - canvas_rect.min;
+                let world = self
+                    .document
+                    .view()
+                    .screen_to_world(GlamVec2::new(local.x, local.y));
+                let tolerance = 10.0 / self.document.view().scale;
+                if let Some(id) = self.document.pick_object(world, tolerance) {
+                    if self.tool_state.last_erased != Some(id) {
+                        self.save_state();
+                        self.document.remove_object(id);
+                        if self.selected_object == Some(id) {
+                            self.selected_object = None;
+                        }
+                        self.tool_state.last_erased = Some(id);
+                    }
+                }
+                self.is_view_changing = true;
+            }
         }
 
         // ── Move free point in Select mode (primary drag, not panning) ───────
@@ -562,41 +725,27 @@ impl GrafitoApp {
         if !panning
             && !self.is_view_changing
             && response.hover_pos().is_some()
+            && !response.dragged()
             && self.current_view != crate::ViewMode::D3
         {
             if let Some(world) = world_at_pointer {
-                let current_time = ui.ctx().input(|i| i.time);
                 let pixel_tolerance = 15.0 / self.document.view().scale;
-                
-                let mut reset = true;
-                if let Some(cand_pos) = self.hover_candidate_pos {
-                    if cand_pos.distance(&world) <= (2.0 / self.document.view().scale) {
-                        reset = false;
-                    }
-                }
-                
-                if reset {
-                    self.hover_candidate_pos = Some(world);
-                    self.hover_candidate_time = current_time;
-                    self.hover_cached_analysis = None;
-                    self.hovered_analysis = None;
-                } else if current_time - self.hover_candidate_time >= 0.15 {
-                    if self.hover_cached_analysis.is_none() {
-                        self.hovered_analysis = None;
-                        self.update_hover_analysis(world, pixel_tolerance);
-                        self.hover_cached_analysis = Some(self.hovered_analysis.clone());
-                    } else {
-                        self.hovered_analysis = self.hover_cached_analysis.as_ref().unwrap().clone();
-                    }
+
+                // A very short debounce (30ms) ensures 30fps for analysis while the app runs at 60fps+.
+                // Or we can just run it if the mouse stopped moving.
+                // Let's implement a spatial + temporal debounce
+                let dist_moved = if let Some(last) = self.hover_candidate_pos {
+                    world.distance(&last) * self.document.view().scale // pixels
                 } else {
+                    100.0
+                };
+
+                if dist_moved > 5.0 {
+                    self.hover_candidate_pos = Some(world);
+                    // Reset hovered_analysis so we don't show old ghosts while moving fast
                     self.hovered_analysis = None;
-                }
-                
-                if self.hover_cached_analysis.is_none() {
-                    let time_left = 0.15 - (current_time - self.hover_candidate_time);
-                    if time_left > 0.0 {
-                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(time_left));
-                    }
+                } else {
+                    self.update_hover_analysis(world, pixel_tolerance);
                 }
             }
         } else {
@@ -612,12 +761,32 @@ impl GrafitoApp {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("input_click");
             if let Some(mut world) = world_at_pointer {
-                if let Some(hover) = &self.hovered_analysis {
-                    if hover.is_snap {
-                        world = hover.point;
-                    } else if self.snap_to_grid {
-                        world = snap_world_to_grid(world, self.document.view().scale);
+                // Ensure instant snap calculation on click to avoid missing snaps due to hover debounce
+                use grafito_geometry::analysis::AnalysisFeature;
+                let tool_filter = match self.current_tool {
+                    grafito_ui::Tool::Root => {
+                        Some(vec![AnalysisFeature::Root, AnalysisFeature::XIntercept])
                     }
+                    grafito_ui::Tool::Extremum => Some(vec![
+                        AnalysisFeature::LocalMaximum,
+                        AnalysisFeature::LocalMinimum,
+                    ]),
+                    grafito_ui::Tool::Inflection => Some(vec![AnalysisFeature::Inflection]),
+                    grafito_ui::Tool::YIntercept => Some(vec![AnalysisFeature::YIntercept]),
+                    grafito_ui::Tool::XIntercept => Some(vec![AnalysisFeature::XIntercept]),
+                    _ => None,
+                };
+                let snap = crate::snap::snap_point(
+                    world,
+                    &self.document,
+                    self.document.view().scale,
+                    &self.snap_config,
+                    crate::snap::SnapOverrides::default(),
+                    tool_filter,
+                );
+
+                if snap.kind != crate::snap::SnapKind::Free {
+                    world = snap.point;
                 } else if self.snap_to_grid {
                     world = snap_world_to_grid(world, self.document.view().scale);
                 }
@@ -685,8 +854,61 @@ impl GrafitoApp {
 
         // ── Cleanup drag state ───────────────────────────────────────────────
         if response.drag_stopped() {
+            // Finalizar Pencil: el PencilObj ya está en el documento y
+            // actualizado en cada tick del drag. Si solo tiene 1 punto
+            // (clic simple sin arrastrar), lo eliminamos — no es un trazo
+            // válido. El undo ya se guardó al inicio del drag con
+            // `save_state`, así que un solo Ctrl+Z deshará el trazo entero.
+            if self.current_tool == Tool::Pencil {
+                if let Some(id) = self.tool_state.drawing_pencil.take() {
+                    let too_short = self
+                        .document
+                        .get_object(id)
+                        .map(|obj| {
+                            if let GeoObject::Pencil(p) = obj {
+                                p.points.len() < 2
+                            } else {
+                                true
+                            }
+                        })
+                        .unwrap_or(true);
+                    if too_short {
+                        self.document.remove_object(id);
+                    }
+                }
+            }
             self.canvas_is_panning = false;
             self.canvas_drag_start = None;
+        }
+
+        // ── Finalizar Pencil/Eraser cuando se suelta el botón (caso touch
+        // y stylus): si ninguno de los botones de dibujo está presionado,
+        // terminamos el trazo del mismo modo que `drag_stopped`. Esto
+        // cubre el caso en que el driver de la tableta emite `button_down`
+        // durante varios frames sin notificar `drag_stopped`.
+        let any_draw_button = pointer.button_down(PointerButton::Primary)
+            || pointer.button_down(PointerButton::Secondary)
+            || pointer.button_down(PointerButton::Middle);
+        if !any_draw_button {
+            if let Some(id) = self.tool_state.drawing_pencil.take() {
+                let too_short = self
+                    .document
+                    .get_object(id)
+                    .map(|obj| {
+                        if let GeoObject::Pencil(p) = obj {
+                            p.points.len() < 2
+                        } else {
+                            true
+                        }
+                    })
+                    .unwrap_or(true);
+                if too_short {
+                    self.document.remove_object(id);
+                }
+            }
+            // Eraser: al soltar el botón, limpiamos `last_erased` para
+            // permitir borrar el mismo objeto en un trazo posterior.
+            self.tool_state.last_erased = None;
         }
 
         // Keep last known position for external consumers (status bar, etc.)
@@ -699,6 +921,21 @@ impl GrafitoApp {
         use crate::snap::{snap_point, SnapOverrides};
         use grafito_core::analyzable::evaluate_curve_at;
 
+        use grafito_geometry::analysis::AnalysisFeature;
+        let tool_filter = match self.current_tool {
+            grafito_ui::Tool::Root => {
+                Some(vec![AnalysisFeature::Root, AnalysisFeature::XIntercept])
+            }
+            grafito_ui::Tool::Extremum => Some(vec![
+                AnalysisFeature::LocalMaximum,
+                AnalysisFeature::LocalMinimum,
+            ]),
+            grafito_ui::Tool::Inflection => Some(vec![AnalysisFeature::Inflection]),
+            grafito_ui::Tool::YIntercept => Some(vec![AnalysisFeature::YIntercept]),
+            grafito_ui::Tool::XIntercept => Some(vec![AnalysisFeature::XIntercept]),
+            _ => None,
+        };
+
         // 1) Snap jerárquico: característica > curva > objeto > eje > cuadrícula.
         let snap = snap_point(
             world,
@@ -706,6 +943,7 @@ impl GrafitoApp {
             self.document.view().scale,
             &self.snap_config,
             SnapOverrides::default(),
+            tool_filter,
         );
         match snap.kind {
             crate::snap::SnapKind::Free => {

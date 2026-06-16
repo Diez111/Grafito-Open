@@ -350,6 +350,8 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
         tool_btn(ui, current_tool, Tool::Circle, "Circunferencia", "F4");
         tool_btn(ui, current_tool, Tool::Polygon, "Polígono", "F5");
         tool_btn(ui, current_tool, Tool::Function, "Función", "F6");
+        tool_btn(ui, current_tool, Tool::Pencil, "Lápiz", "");
+        tool_btn(ui, current_tool, Tool::Eraser, "Borrador", "");
 
         ui.separator();
 
@@ -407,8 +409,8 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
             ui.separator();
 
             // Numeric constraints (only in 2D mode)
-            tool_btn(ui, current_tool, Tool::Distance, "Distancia", "");
-            tool_btn(ui, current_tool, Tool::Angle, "Ángulo", "");
+            tool_btn(ui, current_tool, Tool::DistanceConstraint, "Distancia", "");
+            tool_btn(ui, current_tool, Tool::AngleConstraint, "Ángulo", "");
             tool_btn(ui, current_tool, Tool::Coincident, "Coincidente", "");
             tool_btn(ui, current_tool, Tool::Horizontal, "Horizontal", "");
             tool_btn(ui, current_tool, Tool::Vertical, "Vertical", "");
@@ -646,6 +648,29 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
             let tip = c + egui::vec2(8.0, 6.0);
             painter.line_segment([tip, tip - egui::vec2(4.0, 2.0)], stroke);
             painter.line_segment([tip, tip - egui::vec2(2.0, 4.0)], stroke);
+        }
+        Tool::Pencil => {
+            // Lápiz estilizado: cuerpo triangular + punta + trazo curvo.
+            let body_top = c - egui::vec2(6.0, 6.0);
+            let body_bot_l = c + egui::vec2(-3.0, 5.0);
+            let body_bot_r = c + egui::vec2(3.0, 5.0);
+            let tip = c + egui::vec2(6.0, 7.0);
+            let stroke_w = egui::Stroke::new(1.5, text_color);
+            painter.add(egui::Shape::convex_polygon(
+                vec![body_top, body_bot_l, body_bot_r],
+                Color32::TRANSPARENT,
+                stroke_w,
+            ));
+            painter.line_segment([body_bot_l, tip], stroke_w);
+            painter.line_segment([body_bot_r, tip], stroke_w);
+            // Pequeño trazo ondulado a la derecha, como "escritura".
+            let mut wave = Vec::with_capacity(10);
+            for i in 0..=10 {
+                let t = i as f32 / 10.0;
+                let p = c + egui::vec2(8.0 + t * 6.0, (t * 9.0).sin() * 2.0);
+                wave.push(p);
+            }
+            painter.add(egui::Shape::line(wave, egui::Stroke::new(1.5, text_color)));
         }
         Tool::RegularPolygon => {
             let center = c;
@@ -1001,6 +1026,38 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
                 stroke,
             );
         }
+        Tool::Eraser => {
+            // Goma de borrar: rectángulo oblicuo con esquina levantada.
+            let body_a = c + egui::vec2(-7.0, 6.0);
+            let body_b = c + egui::vec2(5.0, -6.0);
+            let body_c = c + egui::vec2(8.0, -3.0);
+            let body_d = c + egui::vec2(-4.0, 9.0);
+            painter.line_segment([body_a, body_b], stroke);
+            painter.line_segment([body_b, body_c], stroke);
+            painter.line_segment([body_c, body_d], stroke);
+            painter.line_segment([body_d, body_a], stroke);
+            // Líneas decorativas (como "rozaduras" en una goma de verdad).
+            painter.line_segment(
+                [c + egui::vec2(-3.0, 2.0), c + egui::vec2(2.0, -3.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-1.0, 4.0), c + egui::vec2(4.0, -1.0)],
+                stroke,
+            );
+        }
+        Tool::DistanceConstraint | Tool::AngleConstraint => {
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                match tool {
+                    Tool::DistanceConstraint => "↔C",
+                    _ => "∠C",
+                },
+                egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                text_color,
+            );
+        }
     }
 
     response.on_hover_ui(|ui| {
@@ -1018,6 +1075,7 @@ pub enum Tool {
     Line,
     Circle,
     Polygon,
+    Pencil,
     Function,
     // 3D tools
     Point3D,
@@ -1058,11 +1116,14 @@ pub enum Tool {
     Slider,
     Button,
     Image,
+    Eraser,
     // Complex & Visualization
     DomainColoring,
     HeatMap,
     ComplexGrid,
     // Numeric constraints
+    DistanceConstraint,
+    AngleConstraint,
     Coincident,
     Horizontal,
     Vertical,
@@ -1088,6 +1149,7 @@ impl Tool {
             Tool::Line => "Line",
             Tool::Circle => "Circle",
             Tool::Polygon => "Polygon",
+            Tool::Pencil => "Pencil",
             Tool::Function => "Function",
             Tool::Point3D => "Point3D",
             Tool::Sphere3D => "Sphere3D",
@@ -1125,6 +1187,8 @@ impl Tool {
             Tool::DomainColoring => "DomainColoring",
             Tool::HeatMap => "HeatMap",
             Tool::ComplexGrid => "ComplexGrid",
+            Tool::DistanceConstraint => "DistanceConstraint",
+            Tool::AngleConstraint => "AngleConstraint",
             Tool::Coincident => "Coincident",
             Tool::Horizontal => "Horizontal",
             Tool::Vertical => "Vertical",
@@ -1138,6 +1202,9 @@ impl Tool {
             Tool::PolygonIntersection => "PolygonIntersection",
             Tool::PolygonDifference => "PolygonDifference",
             Tool::PolygonXor => "PolygonXor",
+            Tool::DistanceConstraint => "DistanceConstraint",
+            Tool::AngleConstraint => "AngleConstraint",
+            Tool::Eraser => "Eraser",
         }
     }
 
@@ -1148,6 +1215,7 @@ impl Tool {
             Tool::Line
             | Tool::Circle
             | Tool::Polygon
+            | Tool::Pencil
             | Tool::Function
             | Tool::Sphere3D
             | Tool::Cube3D
@@ -1181,6 +1249,7 @@ impl Tool {
             | Tool::Slider
             | Tool::Button
             | Tool::Image
+            | Tool::Eraser
             | Tool::DomainColoring
             | Tool::HeatMap
             | Tool::ComplexGrid
@@ -1197,6 +1266,7 @@ impl Tool {
             | Tool::PolygonIntersection
             | Tool::PolygonDifference
             | Tool::PolygonXor => egui::CursorIcon::Crosshair,
+            Tool::DistanceConstraint | Tool::AngleConstraint => egui::CursorIcon::Crosshair,
         }
     }
 }

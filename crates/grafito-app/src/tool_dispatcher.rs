@@ -18,6 +18,14 @@ pub struct ToolState {
     pub measure_src: Option<ObjectId>,
     pub selection_rect: Option<(Point2, Point2)>,
     pub last_outcome: Option<CommandOutcome>,
+    /// ID del último objeto borrado por la herramienta Eraser durante
+    /// el arrastre actual. Evita borrar dos veces el mismo objeto en
+    /// un solo trazo y permite deshacer todo el trazo en una sola acción.
+    pub last_erased: Option<ObjectId>,
+    /// ID del PencilObj que se está dibujando actualmente. Se establece
+    /// en `drag_started` y se actualiza en cada tick del drag. Al soltar,
+    /// si solo tiene 1 punto, se elimina (no es un trazo válido).
+    pub drawing_pencil: Option<ObjectId>,
 }
 
 #[allow(dead_code)]
@@ -29,6 +37,8 @@ impl ToolState {
         self.measure_src = None;
         self.selection_rect = None;
         self.last_outcome = None;
+        self.last_erased = None;
+        self.drawing_pencil = None;
     }
 }
 
@@ -534,8 +544,11 @@ fn handle_measure(
                         let (area, label, center) = match &obj {
                             grafito_core::GeoObject::Circle(c) => (
                                 std::f64::consts::PI * c.radius * c.radius,
-                                format!("Área círculo = {:.3}", std::f64::consts::PI * c.radius * c.radius),
-                                Some(c.center)
+                                format!(
+                                    "Área círculo = {:.3}",
+                                    std::f64::consts::PI * c.radius * c.radius
+                                ),
+                                Some(c.center),
                             ),
                             grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
                                 let a = polygon_area(&poly.vertices);
@@ -548,7 +561,7 @@ fn handle_measure(
                             }
                             _ => (0.0, String::new(), None),
                         };
-                        
+
                         if area > 0.0 {
                             let txt = grafito_core::TextObj::new(label.clone(), center.unwrap());
                             document.add_object(grafito_core::GeoObject::Text(txt));
@@ -588,7 +601,10 @@ fn handle_measure(
                         );
                         let a = integral.abs();
                         let label = format!("Área bajo curva = {:.3}", a);
-                        let txt = grafito_core::TextObj::new(label.clone(), Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5));
+                        let txt = grafito_core::TextObj::new(
+                            label.clone(),
+                            Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5),
+                        );
                         document.add_object(grafito_core::GeoObject::Text(txt));
                         state.pending.clear();
                         return ToolResult {

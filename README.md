@@ -1,4 +1,4 @@
-# Grafito v0.9.0-beta.1
+# Grafito v1.0.0-beta
 
 **Grafito** es una aplicación interactiva de geometría, álgebra, estadística y cálculo de alto rendimiento, acelerada por GPU, inspirada en GeoGebra y construida desde cero en Rust con APIs gráficas modernas.
 

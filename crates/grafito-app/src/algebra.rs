@@ -98,6 +98,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         grafito_core::GeoObject::Circle(c) => format!("(x - {:.2})² + (y - {:.2})² = {:.2}²", c.center.x, c.center.y, c.radius),
                         grafito_core::GeoObject::Ellipse(e) => format!("(x - {:.2})²/{:.2}² + (y - {:.2})²/{:.2}² = 1", e.center.x, e.center.y, e.rx, e.ry),
                         grafito_core::GeoObject::Polygon(p) => format!("{} vertices", p.vertices.len()),
+                        grafito_core::GeoObject::Pencil(p) => format!("{} puntos", p.points.len()),
                         grafito_core::GeoObject::Point3D(p) => format!("({:.2}, {:.2}, {:.2})", p.position.x, p.position.y, p.position.z),
                         grafito_core::GeoObject::Sphere3D(s) => format!("r={:.2} c=({:.2}, {:.2}, {:.2})", s.radius, s.center.x, s.center.y, s.center.z),
                         grafito_core::GeoObject::Cube3D(c) => format!("size={:.2}", c.size),
@@ -179,51 +180,66 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             // Property sliders
                             if let Some(obj) = app.document.get_object_mut(oid) {
                                 ui.add_space(2.0);
-                                match obj {
-                                    GeoObject::Line(l) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
-                                        });
+                                ui.scope(|ui| {
+                                    if !ui.visuals().dark_mode {
+                                        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(100);
+                                        ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(80);
+                                        ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_gray(60);
+                                        ui.style_mut().visuals.selection.bg_fill = egui::Color32::BLACK;
                                     }
-                                    GeoObject::Circle(c) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
-                                        });
+                                    match obj {
+                                        GeoObject::Line(l) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Circle(c) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Function(f) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Point(p) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Point3D(p) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Polygon(poly) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
+                                            });
+                                        }
+                                        GeoObject::Pencil(pencil) => {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(egui::RichText::new("✏").size(12.0).color(Color32::from_gray(130)));
+                                                ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true));
+                                            });
+                                        }
+                                        _ => {}
                                     }
-                                    GeoObject::Function(f) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
-                                        });
-                                    }
-                                    GeoObject::Point(p) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
-                                        });
-                                    }
-                                    GeoObject::Point3D(p) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
-                                        });
-                                    }
-                                    GeoObject::Polygon(poly) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(20.0);
-                                            ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
-                                            ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
-                                        });
-                                    }
-                                    _ => {}
-                                }
+                                });
                             }
                         }
                     });
@@ -240,22 +256,21 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
             // Variables
             if !app.document.variables.is_empty() {
-                ui.add_space(6.0);
                 ui.add_space(10.0);
-                ui.label(egui::RichText::new("Variables").size(11.0).color(Color32::from_gray(130)));
-                
+
                 let vars: Vec<(String, f64)> = app.document.variables.clone().into_iter().collect();
+                let mut var_to_delete = None;
                 for (name, val) in &vars {
                     let mut v = *val;
-                    
+
                     // Asegurar que exista la meta-data de la variable (valores por defecto)
                     if !app.document.variable_meta.contains_key(name) {
                         app.document.variable_meta.insert(
                             name.clone(),
                             grafito_core::VariableMeta {
                                 position: grafito_geometry::Point2::new(0.0, 0.0),
-                                min: -10.0,
-                                max: 10.0,
+                                min: -5.0,
+                                max: 5.0,
                                 step: 0.1,
                                 visible: true,
                                 animating: false,
@@ -263,33 +278,93 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             },
                         );
                     }
-                    
-                    let (mut animating, min, max, step) = {
+
+                    let (mut animating, mut min, mut max, step) = {
                         let meta = app.document.variable_meta.get(name).unwrap();
                         (meta.animating, meta.min, meta.max, meta.step)
                     };
-                    
-                    ui.horizontal(|ui| {
-                        ui.add_space(5.0);
-                        
-                        // Botón de Play/Pause
-                        let play_icon = if animating { "⏸" } else { "▶" };
-                        if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
-                            animating = !animating;
-                        }
-                        
-                        ui.label(egui::RichText::new(name).size(12.0));
-                        
-                        let sl = egui::Slider::new(&mut v, min..=max).step_by(step);
-                        if ui.add_sized([100.0, 16.0], sl).changed() {
-                            app.document.set_variable(name.clone(), v);
-                            app.document.recompute_bound_parameters();
-                        }
-                    });
-                    
+
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                // Top row: name = value and options
+                                ui.horizontal(|ui| {
+                                    // Make sure it looks like `a = 1.0`
+                                    // Use format to limit decimals if it's an integer
+                                    let val_str = if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.2}") };
+                                    ui.label(egui::RichText::new(format!("{} = {}", name, val_str)).size(14.0).color(txt_col));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.menu_button("⚙", |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label("Min:");
+                                                ui.add(egui::DragValue::new(&mut min).speed(0.1));
+                                            });
+                                            ui.horizontal(|ui| {
+                                                ui.label("Max:");
+                                                ui.add(egui::DragValue::new(&mut max).speed(0.1));
+                                            });
+                                            ui.separator();
+                                            if ui.button("Borrar").clicked() {
+                                                var_to_delete = Some(name.clone());
+                                                ui.close_menu();
+                                            }
+                                        });
+                                    });
+                                });
+
+                                ui.add_space(4.0);
+
+                                // Bottom row: min, slider, max, play button
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("{}", min)).size(12.0));
+
+                                    let mut sl_resp = None;
+                                    ui.scope(|ui| {
+                                        if !ui.visuals().dark_mode {
+                                            ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(100);
+                                            ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(80);
+                                            ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_gray(60);
+                                            ui.style_mut().visuals.selection.bg_fill = egui::Color32::BLACK;
+                                        }
+
+                                        let slider = egui::Slider::new(&mut v, min..=max)
+                                            .step_by(step)
+                                            .show_value(false)
+                                            .trailing_fill(true);
+
+                                        sl_resp = Some(ui.add_sized([ui.available_width() - 50.0, 16.0], slider));
+                                    });
+
+                                    if let Some(sl_resp) = sl_resp {
+                                        if sl_resp.changed() {
+                                            app.document.set_variable(name.clone(), v);
+                                            app.document.recompute_bound_parameters();
+                                        }
+                                    }
+
+                                    ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
+
+                                    let play_icon = if animating { "⏸" } else { "▶" };
+                                    if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
+                                        animating = !animating;
+                                    }
+                                });
+                            });
+                        });
+
                     if let Some(meta) = app.document.variable_meta.get_mut(name) {
                         meta.animating = animating;
+                        meta.min = min;
+                        meta.max = max;
                     }
+
+                    ui.add_space(2.0);
+                    ui.separator();
+                }
+                if let Some(to_del) = var_to_delete {
+                    app.document.remove_variable(&to_del);
                 }
             }
         });

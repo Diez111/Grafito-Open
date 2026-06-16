@@ -113,7 +113,7 @@ Cada feature se considera completa cuando:
 # Para rug (MPFR precisión arbitraria)
 sudo apt install libgmp-dev libmpfr-dev libmpc-dev m4
 
-# Para symbolica (CAS simbólico completo)  
+# Para symbolica (CAS simbólico completo)
 # Requiere m4 instalado — ya disponible
 ```
 

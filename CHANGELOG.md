@@ -7,15 +7,24 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
+## [1.0.0-beta] - 2026-06-15
+
 #### Añadido
-- Motor de análisis matemático unificado en `grafito-geometry` (`analysis.rs`): raíces, extremos, puntos de inflexión, interceptos, asíntotas y Taylor para funciones explícitas, curvas paramétricas 2D, curvas polares, curvas implícitas y campos vectoriales 2D.
+- **Lápiz y Borrador (`Pencil` / `Eraser`)**: nuevo tipo `PencilObj` para dibujo a mano alzada; polilínea con color, grosor y hit-testing por segmento. Soporte para stylus/touch (botones Primary, Secondary y Middle) y deshacer con un solo `Ctrl+Z`. Botones de toolbar `Lápiz` y `Borrador`.
+- **Motor de análisis matemático unificado** en `grafito-geometry` (`analysis.rs`): raíces, extremos, puntos de inflexión, interceptos, asíntotas y Taylor para funciones explícitas, curvas paramétricas 2D, curvas polares, curvas implícitas y campos vectoriales 2D.
+- **`XIntercept`**: nueva `AnalysisFeature` para intersección con el eje X. Integrada en `Root` (que ahora también devuelve `XIntercept`), `Analyze` y en la heurística de snap jerárquico.
 - Puente `grafito-core/src/analyzable.rs` para analizar cualquier `GeoObject` desde la UI y los comandos.
 - Comandos de análisis: `Root`, `Extremum`, `Inflection`, `YIntercept` y `Analyze` (con alias en español).
 - Herramientas de toolbar: `Root`, `Extremum`, `Inflection`, `YIntercept`, `Analyze`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve`, `VectorField2D`.
 - Tests de integración para comandos de análisis en `crates/grafito-command/tests/analysis_commands.rs`.
-- Tool ghost universal: preview translúcido para `Function`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve`, `VectorField2D`, `Segment`, `Ray`, `Vector` y `RegularPolygon`.
+- **Tool ghost universal**: preview translúcido para `Function`, `ParametricCurve2D`, `PolarCurve`, `ImplicitCurve`, `VectorField2D`, `Segment`, `Ray`, `Vector` y `RegularPolygon`. Marcas de eje para puntos de intercepto (rojo en eje X, azul en eje Y) para distinguirlos claramente.
 - Atajos de teclado para análisis: `R` (Raíz), `E` (Extremo), `N` (Inflexión), `Ctrl+Y` (Intersección Y), `Ctrl+A` (Analizar).
 - Unificación parcial del estado pendiente: `Line`, `Circle`, `Polygon`, `Tangent` y `Perpendicular` ahora usan `ToolState.pending` y comparten el mismo ghost preview.
+- Renombrado de las restricciones numéricas `Distance` / `Angle` a `DistanceConstraint` / `AngleConstraint` para diferenciarlas de las herramientas de medición geométrica.
+
+#### Cambiado
+- Snap jerárquico de clic por herramienta: `Root` snap-ea a `Root`/`XIntercept`, `Extremum` a extremos, `Inflection` a inflexiones, `YIntercept`/`XIntercept` a los interceptos correspondientes.
+- Hover analytics simplificado: el debounce temporal se sustituyó por un debounce espacial (>5 px) y solo se actualiza cuando no se está arrastrando.
 
 #### Corregido
 - `unwrap()` críticos en `app.rs` (acción `Symmetry`, icono fallback).
@@ -151,6 +160,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
+[1.0.0-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.0.0-beta
 [0.9.0-beta.1]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0-beta.1
 [v0.9.16-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.16-alpha
 [v0.9.15-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.15-alpha

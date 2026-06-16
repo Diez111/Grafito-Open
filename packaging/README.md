@@ -19,11 +19,11 @@ cd packaging
 ./build-deb.sh
 ```
 
-El paquete se generará en `packaging/build/grafito_0.9.0-beta.2_amd64.deb`
+El paquete se generará en `packaging/build/grafito_1.0.0-beta_amd64.deb`
 
 ### Instalar
 ```bash
-sudo dpkg -i build/grafito_0.9.0-beta.2_amd64.deb
+sudo dpkg -i build/grafito_1.0.0-beta_amd64.deb
 ```
 
 ### Desinstalar
@@ -76,7 +76,7 @@ Archivos fuente: `grafito-icon.svg`
 
 ## Versionado
 
-Versión actual: `0.9.0-beta.2`
+Versión actual: `1.0.0-beta`
 
 Para actualizar la versión:
 1. Editar `packaging/debian/control` (campo Version)

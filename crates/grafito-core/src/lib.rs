@@ -29,6 +29,7 @@ pub mod macros;
 pub mod numeric_solver;
 pub mod object;
 pub mod parametric_sampling;
+pub mod pencil;
 pub mod spatial;
 pub mod validation;
 pub mod vector_field_sampling;
@@ -42,6 +43,7 @@ pub use constraints::*;
 pub use document::*;
 pub use id::*;
 pub use object::*;
+pub use pencil::PencilObj;
 pub use spatial::*;
 
 /// Indicador de calidad de renderizado usado para intercambiar fidelidad por

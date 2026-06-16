@@ -32,10 +32,13 @@ pub fn analyze_object(
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let (xmin, xmax, _, _) = view_bounds;
+    let range = (xmax - xmin).abs();
+    // OPTIMIZACIÓN: Si el rango es pequeño (como en hover/snap local), usamos menos muestras.
+    let samples = if range < 2.0 { 50 } else { 800 };
     let opts = AnalysisOptions {
         domain_min: xmin,
         domain_max: xmax,
-        samples: 800,
+        samples,
         find_roots: features.contains(&AnalysisFeature::Root)
             || features.contains(&AnalysisFeature::XIntercept),
         find_extrema: features.contains(&AnalysisFeature::LocalMaximum)
@@ -61,6 +64,7 @@ pub fn analyze_object(
         GeoObject::Hyperbola(h) => analyze_hyperbola(h.center, h.a, h.b, h.horizontal, features),
         GeoObject::Polygon(p) => analyze_polygon(&p.vertices, features),
         GeoObject::ParametricCurve2D(c) => {
+            // Muestreo + bisección rápida para encontrar el t más cercano.
             analyze_parametric_curve2d(&c.expr_x, &c.expr_y, c.t_min, c.t_max, vars, features)
         }
         GeoObject::PolarCurve(c) => {
@@ -72,6 +76,7 @@ pub fn analyze_object(
         GeoObject::VectorField2D(v) => {
             analyze_vector_field2d(&v.expr_u, &v.expr_v, view_bounds, vars, features)
         }
+        GeoObject::Pencil(_) => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -101,8 +106,43 @@ pub fn evaluate_curve_at(
             let ny = dx / len;
             Some((world.x - l.start.x) * nx + (world.y - l.start.y) * ny)
         }
+        GeoObject::Pencil(p) => {
+            // Distancia con signo al segmento contiguo más cercano. Devuelve
+            // `Some(dist)` siempre que haya al menos un punto.
+            if p.points.is_empty() {
+                return None;
+            }
+            let mut best_d2 = f64::INFINITY;
+            for w in p.points.windows(2) {
+                let a = w[0];
+                let b = w[1];
+                let abx = b.x - a.x;
+                let aby = b.y - a.y;
+                let apx = world.x - a.x;
+                let apy = world.y - a.y;
+                let len2 = abx * abx + aby * aby;
+                if len2 < 1e-15 {
+                    let dx = apx;
+                    let dy = apy;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                    }
+                    continue;
+                }
+                let t = ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0);
+                let cx = a.x + t * abx;
+                let cy = a.y + t * aby;
+                let dx = world.x - cx;
+                let dy = world.y - cy;
+                let d2 = dx * dx + dy * dy;
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                }
+            }
+            Some(best_d2.sqrt())
+        }
         GeoObject::ParametricCurve2D(c) => {
-            // Muestreo + bisección rápida para encontrar el t más cercano.
             let n = 200;
             let (mut best_t, mut best_d2) = (c.t_min, f64::INFINITY);
             for i in 0..=n {

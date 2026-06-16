@@ -34,6 +34,16 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             category: "Herramientas",
             syntax_hint: "f(x) = expr",
         },
+        PaletteCommand {
+            name: "Pencil",
+            category: "Herramientas",
+            syntax_hint: "Clic sostenido y arrastrar para dibujar a mano alzada",
+        },
+        PaletteCommand {
+            name: "Eraser",
+            category: "Herramientas",
+            syntax_hint: "Clic o arrastrar para borrar objetos",
+        },
         // 2D Geometry
         PaletteCommand {
             name: "Ellipse",

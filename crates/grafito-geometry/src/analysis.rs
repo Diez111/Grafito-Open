@@ -124,7 +124,10 @@ pub fn analyze_function(
         xs.push(x);
     }
     let ys = match eval_batch_1d(expr, "x", xs.iter().copied(), vars) {
-        Ok(batch) => batch.into_iter().map(|y| y.filter(|v| v.is_finite())).collect(),
+        Ok(batch) => batch
+            .into_iter()
+            .map(|y| y.filter(|v| v.is_finite()))
+            .collect(),
         Err(_) => vec![None; xs.len()],
     };
 
@@ -524,7 +527,7 @@ pub fn analyze_parametric_curve2d(
         let t = t_min + (i as f64 / samples as f64) * (t_max - t_min);
         ts.push(t);
     }
-    
+
     let mut xs = eval_batch_1d(expr_x, "t", ts.iter().copied(), vars)
         .unwrap_or_else(|_| vec![None; samples + 1]);
     let mut ys = eval_batch_1d(expr_y, "t", ts.iter().copied(), vars)
@@ -724,7 +727,7 @@ pub fn analyze_polar_curve(
         let t = t_min + (i as f64 / samples as f64) * (t_max - t_min);
         ts.push(t);
     }
-    
+
     let rs = eval_batch_1d(expr_r, "t", ts.iter().copied(), vars)
         .unwrap_or_else(|_| vec![None; samples + 1]);
 
@@ -1608,13 +1611,21 @@ fn function_function_intersection(
         (f(x + h) - f(x - h)) / (2.0 * h)
     };
     let n = 400;
-    let xs: Vec<f64> = (0..=n).map(|i| xmin + (i as f64 / n as f64) * (xmax - xmin)).collect();
-    let yas = eval_batch_1d(expr_a, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
-    let ybs = eval_batch_1d(expr_b, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
-    
+    let xs: Vec<f64> = (0..=n)
+        .map(|i| xmin + (i as f64 / n as f64) * (xmax - xmin))
+        .collect();
+    let yas =
+        eval_batch_1d(expr_a, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
+    let ybs =
+        eval_batch_1d(expr_b, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
+
     let get_f = |i: usize| -> f64 {
         if let (Some(a), Some(b)) = (yas[i], ybs[i]) {
-            if a.is_finite() && b.is_finite() { a - b } else { f64::NAN }
+            if a.is_finite() && b.is_finite() {
+                a - b
+            } else {
+                f64::NAN
+            }
         } else {
             f64::NAN
         }
@@ -1679,12 +1690,19 @@ fn function_line_intersection(
         (f_line(x + h) - f_line(x - h)) / (2.0 * h)
     };
     let n = 400;
-    let xs: Vec<f64> = (0..=n).map(|i| xmin + (i as f64 / n as f64) * (xmax - xmin)).collect();
-    let ys = eval_batch_1d(expr, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
-    
+    let xs: Vec<f64> = (0..=n)
+        .map(|i| xmin + (i as f64 / n as f64) * (xmax - xmin))
+        .collect();
+    let ys =
+        eval_batch_1d(expr, "x", xs.iter().copied(), vars).unwrap_or_else(|_| vec![None; n + 1]);
+
     let get_f = |i: usize| -> f64 {
         if let Some(y) = ys[i] {
-            if y.is_finite() { y - (m * xs[i] + b) } else { f64::NAN }
+            if y.is_finite() {
+                y - (m * xs[i] + b)
+            } else {
+                f64::NAN
+            }
         } else {
             f64::NAN
         }

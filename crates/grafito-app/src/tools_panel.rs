@@ -223,14 +223,14 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                     painter.rect_stroke(rect, 6.0, border);
 
                     let icon = match tool {
-                        Tool::Select => "↖",
-                        Tool::Point | Tool::Point3D => "•",
+                        Tool::Select => "^",
+                        Tool::Point | Tool::Point3D => ".",
                         Tool::Slider => "O-",
                         Tool::Midpoint => "M",
-                        Tool::Perpendicular => "⟂",
+                        Tool::Perpendicular => "|_",
                         Tool::Tangent => "/",
                         Tool::Locus => "~",
-                        Tool::Angle => "∠",
+                        Tool::Angle => "<",
                         Tool::Distance => "|x|",
                         Tool::Area => "A",
                         Tool::Slope => "m",

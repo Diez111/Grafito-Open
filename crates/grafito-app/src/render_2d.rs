@@ -625,14 +625,19 @@ impl GrafitoApp {
             ) {
                 continue;
             }
-            
+
             let is_tool_hovered = hovered_object_for_tool == Some(*id);
             let is_driver = self.tool_state.driver == Some(*id);
-            
+
             let style = if is_tool_hovered || is_driver {
                 Some(StyleOverride {
                     width_scale: Some(1.5),
-                    color: Some(Color { r: 0.8, g: 0.8, b: 0.0, a: 1.0 }),
+                    color: Some(Color {
+                        r: 0.8,
+                        g: 0.8,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
                     ..Default::default()
                 })
             } else {
@@ -666,8 +671,7 @@ impl GrafitoApp {
             let screen_pos = view.world_to_screen(hover.point);
             let pos = canvas_rect.min + egui::Vec2::new(screen_pos.x, screen_pos.y);
 
-            let color =
-                Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
+            let color = Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
             let radius = if hover.is_snap { 6.0 } else { 4.0 };
             painter.circle_filled(pos, radius, color);
             painter.circle_stroke(
@@ -961,6 +965,23 @@ impl GrafitoApp {
                         label,
                         egui::FontId::proportional(12.0),
                         label_color,
+                    );
+                }
+            }
+            GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+                // Polilínea: dibuja cada par consecutivo como segmento.
+                let width = get_width(pencil.width, style);
+                let color = to_color32(get_color(pencil.color, style));
+                let stroke = Stroke::new(width, color);
+                for w in pencil.points.windows(2) {
+                    let a = view.world_to_screen(w[0]);
+                    let b = view.world_to_screen(w[1]);
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        stroke,
                     );
                 }
             }

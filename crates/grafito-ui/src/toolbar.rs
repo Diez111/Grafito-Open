@@ -34,6 +34,10 @@ const GROUP_POLYGON: &[ToolEntry] = &[
     (Tool::Polygon, "⬡ Polígono regular", ""),
 ];
 
+const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "✏ Lápiz", "Ctrl+P")];
+
+const GROUP_ERASER: &[ToolEntry] = &[(Tool::Eraser, "🩹 Borrador", "Ctrl+E")];
+
 const GROUP_CONIC: &[ToolEntry] = &[
     (Tool::Select, "◯ Elipse", ""),
     (Tool::Select, "∪ Parábola", ""),
@@ -223,6 +227,41 @@ fn icon_advanced(painter: &Painter, rect: Rect, color: Color32) {
     painter.circle_stroke(c, r, Stroke::new(1.5, color));
 }
 
+fn icon_pencil(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let sw = Stroke::new(1.8, color);
+    // Pencil body (diagonal rectangle)
+    let tip = c + vec2(-7.0, 7.0);
+    let b1 = c + vec2(-4.0, 4.0);
+    let b2 = c + vec2(7.0, -7.0);
+    let b3 = c + vec2(9.0, -5.0);
+    let b4 = c + vec2(-2.0, 6.0);
+    painter.line_segment([b1, b2], sw);
+    painter.line_segment([b2, b3], sw);
+    painter.line_segment([b3, b4], sw);
+    painter.line_segment([b4, b1], sw);
+    // Pencil tip
+    painter.line_segment([b1, tip], sw);
+    painter.line_segment([b4, tip], sw);
+}
+
+fn icon_eraser(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let sw = Stroke::new(1.8, color);
+    // Goma de borrar estilizada: rectángulo oblicuo con esquina levantada.
+    let body_a = c + vec2(-7.0, 6.0);
+    let body_b = c + vec2(5.0, -6.0);
+    let body_c = c + vec2(8.0, -3.0);
+    let body_d = c + vec2(-4.0, 9.0);
+    painter.line_segment([body_a, body_b], sw);
+    painter.line_segment([body_b, body_c], sw);
+    painter.line_segment([body_c, body_d], sw);
+    painter.line_segment([body_d, body_a], sw);
+    // Líneas decorativas (rozaduras) en la mitad de la goma.
+    painter.line_segment([c + vec2(-3.0, 2.0), c + vec2(2.0, -3.0)], sw);
+    painter.line_segment([c + vec2(-1.0, 4.0), c + vec2(4.0, -1.0)], sw);
+}
+
 type IconFn = fn(&Painter, Rect, Color32);
 
 // ── Public toolbar ──
@@ -293,6 +332,24 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Respo
                     current_tool,
                     icon_polygon,
                     GROUP_POLYGON,
+                    accent,
+                    txt,
+                    txt_dim,
+                );
+                tool_group(
+                    ui,
+                    current_tool,
+                    icon_pencil,
+                    GROUP_PENCIL,
+                    accent,
+                    txt,
+                    txt_dim,
+                );
+                tool_group(
+                    ui,
+                    current_tool,
+                    icon_eraser,
+                    GROUP_ERASER,
                     accent,
                     txt,
                     txt_dim,
@@ -393,7 +450,15 @@ fn tool_group(
 
     if resp.clicked() {
         if let Some((tool, _, _)) = tools.first() {
-            *current = *tool;
+            // Comportamiento toggle: si el grupo ya está activo y la
+            // herramienta es Pencil, alternamos a la herramienta por
+            // defecto (Select). Para el resto de grupos, la activación
+            // siempre fuerza la primera herramienta del grupo.
+            if is_active && *tool == Tool::Pencil && *current == Tool::Pencil {
+                *current = Tool::Select;
+            } else {
+                *current = *tool;
+            }
         }
     }
     resp.context_menu(|ui| {

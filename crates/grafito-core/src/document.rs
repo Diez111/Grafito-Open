@@ -196,6 +196,7 @@ impl Document {
                 GeoObject::Line(o) => o.label = label,
                 GeoObject::Circle(o) => o.label = label,
                 GeoObject::Polygon(o) => o.label = label,
+                GeoObject::Pencil(o) => o.label = label,
                 GeoObject::Function(o) => o.label = label,
                 GeoObject::Text(o) => o.label = label,
                 GeoObject::Ellipse(o) => o.label = label,
@@ -1481,6 +1482,22 @@ impl Document {
                     && world.y >= fr.y_min
                     && world.y <= fr.y_max
             }
+            GeoObject::Pencil(pencil) => {
+                // Pencil: comprobamos si el punto está cerca de algún
+                // segmento de la polilínea. La tolerancia se escala por
+                // el grosor del trazo para PencilObj gruesos.
+                if pencil.points.len() < 2 {
+                    return false;
+                }
+                let eff_tol = tolerance.max(pencil.width as f64 / self.view.scale * 0.5);
+                for w in pencil.points.windows(2) {
+                    let d = grafito_geometry::distance_point_to_segment(world, w[0], w[1]);
+                    if d <= eff_tol {
+                        return true;
+                    }
+                }
+                false
+            }
             // 3D objects and complex objects - use bounding box or return false
             GeoObject::VectorField2D(_)
             | GeoObject::PhasePortrait(_)
@@ -1744,6 +1761,30 @@ impl Document {
                     continue;
                 }
                 GeoObject::PhasePortrait(pp) => (pp.x_min, pp.y_min, pp.x_max, pp.y_max),
+                GeoObject::Pencil(p) => {
+                    if p.points.is_empty() {
+                        continue;
+                    }
+                    let mut min_x = f64::INFINITY;
+                    let mut min_y = f64::INFINITY;
+                    let mut max_x = f64::NEG_INFINITY;
+                    let mut max_y = f64::NEG_INFINITY;
+                    for pt in &p.points {
+                        if pt.x < min_x {
+                            min_x = pt.x;
+                        }
+                        if pt.x > max_x {
+                            max_x = pt.x;
+                        }
+                        if pt.y < min_y {
+                            min_y = pt.y;
+                        }
+                        if pt.y > max_y {
+                            max_y = pt.y;
+                        }
+                    }
+                    (min_x, min_y, max_x, max_y)
+                }
                 // 3D objects are not indexed in 2D spatial index
                 GeoObject::Point3D(_)
                 | GeoObject::Segment3D(_)
@@ -1847,6 +1888,9 @@ impl Document {
                         }
                     }
                 }
+                GeoObject::Function(f) => {
+                    f.invalidate_cache();
+                }
                 _ => {}
             }
         }
@@ -1854,6 +1898,13 @@ impl Document {
 
     pub fn set_variable(&mut self, name: String, value: f64) {
         self.variables.insert(name, value);
+        self.recompute_bound_parameters();
+        self.bump_version();
+    }
+
+    pub fn remove_variable(&mut self, name: &str) {
+        self.variables.remove(name);
+        self.variable_meta.remove(name);
         self.recompute_bound_parameters();
         self.bump_version();
     }

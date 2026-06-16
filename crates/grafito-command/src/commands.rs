@@ -195,6 +195,49 @@ fn split_on_standalone_eq(text: &str) -> Option<(&str, &str)> {
     None
 }
 
+fn auto_define_variables(text: &str, document: &mut Document) {
+    let mut current_word = String::new();
+    let mut words = Vec::new();
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            current_word.push(c);
+        } else {
+            if !current_word.is_empty() {
+                words.push(current_word.clone());
+                current_word.clear();
+            }
+        }
+    }
+    if !current_word.is_empty() {
+        words.push(current_word);
+    }
+
+    let reserved = [
+        "x", "y", "z", "t", "r", "theta", "pi", "tau", "e", "sin", "cos", "tan", "asin", "acos",
+        "atan", "sinh", "cosh", "tanh", "sqrt", "log", "ln", "exp", "abs", "mod", "sgn", "step",
+        "floor", "ceil", "f", "g", "h",
+    ];
+
+    for word in words {
+        // Skip reserved words, command names (which usually start with uppercase),
+        // or variables that already exist
+        if reserved.contains(&word.as_str())
+            || word
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
+            || document.variables.contains_key(&word)
+            || document.objects_iter().any(|(_, o)| o.label() == word)
+        {
+            continue;
+        }
+
+        // Auto-define undefined variable to 1.0
+        document.set_variable(word, 1.0);
+    }
+}
+
 pub fn process_input(document: &mut Document, input_text: &mut String) -> CommandOutcome {
     let raw_text = input_text.trim().to_string();
     if raw_text.is_empty() {
@@ -216,6 +259,8 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         .replace("×", "*")
         .replace("≤", "<=")
         .replace("≥", ">=");
+
+    auto_define_variables(&text, document);
 
     let mut result: CommandOutcome = CommandOutcome::Ok;
 
@@ -1833,6 +1878,26 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     path
                 ));
             }
+            "Erase" if cmd.args.len() == 1 => {
+                // Erase[label] borra el objeto con la etiqueta dada.
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    document.remove_object(id);
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("Erase: '{}' borrado", label));
+                }
+                return CommandOutcome::Error(format!("Erase: objeto '{}' no encontrado", label));
+            }
+            "EraseAll" => {
+                // Borra todos los objetos visibles.
+                let ids: Vec<ObjectId> = document.objects_iter().map(|(id, _)| *id).collect();
+                let n = ids.len();
+                for id in ids {
+                    document.remove_object(id);
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!("EraseAll: {} objeto(s) borrado(s)", n));
+            }
             "ScatterPlot" if cmd.args.len() >= 2 => {
                 let xs = parse_brace_list(&cmd.args[0]);
                 let ys = parse_brace_list(&cmd.args[1]);
@@ -2701,22 +2766,20 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
     if let Some((name, rest)) = split_on_standalone_eq(text) {
         let name = name.trim();
         let rest = rest.trim();
-        if name.chars().all(|c| c.is_alphabetic()) && name.len() == 1 {
-            if let Ok(val) = rest.parse::<f64>() {
+        if name.chars().all(|c| c.is_alphabetic()) && name.len() >= 1 && !is_function_lhs(name) {
+            // Evaluamos la expresión para permitir operaciones (ej: a = 5 + 3)
+            let vars: Vec<(String, f64)> = document
+                .variables
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            if let Ok(val) = evaluate(rest, &vars) {
                 document.set_variable(name.to_string(), val);
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
         }
-        if is_function_lhs(name)
-            && (rest.contains('x')
-                || rest
-                    .chars()
-                    .all(|c| c.is_numeric() || "+-*/().^x sincostanlognatqerfabs ".contains(c))
-                || rest.to_lowercase().starts_with("deriv")
-                || rest.to_lowercase().starts_with("integ")
-                || rest.to_lowercase().starts_with("taylor"))
-        {
+        if is_function_lhs(name) {
             let label = name
                 .split_once('(')
                 .map(|(id, _)| id.trim())
@@ -2734,8 +2797,18 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             let inner = &rest[1..rest.len() - 1];
             let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
             if parts.len() == 2 {
-                if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                    let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)).with_label(name));
+                let vars_vec: Vec<(String, f64)> = document
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                if let (Ok(x), Ok(y)) =
+                    (evaluate(parts[0], &vars_vec), evaluate(parts[1], &vars_vec))
+                {
+                    let mut p = PointObj::new(Point2::new(x, y)).with_label(name);
+                    p.x_expr = Some(parts[0].to_string());
+                    p.y_expr = Some(parts[1].to_string());
+                    let obj = GeoObject::Point(p);
                     document.add_object(obj);
                     input_text.clear();
                     return CommandOutcome::Ok;
@@ -2867,12 +2940,45 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         input_text.clear();
         return CommandOutcome::Ok;
     } else {
+        let vars_vec: Vec<(String, f64)> = document
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
         if contains_var(text, 'x') {
             let label = next_function_label(document);
             let obj = GeoObject::Function(FunctionObj::new(text).with_label(label));
             document.add_object(obj);
             input_text.clear();
             return CommandOutcome::Ok;
+        } else if let Ok(val) = evaluate(text, &vars_vec) {
+            let mut name = String::new();
+            for c in b'a'..=b'z' {
+                let letter = (c as char).to_string();
+                if !document.variables.contains_key(&letter)
+                    && find_object_by_label(document, &letter).is_none()
+                {
+                    name = letter;
+                    break;
+                }
+            }
+            if !name.is_empty() {
+                document.set_variable(name.clone(), val);
+                document.variable_meta.insert(
+                    name,
+                    grafito_core::VariableMeta {
+                        position: grafito_geometry::Point2::new(0.0, 0.0),
+                        min: -5.0,
+                        max: 5.0,
+                        step: 0.1,
+                        visible: true,
+                        animating: false,
+                        animation_speed: 1.0,
+                    },
+                );
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
         }
         if text.starts_with('(') && text.ends_with(')') {
             let inner = &text[1..text.len() - 1];
@@ -2890,8 +2996,18 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 }
             }
             if parts.len() == 2 {
-                if let (Ok(x), Ok(y)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                    let obj = GeoObject::Point(PointObj::new(Point2::new(x, y)));
+                let vars_vec: Vec<(String, f64)> = document
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                if let (Ok(x), Ok(y)) =
+                    (evaluate(parts[0], &vars_vec), evaluate(parts[1], &vars_vec))
+                {
+                    let mut p = PointObj::new(Point2::new(x, y));
+                    p.x_expr = Some(parts[0].to_string());
+                    p.y_expr = Some(parts[1].to_string());
+                    let obj = GeoObject::Point(p);
                     document.add_object(obj);
                     input_text.clear();
                     return CommandOutcome::Ok;
@@ -2899,6 +3015,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
         }
     }
+
     input_text.clear();
     match result {
         CommandOutcome::Ok => CommandOutcome::Error(format!(

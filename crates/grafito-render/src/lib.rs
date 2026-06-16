@@ -365,6 +365,35 @@ impl Renderer {
                         poly.color,
                     );
                 }
+                GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+                    // Polilínea: cada par consecutivo de puntos genera un
+                    // segmento con `add_line_segment`. Aplicamos clipping
+                    // 2D por segmento para no dibujar fuera del viewport.
+                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view.screen_to_world(view.screen_size);
+                    let view_bounds = grafito_geometry::AABB::new(
+                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    );
+                    for w in pencil.points.windows(2) {
+                        let a = w[0];
+                        let b = w[1];
+                        if let Some((clip_a, clip_b)) =
+                            grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
+                        {
+                            let sa = view.world_to_screen(clip_a);
+                            let sb = view.world_to_screen(clip_b);
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                sa,
+                                sb,
+                                pencil.width,
+                                pencil.color,
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -765,6 +794,32 @@ impl Renderer {
                         poly.width,
                         poly.color,
                     );
+                }
+                GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
+                    let view_bounds = grafito_geometry::AABB::new(
+                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    );
+                    for w in pencil.points.windows(2) {
+                        let a = w[0];
+                        let b = w[1];
+                        if let Some((clip_a, clip_b)) =
+                            grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
+                        {
+                            let sa = view_transform.world_to_screen(clip_a);
+                            let sb = view_transform.world_to_screen(clip_b);
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                sa,
+                                sb,
+                                pencil.width,
+                                pencil.color,
+                            );
+                        }
+                    }
                 }
                 GeoObject::Function(fun) => {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));

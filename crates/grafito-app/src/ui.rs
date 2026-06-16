@@ -97,7 +97,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                 });
                 ui.menu_button("Ayuda", |ui| {
-                    if ui.button("Acerca de Grafito v0.9.0-beta.1").clicked() {}
+                    if ui.button("Acerca de Grafito v1.0.0-beta").clicked() {}
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
@@ -169,12 +169,12 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
     let tabs: &[(&str, &str, &str)] = &[
-        ("Álgebra", "∑", "Objetos, variables, comandos"),
-        ("Herram.", "🛠", "Herramientas de construcción y análisis"),
-        ("CAS", "⌨", "Cálculo simbólico paso a paso"),
-        ("Tabla", "☰", "Valores numéricos x|f(x)"),
-        ("Hoja", "⊞", "Hoja de cálculo"),
-        ("Vista", "◎", "Cuadrícula, ejes, etiquetas"),
+        ("Álgebra", "A", "Objetos, variables, comandos"),
+        ("Herram.", "H", "Herramientas de construcción y análisis"),
+        ("CAS", "C", "Cálculo simbólico paso a paso"),
+        ("Tabla", "T", "Valores numéricos x|f(x)"),
+        ("Hoja", "S", "Hoja de cálculo"),
+        ("Vista", "V", "Cuadrícula, ejes, etiquetas"),
     ];
     egui::SidePanel::left("icon_bar")
         .exact_width(52.0)
@@ -376,7 +376,9 @@ fn status_hint_for_tool(tool: Tool) -> String {
         Tool::RegularPolygon => "⬡ Polígono regular: clic centro, clic vértice".to_string(),
         Tool::Function => "f(x) Función: clic para crear y editar".to_string(),
         Tool::Distance => "↔ Distancia: clic en dos puntos".to_string(),
-        Tool::Angle => "∠ Ángulo: clic vértice, luego dos puntos".to_string(),
+        Tool::DistanceConstraint => "↔ Restricción Distancia: clic en dos puntos".to_string(),
+        Tool::Angle => "∠ Ángulo: clic en 3 puntos (vértice, brazo 1, brazo 2)".to_string(),
+        Tool::AngleConstraint => "∠ Restricción Ángulo: clic en dos rectas".to_string(),
         Tool::Area => "⬜ Área: clic en polígono o círculo".to_string(),
         Tool::Slope => "m Pendiente: clic en recta".to_string(),
         Tool::Slider => "═ Deslizador: clic para crear variable".to_string(),

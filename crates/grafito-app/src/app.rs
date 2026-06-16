@@ -456,8 +456,8 @@ impl GrafitoApp {
 
     pub(crate) fn start_pending_action(&mut self, tool: Tool) {
         self.pending_action = match tool {
-            Tool::Distance => PendingAction::Distance { first: None },
-            Tool::Angle => PendingAction::Angle { first: None },
+            Tool::DistanceConstraint => PendingAction::Distance { first: None },
+            Tool::AngleConstraint => PendingAction::Angle { first: None },
             Tool::Tangent => PendingAction::Tangent { first: None },
             Tool::Coincident => PendingAction::Coincident { first: None },
             Tool::Horizontal => PendingAction::Horizontal { line: None },
@@ -490,8 +490,8 @@ impl GrafitoApp {
     pub(crate) fn is_constraint_tool(tool: Tool) -> bool {
         matches!(
             tool,
-            Tool::Distance
-                | Tool::Angle
+            Tool::DistanceConstraint
+                | Tool::AngleConstraint
                 | Tool::Tangent
                 | Tool::Coincident
                 | Tool::Horizontal
@@ -516,6 +516,10 @@ impl GrafitoApp {
             } else {
                 self.clear_pending_action();
             }
+            // Limpiar marcas del Eraser y del Pencil en curso al cambiar
+            // de herramienta, para no dejar un PencilObj "huérfano".
+            self.tool_state.last_erased = None;
+            self.tool_state.drawing_pencil = None;
             self.previous_tool = self.current_tool;
         }
     }
@@ -1391,7 +1395,7 @@ pub fn run_app() -> Result<(), eframe::Error> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Grafito v0.9.0-beta.1");
+                println!("Grafito v1.0.0-beta");
                 println!("Usage: grafito [OPTIONS]");
                 println!("Options:");
                 println!("  -h, --help       Print help information");

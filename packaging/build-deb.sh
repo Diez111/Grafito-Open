@@ -5,7 +5,7 @@ echo "Building Grafito .deb package..."
 
 # Variables
 PKG_NAME="grafito"
-PKG_VERSION="0.9.0-beta.2"
+PKG_VERSION="1.0.0-beta"
 PKG_ARCH="amd64"
 BUILD_DIR="build/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}"
 DEBIAN_DIR="debian"

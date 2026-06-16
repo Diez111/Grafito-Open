@@ -1,4 +1,5 @@
 use crate::id::ObjectId;
+use crate::pencil::PencilObj;
 use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ pub enum GeoObject {
     Line(LineObj),
     Circle(CircleObj),
     Polygon(PolygonObj),
+    Pencil(PencilObj),
     Function(FunctionObj),
     Text(TextObj),
     Ellipse(EllipseObj),
@@ -89,6 +91,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.id,
             GeoObject::RegressionLine(o) => o.id,
             GeoObject::PhasePortrait(o) => o.id,
+            GeoObject::Pencil(o) => o.id,
         }
     }
 
@@ -129,6 +132,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => &o.label,
             GeoObject::RegressionLine(o) => &o.label,
             GeoObject::PhasePortrait(o) => &o.label,
+            GeoObject::Pencil(o) => &o.label,
         }
     }
 
@@ -169,6 +173,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.label = label,
             GeoObject::RegressionLine(o) => o.label = label,
             GeoObject::PhasePortrait(o) => o.label = label,
+            GeoObject::Pencil(o) => o.label = label,
         }
     }
 
@@ -178,6 +183,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.color,
             GeoObject::Circle(o) => o.color,
             GeoObject::Polygon(o) => o.color,
+            GeoObject::Pencil(o) => o.color,
             GeoObject::Function(o) => o.color,
             GeoObject::Text(o) => o.color,
             GeoObject::Ellipse(o) => o.color,
@@ -218,6 +224,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.color = color,
             GeoObject::Circle(o) => o.color = color,
             GeoObject::Polygon(o) => o.color = color,
+            GeoObject::Pencil(o) => o.color = color,
             GeoObject::Function(o) => o.color = color,
             GeoObject::Text(o) => o.color = color,
             GeoObject::Ellipse(o) => o.color = color,
@@ -258,6 +265,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.visible,
             GeoObject::Circle(o) => o.visible,
             GeoObject::Polygon(o) => o.visible,
+            GeoObject::Pencil(o) => o.visible,
             GeoObject::Function(o) => o.visible,
             GeoObject::Text(o) => o.visible,
             GeoObject::Ellipse(o) => o.visible,
@@ -298,6 +306,7 @@ impl GeoObject {
             GeoObject::Line(o) => o.visible = visible,
             GeoObject::Circle(o) => o.visible = visible,
             GeoObject::Polygon(o) => o.visible = visible,
+            GeoObject::Pencil(o) => o.visible = visible,
             GeoObject::Function(o) => o.visible = visible,
             GeoObject::Text(o) => o.visible = visible,
             GeoObject::Ellipse(o) => o.visible = visible,
@@ -338,6 +347,7 @@ impl GeoObject {
             GeoObject::Line(_) => "Line",
             GeoObject::Circle(_) => "Circle",
             GeoObject::Polygon(_) => "Polygon",
+            GeoObject::Pencil(_) => "Pencil",
             GeoObject::Function(_) => "Function",
             GeoObject::Text(_) => "Text",
             GeoObject::Ellipse(_) => "Ellipse",

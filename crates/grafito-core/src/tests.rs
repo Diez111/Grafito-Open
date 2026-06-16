@@ -100,6 +100,25 @@ mod tests {
     }
 
     #[test]
+    fn test_pick_object_pencil() {
+        // El Eraser debe poder borrar un PencilObj. El bug previo era que
+        // `check_hit` no tenía brazo para `Pencil` y caía en `_ => false`,
+        // así que el Pencil nunca era hit.
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        // Pencil con dos puntos: segmento de (0,0) a (2,0).
+        let pencil = crate::PencilObj::new(vec![Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)]);
+        let pencil_id = doc.add_object(GeoObject::Pencil(pencil));
+        // Click justo sobre el segmento.
+        let hit = doc.pick_object(Point2::new(1.0, 0.0), 0.1);
+        assert!(hit.is_some(), "Pencil sobre el segmento debe ser hit");
+        assert_eq!(hit.unwrap(), pencil_id);
+        // Click lejos del segmento.
+        let miss = doc.pick_object(Point2::new(10.0, 10.0), 0.1);
+        assert!(miss.is_none(), "Pencil lejos no debe ser hit");
+    }
+
+    #[test]
     fn test_spatial_index_insert_and_query() {
         let mut idx = SpatialIndex::new();
         let id1 = ObjectId::new();

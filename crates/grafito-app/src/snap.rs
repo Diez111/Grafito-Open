@@ -136,6 +136,7 @@ pub fn snap_point(
     view_scale: f64,
     cfg: &SnapConfig,
     overrides: SnapOverrides,
+    tool_filter: Option<Vec<AnalysisFeature>>,
 ) -> SnapResult {
     if overrides.shift_pressed {
         return SnapResult::free(world);
@@ -143,7 +144,7 @@ pub fn snap_point(
     let tol = world_tolerance(cfg, view_scale);
 
     if overrides.alt_pressed || cfg.snap_to_features {
-        if let Some(r) = snap_to_feature(world, document, view_scale, tol) {
+        if let Some(r) = snap_to_feature(world, document, view_scale, tol, tool_filter) {
             return r;
         }
     }
@@ -185,6 +186,7 @@ fn snap_to_feature(
     document: &Document,
     view_scale: f64,
     tol: f64,
+    tool_filter: Option<Vec<AnalysisFeature>>,
 ) -> Option<SnapResult> {
     // La tolerancia en mundo ya está calculada por el caller; view_scale se
     // mantiene en la firma para simetría con `snap_to_curve` y por si en el
@@ -201,7 +203,7 @@ fn snap_to_feature(
         world_tl.y.min(world_br.y),
         world_tl.y.max(world_br.y),
     );
-    
+
     // OPTIMIZACIÓN CRÍTICA PARA EL LAG: No analizar toda la pantalla (cientos de evaluaciones).
     // Solo analizamos una ventana estrecha alrededor del cursor.
     let local_bounds = (
@@ -212,7 +214,7 @@ fn snap_to_feature(
     );
 
     let vars: HashMap<String, f64> = document.variables.clone();
-    let features = default_analysis_features();
+    let features = tool_filter.unwrap_or_else(default_analysis_features);
     let mut best: Option<(f64, Point2, AnalysisFeature, String)> = None;
     for (_, obj) in document.objects_iter() {
         if !obj.is_visible() {
@@ -380,16 +382,16 @@ mod tests {
     #[test]
     fn shift_disables_snap() {
         let doc = empty_doc();
-        let cfg = SnapConfig::default();
         let r = snap_point(
             Point2::new(0.0, 0.0),
             &doc,
             50.0,
-            &cfg,
+            &SnapConfig::default(),
             SnapOverrides {
                 shift_pressed: true,
                 ..Default::default()
             },
+            None,
         );
         assert_eq!(r.kind, SnapKind::Free);
     }
@@ -410,6 +412,7 @@ mod tests {
             50.0,
             &cfg,
             SnapOverrides::default(),
+            None,
         );
         assert_eq!(r.kind, SnapKind::Axis);
         assert!((r.point.y).abs() < 1e-9);
@@ -432,6 +435,7 @@ mod tests {
             50.0,
             &cfg,
             SnapOverrides::default(),
+            None,
         );
         assert_eq!(r.kind, SnapKind::Free);
     }
@@ -449,6 +453,7 @@ mod tests {
             50.0,
             &cfg,
             SnapOverrides::default(),
+            None,
         );
         assert_eq!(r.kind, SnapKind::Feature);
         assert!((r.point.x - 1.0).abs() < 1e-3);
@@ -472,6 +477,7 @@ mod tests {
             50.0,
             &cfg,
             SnapOverrides::default(),
+            None,
         );
         assert_eq!(r.kind, SnapKind::Object);
         assert!((r.point.x - 1.0).abs() < 1e-6);
