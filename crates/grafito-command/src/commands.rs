@@ -2766,7 +2766,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
     if let Some((name, rest)) = split_on_standalone_eq(text) {
         let name = name.trim();
         let rest = rest.trim();
-        if name.chars().all(|c| c.is_alphabetic()) && name.len() >= 1 && !is_function_lhs(name) {
+        if name.chars().all(|c| c.is_alphabetic()) && !name.is_empty() && !is_function_lhs(name) {
             // Evaluamos la expresión para permitir operaciones (ej: a = 5 + 3)
             let vars: Vec<(String, f64)> = document
                 .variables

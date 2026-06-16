@@ -1202,8 +1202,6 @@ impl Tool {
             Tool::PolygonIntersection => "PolygonIntersection",
             Tool::PolygonDifference => "PolygonDifference",
             Tool::PolygonXor => "PolygonXor",
-            Tool::DistanceConstraint => "DistanceConstraint",
-            Tool::AngleConstraint => "AngleConstraint",
             Tool::Eraser => "Eraser",
         }
     }

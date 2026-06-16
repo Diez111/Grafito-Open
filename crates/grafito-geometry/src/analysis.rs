@@ -528,9 +528,9 @@ pub fn analyze_parametric_curve2d(
         ts.push(t);
     }
 
-    let mut xs = eval_batch_1d(expr_x, "t", ts.iter().copied(), vars)
+    let xs = eval_batch_1d(expr_x, "t", ts.iter().copied(), vars)
         .unwrap_or_else(|_| vec![None; samples + 1]);
-    let mut ys = eval_batch_1d(expr_y, "t", ts.iter().copied(), vars)
+    let ys = eval_batch_1d(expr_y, "t", ts.iter().copied(), vars)
         .unwrap_or_else(|_| vec![None; samples + 1]);
 
     let eval_x = |t: f64| f64_or_nan_var(expr_x, "t", t, vars);
@@ -1634,8 +1634,8 @@ fn function_function_intersection(
     let mut out = Vec::new();
     let mut prev_x = xs[0];
     let mut prev_f = get_f(0);
-    for i in 1..=n {
-        let x = xs[i];
+    for (i, x) in xs.iter().enumerate().take(n + 1).skip(1) {
+        let x = *x;
         let fx = get_f(i);
         if !fx.is_finite() {
             prev_x = x;
@@ -1711,8 +1711,8 @@ fn function_line_intersection(
     let mut out = Vec::new();
     let mut prev_x = xs[0];
     let mut prev_f = get_f(0);
-    for i in 1..=n {
-        let x = xs[i];
+    for (i, x) in xs.iter().enumerate().take(n + 1).skip(1) {
+        let x = *x;
         let fx = get_f(i);
         if !fx.is_finite() {
             prev_x = x;

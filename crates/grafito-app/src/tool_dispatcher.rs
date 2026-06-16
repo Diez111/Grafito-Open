@@ -621,6 +621,9 @@ fn handle_measure(
                     reset_tool: false,
                 };
             }
+            // state.pending solo puede tener 1 o 2 puntos después del push;
+            // los dos casos anteriores ya retornan, así que este punto es
+            // inalcanzable, pero lo dejamos para que el compilador no se queje.
             ToolResult {
                 objects: vec![],
                 message: Some("Selecciona un objeto o dos puntos para área".into()),
@@ -706,12 +709,6 @@ fn handle_measure(
                 reset_tool: false,
             }
         }
-        "Area" => ToolResult {
-            // Primer clic: esperando el segundo para definir el intervalo.
-            objects: vec![],
-            reset_tool: false,
-            message: Some("Clic 2: define el intervalo o el objeto".into()),
-        },
         _ => ToolResult {
             objects: vec![],
             reset_tool: false,

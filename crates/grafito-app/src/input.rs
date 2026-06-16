@@ -482,7 +482,7 @@ impl GrafitoApp {
             if self.current_tool == Tool::Pencil
                 && response.drag_started_by(PointerButton::Primary)
                 && !space_pressed
-                && !self.tool_state.drawing_pencil.is_some()
+                && self.tool_state.drawing_pencil.is_none()
             {
                 self.save_state();
                 if let Some(pos) = current_pos {
@@ -515,7 +515,7 @@ impl GrafitoApp {
             && (pointer.button_down(PointerButton::Primary)
                 || pointer.button_down(PointerButton::Secondary)
                 || pointer.button_down(PointerButton::Middle))
-            && !self.tool_state.drawing_pencil.is_some()
+            && self.tool_state.drawing_pencil.is_none()
             && self.current_tool == Tool::Pencil
         {
             self.save_state();
@@ -632,16 +632,14 @@ impl GrafitoApp {
                 // Throttling: solo añadimos un punto si está al menos a
                 // `min_step` unidades del último (en coords del mundo).
                 let min_step = 0.01 / self.document.view().scale.max(1e-3);
-                if let Some(obj) = self.document.get_object_mut(pencil_id) {
-                    if let GeoObject::Pencil(p) = obj {
-                        let should_push = p
-                            .points
-                            .last()
-                            .map(|last| last.distance(&world) >= min_step)
-                            .unwrap_or(true);
-                        if should_push {
-                            p.push(world);
-                        }
+                if let Some(GeoObject::Pencil(p)) = self.document.get_object_mut(pencil_id) {
+                    let should_push = p
+                        .points
+                        .last()
+                        .map(|last| last.distance(&world) >= min_step)
+                        .unwrap_or(true);
+                    if should_push {
+                        p.push(world);
                     }
                 }
                 // Forzamos repintado para que el PencilObj actualizado se vea.
