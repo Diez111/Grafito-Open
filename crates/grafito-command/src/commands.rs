@@ -1,12 +1,12 @@
 use geo::BooleanOps;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
-    Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
-    Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
-    HyperbolaObj, ImplicitCurveObj, LineKind, LineObj, MoebiusStripObj, ObjectId, ParabolaObj,
-    ParametricCurve2DObj, PhasePortraitObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj,
-    RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj,
-    Torus3DObj, VectorField2DObj, VectorField3DObj,
+    Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, ComplexMappingObj, Cone3DObj, Cube3DObj,
+    Cylinder3DObj, Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj,
+    HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, LineKind, LineObj, MoebiusStripObj,
+    ObjectId, ParabolaObj, ParametricCurve2DObj, PhasePortraitObj, Point3DObj, PointObj,
+    PolarCurveObj, PolygonObj, RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj,
+    Sphere3DObj, Surface3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{analyze_intersection, AnalysisFeature, IntersectionCurve};
 use grafito_geometry::boolean::polygon_to_geo;
@@ -2570,6 +2570,33 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     "Complex grid created — scroll/zoom to explore".into(),
                 );
             }
+            "ComplexMapping" if cmd.args.len() == 2 => {
+                let expr = cmd.args[0].trim();
+                let target_label = cmd.args[1].trim();
+                // Aceptar tanto "x" como "x(t)" como "x" simple para tolerar
+                // notación matemática (consistente con Root[...]).
+                let base_label = target_label
+                    .split_once('(')
+                    .map(|(id, _)| id.trim())
+                    .unwrap_or(target_label);
+                let resolved = find_object_by_label(document, target_label)
+                    .or_else(|| find_object_by_label(document, base_label));
+                match resolved {
+                    Some(id) => {
+                        let cm = ComplexMappingObj::new(expr, id);
+                        document.add_object(GeoObject::ComplexMapping(cm));
+                        input_text.clear();
+                        return CommandOutcome::Message(format!(
+                            "ComplexMapping: {expr} sobre {target_label}"
+                        ));
+                    }
+                    None => {
+                        return CommandOutcome::Error(format!(
+                            "ComplexMapping: objeto '{target_label}' no encontrado"
+                        ));
+                    }
+                }
+            }
             "DomainColoring" if !cmd.args.is_empty() => {
                 let x_min = cmd
                     .args
@@ -3342,6 +3369,11 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "inverse" | "inversa" => "Inverse",
             "taylor" => "Taylor",
             "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
+            "complexmapping"
+            | "complex_mapping"
+            | "mapeocomplejo"
+            | "mapeo_complejo"
+            | "transformadacompleja" => "ComplexMapping",
             "domaincoloring" | "domain_coloring" | "dcolor" => "DomainColoring",
             "heatmap" | "heat_map" | "hmap" => "HeatMap",
             "polarcurve" | "polar_curve" | "polar" => "PolarCurve",

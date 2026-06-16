@@ -4,7 +4,9 @@ use glam::Vec2 as GlamVec2;
 use grafito_core::parametric_sampling;
 use grafito_core::vector_field_sampling;
 use grafito_core::GeoObject;
-use grafito_geometry::expr::{eval_function_with_vars, eval_integral_batch, prepare_function_ast};
+use grafito_geometry::expr::{
+    eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
+};
 use grafito_geometry::{Color, Point2};
 
 fn to_color32(c: Color) -> Color32 {
@@ -2007,100 +2009,280 @@ impl GrafitoApp {
                 }
             }
             GeoObject::ComplexMapping(cm) => {
-                // Get target object and apply complex mapping
                 use num_complex::Complex64;
                 use std::collections::HashMap;
 
-                // Parse the complex expression once
-                let expr = match grafito_geometry::complex_expr::parse(&cm.expr) {
-                    Ok(e) => e,
-                    Err(_) => return,
-                };
-
-                // Convert document variables to complex
-                let mut vars: HashMap<String, Complex64> = HashMap::new();
-                for (name, val) in &self.document.variables {
-                    vars.insert(name.clone(), Complex64::new(*val, 0.0));
+                // 1) Validar que la expresión compleja parsea. Si falla,
+                //    skip (es comportamiento lazy: el objeto queda creado pero
+                //    no se dibuja hasta que la expresión sea válida).
+                //    La validación la hace `eval_complex_batch` más abajo
+                //    (parsea internamente y devuelve Err si no parsea).
+                if grafito_geometry::complex_expr::parse(&cm.expr).is_err() {
+                    return;
                 }
 
-                if let Some(target) = self.document.get_object(cm.target) {
-                    match target {
-                        GeoObject::Polygon(poly) => {
-                            let mut transformed_verts = Vec::new();
-                            for (i, vert) in poly.vertices.iter().enumerate() {
-                                let x = self
-                                    .document
-                                    .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), vert.x);
-                                let y = self
-                                    .document
-                                    .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), vert.y);
-                                let z = Complex64::new(x, y);
-                                vars.insert("z".to_string(), z);
+                // 2) Resolver el target. Si no existe o el tipo no está
+                //    soportado, no dibujamos nada.
+                let target = match self.document.get_object(cm.target) {
+                    Some(t) => t,
+                    None => return,
+                };
 
-                                if let Ok(result) = expr.eval(&vars) {
-                                    if result.re.is_finite() && result.im.is_finite() {
-                                        transformed_verts.push(Point2::new(result.re, result.im));
-                                    }
+                // 3) Extraer el dominio visible para sampling de Function y
+                //    cotas de muestreo para ParametricCurve2D / PolarCurve.
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
+
+                // 4) Generar la lista de puntos complejos z que vamos a
+                //    transformar. Cada target emite un Vec<Complex64> en
+                //    orden (puntos densos para curvas, vértices para
+                //    polígonos, grid para Function, etc.).
+                let z_samples: Vec<Complex64> = match target {
+                    GeoObject::Polygon(poly) => poly
+                        .vertices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let x = self
+                                .document
+                                .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                            let y = self
+                                .document
+                                .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                            Complex64::new(x, y)
+                        })
+                        .collect(),
+                    GeoObject::Line(line) => {
+                        let start = Point2::new(
+                            self.document.resolve_expr(&line.start_x_expr, line.start.x),
+                            self.document.resolve_expr(&line.start_y_expr, line.start.y),
+                        );
+                        let end = Point2::new(
+                            self.document.resolve_expr(&line.end_x_expr, line.end.x),
+                            self.document.resolve_expr(&line.end_y_expr, line.end.y),
+                        );
+                        let steps = 50;
+                        (0..=steps)
+                            .map(|i| {
+                                let t = i as f64 / steps as f64;
+                                Complex64::new(
+                                    start.x + t * (end.x - start.x),
+                                    start.y + t * (end.y - start.y),
+                                )
+                            })
+                            .collect()
+                    }
+                    GeoObject::Function(f) => {
+                        let n = 400;
+                        (0..=n)
+                            .map(|i| {
+                                let t = i as f64 / n as f64;
+                                let x = xmin + t * (xmax - xmin);
+                                let y = grafito_geometry::expr::eval_function_with_vars(
+                                    &f.expr,
+                                    x,
+                                    &self.document.variables,
+                                )
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::ImplicitCurve(_ic) => {
+                        // Para implícitas usamos el helper de muestreo del
+                        // crate core (marching squares + polilínea cerrada).
+                        // Si el cache no está poblado todavía, lo forzamos
+                        // evaluando una vez en el rango visible.
+                        let mut samples = Vec::new();
+                        for (level, segments) in self.document.implicit_curve_segments(cm.target) {
+                            for (a, b) in segments {
+                                let n = 16;
+                                for i in 0..=n {
+                                    let t = i as f64 / n as f64;
+                                    samples.push(Complex64::new(
+                                        a.x + t * (b.x - a.x),
+                                        a.y + t * (b.y - a.y),
+                                    ));
                                 }
-                            }
-
-                            if transformed_verts.len() >= 3 {
-                                let points: Vec<Pos2> = transformed_verts
-                                    .iter()
-                                    .map(|v| {
-                                        let s = view.world_to_screen(*v);
-                                        canvas_rect.min + Vec2::new(s.x, s.y)
-                                    })
-                                    .collect();
-
-                                let stroke = Stroke::new(2.0, to_color32(cm.color));
-                                for i in 0..points.len() {
-                                    let j = (i + 1) % points.len();
-                                    painter.line_segment([points[i], points[j]], stroke);
-                                }
+                                let _ = level;
                             }
                         }
-                        GeoObject::Line(line) => {
-                            let start = Point2::new(
-                                self.document.resolve_expr(&line.start_x_expr, line.start.x),
-                                self.document.resolve_expr(&line.start_y_expr, line.start.y),
-                            );
-                            let end = Point2::new(
-                                self.document.resolve_expr(&line.end_x_expr, line.end.x),
-                                self.document.resolve_expr(&line.end_y_expr, line.end.y),
-                            );
-                            let steps = 50;
-                            let dx = (end.x - start.x) / steps as f64;
-                            let dy = (end.y - start.y) / steps as f64;
-                            let mut prev: Option<Pos2> = None;
+                        samples
+                    }
+                    GeoObject::ParametricCurve2D(c) => {
+                        let n = 200;
+                        (0..=n)
+                            .map(|i| {
+                                let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+                                let x = eval_batch_1d(
+                                    &c.expr_x,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                let y = eval_batch_1d(
+                                    &c.expr_y,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::PolarCurve(c) => {
+                        let n = 200;
+                        (0..=n)
+                            .map(|i| {
+                                let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+                                let r = eval_batch_1d(
+                                    &c.expr_r,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(r * t.cos(), r * t.sin())
+                            })
+                            .collect()
+                    }
+                    _ => return,
+                };
 
-                            for i in 0..=steps {
-                                let x = start.x + i as f64 * dx;
-                                let y = start.y + i as f64 * dy;
-                                let z = Complex64::new(x, y);
-                                vars.insert("z".to_string(), z);
+                if z_samples.is_empty() {
+                    return;
+                }
 
-                                if let Ok(result) = expr.eval(&vars) {
-                                    if result.re.is_finite() && result.im.is_finite() {
-                                        let screen =
-                                            view.world_to_screen(Point2::new(result.re, result.im));
-                                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                                        if let Some(prev_pos) = prev {
-                                            painter.line_segment(
-                                                [prev_pos, pos],
-                                                Stroke::new(2.0, to_color32(cm.color)),
-                                            );
-                                        }
-                                        prev = Some(pos);
-                                    } else {
-                                        prev = None;
+                // 5) Batch-eval de la expresión: un solo parse, muchos
+                //    puntos. Si el parse falla, ya hicimos return antes.
+                //    Si la evaluación de un punto falla (división por cero,
+                //    NaN, etc.), ese punto queda en None y se trata como
+                //    singularidad (disparo de asíntota).
+                let real_vars: HashMap<String, f64> = self.document.variables.clone();
+                let results = match grafito_geometry::complex_expr::eval_complex_batch(
+                    &cm.expr,
+                    "z",
+                    z_samples.iter().copied(),
+                    &real_vars,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+                // Re-construimos un vec paralelo para evitar manejar Option<Point2>:
+                // usamos Point2 con NaN para representar "no-finito".
+                let mut transformed: Vec<(Point2, bool)> = Vec::with_capacity(results.len());
+                for (z_in, w_out) in z_samples.iter().zip(results.iter()) {
+                    match w_out {
+                        Some(w) if w.re.is_finite() && w.im.is_finite() => {
+                            transformed.push((Point2::new(w.re, w.im), true));
+                        }
+                        _ => {
+                            // Guardamos el z original (no el resultado) como
+                            // "último punto conocido antes de la singularidad"
+                            // para dibujar la asíntota desde donde el trazo
+                            // sale del plano visible.
+                            let _ = z_in;
+                            transformed.push((Point2::new(f64::NAN, f64::NAN), false));
+                        }
+                    }
+                }
+
+                // 6) Render: dibujar segmentos sólidos entre puntos finitos
+                //    consecutivos, y asíntotas punteadas en los huecos no
+                //    finitos. La asíntota se traza desde el último punto
+                //    finito en la dirección del último delta (en world), lo
+                //    que aproxima la tangente de la curva justo antes de la
+                //    singularidad.
+                let stroke = Stroke::new(2.0, to_color32(cm.color));
+                let to_screen = |world: Point2| -> Pos2 {
+                    let s = view.world_to_screen(world);
+                    canvas_rect.min + Vec2::new(s.x, s.y)
+                };
+                let to_screen_dir = |dx: f64, dy: f64| -> Vec2 {
+                    let s1 = view.world_to_screen(Point2::new(0.0, 0.0));
+                    let s2 = view.world_to_screen(Point2::new(dx, dy));
+                    Vec2::new(s2.x - s1.x, s2.y - s1.y)
+                };
+                let dashed_stroke = Stroke::new(1.0, to_color32(cm.color).gamma_multiply(0.7));
+
+                let mut prev: Option<(Point2, Pos2, Vec2)> = None;
+                // (world_pos, screen_pos, screen_dir_of_tangent)
+
+                for (world_pt, is_finite) in transformed.iter() {
+                    if *is_finite {
+                        let screen_pt = to_screen(*world_pt);
+                        if let Some((prev_world, prev_screen, _)) = prev {
+                            // Trazo sólido.
+                            painter.line_segment([prev_screen, screen_pt], stroke);
+                            // Actualizar dirección tangente.
+                            let dx = world_pt.x - prev_world.x;
+                            let dy = world_pt.y - prev_world.y;
+                            if dx.hypot(dy) > 1e-9 {
+                                let dir_screen = to_screen_dir(dx, dy);
+                                prev = Some((*world_pt, screen_pt, dir_screen));
+                            }
+                        } else {
+                            // Primer punto finito después de una
+                            // singularidad. Si la dirección tangente no
+                            // existe aún, la dejamos en (0,1) (hacia
+                            // abajo) como placeholder.
+                            prev = Some((*world_pt, screen_pt, Vec2::new(0.0, 1.0)));
+                        }
+                    } else {
+                        // Punto no finito: dibujar la asíntota desde el
+                        // último punto finito en la dirección de la
+                        // tangente, en pasos pequeños hasta que aparezca
+                        // un nuevo punto finito o agotemos N pasos.
+                        if let Some((_, prev_screen, dir_screen)) = prev {
+                            if dir_screen.length() > 0.5 {
+                                // Normalizar y dibujar ~30 píxeles de
+                                // asíntota en esa dirección.
+                                let step_px = 6.0_f32;
+                                let n_dashes = 6;
+                                let dir_norm = dir_screen.normalized();
+                                let mut last = prev_screen;
+                                for i in 1..=n_dashes {
+                                    let next = Pos2::new(
+                                        last.x + dir_norm.x * step_px,
+                                        last.y + dir_norm.y * step_px,
+                                    );
+                                    // Patrón: dibujar 1, saltar 1, dibujar
+                                    // 1, ... para que parezca punteado.
+                                    if i % 2 == 1 {
+                                        painter.line_segment([last, next], dashed_stroke);
                                     }
-                                } else {
-                                    prev = None;
+                                    last = next;
                                 }
+                            } else {
+                                // Sin dirección: marcar con una X roja
+                                // en el último punto finito conocido.
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(prev_screen.x - 6.0, prev_screen.y - 6.0),
+                                        Pos2::new(prev_screen.x + 6.0, prev_screen.y + 6.0),
+                                    ],
+                                    Stroke::new(1.5, Color32::from_rgb(220, 30, 30)),
+                                );
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(prev_screen.x - 6.0, prev_screen.y + 6.0),
+                                        Pos2::new(prev_screen.x + 6.0, prev_screen.y - 6.0),
+                                    ],
+                                    Stroke::new(1.5, Color32::from_rgb(220, 30, 30)),
+                                );
                             }
                         }
-                        _ => {}
+                        prev = None;
                     }
                 }
             }

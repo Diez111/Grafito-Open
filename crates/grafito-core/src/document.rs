@@ -5,8 +5,8 @@ use crate::numeric_constraints::{
 };
 use crate::numeric_solver::{NumericSolver, SolveError, VarIndex};
 use crate::{
-    EllipseObj, GeoObject, HyperbolaObj, LineKind, ObjectId, ParabolaObj, PointObj,
-    RelationOperator,
+    EllipseObj, GeoObject, HyperbolaObj, ImplicitCurveSegments, LineKind, ObjectId, ParabolaObj,
+    PointObj, RelationOperator,
 };
 use grafito_geometry::expr::evaluate_cached;
 use grafito_geometry::{
@@ -1141,6 +1141,21 @@ impl Document {
         self.bump_version();
         self.spatial_dirty = true;
         self.objects.get_mut(&id)
+    }
+
+    /// Devuelve una **copia** de los segmentos cacheados de un
+    /// `ImplicitCurveObj`. Si el id no corresponde a una implícita, o si el
+    /// cache aún no está poblado, devuelve un vector vacío (es seguro y
+    /// barato; el render simplemente no dibujará ese `ComplexMapping`).
+    pub fn implicit_curve_segments(&self, id: ObjectId) -> ImplicitCurveSegments {
+        if let Some(GeoObject::ImplicitCurve(ic)) = self.objects.get(&id) {
+            ic.cached_segments
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn objects(&self) -> &HashMap<ObjectId, GeoObject> {

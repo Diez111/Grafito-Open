@@ -7,6 +7,10 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
+#### Añadido
+- **`ComplexMapping[expr, target]`**: aplica una expresión compleja arbitraria a un objeto del documento. Soporta `Line`, `Polygon`, `Function`, `ImplicitCurve`, `ParametricCurve2D` y `PolarCurve` como targets. Ejemplo: `ImplicitCurve[x^2 + y^2 = 1]; ComplexMapping[1/z, c]` invierte el círculo. Las singularidades (puntos donde `expr` explota, p.ej. `1/z` cerca del origen) se manejan con **asíntotas automáticas punteadas** en la dirección de la tangente previa. Si no hay tangente previa, se marca con una `X` roja. Alias en español: `MapeoComplejo`, `MapeoComplejoCompleja`, `TransformadaCompleja`.
+- Tests de integración en `crates/grafito-command/tests/complex_mapping.rs` cubriendo los 6 tipos de target.
+
 ## [1.0.0-beta] - 2026-06-15
 
 #### Añadido

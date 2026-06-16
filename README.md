@@ -293,6 +293,39 @@ Además de las cónicas canónicas, Grafito soporta construcciones de cónicas p
 
 Todas las cónicas soportan rotación arbitraria y renderizado correcto de ramas/aberturas.
 
+### Conjuntos como en GeoGebra
+
+Cualquier curva que puedas escribir como `lhs op rhs` (con `op ∈ {=,<,>,≤,≥,≠}`) se crea con `ImplicitCurve[lhs op rhs]`. Ejemplos:
+
+```text
+ImplicitCurve[x^2 + y^2 = 1]              # círculo unitario
+ImplicitCurve[x^2/4 + y^2/9 = 1]          # elipse
+ImplicitCurve[y = x^2]                    # parábola vertical
+ImplicitCurve[x*y = 1]                    # hipérbola
+ImplicitCurve[x^3 + y^3 - 3*x*y = 0]      # folium de Descartes
+```
+
+Estas curvas se rendereizan con marching squares sobre la vista actual y se pueden usar como target de `ComplexMapping` (ver siguiente sección).
+
+---
+
+## Mapeos Complejos
+
+`ComplexMapping[expr, target]` aplica una expresión compleja arbitraria a un objeto del documento. La expresión se evalúa con `z` como variable compleja (`x + i·y` para cada punto del target).
+
+| Target | Comando de ejemplo | Resultado |
+|--------|--------------------|-----------|
+| Polígono | `Polygon[…]; ComplexMapping[1/z, P]` | Polígono transformado por `1/z` |
+| Línea | `Line[A, B]; ComplexMapping[z^2, L]` | Línea con `z^2` aplicado |
+| Función | `f(x) = sin(x); ComplexMapping[1/z, f]` | Curva compleja de `sin(x)` bajo `1/z` |
+| Implícita | `ImplicitCurve[x^2 + y^2 = 1]; ComplexMapping[1/z, c]` | Inversión del círculo |
+| Paramétrica | `ParametricCurve2D[cos(t), sin(t), 0, 2*pi]; ComplexMapping[z^2, c]` | Lemniscata de Bernoulli |
+| Polar | `PolarCurve[1 - cos(t), 0, 2*pi]; ComplexMapping[1/z, p]` | Cardioide invertida |
+
+**Asíntotas automáticas.** Cuando la expresión explota (p.ej. `1/z` cerca del origen), Grafito traza automáticamente una asíntota punteada en la dirección de la tangente del último trazo finito. Si no hay tangente previa, marca la singularidad con una `X` roja.
+
+Aliases en español: `MapeoComplejo`, `MapeoComplejoCompleja`, `TransformadaCompleja`. El parser de expresiones complejas (`complex_expr`) reconoce `1/z`, `z^2`, `exp(z)`, `sin(z)`, `cos(z)`, `ln(z)`, `sqrt(z)`, `z+1`, `(z-1)/(z+1)`, etc.
+
 ---
 
 ## Canvas 3D

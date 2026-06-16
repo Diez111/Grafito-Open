@@ -226,6 +226,11 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             syntax_hint: "ImplicitCurve[f(x,y) = c]",
         },
         PaletteCommand {
+            name: "ComplexMapping",
+            category: "Crear",
+            syntax_hint: "ComplexMapping[expr_compleja, target]",
+        },
+        PaletteCommand {
             name: "VectorField2D",
             category: "Crear",
             syntax_hint: "VectorField2D[u(x,y), v(x,y)]",
