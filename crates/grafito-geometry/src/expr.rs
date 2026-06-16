@@ -2,6 +2,21 @@ use evalexpr::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+/// Convierte un f64 a orden de Bessel (i32) de forma segura.
+fn bessel_order(f: f64) -> i32 {
+    if !f.is_finite() {
+        return 0;
+    }
+    let rounded = f.round();
+    if rounded > 1000.0 {
+        1000
+    } else if rounded < -1000.0 {
+        -1000
+    } else {
+        rounded as i32
+    }
+}
+
 fn setup_math_context() -> HashMapContext {
     let mut ctx = HashMapContext::new();
     let _ = ctx.set_function(
@@ -70,15 +85,36 @@ fn setup_math_context() -> HashMapContext {
     );
     let _ = ctx.set_function(
         "sec".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.cos()))),
+        evalexpr::Function::new(|arg| {
+            let c = arg.as_float()?.cos();
+            Ok(Value::Float(if c.abs() < 1e-15 {
+                f64::NAN
+            } else {
+                1.0 / c
+            }))
+        }),
     );
     let _ = ctx.set_function(
         "csc".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.sin()))),
+        evalexpr::Function::new(|arg| {
+            let s = arg.as_float()?.sin();
+            Ok(Value::Float(if s.abs() < 1e-15 {
+                f64::NAN
+            } else {
+                1.0 / s
+            }))
+        }),
     );
     let _ = ctx.set_function(
         "cot".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.tan()))),
+        evalexpr::Function::new(|arg| {
+            let t = arg.as_float()?.tan();
+            Ok(Value::Float(if t.abs() < 1e-15 {
+                f64::NAN
+            } else {
+                1.0 / t
+            }))
+        }),
     );
     let _ = ctx.set_function(
         "sinh".into(),
@@ -107,18 +143,6 @@ fn setup_math_context() -> HashMapContext {
     let _ = ctx.set_function(
         "round".into(),
         evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.round()))),
-    );
-    let _ = ctx.set_function(
-        "sec".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.cos()))),
-    );
-    let _ = ctx.set_function(
-        "csc".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.sin()))),
-    );
-    let _ = ctx.set_function(
-        "cot".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(1.0 / arg.as_float()?.tan()))),
     );
     let _ = ctx.set_function(
         "asinh".into(),
@@ -326,7 +350,7 @@ fn setup_math_context() -> HashMapContext {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
                 Ok(Value::Float(crate::special_functions::bessel_j(
-                    t[0].as_float()? as i32,
+                    bessel_order(t[0].as_float()?),
                     t[1].as_float()?,
                 )))
             } else {
@@ -343,7 +367,7 @@ fn setup_math_context() -> HashMapContext {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
                 Ok(Value::Float(crate::special_functions::bessel_y(
-                    t[0].as_float()? as i32,
+                    bessel_order(t[0].as_float()?),
                     t[1].as_float()?,
                 )))
             } else {
@@ -360,7 +384,7 @@ fn setup_math_context() -> HashMapContext {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
                 Ok(Value::Float(crate::special_functions::bessel_i(
-                    t[0].as_float()? as i32,
+                    bessel_order(t[0].as_float()?),
                     t[1].as_float()?,
                 )))
             } else {
@@ -523,7 +547,7 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
             // Evaluate at x=0.5 (not x=0) to expose precision loss in trig:
             // cos(11^50 * pi * 0.5) has argument ~5e51 → f64 mantissa saturated → garbage
             let mag = eval_single_point(&substituted, 0.5);
-            if mag.is_none() || (mag.unwrap().abs() < 1e-10) {
+            if mag.map_or(true, |v| v.abs() < 1e-10) {
                 tiny_count += 1;
                 if tiny_count >= 3 {
                     break; // Series has converged numerically — remaining terms won't affect result

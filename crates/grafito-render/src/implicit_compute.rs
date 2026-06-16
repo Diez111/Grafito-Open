@@ -61,6 +61,7 @@ pub(crate) enum CompileError {
     UnsupportedNode(String),
     UnsupportedVariable(String),
     StackTooDeep,
+    TooManyConstants,
 }
 
 impl std::fmt::Display for CompileError {
@@ -71,6 +72,7 @@ impl std::fmt::Display for CompileError {
                 write!(f, "variable '{}' not available on GPU evaluator", v)
             }
             CompileError::StackTooDeep => write!(f, "expression too deep for GPU stack"),
+            CompileError::TooManyConstants => write!(f, "too many constants for GPU buffer"),
         }
     }
 }
@@ -91,6 +93,9 @@ pub(crate) fn compile_expr_with_mapping(
 
     match expr {
         Expr::Const(c) => {
+            if prog.constants.len() >= 256 {
+                return Err(CompileError::TooManyConstants);
+            }
             let idx = prog.constants.len() as u32;
             prog.constants.push(*c as f32);
             prog.code.push(Op::PushConst.encode(idx));
@@ -100,6 +105,9 @@ pub(crate) fn compile_expr_with_mapping(
             if let Some((_, operand)) = var_map.iter().find(|(n, _)| *n == name) {
                 prog.code.push(Op::PushVar.encode(*operand));
             } else if let Some(v) = document_vars.get(name) {
+                if prog.constants.len() >= 256 {
+                    return Err(CompileError::TooManyConstants);
+                }
                 let idx = prog.constants.len() as u32;
                 prog.constants.push(*v as f32);
                 prog.code.push(Op::PushConst.encode(idx));
@@ -187,7 +195,25 @@ pub(crate) fn compile_expr_with_mapping(
         }
     }
 
-    if prog.code.len() > 4096 {
+    // Verificar profundidad real de pila simulando los efectos de cada opcode.
+    let mut sp: i32 = 0;
+    let mut max_sp: i32 = 0;
+    for &instr in &prog.code {
+        let op = instr & 0xFFu32;
+        match op {
+            1 | 2 | 20 | 21 => {
+                sp += 1;
+                if sp > max_sp {
+                    max_sp = sp;
+                }
+            }
+            3..=8 | 16 | 17 => {
+                sp -= 1;
+            }
+            _ => {}
+        }
+    }
+    if max_sp > 32 || prog.code.len() > 4096 {
         return Err(CompileError::StackTooDeep);
     }
     Ok(())
@@ -449,13 +475,20 @@ impl ImplicitComputePipeline {
         // GPU work finishes, which is acceptable because the subsequent
         // marching-squares step still runs on the CPU.
         let slice = self.values_readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |result| {
-            if let Err(e) = result {
-                log::error!("Implicit compute readback failed: {:?}", e);
+        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map_ok_clone = map_ok.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if result.is_ok() {
+                map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                log::error!("Implicit compute readback failed: {:?}", result.err());
             }
         });
         device.poll(wgpu::Maintain::Wait);
 
+        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let data = slice.get_mapped_range();
         let values_f32: &[f32] = bytemuck::cast_slice(&data);
         let mut rows = Vec::with_capacity(grid_size + 1);

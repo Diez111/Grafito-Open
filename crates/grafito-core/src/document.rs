@@ -143,7 +143,7 @@ impl Document {
                 // Determine if it's the exact old symbol or a subscript variant
                 let rest = &label[old.len()..];
                 let is_subscript = rest.is_empty()
-                    && rest.chars().all(|c| {
+                    || rest.chars().all(|c| {
                         matches!(c, '₀' | '₁' | '₂' | '₃' | '₄' | '₅' | '₆' | '₇' | '₈' | '₉')
                     });
                 if is_subscript {
@@ -1224,19 +1224,35 @@ impl Document {
             return None;
         }
 
+        let mut hits: Vec<(ObjectId, f64)> = Vec::new();
         for id in candidates {
             if let Some(obj) = self.objects.get(&id) {
                 if !obj.is_visible() {
                     continue;
                 }
-                // Use precise check
                 if self.check_hit(obj, world, tolerance) {
-                    // For simplicity, just return the first hit or compute actual distance
-                    return Some(id);
+                    let dist = match obj {
+                        GeoObject::Point(p) => p.position.distance(&world),
+                        GeoObject::Line(l) => {
+                            let start = Point2::new(
+                                self.resolve_expr(&l.start_x_expr, l.start.x),
+                                self.resolve_expr(&l.start_y_expr, l.start.y),
+                            );
+                            let end = Point2::new(
+                                self.resolve_expr(&l.end_x_expr, l.end.x),
+                                self.resolve_expr(&l.end_y_expr, l.end.y),
+                            );
+                            distance_point_to_segment(world, start, end)
+                        }
+                        GeoObject::Circle(c) => (c.center.distance(&world) - c.radius).abs(),
+                        _ => tolerance,
+                    };
+                    hits.push((id, dist));
                 }
             }
         }
-        None
+        hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits.first().map(|(id, _)| *id)
     }
 
     fn check_hit(&self, obj: &GeoObject, world: Point2, tolerance: f64) -> bool {
@@ -1842,7 +1858,10 @@ impl Document {
         match expr {
             Some(e) => {
                 let vars = {
-                    let mut cache = self.cached_vars_list.lock().unwrap();
+                    let mut cache = self
+                        .cached_vars_list
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     if let Some((ver, cached)) = &*cache {
                         if *ver == self.version {
                             cached.clone()

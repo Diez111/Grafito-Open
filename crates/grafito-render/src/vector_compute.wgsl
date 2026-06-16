@@ -70,6 +70,10 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
 
     let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
+        if sp < 0 || sp >= STACK_SIZE {
+            var zero = 0.0;
+            return EvalResult(zero / zero, zero / zero);
+        }
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
         let operand = instr >> 8u;
@@ -162,13 +166,23 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
             case OP_LOG: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(log(v), 0.0, v <= 0.0);
+                if v <= 0.0 {
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
+                } else {
+                    stack[sp] = log(v);
+                }
                 sp = sp + 1;
             }
             case OP_SQRT: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(sqrt(v), 0.0, v < 0.0);
+                if v < 0.0 {
+                    var zero = 0.0;
+                    stack[sp] = zero / zero;
+                } else {
+                    stack[sp] = sqrt(v);
+                }
                 sp = sp + 1;
             }
             case OP_ABS: {
@@ -226,13 +240,13 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let nx = f32(params.nx - 1u);
-    let ny = f32(params.ny - 1u);
+    let nx = f32(max(params.nx - 1u, 1u));
+    let ny = f32(max(params.ny - 1u, 1u));
     let x = params.x_min + f32(gid.x) * (params.x_max - params.x_min) / nx;
     let y = params.y_min + f32(gid.y) * (params.y_max - params.y_min) / ny;
 
     let r = eval_bytecode(x, y);
-    let idx = (gid.y * (params.nx + 1u) + gid.x) * 4u;
+    let idx = (gid.y * params.nx + gid.x) * 4u;
     values[idx] = x;
     values[idx + 1u] = y;
     values[idx + 2u] = r.u;

@@ -212,8 +212,7 @@ fn find_roots(f: &dyn Fn(f64) -> f64, x_min: f64, x_max: f64) -> Vec<Point2> {
         if prev_y * y <= 0.0 {
             let root_x = newton(f, x - dx * 0.5, 30);
             if root_x.is_finite() && root_x >= x_min && root_x <= x_max {
-                let root_y =
-                    crate::expr::evaluate("x", &[("x".to_string(), root_x)]).unwrap_or(0.0);
+                let root_y = root_x;
                 let fy_at_root = f(root_x);
                 if fy_at_root.abs() < 1e-6 {
                     let is_duplicate = roots.iter().any(|r: &Point2| (r.x - root_x).abs() < 1e-6);

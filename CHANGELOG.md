@@ -5,11 +5,65 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0-beta] - 2026-06-16
 
 #### Añadido
 - **`ComplexMapping[expr, target]`**: aplica una expresión compleja arbitraria a un objeto del documento. Soporta `Line`, `Polygon`, `Function`, `ImplicitCurve`, `ParametricCurve2D` y `PolarCurve` como targets. Ejemplo: `ImplicitCurve[x^2 + y^2 = 1]; ComplexMapping[1/z, c]` invierte el círculo. Las singularidades (puntos donde `expr` explota, p.ej. `1/z` cerca del origen) se manejan con **asíntotas automáticas punteadas** en la dirección de la tangente previa. Si no hay tangente previa, se marca con una `X` roja. Alias en español: `MapeoComplejo`, `MapeoComplejoCompleja`, `TransformadaCompleja`.
 - Tests de integración en `crates/grafito-command/tests/complex_mapping.rs` cubriendo los 6 tipos de target.
+- **`student_t_quantile(p, nu)`**: cuantil de la distribución t-Student por bisección. Usado en `confidence_interval_mean` para `n < 30` (antes usaba la normal, subestimando el intervalo).
+- **`Matrix::checked_get` / `checked_set`**: variantes seguras de `get`/`set` que devuelven `None`/`false` ante índices fuera de rango.
+- **8 tests nuevos en `interval.rs`** (crosses_zero, contains, definitely_positive/negative, safe_sample, detect_asymptotes, midpoint) y 1 test en `ode.rs` (`euler_zero_steps`).
+- **3 tests nuevos en `document.rs`** para `migrate_complex_symbol` (variante con subíndice, base, y sin coincidencia).
+
+#### Cambiado
+- `erf` y `gamma_ln` en `statistics.rs` ahora delegan en `crate::special_functions::erf` / `ln_gamma` (implementaciones canónicas) en lugar de las aproximaciones locales.
+- `confidence_interval_mean` usa t-Student para muestras pequeñas (`n < 30`) y normal para `n ≥ 30`, en lugar de usar siempre la normal.
+- Botón "Salir" del menú ahora usa `ctx.send_viewport_cmd(Close)` en vez de `std::process::exit(0)`, permitiendo un cierre ordenado de wgpu/egui sin abortar operaciones en vuelo.
+- Snapshot del documento en `GrafitoApp` se clona solo cuando cambia `version`; cambios de view (pan/zoom) usan `Arc::make_mut` para evitar clones por frame.
+- `configure_modern_style` se aplica solo cuando cambia el tema, no en cada frame.
+- Eliminado el camino CPU de `marching_squares_contour` y la utilidad `hsv_to_rgb` (sustituidos por el pipeline GPU `ImplicitComputePipeline` y `fractal_color_hsv` respectivamente).
+
+#### Corregido
+- **Seguridad numérica en GPU/WGSL**:
+  - Protección contra stack underflow/overflow en los 4 shaders (`function`, `implicit`, `parametric`, `vector`): `sp < 0 || sp >= STACK_SIZE` devuelve `NaN` en lugar de corromper memoria de la pila.
+  - `log`/`sqrt` con argumento no válido ahora devuelven `NaN` en GPU en vez de `0.0` (antes silenciaba el error y generaba gráficas planas o discontinuidades).
+  - División por cero en `cs_main` cuando `params.n == 0` o `params.grid_size == 0` (`max(n-1, 1)` para evitar `0/0`).
+  - `ImplicitCompute` ahora limita a 256 constantes y simula la profundidad real de la pila (antes solo contaba el tamaño del bytecode).
+  - `readback` de los 3 pipelines (`function`, `implicit`, `parametric`) propaga el fallo con `AtomicBool` en vez de devolver datos vacíos silenciosamente.
+- **Funciones matemáticas**:
+  - `BesselJ`/`BesselY`/`BesselI` validan el orden con `bessel_order()`: NaN/Infinito → 0, valores fuera de `[-1000, 1000]` se saturan (antes saturaban a `i32::MIN`/`i32::MAX` y producían resultados arbitrarios).
+  - `Sec`/`Csc`/`Cot` devuelven `NaN` en la singularidad (p.ej. `sec(pi/2)`) en lugar de `±Infinity` (que rompía el render y los snapshots GPU).
+  - `bessel_order` se aplica tanto en `Expr::eval_*` como en el `evalexpr` context y en `simplify_once` (Const-Const fold).
+- **Color clamping**: `to_color32`, `algebra.rs`, `export.rs` (SVG) y ghost rendering clampean los componentes RGBA a `[0, 255]` antes de la conversión a `u8`, evitando overflow y valores basura en objetos con color fuera de rango.
+- **Estabilidad / panics**:
+  - Reemplazo de `unwrap()` por `?`/`ok_or`/`continue` en `algebra.rs` (panel de variables), `app.rs` (acciones de restricción, ícono fallback), `snap.rs`, `tool_dispatcher.rs`, `commands.rs` (Integral/Plot args).
+  - `cached_vars_list.lock().unwrap()` → `unwrap_or_else(|p| p.into_inner())` en `document.rs` para tolerar envenenamiento del mutex.
+  - `lock_or_die` en `migrate_complex_symbol`: la rama `is_subscript` se evaluaba como `rest.is_empty() && rest.chars().all(...)` (siempre falsa si `rest` no estaba vacío) — corregido a `||` para que `z₁` migre a `w₁` y no solo a `w`.
+- **Hit-test**: `Document::hit_test` ahora ordena candidatos por distancia real y devuelve el más cercano en lugar del primero coincidente, evitando seleccionar un objeto lejano cuando hay solapamiento.
+- **Restricciones numéricas**: `DistanceEq`, `AngleEq`, `TangentEq`, `EqualLengthEq` reemplazan `if len < 1e-12 { return Vec::new(); }` por `.max(1e-12)` para que el solver reciba un Jacobiano finito en configuraciones degeneradas en lugar de abortar el paso.
+- **ODE**: `euler_system`/`runge_kutta_4_system` validan `steps == 0` (devuelven el estado inicial) y toleran `|f(t,y)| ≠ n` rellenando con ceros; evita panic por `IndexOutOfBounds` cuando la ED entrega dimensiones inconsistentes.
+- **Geometría**:
+  - `safe_sample` con `n < 2` devuelve `vec![]` en lugar de `0/0`.
+  - `cardioid` y `epicycloid` con `steps == 0` devuelven `vec![]` sin dividir por cero.
+  - `compute_fractal` con `width == 0 || height == 0` retorna temprano; `fractal_color_hsv` con `max_iter == 0` retorna negro opaco en vez de NaN.
+- **Estadísticas**: `histogram` ignora valores no finitos (NaN/Inf) en vez de contaminar bins con índices enormes.
+- **Intérprete de comandos**:
+  - `Tangent` cuando el punto está dentro del círculo ahora avisa "no hay tangentes" en vez de éxito silencioso.
+  - Comandos 3D (`Point3D`, `Segment3D`, `Sphere`, `Cube`, etc.) en contexto 2D devuelven error explícito en vez de fallar más adelante.
+  - `Script` con recursión profunda (≥ 6 niveles) aborta con error claro en vez de stack overflow.
+  - `expand_all_cas` limita a 50 iteraciones para prevenir expansión infinita.
+  - `Plot[expr, var]` y `Integral[expr, var, ...]` ahora usan `replace_variable` (límite de palabra) en vez de `String::replace` para no corromper nombres de funciones (p.ej. `exp(t)` se quedaba como `xxp(x)` en vez de `exp(x)`).
+  - `parse_point_str` quita solo el par externo de paréntesis en vez de un nivel global (soporta tuplas anidadas).
+  - `parse_brace_list` ignora elementos vacíos tras `,` (sintaxis `{1,,2}` ya no rompe el parser).
+  - `is_function_lhs` usa `starts_with(|c| c.is_ascii_digit())` en lugar de `chars().next().unwrap()`.
+  - Mensaje de `Intersect` ahora reporta el número de intersecciones encontradas.
+- **Renderer 3D**: `face_normal` protege contra producto cruz de longitud cero (triángulos coplanarios) devolviendo `(0, 1, 0)` en vez de `NaN`.
+- **DD / análisis simbólico**:
+  - `DD::sin` con entrada no finita devuelve `(NaN, NaN)` en vez de propagar un resultado basura.
+  - `PartialOrd` para `DD` ahora compara por `hi` y luego por `lo` (preservando precisión DD) en vez de convertir a `f64` con truncamiento.
+- **App / UX**:
+  - Errores de `save_state`/`load_state` se muestran como toasts en vez de solo `log::error!` (antes el usuario no se enteraba del fallo).
+  - `marching_squares_contour` muerto eliminado del binario.
 
 ## [1.0.0-beta] - 2026-06-15
 

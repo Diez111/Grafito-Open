@@ -20,6 +20,48 @@ use grafito_geometry::Point3D;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+/// Reemplaza una variable por otra solo en límites de palabra (identificadores completos).
+/// Evita corromper nombres de funciones: `replace_variable("exp(e)", "e", "x")` → `"exp(x)"`, no `"xxp(x)"`.
+fn replace_variable(expr: &str, from: &str, to: &str) -> String {
+    let mut result = String::with_capacity(expr.len());
+    let bytes = expr.as_bytes();
+    let from_bytes = from.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + from_bytes.len() <= bytes.len() && &bytes[i..i + from_bytes.len()] == from_bytes {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let after_ok =
+                i + from_bytes.len() == bytes.len() || !is_ident_char(bytes[i + from_bytes.len()]);
+            if before_ok && after_ok {
+                result.push_str(to);
+                i += from_bytes.len();
+                continue;
+            }
+        }
+        // Handle multi-byte UTF-8 by pushing the whole character
+        let ch_len = utf8_char_len(bytes[i]);
+        result.push_str(&expr[i..i + ch_len]);
+        i += ch_len;
+    }
+    result
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b < 0xE0 {
+        2
+    } else if b < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
 /// Trait para evaluadores GPU de funciones 1D por lotes.
 ///
 /// La aplicación puede registrar una implementación que envuelva el pipeline
@@ -484,13 +526,15 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                                     prev_x = x;
                                 }
                             }
+                            let count = inters.len();
                             for r in inters {
                                 document.add_object(GeoObject::Point(PointObj::new(r)));
                             }
                             input_text.clear();
-                            return CommandOutcome::Message(
-                                "Intersect: intersecciones (barrido) creadas".into(),
-                            );
+                            return CommandOutcome::Message(format!(
+                                "Intersect: {} intersección(es) encontrada(s)",
+                                count
+                            ));
                         }
                     }
                 }
@@ -957,6 +1001,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     return CommandOutcome::Ok;
                 }
             }
+            "Point3D" | "Segment3D" | "Sphere" | "Cube" | "Cylinder" | "Cone" | "Torus"
+            | "Moebius" | "Surface3D" => {
+                return CommandOutcome::Error("Argumentos inválidos para comando 3D".into());
+            }
             "Tangent" => {
                 if cmd.args.len() >= 3 {
                     if let (Ok((cx, cy)), Ok(r), Ok((px, py))) = (
@@ -983,6 +1031,12 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                                 LineObj::new_with_kind(Point2::new(px, py), t2, LineKind::Line)
                                     .with_label("T2"),
                             ));
+                        } else {
+                            input_text.clear();
+                            return CommandOutcome::Message(
+                                "Tangent: el punto está dentro del círculo, no hay tangentes"
+                                    .into(),
+                            );
                         }
                     }
                 }
@@ -1641,6 +1695,15 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
             "Script" if !cmd.args.is_empty() => {
                 const MAX_SCRIPT_COMMANDS: usize = 100;
+                const MAX_SCRIPT_DEPTH: u32 = 5;
+                // Detectar recursión de Script anidados
+                let script_count = cmd.args[0].matches("Script[").count();
+                if script_count > MAX_SCRIPT_DEPTH as usize {
+                    result =
+                        CommandOutcome::Error("Script: profundidad de anidamiento excedida".into());
+                    input_text.clear();
+                    return result;
+                }
                 let commands: Vec<String> = cmd.args[0]
                     .split(';')
                     .map(|s| s.trim().to_string())
@@ -3208,7 +3271,13 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
 
 pub fn expand_all_cas(text: &str, document: &Document) -> String {
     let mut current = text.to_string();
+    let mut iterations = 0;
+    const MAX_ITERATIONS: usize = 50;
     while let Some((cmd, inner, range)) = extract_cas_command(&current) {
+        iterations += 1;
+        if iterations > MAX_ITERATIONS {
+            break;
+        }
         let expanded_inner = expand_all_cas(&inner, document);
         let args: Vec<String> = split_args(&expanded_inner)
             .into_iter()
@@ -3480,8 +3549,8 @@ pub fn split_args(s: &str) -> Vec<String> {
     let mut start = 0;
     for (i, ch) in s.char_indices() {
         match ch {
-            '(' | '{' => depth += 1,
-            ')' | '}' => depth -= 1,
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth -= 1,
             ',' if depth == 0 => {
                 args.push(s[start..i].to_string());
                 start = i + 1;
@@ -3523,14 +3592,14 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             let mut b_str = None;
 
             if cmd.args.len() == 4 {
-                var = cmd.args.get(1).unwrap().trim().to_string();
+                var = cmd.args[1].trim().to_string();
                 a_str = cmd.args.get(2);
                 b_str = cmd.args.get(3);
             } else if cmd.args.len() == 3 {
                 a_str = cmd.args.get(1);
                 b_str = cmd.args.get(2);
             } else if cmd.args.len() == 2 {
-                var = cmd.args.get(1).unwrap().trim().to_string();
+                var = cmd.args[1].trim().to_string();
             }
 
             // Check if upper limit is a variable (e.g. Integral[expr, t, 0, x])
@@ -3629,7 +3698,7 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(20.0);
 
-            let graph_expr = expr_clean.replace(var, "x");
+            let graph_expr = replace_variable(&expr_clean, var, "x");
             let label = next_function_label(document);
             document.add_object(GeoObject::Function(
                 FunctionObj::new(&graph_expr).with_label(&label),
@@ -3823,7 +3892,7 @@ pub fn is_function_lhs(name: &str) -> bool {
         let args = args.trim_end_matches(')').trim();
         id.chars().all(|c| c.is_alphabetic() || c.is_ascii_digit())
             && !id.is_empty()
-            && !id.chars().next().unwrap().is_ascii_digit()
+            && !id.starts_with(|c: char| c.is_ascii_digit())
             && args.len() == 1
             && args.chars().all(|c| c.is_alphabetic())
     } else {
@@ -3999,7 +4068,13 @@ fn subscript_label(n: usize) -> String {
 }
 
 pub fn parse_point_str(s: &str) -> Result<(f64, f64), String> {
-    let s = s.trim().trim_start_matches('(').trim_end_matches(')');
+    let s = s.trim();
+    // Quitar solo un par de paréntesis externos, no todos
+    let s = if s.starts_with('(') && s.ends_with(')') {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    };
     let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
     if parts.len() == 2 {
         Ok((
@@ -4134,7 +4209,14 @@ pub fn parse_preview(input_text: &str) -> Option<GeoObject> {
 fn parse_brace_list(s: &str) -> Vec<f64> {
     let s = s.trim().trim_start_matches('{').trim_end_matches('}');
     s.split(',')
-        .filter_map(|v| v.trim().parse::<f64>().ok())
+        .filter_map(|v| {
+            let v = v.trim();
+            if v.is_empty() {
+                None
+            } else {
+                v.parse::<f64>().ok()
+            }
+        })
         .collect()
 }
 

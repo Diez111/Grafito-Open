@@ -183,6 +183,9 @@ pub struct GrafitoApp {
     pub hover_candidate_pos: Option<Point2>,
     pub hover_candidate_time: f64,
     pub hover_cached_analysis: Option<Option<HoveredAnalysis>>,
+    pub document_snapshot: std::sync::Arc<Document>,
+    pub snapshot_version: u64,
+    pub style_applied: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +298,9 @@ impl GrafitoApp {
             THEME_LIGHT.apply(&cc.egui_ctx);
         }
 
+        let snapshot_version = document.version;
+        let document_snapshot = std::sync::Arc::new(document.clone());
+
         Self {
             document,
             current_tool: Tool::default(),
@@ -347,6 +353,9 @@ impl GrafitoApp {
                 grafito_geometry::Color::new(0.9, 0.6, 0.1, 1.0),
                 grafito_geometry::Color::new(0.5, 0.1, 0.9, 1.0),
             ],
+            document_snapshot,
+            snapshot_version,
+            style_applied: None,
         }
     }
 
@@ -354,6 +363,20 @@ impl GrafitoApp {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("constraints");
         self.document.re_evaluate_constraints(order);
+    }
+
+    /// Devuelve un `Arc<Document>` para el callback GPU.
+    /// Solo clona el documento cuando el `version` cambia (contenido modificado).
+    /// Para cambios de view (pan/zoom), actualiza el view in-place vía `make_mut`.
+    fn document_for_callback(&mut self) -> std::sync::Arc<Document> {
+        if self.document.version != self.snapshot_version {
+            self.document_snapshot = std::sync::Arc::new(self.document.clone());
+            self.snapshot_version = self.document.version;
+        } else {
+            let snap = std::sync::Arc::make_mut(&mut self.document_snapshot);
+            snap.set_view(*self.document.view());
+        }
+        self.document_snapshot.clone()
     }
 
     pub(crate) fn save_state(&mut self) {
@@ -416,6 +439,11 @@ impl GrafitoApp {
             let path_str = path.to_string_lossy().to_string();
             if let Err(e) = crate::export::save_document(&self.document, &path_str) {
                 log::error!("Save failed: {}", e);
+                self.toasts.push(
+                    format!("Error al guardar: {}", e),
+                    grafito_ui::toast::ToastKind::Error,
+                    5.0,
+                );
             }
             if self.recent_files.len() >= 10 {
                 self.recent_files.remove(0);
@@ -441,7 +469,14 @@ impl GrafitoApp {
                     }
                     self.recent_files.push(path_str);
                 }
-                Err(e) => log::error!("Load failed: {}", e),
+                Err(e) => {
+                    log::error!("Load failed: {}", e);
+                    self.toasts.push(
+                        format!("Error al cargar: {}", e),
+                        grafito_ui::toast::ToastKind::Error,
+                        5.0,
+                    );
+                }
             }
         }
     }
@@ -734,8 +769,7 @@ impl GrafitoApp {
                 self.document.add_horizontal_constraint(id);
                 self.re_evaluate_constraints(&[]);
             }
-            PendingAction::Vertical { line } => {
-                let _ = line;
+            PendingAction::Vertical { line: _ } => {
                 if !self.is_line(id) {
                     self.pending_action = PendingAction::Vertical { line: None };
                     return;
@@ -976,7 +1010,10 @@ impl eframe::App for GrafitoApp {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("app_update");
 
-        configure_modern_style(ctx);
+        if self.style_applied != Some(self.dark_mode) {
+            configure_modern_style(ctx);
+            self.style_applied = Some(self.dark_mode);
+        }
         if self.is_view_changing
             && self.last_interaction_time.elapsed() > Duration::from_millis(150)
         {
@@ -1266,7 +1303,7 @@ impl eframe::App for GrafitoApp {
                             let callback = egui_wgpu::Callback::new_paint_callback(
                                 canvas_rect,
                                 crate::canvas::CanvasCallback {
-                                    document: std::sync::Arc::new(self.document.clone()),
+                                    document: self.document_for_callback(),
                                     dark_mode: self.dark_mode,
                                 },
                             );
@@ -1331,7 +1368,7 @@ impl eframe::App for GrafitoApp {
                         let callback = egui_wgpu::Callback::new_paint_callback(
                             canvas_rect,
                             crate::canvas::Canvas3DCallback {
-                                document: std::sync::Arc::new(self.document.clone()),
+                                document: self.document_for_callback(),
                                 camera: self.camera,
                                 dark_mode: self.dark_mode,
                                 screen_w: w,
@@ -1355,9 +1392,9 @@ impl eframe::App for GrafitoApp {
                             let pos = origin + egui::Vec2::new(pt.0, pt.1);
                             // Render ghost with reduced opacity
                             let ghost_color = egui::Color32::from_rgba_premultiplied(
-                                (ghost.color.r * 255.0) as u8,
-                                (ghost.color.g * 255.0) as u8,
-                                (ghost.color.b * 255.0) as u8,
+                                (ghost.color.r * 255.0).clamp(0.0, 255.0) as u8,
+                                (ghost.color.g * 255.0).clamp(0.0, 255.0) as u8,
+                                (ghost.color.b * 255.0).clamp(0.0, 255.0) as u8,
                                 80, // ~30% opacity
                             );
                             painter.circle_filled(pos, ghost.size.min(8.0) * 1.3, ghost_color);

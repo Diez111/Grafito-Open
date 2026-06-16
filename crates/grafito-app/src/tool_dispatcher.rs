@@ -175,7 +175,12 @@ pub fn dispatch_tool(
         }),
         Tool::Slider => {
             // Crear slider: usa el sistema de variables + VariableMeta
-            let name = format!("v{}", document.variables.len());
+            let mut idx = document.variables.len();
+            let mut name = format!("v{}", idx);
+            while document.variables.contains_key(&name) {
+                idx += 1;
+                name = format!("v{}", idx);
+            }
             document.set_variable(name.clone(), 0.0);
             document.variable_meta.insert(
                 name.clone(),
@@ -258,7 +263,13 @@ pub fn dispatch_tool(
                         Tool::YIntercept => format!("YIntercept[{}]", label),
                         Tool::XIntercept => format!("XIntercept[{}]", label),
                         Tool::Analyze => format!("Analyze[{}]", label),
-                        _ => unreachable!(),
+                        _ => {
+                            return ToolResult {
+                                objects: vec![],
+                                message: Some("Herramienta no soportada para análisis".into()),
+                                reset_tool: true,
+                            }
+                        }
                     };
                     let mut c = cmd;
                     let outcome = grafito_command::commands::process_input(document, &mut c);
@@ -563,8 +574,10 @@ fn handle_measure(
                         };
 
                         if area > 0.0 {
-                            let txt = grafito_core::TextObj::new(label.clone(), center.unwrap());
-                            document.add_object(grafito_core::GeoObject::Text(txt));
+                            if let Some(c) = center {
+                                let txt = grafito_core::TextObj::new(label.clone(), c);
+                                document.add_object(grafito_core::GeoObject::Text(txt));
+                            }
                             state.pending.clear();
                             return ToolResult {
                                 objects: vec![],

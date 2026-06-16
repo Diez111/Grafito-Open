@@ -23,6 +23,9 @@ pub fn euler<F>(f: F, t0: f64, y0: f64, t_end: f64, steps: usize) -> Vec<(f64, f
 where
     F: Fn(f64, f64) -> f64,
 {
+    if steps == 0 {
+        return vec![(t0, y0)];
+    }
     let mut points = Vec::with_capacity(steps + 1);
     let h = (t_end - t0) / steps as f64;
     let mut t = t0;
@@ -62,6 +65,9 @@ pub fn runge_kutta_4<F>(f: F, t0: f64, y0: f64, t_end: f64, steps: usize) -> Vec
 where
     F: Fn(f64, f64) -> f64,
 {
+    if steps == 0 {
+        return vec![(t0, y0)];
+    }
     let mut points = Vec::with_capacity(steps + 1);
     let h = (t_end - t0) / steps as f64;
     let mut t = t0;
@@ -109,6 +115,9 @@ pub fn euler_system<F>(
 where
     F: Fn(f64, &[f64]) -> Vec<f64>,
 {
+    if steps == 0 {
+        return vec![(t0, y0.clone())];
+    }
     let mut points = Vec::with_capacity(steps + 1);
     let h = (t_end - t0) / steps as f64;
     let mut t = t0;
@@ -118,7 +127,8 @@ where
 
     for _ in 0..steps {
         let dydt = f(t, &y);
-        for i in 0..y.len() {
+        let n = y.len().min(dydt.len());
+        for i in 0..n {
             y[i] += h * dydt[i];
         }
         t += h;
@@ -149,6 +159,9 @@ pub fn runge_kutta_4_system<F>(
 where
     F: Fn(f64, &[f64]) -> Vec<f64>,
 {
+    if steps == 0 {
+        return vec![(t0, y0.clone())];
+    }
     let mut points = Vec::with_capacity(steps + 1);
     let h = (t_end - t0) / steps as f64;
     let mut t = t0;
@@ -157,24 +170,28 @@ where
 
     points.push((t, y.clone()));
 
+    let mut y_temp = vec![0.0; n];
     for _ in 0..steps {
         let k1 = f(t, &y);
+        let k1 = if k1.len() == n { k1 } else { vec![0.0; n] };
 
-        let mut y_temp = vec![0.0; n];
         for i in 0..n {
             y_temp[i] = y[i] + h / 2.0 * k1[i];
         }
         let k2 = f(t + h / 2.0, &y_temp);
+        let k2 = if k2.len() == n { k2 } else { vec![0.0; n] };
 
         for i in 0..n {
             y_temp[i] = y[i] + h / 2.0 * k2[i];
         }
         let k3 = f(t + h / 2.0, &y_temp);
+        let k3 = if k3.len() == n { k3 } else { vec![0.0; n] };
 
         for i in 0..n {
             y_temp[i] = y[i] + h * k3[i];
         }
         let k4 = f(t + h, &y_temp);
+        let k4 = if k4.len() == n { k4 } else { vec![0.0; n] };
 
         for i in 0..n {
             y[i] += h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
@@ -279,5 +296,65 @@ mod tests {
         assert!((points[0].y - 1.0).abs() < 0.001);
         assert!((points[2].x - 2.0).abs() < 0.001);
         assert!((points[2].y - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_euler_zero_steps() {
+        let f = |_t: f64, y: f64| y;
+        let solution = euler(f, 0.0, 1.0, 1.0, 0);
+        assert_eq!(solution.len(), 1);
+        assert_eq!(solution[0], (0.0, 1.0));
+    }
+
+    #[test]
+    fn test_rk4_zero_steps() {
+        let f = |_t: f64, y: f64| y;
+        let solution = runge_kutta_4(f, 0.0, 1.0, 1.0, 0);
+        assert_eq!(solution.len(), 1);
+        assert_eq!(solution[0], (0.0, 1.0));
+    }
+
+    #[test]
+    fn test_euler_system_zero_steps() {
+        let f = |_t: f64, state: &[f64]| vec![state[1], -state[0]];
+        let solution = euler_system(f, 0.0, vec![1.0, 0.0], 1.0, 0);
+        assert_eq!(solution.len(), 1);
+        assert_eq!(solution[0].1, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_rk4_system_zero_steps() {
+        let f = |_t: f64, state: &[f64]| vec![state[1], -state[0]];
+        let solution = runge_kutta_4_system(f, 0.0, vec![1.0, 0.0], 1.0, 0);
+        assert_eq!(solution.len(), 1);
+        assert_eq!(solution[0].1, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_euler_system_wrong_length() {
+        // f returns a vector of different length — should not panic
+        let f = |_t: f64, _state: &[f64]| vec![1.0]; // returns 1, state has 2
+        let solution = euler_system(f, 0.0, vec![1.0, 0.0], 1.0, 10);
+        assert_eq!(solution.len(), 11);
+        // Only first component should be updated
+        assert!(solution[10].1[0].is_finite());
+    }
+
+    #[test]
+    fn test_rk4_system_wrong_length() {
+        // f returns a vector of different length — should not panic
+        let f = |_t: f64, _state: &[f64]| vec![1.0]; // returns 1, state has 2
+        let solution = runge_kutta_4_system(f, 0.0, vec![1.0, 0.0], 1.0, 10);
+        assert_eq!(solution.len(), 11);
+    }
+
+    #[test]
+    fn test_euler_negative_direction() {
+        // t_end < t0 → h is negative, should still work
+        let f = |_t: f64, y: f64| y;
+        let solution = euler(f, 1.0, 1.0, 0.0, 10);
+        assert_eq!(solution.len(), 11);
+        assert!((solution[0].0 - 1.0).abs() < 1e-10);
+        assert!((solution[10].0 - 0.0).abs() < 1e-10);
     }
 }

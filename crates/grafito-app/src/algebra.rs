@@ -84,11 +84,17 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         continue;
                     }
 
+                    // El Pencil es una herramienta de dibujo libre, no un
+                    // objeto analizable: no debe aparecer en el panel de álgebra.
+                    if matches!(obj, grafito_core::GeoObject::Pencil(_)) {
+                        continue;
+                    }
+
                     let o_col = obj.color();
                     let col = Color32::from_rgba_unmultiplied(
-                        (o_col.r * 255.0) as u8,
-                        (o_col.g * 255.0) as u8,
-                        (o_col.b * 255.0) as u8,
+                        (o_col.r * 255.0).clamp(0.0, 255.0) as u8,
+                        (o_col.g * 255.0).clamp(0.0, 255.0) as u8,
+                        (o_col.b * 255.0).clamp(0.0, 255.0) as u8,
                         255,
                     );
                     let expr = match obj {
@@ -280,7 +286,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
 
                     let (mut animating, mut min, mut max, step) = {
-                        let meta = app.document.variable_meta.get(name).unwrap();
+                        let Some(meta) = app.document.variable_meta.get(name) else {
+                            continue;
+                        };
                         (meta.animating, meta.min, meta.max, meta.step)
                     };
 

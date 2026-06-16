@@ -12,6 +12,22 @@ fn reduce_angle(a: f64) -> f64 {
     }
 }
 
+/// Convierte un f64 a orden de Bessel (i32) de forma segura.
+/// Redondea al entero más cercano, y devuelve 0 para NaN/Infinito.
+fn bessel_order(f: f64) -> i32 {
+    if !f.is_finite() {
+        return 0;
+    }
+    let rounded = f.round();
+    if rounded > 1000.0 {
+        1000
+    } else if rounded < -1000.0 {
+        -1000
+    } else {
+        rounded as i32
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Const(f64),
@@ -754,9 +770,30 @@ impl Expr {
             Floor(u) => u.eval_2d(var1, val1, var2, val2).floor(),
             Ceil(u) => u.eval_2d(var1, val1, var2, val2).ceil(),
             Round(u) => u.eval_2d(var1, val1, var2, val2).round(),
-            Sec(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos(),
-            Csc(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin(),
-            Cot(u) => 1.0 / reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan(),
+            Sec(u) => {
+                let c = reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos();
+                if c.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / c
+                }
+            }
+            Csc(u) => {
+                let s = reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin();
+                if s.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / s
+                }
+            }
+            Cot(u) => {
+                let t = reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan();
+                if t.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / t
+                }
+            }
             Asinh(u) => u.eval_2d(var1, val1, var2, val2).asinh(),
             Acosh(u) => u.eval_2d(var1, val1, var2, val2).acosh(),
             Atanh(u) => u.eval_2d(var1, val1, var2, val2).atanh(),
@@ -803,15 +840,15 @@ impl Expr {
                 b.eval_2d(var1, val1, var2, val2),
             ),
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                n.eval_2d(var1, val1, var2, val2) as i32,
+                bessel_order(n.eval_2d(var1, val1, var2, val2)),
                 u.eval_2d(var1, val1, var2, val2),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                n.eval_2d(var1, val1, var2, val2) as i32,
+                bessel_order(n.eval_2d(var1, val1, var2, val2)),
                 u.eval_2d(var1, val1, var2, val2),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                n.eval_2d(var1, val1, var2, val2) as i32,
+                bessel_order(n.eval_2d(var1, val1, var2, val2)),
                 u.eval_2d(var1, val1, var2, val2),
             ),
             Sum(_, _, _, _) => f64::NAN, // expanded by preprocess_expr before AST eval
@@ -958,9 +995,30 @@ impl Expr {
             Floor(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).floor(),
             Ceil(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).ceil(),
             Round(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).round(),
-            Sec(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos(),
-            Csc(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin(),
-            Cot(u) => 1.0 / reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan(),
+            Sec(u) => {
+                let c = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos();
+                if c.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / c
+                }
+            }
+            Csc(u) => {
+                let s = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin();
+                if s.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / s
+                }
+            }
+            Cot(u) => {
+                let t = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan();
+                if t.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / t
+                }
+            }
             Asinh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).asinh(),
             Acosh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).acosh(),
             Atanh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).atanh(),
@@ -1018,15 +1076,15 @@ impl Expr {
                 b.eval_3d(var1, val1, var2, val2, var3, val3),
             ),
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
                 u.eval_3d(var1, val1, var2, val2, var3, val3),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
                 u.eval_3d(var1, val1, var2, val2, var3, val3),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                n.eval_3d(var1, val1, var2, val2, var3, val3) as i32,
+                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
                 u.eval_3d(var1, val1, var2, val2, var3, val3),
             ),
             Lt(a, b) => {
@@ -1162,9 +1220,30 @@ impl Expr {
             Floor(u) => u.eval_at(var, value).floor(),
             Ceil(u) => u.eval_at(var, value).ceil(),
             Round(u) => u.eval_at(var, value).round(),
-            Sec(u) => 1.0 / reduce_angle(u.eval_at(var, value)).cos(),
-            Csc(u) => 1.0 / reduce_angle(u.eval_at(var, value)).sin(),
-            Cot(u) => 1.0 / reduce_angle(u.eval_at(var, value)).tan(),
+            Sec(u) => {
+                let c = reduce_angle(u.eval_at(var, value)).cos();
+                if c.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / c
+                }
+            }
+            Csc(u) => {
+                let s = reduce_angle(u.eval_at(var, value)).sin();
+                if s.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / s
+                }
+            }
+            Cot(u) => {
+                let t = reduce_angle(u.eval_at(var, value)).tan();
+                if t.abs() < 1e-15 {
+                    f64::NAN
+                } else {
+                    1.0 / t
+                }
+            }
             Asinh(u) => u.eval_at(var, value).asinh(),
             Acosh(u) => u.eval_at(var, value).acosh(),
             Atanh(u) => u.eval_at(var, value).atanh(),
@@ -1203,15 +1282,15 @@ impl Expr {
                 crate::special_functions::beta(a.eval_at(var, value), b.eval_at(var, value))
             }
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                n.eval_at(var, value) as i32,
+                bessel_order(n.eval_at(var, value)),
                 u.eval_at(var, value),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                n.eval_at(var, value) as i32,
+                bessel_order(n.eval_at(var, value)),
                 u.eval_at(var, value),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                n.eval_at(var, value) as i32,
+                bessel_order(n.eval_at(var, value)),
                 u.eval_at(var, value),
             ),
             Lt(a, b) => {
@@ -1744,7 +1823,7 @@ impl Expr {
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
                     (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_j(*cn as i32, *ca))
+                        Const(crate::special_functions::bessel_j(bessel_order(*cn), *ca))
                     }
                     _ => BesselJ(Box::new(sn), Box::new(sa)),
                 }
@@ -1754,7 +1833,7 @@ impl Expr {
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
                     (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_y(*cn as i32, *ca))
+                        Const(crate::special_functions::bessel_y(bessel_order(*cn), *ca))
                     }
                     _ => BesselY(Box::new(sn), Box::new(sa)),
                 }
@@ -1764,7 +1843,7 @@ impl Expr {
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
                     (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_i(*cn as i32, *ca))
+                        Const(crate::special_functions::bessel_i(bessel_order(*cn), *ca))
                     }
                     _ => BesselI(Box::new(sn), Box::new(sa)),
                 }

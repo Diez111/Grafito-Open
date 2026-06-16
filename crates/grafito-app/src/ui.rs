@@ -55,7 +55,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
                     ui.separator();
                     if ui.button("Salir").clicked() {
-                        std::process::exit(0);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.menu_button("Editar", |ui| {

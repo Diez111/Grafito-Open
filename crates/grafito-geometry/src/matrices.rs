@@ -49,11 +49,46 @@ impl Matrix {
     }
 
     pub fn get(&self, r: usize, c: usize) -> f64 {
+        debug_assert!(
+            r < self.rows && c < self.cols,
+            "Matrix::get index ({}, {}) out of bounds for {}x{} matrix",
+            r,
+            c,
+            self.rows,
+            self.cols
+        );
         self.data[r * self.cols + c]
     }
 
     pub fn set(&mut self, r: usize, c: usize, val: f64) {
+        debug_assert!(
+            r < self.rows && c < self.cols,
+            "Matrix::set index ({}, {}) out of bounds for {}x{} matrix",
+            r,
+            c,
+            self.rows,
+            self.cols
+        );
         self.data[r * self.cols + c] = val;
+    }
+
+    /// Versión segura de `get` que retorna `None` si los índices están fuera de rango.
+    pub fn checked_get(&self, r: usize, c: usize) -> Option<f64> {
+        if r < self.rows && c < self.cols {
+            Some(self.data[r * self.cols + c])
+        } else {
+            None
+        }
+    }
+
+    /// Versión segura de `set` que retorna `false` si los índices están fuera de rango.
+    pub fn checked_set(&mut self, r: usize, c: usize, val: f64) -> bool {
+        if r < self.rows && c < self.cols {
+            self.data[r * self.cols + c] = val;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn add(&self, other: &Matrix) -> Option<Matrix> {

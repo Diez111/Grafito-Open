@@ -87,6 +87,9 @@ impl DD {
 
     /// Compute sin using Taylor series
     pub fn sin(&self) -> Self {
+        if !self.hi.is_finite() {
+            return Self::new(f64::NAN, f64::NAN);
+        }
         // Reduce to [-pi, pi]
         let two_pi = Self::from_f64(2.0 * PI);
         let mut x = *self;
@@ -275,7 +278,14 @@ impl PartialEq for DD {
 
 impl PartialOrd for DD {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.to_f64().partial_cmp(&other.to_f64())
+        // Comparar primero por hi, luego por lo para preservar precisión DD.
+        if self.hi < other.hi {
+            Some(std::cmp::Ordering::Less)
+        } else if self.hi > other.hi {
+            Some(std::cmp::Ordering::Greater)
+        } else {
+            self.lo.partial_cmp(&other.lo)
+        }
     }
 }
 

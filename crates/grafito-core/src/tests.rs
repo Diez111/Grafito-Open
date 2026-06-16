@@ -1578,4 +1578,37 @@ mod tests {
             y_pos1
         );
     }
+
+    #[test]
+    fn test_migrate_complex_symbol_with_subscript() {
+        let mut doc = Document::new();
+        let mut cg = ComplexGridObj::new("z", -5.0, 5.0, -5.0, 5.0);
+        cg.label = "z₁".to_string();
+        let id = doc.add_object(GeoObject::ComplexGrid(cg));
+        doc.migrate_complex_symbol("w");
+        let obj = doc.get_object(id).unwrap();
+        assert_eq!(obj.label(), "w₁", "z₁ should migrate to w₁");
+    }
+
+    #[test]
+    fn test_migrate_complex_symbol_base() {
+        let mut doc = Document::new();
+        let cg = ComplexGridObj::new("z", -5.0, 5.0, -5.0, 5.0);
+        let id = doc.add_object(GeoObject::ComplexGrid(cg));
+        doc.migrate_complex_symbol("w");
+        let obj = doc.get_object(id).unwrap();
+        assert_eq!(obj.label(), "w", "z should migrate to w");
+    }
+
+    #[test]
+    fn test_migrate_complex_symbol_no_match() {
+        let mut doc = Document::new();
+        let cg = ComplexGridObj::new("z", -5.0, 5.0, -5.0, 5.0);
+        let mut cg = cg;
+        cg.label = "f".to_string();
+        let id = doc.add_object(GeoObject::ComplexGrid(cg));
+        doc.migrate_complex_symbol("w");
+        let obj = doc.get_object(id).unwrap();
+        assert_eq!(obj.label(), "f", "f should not be migrated");
+    }
 }

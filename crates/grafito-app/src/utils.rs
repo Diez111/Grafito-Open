@@ -10,10 +10,10 @@ use crate::snap::SnapConfig;
 
 pub(crate) fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
-        (c.r * 255.0) as u8,
-        (c.g * 255.0) as u8,
-        (c.b * 255.0) as u8,
-        (c.a * 255.0) as u8,
+        (c.r * 255.0).clamp(0.0, 255.0) as u8,
+        (c.g * 255.0).clamp(0.0, 255.0) as u8,
+        (c.b * 255.0).clamp(0.0, 255.0) as u8,
+        (c.a * 255.0).clamp(0.0, 255.0) as u8,
     )
 }
 

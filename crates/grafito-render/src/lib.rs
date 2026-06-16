@@ -1433,105 +1433,6 @@ impl Renderer {
         (vertices, indices)
     }
 
-    fn marching_squares_contour(
-        expr_lhs: &str,
-        expr_rhs: &str,
-        _level: f64,
-        x_min: f64,
-        x_max: f64,
-        y_min: f64,
-        y_max: f64,
-        resolution: usize,
-    ) -> Vec<Point2> {
-        let dx = (x_max - x_min) / resolution as f64;
-        let dy = (y_max - y_min) / resolution as f64;
-        let mut segments = Vec::new();
-
-        for i in 0..resolution {
-            let x0 = x_min + i as f64 * dx;
-            let x1 = x0 + dx;
-            for j in 0..resolution {
-                let y0 = y_min + j as f64 * dy;
-                let y1 = y0 + dy;
-
-                let f = |x: f64, y: f64| -> f64 {
-                    let vars = vec![("x".to_string(), x), ("y".to_string(), y)];
-                    let lhs = grafito_geometry::expr::evaluate(expr_lhs, &vars).unwrap_or(f64::NAN);
-                    let rhs = grafito_geometry::expr::evaluate(expr_rhs, &vars).unwrap_or(f64::NAN);
-                    if lhs.is_nan() || rhs.is_nan() {
-                        f64::NAN
-                    } else {
-                        lhs - rhs
-                    }
-                };
-
-                let v00 = f(x0, y0);
-                let v10 = f(x1, y0);
-                let v11 = f(x1, y1);
-                let v01 = f(x0, y1);
-
-                let case = (v00 >= 0.0) as u8
-                    | ((v10 >= 0.0) as u8) << 1
-                    | ((v11 >= 0.0) as u8) << 2
-                    | ((v01 >= 0.0) as u8) << 3;
-
-                let mid_bottom = Point2::new((x0 + x1) * 0.5, y0);
-                let mid_right = Point2::new(x1, (y0 + y1) * 0.5);
-                let mid_top = Point2::new((x0 + x1) * 0.5, y1);
-                let mid_left = Point2::new(x0, (y0 + y1) * 0.5);
-
-                let _bl = Point2::new(x0, y0);
-                let _br = Point2::new(x1, y0);
-                let _tr = Point2::new(x1, y1);
-                let _tl = Point2::new(x0, y1);
-
-                match case {
-                    0 | 15 => {}
-                    1 | 14 => segments.extend_from_slice(&[(mid_bottom, mid_left)]),
-                    2 | 13 => segments.extend_from_slice(&[(mid_right, mid_bottom)]),
-                    3 | 12 => segments.extend_from_slice(&[(mid_right, mid_left)]),
-                    4 | 11 => segments.extend_from_slice(&[(mid_top, mid_right)]),
-                    5 => {
-                        segments.extend_from_slice(&[(mid_bottom, mid_left), (mid_top, mid_right)]);
-                    }
-                    6 | 9 => segments.extend_from_slice(&[(mid_top, mid_bottom)]),
-                    7 | 8 => segments.extend_from_slice(&[(mid_top, mid_left)]),
-                    10 => {
-                        segments.extend_from_slice(&[(mid_right, mid_bottom), (mid_left, mid_top)]);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let mut points = Vec::new();
-        for (a, b) in segments {
-            if points.len() > 10000 {
-                break;
-            }
-            if points.is_empty() {
-                points.push(a);
-            }
-            points.push(b);
-        }
-        points
-    }
-
-    fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
-        let c = v * s;
-        let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-        let m = v - c;
-        let (r, g, b) = match (h * 6.0) as i32 % 6 {
-            0 => (c, x, 0.0),
-            1 => (x, c, 0.0),
-            2 => (0.0, c, x),
-            3 => (0.0, x, c),
-            4 => (x, 0.0, c),
-            _ => (c, 0.0, x),
-        };
-        Color::new(r + m, g + m, b + m, 1.0)
-    }
-
     fn build_grid(
         &self,
         vertices: &mut Vec<Vertex>,
@@ -3284,7 +3185,13 @@ impl Renderer {
     fn face_normal(a: &Point3D, b: &Point3D, c: &Point3D) -> glam::Vec3 {
         let u = glam::Vec3::new((b.x - a.x) as f32, (b.y - a.y) as f32, (b.z - a.z) as f32);
         let v = glam::Vec3::new((c.x - a.x) as f32, (c.y - a.y) as f32, (c.z - a.z) as f32);
-        u.cross(v).normalize()
+        let n = u.cross(v);
+        let len = n.length();
+        if len < 1e-10 {
+            glam::Vec3::new(0.0, 1.0, 0.0)
+        } else {
+            n / len
+        }
     }
 
     fn icosphere(subdivisions: usize) -> (Vec<(f64, f64, f64)>, Vec<u32>) {

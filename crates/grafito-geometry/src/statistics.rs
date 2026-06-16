@@ -228,6 +228,9 @@ pub fn histogram(data: &[f64], bins: usize) -> Vec<(f64, f64, f64)> {
     };
     let mut counts = vec![0usize; bins];
     for &v in data {
+        if !v.is_finite() {
+            continue;
+        }
         let idx = ((v - lo) / width).floor() as usize;
         let idx = idx.min(bins - 1);
         counts[idx] += 1;
@@ -291,37 +294,11 @@ pub fn boxplot_stats(data: &[f64]) -> Option<(f64, f64, f64, f64, f64, Vec<f64>)
 }
 
 fn erf(x: f64) -> f64 {
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-    sign * y
+    crate::special_functions::erf(x)
 }
 
 fn gamma_ln(x: f64) -> f64 {
-    let c = [
-        76.18009172947146,
-        -86.50532032941677,
-        24.01409824083091,
-        -1.231739572450155,
-        0.1208650973866179e-2,
-        -0.5395239384953e-5,
-    ];
-    let mut y = x;
-    let mut tmp = x + 5.5;
-    tmp -= (x + 0.5) * tmp.ln();
-    let mut ser = 1.000000000190015;
-    for &cj in &c {
-        y += 1.0;
-        ser += cj / y;
-    }
-    -tmp + (2.5066282746310005 * ser / x).ln()
+    crate::special_functions::ln_gamma(x)
 }
 
 pub fn normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
@@ -428,6 +405,32 @@ pub fn student_t_cdf(x: f64, nu: f64) -> f64 {
     } else {
         0.5 * i
     }
+}
+
+/// Cuantil (inversa de la CDF) de la distribución t-Student.
+/// Usa bisección sobre `student_t_cdf`.
+pub fn student_t_quantile(p: f64, nu: f64) -> f64 {
+    if p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 1.0 {
+        return f64::INFINITY;
+    }
+    if nu <= 0.0 {
+        return f64::NAN;
+    }
+    let mut lo = -100.0;
+    let mut hi = 100.0;
+    for _ in 0..100 {
+        let mid = (lo + hi) / 2.0;
+        let cdf = student_t_cdf(mid, nu);
+        if cdf < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    (lo + hi) / 2.0
 }
 
 fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
@@ -871,7 +874,11 @@ pub fn confidence_interval_mean(data: &[f64], confidence: f64) -> Option<(f64, f
     let se = sample_std / (n as f64).sqrt();
 
     let alpha = 1.0 - confidence;
-    let t_crit = normal_quantile(1.0 - alpha / 2.0, 0.0, 1.0);
+    let t_crit = if n < 30 {
+        student_t_quantile(1.0 - alpha / 2.0, (n - 1) as f64)
+    } else {
+        normal_quantile(1.0 - alpha / 2.0, 0.0, 1.0)
+    };
 
     let margin = t_crit * se;
     let lower = sample_mean - margin;

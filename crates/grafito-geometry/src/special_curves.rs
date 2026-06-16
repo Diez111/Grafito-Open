@@ -17,6 +17,9 @@ use crate::Point2;
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn cardioid(a: f64, steps: usize) -> Vec<Point2> {
+    if steps == 0 {
+        return vec![];
+    }
     let mut points = Vec::with_capacity(steps);
     for i in 0..steps {
         let theta = 2.0 * std::f64::consts::PI * (i as f64) / (steps as f64);
@@ -156,6 +159,9 @@ pub fn lissajous(
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn epicycloid(r: f64, k: f64, steps: usize) -> Vec<Point2> {
+    if steps == 0 {
+        return vec![];
+    }
     let mut points = Vec::with_capacity(steps);
     let max_theta = 2.0 * std::f64::consts::PI * k.ceil();
 

@@ -266,13 +266,20 @@ impl FunctionComputePipeline {
         // Synchronously map the readback buffer. This blocks the CPU until the
         // GPU work finishes, matching the implicit-curve compute path.
         let slice = self.values_readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |result| {
-            if let Err(e) = result {
-                log::error!("Function compute readback failed: {:?}", e);
+        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map_ok_clone = map_ok.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if result.is_ok() {
+                map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                log::error!("Function compute readback failed: {:?}", result.err());
             }
         });
         device.poll(wgpu::Maintain::Wait);
 
+        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let data = slice.get_mapped_range();
         let values_f32: &[f32] = bytemuck::cast_slice(&data);
         let ys: Vec<f64> = values_f32[..=grid_size]

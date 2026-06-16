@@ -74,10 +74,7 @@ impl ConstraintEquation for DistanceEq {
         let by = vars[self.b_idx + 1];
         let dx = ax - bx;
         let dy = ay - by;
-        let d = (dx * dx + dy * dy).sqrt();
-        if d < 1e-12 {
-            return Vec::new();
-        }
+        let d = (dx * dx + dy * dy).sqrt().max(1e-12);
         let inv = 1.0 / d;
         vec![
             (0, self.a_idx, dx * inv),
@@ -191,9 +188,8 @@ impl ConstraintEquation for AngleEq {
 
         let (u, l1) = normalized_direction_with_length(s1, e1);
         let (v, l2) = normalized_direction_with_length(s2, e2);
-        if l1 < 1e-12 || l2 < 1e-12 {
-            return Vec::new();
-        }
+        let l1 = l1.max(1e-12);
+        let l2 = l2.max(1e-12);
 
         let cross = u.x * v.y - u.y * v.x;
         let dot = u.x * v.x + u.y * v.y;
@@ -327,10 +323,7 @@ impl ConstraintEquation for TangentEq {
         let dx = end.x - start.x;
         let dy = end.y - start.y;
         let len2 = dx * dx + dy * dy;
-        let len = len2.sqrt();
-        if len < 1e-12 {
-            return Vec::new();
-        }
+        let len = len2.sqrt().max(1e-12);
 
         let n = dx * (start.y - self.center.y) - dy * (start.x - self.center.x);
         let signed = n / len;
@@ -676,13 +669,9 @@ impl ConstraintEquation for EqualLengthEq {
         let len1 = (u_x * u_x + u_y * u_y).sqrt();
         let w_x = cx - dx;
         let w_y = cy - dy;
-        let len2 = (w_x * w_x + w_y * w_y).sqrt();
+        let len2 = (w_x * w_x + w_y * w_y).sqrt().max(1e-12);
 
-        if len1 < 1e-12 || len2 < 1e-12 {
-            return Vec::new();
-        }
-
-        let il1 = 1.0 / len1;
+        let il1 = 1.0 / len1.max(1e-12);
         let il2 = 1.0 / len2;
 
         let mut triples = Vec::with_capacity(8);

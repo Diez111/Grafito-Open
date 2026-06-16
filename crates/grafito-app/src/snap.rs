@@ -223,7 +223,9 @@ fn snap_to_feature(
         let results = analyze_object(obj, local_bounds, &vars, &features);
         for r in results {
             let d = r.point.distance(&world);
-            if d <= tol && (best.is_none() || d < best.as_ref().unwrap().0) {
+            if d <= tol
+                && (best.is_none() || d < best.as_ref().map(|b| b.0).unwrap_or(f64::INFINITY))
+            {
                 best = Some((d, r.point, r.feature, r.label));
             }
         }
@@ -304,7 +306,9 @@ fn snap_to_object(
         }
         if let grafito_core::GeoObject::Point(p) = obj {
             let d = p.position.distance(&world);
-            if d <= tol_world && (best.is_none() || d < best.as_ref().unwrap().0) {
+            if d <= tol_world
+                && (best.is_none() || d < best.as_ref().map(|b| b.0).unwrap_or(f64::INFINITY))
+            {
                 best = Some((
                     d,
                     p.position,

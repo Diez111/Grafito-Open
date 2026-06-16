@@ -248,13 +248,20 @@ impl ParametricComputePipeline {
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.values_readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |result| {
-            if let Err(e) = result {
-                log::error!("Parametric compute readback failed: {:?}", e);
+        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map_ok_clone = map_ok.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if result.is_ok() {
+                map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                log::error!("Parametric compute readback failed: {:?}", result.err());
             }
         });
         device.poll(wgpu::Maintain::Wait);
 
+        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let data = slice.get_mapped_range();
         let values_f32: &[f32] = bytemuck::cast_slice(&data);
         let out: Vec<f32> = values_f32[..output_count].to_vec();

@@ -50,9 +50,9 @@ pub fn export_svg(doc: &Document, width: f64, height: f64) -> String {
         let c = obj.color();
         let rgb = format!(
             "rgb({},{},{})",
-            (c.r * 255.0) as u8,
-            (c.g * 255.0) as u8,
-            (c.b * 255.0) as u8
+            (c.r * 255.0).clamp(0.0, 255.0) as u8,
+            (c.g * 255.0).clamp(0.0, 255.0) as u8,
+            (c.b * 255.0).clamp(0.0, 255.0) as u8
         );
         match obj {
             grafito_core::GeoObject::Point(p) => {

@@ -178,6 +178,9 @@ pub fn compute_fractal(
 ) -> Vec<FractalPixel> {
     use rayon::prelude::*;
 
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
     let dx = (x_max - x_min) / width as f64;
     let dy = (y_max - y_min) / height as f64;
 
@@ -220,7 +223,7 @@ pub fn compute_fractal(
 }
 
 pub fn fractal_color_hsv(iter: u32, max_iter: u32, smooth: f64) -> (f32, f32, f32, f32) {
-    if iter >= max_iter {
+    if iter >= max_iter || max_iter == 0 {
         return (0.0, 0.0, 0.0, 1.0);
     }
     let t = smooth / max_iter as f64;
