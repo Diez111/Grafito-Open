@@ -5,6 +5,29 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.1.2-beta] - 2026-06-16
+
+#### Añadido
+- **Comandos de medición**: `Area[objeto]`, `Circumference[objeto]`, `Center[objeto]`, `Length[objeto]`, `Slope[objeto]`. `Area` dibuja un polígono sombreado con el valor del área. `Center` crea un punto en el centro de Círculo, Elipse, Parábola o Hipérbola.
+- **Comandos de construcción geométrica**: `Sector[centro, radio, angulo]` (sector circular con polígono sombreado), `Arc[centro, radio, ang1, ang2]` (arco circular).
+- **Comandos CAS de cálculo diferencial/integral**: `TangentAt[función, x]` (línea tangente), `NormalAt[función, x]` (línea normal), `ArcLength[función, a, b]` (∫√(1+f'²)dx), `CurvatureAt[función, x]` (κ = |f''| / (1+f'²)^(3/2)), `VolumeOfRevolution[función, a, b]` (π∫f²dx), `SurfaceOfRevolution[función, a, b]` (2π∫|f|√(1+f'²)dx). Alias en español: `TangenteEn`, `NormalEn`, `LongitudArco`, `CurvaturaEn`, `VolumenRevolucion`, `SuperficieRevolucion`.
+- **Snap a intersecciones**: nueva función `snap_to_intersections` que computa intersecciones entre pares de objetos visibles (Line-Line, Line-Circle, Circle-Circle, Function-Line, Function-Function) al hacer hover cerca del cursor. Muestra "Intersección: (x, y)" como etiqueta de snap.
+- **Grupos nuevos en la toolbar**: `ANALYSIS` (Root, Extremum, Inflection, YIntercept, XIntercept, Intersect, Analyze), `CONSTRAINT` (Coincident, DistanceConstraint, Angle, Horizontal, Vertical, EqualLength, Symmetry) y `BOOLEAN` (Union, Intersection, Difference, XOR).
+- **Iconos vectoriales**: `icon_analysis` (mira con curva + marcador de raíz), `icon_constraint` (regla con bola en cada extremo).
+- **Panel de álgebra**: ahora muestra área, perímetro, longitud y volumen calculados en tiempo real para Línea, Círculo, Elipse, Polígono, Esfera 3D, Cubo 3D, Cilindro 3D, Cono 3D y Segmento 3D.
+- **Reflect mejorado**: `Reflect[objeto, punto, punto]` ahora refleja objetos completos (Point, Line, Circle, Polygon) preservando el label con sufijo `'`, en lugar de solo crear un punto reflejado R'.
+
+#### Cambiado
+- **Tool Angle**: ahora dibuja un arco visual (sector poligonal sombreado) entre los rayos medidos, en vez de solo un label de texto flotante.
+- **Tool Area**: dibuja un polígono sombreado relleno para áreas de círculo, polígono y área bajo curva (función), con un color azul semitransparente distintivo.
+- **Color picker**: rueda HSV rediseñada con un gradiente Mesh ultra-suave (64 segmentos) en vez de sectores poligonales discretos. Ajuste fino de layout (136 px, 280 px altura).
+- **Toolbar**: reorganización en secciones lógicas: 12 grupos (antes 10), añadidas herramientas `Ray`, `Vector`, `ImplicitCurve`, `VectorField2D`, `ConicByFivePoints` que estaban disponibles por comando pero no en la UI.
+
+#### Corregido
+- **Toolbar roto**: 21 herramientas tenían mapeos erróneos (`Tool::Select` o duplicados) — `Segment` apuntaba a `Line`, `RegularPolygon` a `Polygon`, `EllipseByFoci`/`ParabolaByFocusDirectrix`/`HyperbolaByFoci` a `Select`, `ParametricCurve2D`/`PolarCurve` a `Select`. Todas corregidas a sus `Tool` correspondientes. Eliminadas entradas inexistentes (Pirámide, Cono, Cilindro, Toro, Hipercubo 4D, Texto) y duplicados (Círculo centro-radio).
+- **Snap a curva roto**: `snap_to_curve` descartaba los resultados para Círculo y Línea con `let _ = c;` y `let _ = l;` sin crear el `SnapResult`. Ahora proyecta correctamente el punto del cursor sobre el borde del círculo o la línea.
+- **Cierre de color picker**: se podía cerrar con escape pero dejaba el toggle del panel desincronizado — corregido con `fixed_size` consistente.
+
 ## [1.1.0-beta] - 2026-06-16
 
 #### Añadido

@@ -419,8 +419,8 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         egui::Window::new("🎨 Selector de Color")
             .collapsible(false)
             .resizable(false)
-            .default_width(320.0)
-            .fixed_size([320.0, 300.0])
+            .default_width(330.0)
+            .fixed_size([330.0, 280.0])
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .open(&mut keep_open)
             .show(ctx, |ui| {

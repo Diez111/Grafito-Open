@@ -1,4 +1,4 @@
-//! Horizontal toolbar with 10 tool groups, each with dropdown.
+//! Horizontal toolbar with tool groups, each with dropdown.
 //! Icons are drawn with egui::Painter — no Unicode dependency.
 //! Pattern: one icon per group (last used tool), ▾ opens sub-menu.
 
@@ -19,19 +19,20 @@ const GROUP_POINT: &[ToolEntry] = &[
 
 const GROUP_LINE: &[ToolEntry] = &[
     (Tool::Line, "╱ Recta", "F3"),
-    (Tool::Line, "─ Segmento", ""),
+    (Tool::Segment, "─ Segmento", ""),
+    (Tool::Ray, "→ Semirrecta", ""),
+    (Tool::Vector, "→ Vector", ""),
     (Tool::Perpendicular, "⊥ Perpendicular", ""),
 ];
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
     (Tool::Circle, "○ Círculo centro-punto", "F4"),
-    (Tool::Circle, "◎ Círculo centro-radio", ""),
     (Tool::Tangent, "⌒ Tangente", ""),
 ];
 
 const GROUP_POLYGON: &[ToolEntry] = &[
     (Tool::Polygon, "△ Polígono", "F5"),
-    (Tool::Polygon, "⬡ Polígono regular", ""),
+    (Tool::RegularPolygon, "⬡ Polígono regular", ""),
 ];
 
 const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "✏ Lápiz", "Ctrl+P")];
@@ -39,15 +40,22 @@ const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "✏ Lápiz", "Ctrl+P")];
 const GROUP_ERASER: &[ToolEntry] = &[(Tool::Eraser, "🩹 Borrador", "Ctrl+E")];
 
 const GROUP_CONIC: &[ToolEntry] = &[
-    (Tool::Select, "◯ Elipse", ""),
-    (Tool::Select, "∪ Parábola", ""),
-    (Tool::Select, "⊃ Hipérbola", ""),
+    (Tool::EllipseByFoci, "◯ Elipse por focos", ""),
+    (
+        Tool::ParabolaByFocusDirectrix,
+        "∪ Parábola foco-directriz",
+        "",
+    ),
+    (Tool::HyperbolaByFoci, "⊃ Hipérbola por focos", ""),
+    (Tool::ConicByFivePoints, "⬭ Cónica por 5 puntos", ""),
 ];
 
 const GROUP_CURVE: &[ToolEntry] = &[
     (Tool::Function, "f(x) Función", "F6"),
-    (Tool::Select, "(x,y) Paramétrica 2D", ""),
-    (Tool::Select, "r(θ) Polar", ""),
+    (Tool::ParametricCurve2D, "(x,y) Paramétrica 2D", ""),
+    (Tool::PolarCurve, "r(θ) Polar", ""),
+    (Tool::ImplicitCurve, "F(x,y)=0 Implícita", ""),
+    (Tool::VectorField2D, "⇄ Campo vectorial", ""),
     (Tool::Locus, "⌒ Lugar geométrico", ""),
 ];
 
@@ -58,15 +66,37 @@ const GROUP_MEASURE: &[ToolEntry] = &[
     (Tool::Slope, "m Pendiente", ""),
 ];
 
+const GROUP_ANALYSIS: &[ToolEntry] = &[
+    (Tool::Root, "√ Raíces", ""),
+    (Tool::Extremum, "▲ Extremos", ""),
+    (Tool::Inflection, "∿ Inflexión", ""),
+    (Tool::YIntercept, "↕ Intersección Y", ""),
+    (Tool::XIntercept, "↔ Intersección X", ""),
+    (Tool::Intersect, "⊕ Intersección", ""),
+    (Tool::Analyze, "⚙ Analizar", ""),
+];
+
+const GROUP_CONSTRAINT: &[ToolEntry] = &[
+    (Tool::Coincident, "⊙ Coincidente", ""),
+    (Tool::DistanceConstraint, "↔ Distancia", ""),
+    (Tool::AngleConstraint, "∠ Ángulo", ""),
+    (Tool::Horizontal, "─ Horizontal", ""),
+    (Tool::Vertical, "│ Vertical", ""),
+    (Tool::EqualLength, "= Igual longitud", ""),
+    (Tool::Symmetry, "⇋ Simetría", ""),
+];
+
+const GROUP_BOOLEAN: &[ToolEntry] = &[
+    (Tool::PolygonUnion, "∪ Unión", ""),
+    (Tool::PolygonIntersection, "∩ Intersección", ""),
+    (Tool::PolygonDifference, "∖ Diferencia", ""),
+    (Tool::PolygonXor, "⊻ XOR", ""),
+];
+
 const GROUP_3D: &[ToolEntry] = &[
     (Tool::Point3D, "● Punto 3D", ""),
     (Tool::Sphere3D, "◯ Esfera", "F8"),
     (Tool::Cube3D, "□ Cubo", "F9"),
-    (Tool::Select, "△ Pirámide", ""),
-    (Tool::Select, "▲ Cono", ""),
-    (Tool::Select, "▭ Cilindro", ""),
-    (Tool::Select, "◎ Toro", ""),
-    (Tool::Select, "⏣ Hipercubo 4D", ""),
 ];
 
 const GROUP_ADVANCED: &[ToolEntry] = &[
@@ -80,7 +110,6 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
     (Tool::Slider, "═ Deslizador", ""),
     (Tool::Button, "☑ Checkbox/Botón", ""),
     (Tool::Image, "🖼 Imagen", ""),
-    (Tool::Select, "T Texto", ""),
 ];
 
 // ── Vector icon drawing functions ──
@@ -88,13 +117,12 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
 fn icon_move(painter: &Painter, rect: Rect, color: Color32) {
     let c = rect.center();
     let s = rect.width() * 0.38;
-    // Arrow vertices: top-left, bottom-middle, inner-corner, right-middle
     let pts = vec![
-        c + vec2(-s, -s),            // Top-left tip
-        c + vec2(-s * 0.2, s * 0.8), // Bottom tip
-        c + vec2(-s * 0.1, s * 0.2), // Inner corner
-        c + vec2(s * 0.8, s * 0.3),  // Right tip
-        c + vec2(-s, -s),            // Back to start to close the path
+        c + vec2(-s, -s),
+        c + vec2(-s * 0.2, s * 0.8),
+        c + vec2(-s * 0.1, s * 0.2),
+        c + vec2(s * 0.8, s * 0.3),
+        c + vec2(-s, -s),
     ];
     painter.add(Shape::line(pts, Stroke::new(2.0, color)));
 }
@@ -230,7 +258,6 @@ fn icon_advanced(painter: &Painter, rect: Rect, color: Color32) {
 fn icon_pencil(painter: &Painter, rect: Rect, color: Color32) {
     let c = rect.center();
     let sw = Stroke::new(1.8, color);
-    // Pencil body (diagonal rectangle)
     let tip = c + vec2(-7.0, 7.0);
     let b1 = c + vec2(-4.0, 4.0);
     let b2 = c + vec2(7.0, -7.0);
@@ -240,7 +267,6 @@ fn icon_pencil(painter: &Painter, rect: Rect, color: Color32) {
     painter.line_segment([b2, b3], sw);
     painter.line_segment([b3, b4], sw);
     painter.line_segment([b4, b1], sw);
-    // Pencil tip
     painter.line_segment([b1, tip], sw);
     painter.line_segment([b4, tip], sw);
 }
@@ -248,7 +274,6 @@ fn icon_pencil(painter: &Painter, rect: Rect, color: Color32) {
 fn icon_eraser(painter: &Painter, rect: Rect, color: Color32) {
     let c = rect.center();
     let sw = Stroke::new(1.8, color);
-    // Goma de borrar estilizada: rectángulo oblicuo con esquina levantada.
     let body_a = c + vec2(-7.0, 6.0);
     let body_b = c + vec2(5.0, -6.0);
     let body_c = c + vec2(8.0, -3.0);
@@ -257,9 +282,58 @@ fn icon_eraser(painter: &Painter, rect: Rect, color: Color32) {
     painter.line_segment([body_b, body_c], sw);
     painter.line_segment([body_c, body_d], sw);
     painter.line_segment([body_d, body_a], sw);
-    // Líneas decorativas (rozaduras) en la mitad de la goma.
     painter.line_segment([c + vec2(-3.0, 2.0), c + vec2(2.0, -3.0)], sw);
     painter.line_segment([c + vec2(-1.0, 4.0), c + vec2(4.0, -1.0)], sw);
+}
+
+fn icon_analysis(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.35;
+    // Crosshair
+    painter.line_segment(
+        [c + vec2(-s, 0.0), c + vec2(s, 0.0)],
+        Stroke::new(1.5, color.gamma_multiply(0.5)),
+    );
+    painter.line_segment(
+        [c + vec2(0.0, -s), c + vec2(0.0, s)],
+        Stroke::new(1.5, color.gamma_multiply(0.5)),
+    );
+    // Curve through origin
+    let n = 12;
+    let mut pts = Vec::with_capacity(n);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let x = -s + t * 2.0 * s;
+        let y = -s * 0.5 * (t * std::f32::consts::PI).sin();
+        pts.push(c + vec2(x, y));
+    }
+    painter.add(Shape::line(pts, Stroke::new(2.0, color)));
+    // Root marker
+    painter.circle_filled(c + vec2(0.0, s * 0.5), 3.0, color);
+}
+
+fn icon_constraint(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.3;
+    let p1 = c + vec2(-s, -s * 0.3);
+    let p2 = c + vec2(s, s * 0.3);
+    painter.line_segment([p1, p2], Stroke::new(1.5, color.gamma_multiply(0.6)));
+    painter.circle_filled(p1, 3.0, color);
+    painter.circle_filled(p2, 3.0, color);
+    let lk = c + vec2(0.0, -s * 0.7);
+    painter.rect_stroke(
+        Rect::from_center_size(lk, vec2(6.0, 5.0)),
+        1.0,
+        Stroke::new(1.5, color),
+    );
+}
+
+fn icon_boolean(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.28;
+    painter.circle_stroke(c + vec2(-s * 0.4, 0.0), s, Stroke::new(1.8, color));
+    painter.circle_stroke(c + vec2(s * 0.4, 0.0), s, Stroke::new(1.8, color));
+    painter.circle_filled(c, 2.0, color);
 }
 
 type IconFn = fn(&Painter, Rect, Color32);
@@ -381,6 +455,33 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Respo
                     txt,
                     txt_dim,
                 );
+                tool_group(
+                    ui,
+                    current_tool,
+                    icon_analysis,
+                    GROUP_ANALYSIS,
+                    accent,
+                    txt,
+                    txt_dim,
+                );
+                tool_group(
+                    ui,
+                    current_tool,
+                    icon_constraint,
+                    GROUP_CONSTRAINT,
+                    accent,
+                    txt,
+                    txt_dim,
+                );
+                tool_group(
+                    ui,
+                    current_tool,
+                    icon_boolean,
+                    GROUP_BOOLEAN,
+                    accent,
+                    txt,
+                    txt_dim,
+                );
                 if is_3d {
                     tool_group(ui, current_tool, icon_3d, GROUP_3D, accent, txt, txt_dim);
                 }
@@ -422,7 +523,6 @@ fn tool_group(
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let resp = resp.on_hover_text(label);
 
-    // Background
     if is_active || resp.hovered() {
         let fill = if is_active {
             Color32::from_rgba_unmultiplied(53, 132, 228, 25)
@@ -432,7 +532,6 @@ fn tool_group(
         ui.painter().rect_filled(rect, 6.0, fill);
     }
     if is_active {
-        // Active indicator: bottom border
         let indicator = Rect::from_min_max(
             pos2(rect.min.x + 6.0, rect.max.y - 3.0),
             pos2(rect.max.x - 6.0, rect.max.y),
@@ -440,7 +539,6 @@ fn tool_group(
         ui.painter().rect_filled(indicator, 1.0, accent);
     }
 
-    // Draw the vector icon centered
     let icon_rect = Rect::from_center_size(rect.center(), vec2(22.0, 24.0));
     icon_fn(
         ui.painter(),
@@ -450,10 +548,6 @@ fn tool_group(
 
     if resp.clicked() {
         if let Some((tool, _, _)) = tools.first() {
-            // Comportamiento toggle: si el grupo ya está activo y la
-            // herramienta es Pencil, alternamos a la herramienta por
-            // defecto (Select). Para el resto de grupos, la activación
-            // siempre fuerza la primera herramienta del grupo.
             if is_active && *tool == Tool::Pencil && *current == Tool::Pencil {
                 *current = Tool::Select;
             } else {

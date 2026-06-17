@@ -100,15 +100,95 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     let expr = match obj {
                         grafito_core::GeoObject::Function(f) => f.expr.clone(),
                         grafito_core::GeoObject::Point(p) => format!("({:.2}, {:.2})", p.position.x, p.position.y),
-                        grafito_core::GeoObject::Line(l) => format!("({:.2}, {:.2}) ↔ ({:.2}, {:.2})", l.start.x, l.start.y, l.end.x, l.end.y),
-                        grafito_core::GeoObject::Circle(c) => format!("(x - {:.2})² + (y - {:.2})² = {:.2}²", c.center.x, c.center.y, c.radius),
-                        grafito_core::GeoObject::Ellipse(e) => format!("(x - {:.2})²/{:.2}² + (y - {:.2})²/{:.2}² = 1", e.center.x, e.center.y, e.rx, e.ry),
-                        grafito_core::GeoObject::Polygon(p) => format!("{} vertices", p.vertices.len()),
+                        grafito_core::GeoObject::Line(l) => {
+                            let dx = l.end.x - l.start.x;
+                            let dy = l.end.y - l.start.y;
+                            let len = (dx * dx + dy * dy).sqrt();
+                            format!(
+                                "({:.2}, {:.2}) ↔ ({:.2}, {:.2})  L={:.3}",
+                                l.start.x, l.start.y, l.end.x, l.end.y, len
+                            )
+                        }
+                        grafito_core::GeoObject::Circle(c) => {
+                            let area = std::f64::consts::PI * c.radius * c.radius;
+                            let perim = 2.0 * std::f64::consts::PI * c.radius;
+                            format!(
+                                "r={:.2}  A={:.3}  P={:.3}",
+                                c.radius, area, perim
+                            )
+                        }
+                        grafito_core::GeoObject::Ellipse(e) => {
+                            let area = std::f64::consts::PI * e.rx * e.ry;
+                            format!(
+                                "rx={:.2} ry={:.2}  A={:.3}",
+                                e.rx, e.ry, area
+                            )
+                        }
+                        grafito_core::GeoObject::Polygon(p) => {
+                            let n = p.vertices.len();
+                            let perim = if n >= 2 {
+                                let mut sum = 0.0;
+                                for i in 0..n {
+                                    let a = p.vertices[i];
+                                    let b = p.vertices[(i + 1) % n];
+                                    let dx = b.x - a.x;
+                                    let dy = b.y - a.y;
+                                    sum += (dx * dx + dy * dy).sqrt();
+                                }
+                                sum
+                            } else {
+                                0.0
+                            };
+                            let area = if n >= 3 {
+                                let mut s = 0.0;
+                                for i in 0..n {
+                                    let j = (i + 1) % n;
+                                    s += p.vertices[i].x * p.vertices[j].y
+                                        - p.vertices[j].x * p.vertices[i].y;
+                                }
+                                s.abs() * 0.5
+                            } else {
+                                0.0
+                            };
+                            format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
+                        }
                         grafito_core::GeoObject::Pencil(p) => format!("{} puntos", p.points.len()),
                         grafito_core::GeoObject::Point3D(p) => format!("({:.2}, {:.2}, {:.2})", p.position.x, p.position.y, p.position.z),
-                        grafito_core::GeoObject::Sphere3D(s) => format!("r={:.2} c=({:.2}, {:.2}, {:.2})", s.radius, s.center.x, s.center.y, s.center.z),
-                        grafito_core::GeoObject::Cube3D(c) => format!("size={:.2}", c.size),
-                        grafito_core::GeoObject::Segment3D(s) => format!("({:.2}, {:.2}, {:.2}) ↔ ({:.2}, {:.2}, {:.2})", s.a.x, s.a.y, s.a.z, s.b.x, s.b.y, s.b.z),
+                        grafito_core::GeoObject::Sphere3D(s) => {
+                            let area = 4.0 * std::f64::consts::PI * s.radius * s.radius;
+                            let vol = 4.0 / 3.0 * std::f64::consts::PI * s.radius * s.radius * s.radius;
+                            format!("r={:.2}  A={:.3}  V={:.3}", s.radius, area, vol)
+                        }
+                        grafito_core::GeoObject::Cube3D(c) => {
+                            let vol = c.size * c.size * c.size;
+                            format!("size={:.2}  V={:.3}", c.size, vol)
+                        }
+                        grafito_core::GeoObject::Cylinder3D(cy) => {
+                            let dx = cy.top_center.x - cy.base_center.x;
+                            let dy = cy.top_center.y - cy.base_center.y;
+                            let dz = cy.top_center.z - cy.base_center.z;
+                            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let vol = std::f64::consts::PI * cy.radius * cy.radius * h;
+                            format!("r={:.2} h={:.2}  V={:.3}", cy.radius, h, vol)
+                        }
+                        grafito_core::GeoObject::Cone3D(co) => {
+                            let dx = co.apex.x - co.base_center.x;
+                            let dy = co.apex.y - co.base_center.y;
+                            let dz = co.apex.z - co.base_center.z;
+                            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let vol = 1.0 / 3.0 * std::f64::consts::PI * co.radius * co.radius * h;
+                            format!("r={:.2} h={:.2}  V={:.3}", co.radius, h, vol)
+                        }
+                        grafito_core::GeoObject::Torus3D(t) => {
+                            format!("R={:.2} r={:.2}", t.r_major, t.r_minor)
+                        }
+                        grafito_core::GeoObject::Segment3D(s) => {
+                            let dx = s.b.x - s.a.x;
+                            let dy = s.b.y - s.a.y;
+                            let dz = s.b.z - s.a.z;
+                            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                            format!("L={:.3}", len)
+                        }
                         _ => String::new(),
                     };
                     (obj.label().to_string(), obj.name().to_string(), obj.is_visible(), col, expr)

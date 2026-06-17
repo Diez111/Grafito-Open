@@ -542,6 +542,193 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     "Intersect: objetos no compatibles o no encontrados".into(),
                 );
             }
+            "Area" if cmd.args.len() == 1 => {
+                // Area[objeto]: crea polígono sombreado + label
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    if let Some(obj) = document.get_object(id).cloned() {
+                        let verts_opt: Option<Vec<Point2>> = match &obj {
+                            GeoObject::Circle(c) => {
+                                let n = 64;
+                                let mut v = Vec::with_capacity(n);
+                                for k in 0..n {
+                                    let theta =
+                                        2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+                                    v.push(Point2::new(
+                                        c.center.x + c.radius * theta.cos(),
+                                        c.center.y + c.radius * theta.sin(),
+                                    ));
+                                }
+                                Some(v)
+                            }
+                            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                                Some(poly.vertices.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(verts) = verts_opt {
+                            let area = match &obj {
+                                GeoObject::Circle(c) => std::f64::consts::PI * c.radius * c.radius,
+                                GeoObject::Polygon(poly) => {
+                                    let mut s = 0.0;
+                                    for i in 0..poly.vertices.len() {
+                                        let j = (i + 1) % poly.vertices.len();
+                                        s += poly.vertices[i].x * poly.vertices[j].y
+                                            - poly.vertices[j].x * poly.vertices[i].y;
+                                    }
+                                    s.abs() * 0.5
+                                }
+                                _ => 0.0,
+                            };
+                            let n = verts.len() as f64;
+                            let cx = verts.iter().map(|v| v.x).sum::<f64>() / n;
+                            let cy = verts.iter().map(|v| v.y).sum::<f64>() / n;
+                            let mut fill_poly = grafito_core::PolygonObj::new(verts);
+                            fill_poly.color = grafito_geometry::Color::new(0.2, 0.5, 0.9, 1.0);
+                            fill_poly.width = 1.5;
+                            fill_poly.fill_color =
+                                Some(grafito_geometry::Color::new(0.2, 0.5, 0.9, 0.3));
+                            document.add_object(GeoObject::Polygon(fill_poly));
+                            let txt = grafito_core::TextObj::new(
+                                format!("A = {:.3}", area),
+                                Point2::new(cx, cy),
+                            );
+                            document.add_object(GeoObject::Text(txt));
+                            input_text.clear();
+                            return CommandOutcome::Message(format!("Área = {:.3}", area));
+                        }
+                    }
+                }
+                return CommandOutcome::Error("Area: objeto no encontrado o no soportado".into());
+            }
+            "Circumference" if cmd.args.len() == 1 => {
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    let perim = if let Some(obj) = document.get_object(id) {
+                        match obj {
+                            GeoObject::Circle(c) => 2.0 * std::f64::consts::PI * c.radius,
+                            GeoObject::Polygon(poly) => {
+                                let mut s = 0.0;
+                                for i in 0..poly.vertices.len() {
+                                    let a = poly.vertices[i];
+                                    let b = poly.vertices[(i + 1) % poly.vertices.len()];
+                                    let dx = b.x - a.x;
+                                    let dy = b.y - a.y;
+                                    s += (dx * dx + dy * dy).sqrt();
+                                }
+                                s
+                            }
+                            _ => -1.0,
+                        }
+                    } else {
+                        -1.0
+                    };
+                    if perim >= 0.0 {
+                        return CommandOutcome::Message(format!(
+                            "Perímetro({}) = {:.3}",
+                            label, perim
+                        ));
+                    }
+                }
+                return CommandOutcome::Error("Circumference: objeto no encontrado".into());
+            }
+            "Center" if cmd.args.len() == 1 => {
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    if let Some(obj) = document.get_object(id) {
+                        let center = match obj {
+                            GeoObject::Circle(c) => Some(c.center),
+                            GeoObject::Ellipse(e) => Some(e.center),
+                            GeoObject::Parabola(p) => Some(Point2::new(p.vertex.x, p.vertex.y)),
+                            GeoObject::Hyperbola(h) => Some(Point2::new(h.center.x, h.center.y)),
+                            _ => None,
+                        };
+                        if let Some(c) = center {
+                            let new_label = next_function_label(document);
+                            document.add_object(GeoObject::Point(
+                                PointObj::new(c).with_label(&new_label),
+                            ));
+                            return CommandOutcome::Message(format!(
+                                "Centro de {} = ({:.3}, {:.3})",
+                                label, c.x, c.y
+                            ));
+                        }
+                    }
+                }
+                return CommandOutcome::Error("Center: objeto no encontrado o sin centro".into());
+            }
+            "Sector" if cmd.args.len() == 3 => {
+                // Sector[centro, radio, angulo] — crea un sector circular
+                if let (Ok((cx, cy)), Ok(r), Ok(deg)) = (
+                    parse_point_str(&cmd.args[0]),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                ) {
+                    let theta = deg.to_radians();
+                    let n = 32;
+                    let mut verts = Vec::with_capacity(n + 2);
+                    verts.push(Point2::new(cx, cy));
+                    for k in 0..=n {
+                        let t = theta * (k as f64) / (n as f64);
+                        verts.push(Point2::new(cx + r * t.cos(), cy + r * t.sin()));
+                    }
+                    let arc_len = r * theta.abs();
+                    let area = 0.5 * r * r * theta.abs();
+                    let mut sector_poly = grafito_core::PolygonObj::new(verts);
+                    sector_poly.color = grafito_geometry::Color::new(0.9, 0.5, 0.2, 1.0);
+                    sector_poly.width = 1.5;
+                    sector_poly.fill_color = Some(grafito_geometry::Color::new(0.9, 0.5, 0.2, 0.3));
+                    document.add_object(GeoObject::Polygon(sector_poly));
+                    let txt = grafito_core::TextObj::new(
+                        format!(
+                            "Sector: r={:.2}  θ={:.1}°  A={:.3}  L={:.3}",
+                            r, deg, area, arc_len
+                        ),
+                        Point2::new(cx, cy),
+                    );
+                    document.add_object(GeoObject::Text(txt));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "Sector creado: r={:.2}, θ={:.1}°",
+                        r, deg
+                    ));
+                }
+                return CommandOutcome::Error("Sector: argumentos inválidos".into());
+            }
+            "Arc" if cmd.args.len() == 4 => {
+                // Arc[centro, radio, angulo1, angulo2] — arco entre dos ángulos
+                if let (Ok((cx, cy)), Ok(r), Ok(deg1), Ok(deg2)) = (
+                    parse_point_str(&cmd.args[0]),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                ) {
+                    let t1 = deg1.to_radians();
+                    let t2 = deg2.to_radians();
+                    let n = 48;
+                    let mut pts = Vec::with_capacity(n + 1);
+                    for k in 0..=n {
+                        let t = t1 + (t2 - t1) * (k as f64) / (n as f64);
+                        pts.push(Point2::new(cx + r * t.cos(), cy + r * t.sin()));
+                    }
+                    let arc_len = r * (t2 - t1).abs();
+                    let mut arc = LineObj::new(pts[0], *pts.last().unwrap());
+                    arc.color = grafito_geometry::Color::new(0.9, 0.5, 0.2, 1.0);
+                    arc.width = 2.0;
+                    document.add_object(GeoObject::Line(arc));
+                    let txt = grafito_core::TextObj::new(
+                        format!("Arco: r={:.2}  L={:.3}", r, arc_len),
+                        Point2::new(cx, cy),
+                    );
+                    document.add_object(GeoObject::Text(txt));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "Arco creado: r={:.2}, {:.1}° → {:.1}°",
+                        r, deg1, deg2
+                    ));
+                }
+                return CommandOutcome::Error("Arc: argumentos inválidos".into());
+            }
             "Angle" if cmd.args.len() >= 2 => {
                 if let (Some(a), Some(b)) = (
                     find_object_by_label(document, cmd.args[0].trim()),
@@ -1446,18 +1633,156 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     let dy = by - ay;
                     let len2 = dx * dx + dy * dy;
                     if len2 > 0.0 {
-                        let t = ((px - ax) * dx + (py - ay) * dy) / len2;
-                        let cx = ax + t * dx;
-                        let cy = ay + t * dy;
-                        let rx = 2.0 * cx - px;
-                        let ry = 2.0 * cy - py;
-                        document.add_object(GeoObject::Point(
-                            PointObj::new(Point2::new(rx, ry)).with_label("R'"),
-                        ));
+                        let mirror_point = |p: Point2| {
+                            let t = ((p.x - ax) * dx + (p.y - ay) * dy) / len2;
+                            let cx = ax + t * dx;
+                            let cy = ay + t * dy;
+                            Point2::new(2.0 * cx - p.x, 2.0 * cy - p.y)
+                        };
+                        let id_opt = find_object_by_label(document, &cmd.args[0]);
+                        if let Some(id) = id_opt {
+                            if let Some(obj) = document.get_object(id).cloned() {
+                                let label = obj.label().to_string();
+                                let reflected = match obj {
+                                    GeoObject::Point(p) => Some(GeoObject::Point(
+                                        PointObj::new(mirror_point(p.position))
+                                            .with_label(format!("{}'", label)),
+                                    )),
+                                    GeoObject::Line(l) => {
+                                        let s = mirror_point(l.start);
+                                        let e = mirror_point(l.end);
+                                        Some(GeoObject::Line(
+                                            LineObj::new(s, e).with_label(format!("{}'", label)),
+                                        ))
+                                    }
+                                    GeoObject::Circle(c) => {
+                                        let mirrored = mirror_point(c.center);
+                                        Some(GeoObject::Circle(
+                                            CircleObj::new(mirrored, c.radius)
+                                                .with_label(format!("{}'", label)),
+                                        ))
+                                    }
+                                    GeoObject::Polygon(poly) => {
+                                        let mirrored: Vec<Point2> = poly
+                                            .vertices
+                                            .iter()
+                                            .map(|v| mirror_point(*v))
+                                            .collect();
+                                        let mut new_poly = PolygonObj::new(mirrored);
+                                        new_poly.label = format!("{}'", label);
+                                        Some(GeoObject::Polygon(new_poly))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(r) = reflected {
+                                    document.add_object(r);
+                                } else {
+                                    document.add_object(GeoObject::Point(
+                                        PointObj::new(mirror_point(Point2::new(px, py)))
+                                            .with_label("R'"),
+                                    ));
+                                }
+                            } else {
+                                document.add_object(GeoObject::Point(
+                                    PointObj::new(mirror_point(Point2::new(px, py)))
+                                        .with_label("R'"),
+                                ));
+                            }
+                        } else {
+                            document.add_object(GeoObject::Point(
+                                PointObj::new(mirror_point(Point2::new(px, py))).with_label("R'"),
+                            ));
+                        }
                     }
                 }
                 input_text.clear();
                 return CommandOutcome::Ok;
+            }
+            "Length" if cmd.args.len() == 1 => {
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    if let Some(obj) = document.get_object(id) {
+                        let length = match obj {
+                            GeoObject::Line(l) => {
+                                let dx = l.end.x - l.start.x;
+                                let dy = l.end.y - l.start.y;
+                                (dx * dx + dy * dy).sqrt()
+                            }
+                            GeoObject::Segment3D(s) => {
+                                let dx = s.b.x - s.a.x;
+                                let dy = s.b.y - s.a.y;
+                                let dz = s.b.z - s.a.z;
+                                (dx * dx + dy * dy + dz * dz).sqrt()
+                            }
+                            GeoObject::Polygon(poly) => {
+                                let mut s = 0.0;
+                                for i in 0..poly.vertices.len() {
+                                    let a = poly.vertices[i];
+                                    let b = poly.vertices[(i + 1) % poly.vertices.len()];
+                                    let dx = b.x - a.x;
+                                    let dy = b.y - a.y;
+                                    s += (dx * dx + dy * dy).sqrt();
+                                }
+                                s
+                            }
+                            GeoObject::Circle(c) => 2.0 * std::f64::consts::PI * c.radius,
+                            _ => -1.0,
+                        };
+                        if length >= 0.0 {
+                            return CommandOutcome::Message(format!(
+                                "Length({}) = {:.3}",
+                                label, length
+                            ));
+                        }
+                    }
+                }
+                return CommandOutcome::Error("Length: objeto no encontrado".into());
+            }
+            "Slope" if cmd.args.len() == 1 => {
+                let label = cmd.args[0].trim();
+                if let Some(id) = find_object_by_label(document, label) {
+                    if let Some(obj) = document.get_object(id) {
+                        let slope = match obj {
+                            GeoObject::Line(l) => {
+                                if (l.end.x - l.start.x).abs() < 1e-12 {
+                                    f64::INFINITY
+                                } else {
+                                    (l.end.y - l.start.y) / (l.end.x - l.start.x)
+                                }
+                            }
+                            GeoObject::Function(f) => {
+                                let x = 0.0;
+                                let h = 1e-6;
+                                let f1 = grafito_geometry::expr::eval_function_with_vars(
+                                    &f.expr,
+                                    x + h,
+                                    &document.variables,
+                                )
+                                .unwrap_or(0.0);
+                                let fm1 = grafito_geometry::expr::eval_function_with_vars(
+                                    &f.expr,
+                                    x - h,
+                                    &document.variables,
+                                )
+                                .unwrap_or(0.0);
+                                (f1 - fm1) / (2.0 * h)
+                            }
+                            _ => f64::NAN,
+                        };
+                        if slope.is_finite() {
+                            return CommandOutcome::Message(format!(
+                                "Slope({}) = {:.3}",
+                                label, slope
+                            ));
+                        } else if slope.is_infinite() {
+                            return CommandOutcome::Message(format!(
+                                "Slope({}) = ∞ (vertical)",
+                                label
+                            ));
+                        }
+                    }
+                }
+                return CommandOutcome::Error("Slope: objeto no encontrado".into());
             }
             "Locus" if cmd.args.len() == 2 => {
                 let expr = cmd.args[0].trim();
@@ -3294,6 +3619,12 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
             "expand" | "expandir" => "Expand",
             "simplify" | "simplificar" => "Simplify",
             "taylor" => "Taylor",
+            "tangentat" | "tangenteen" => "TangentAt",
+            "normalat" | "normalen" => "NormalAt",
+            "arclength" | "longitudarco" => "ArcLength",
+            "curvatureat" | "curvaturaen" => "CurvatureAt",
+            "volumeofrevolution" | "volumenrevolucion" => "VolumeOfRevolution",
+            "surfaceofrevolution" | "superficierevolucion" => "SurfaceOfRevolution",
             _ => "Unknown",
         };
 
@@ -3412,6 +3743,12 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "factor" | "factorizar" => "Factor",
             "expand" | "expandir" => "Expand",
             "simplify" | "simplificar" => "Simplify",
+            "tangentat" | "tangenteen" => "TangentAt",
+            "normalat" | "normalen" => "NormalAt",
+            "arclength" | "longitudarco" => "ArcLength",
+            "curvatureat" | "curvaturaen" => "CurvatureAt",
+            "volumeofrevolution" | "volumenrevolucion" => "VolumeOfRevolution",
+            "surfaceofrevolution" | "superficierevolucion" => "SurfaceOfRevolution",
             "lorenz" => "Lorenz",
             "rossler" | "rössler" => "Rossler",
             "thomas" | "butterfly" => "Thomas",
@@ -3881,6 +4218,128 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
                 Ok(simplified) => Some(format!("{} = {}", expr, simplified)),
                 Err(e) => Some(format!("Simplify error: {}", e)),
             }
+        }
+        "TangentAt" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let h = 1e-6;
+            let fx = eval_function_with_vars(&expr, x, &vars).unwrap_or(f64::NAN);
+            let fxh = eval_function_with_vars(&expr, x + h, &vars).unwrap_or(f64::NAN);
+            let fxmh = eval_function_with_vars(&expr, x - h, &vars).unwrap_or(f64::NAN);
+            let slope = (fxh - fxmh) / (2.0 * h);
+            if !fx.is_finite() || !slope.is_finite() {
+                return Some("No se puede calcular la tangente en este punto".into());
+            }
+            let p1 = Point2::new(x, fx);
+            let p2 = Point2::new(x + 1.0, fx + slope);
+            document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("tangente")));
+            Some(format!(
+                "Tangente en x={:.4}: y = {:.4} + {:.4}·(x − {:.4})",
+                x, fx, slope, x
+            ))
+        }
+        "NormalAt" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let h = 1e-6;
+            let fx = eval_function_with_vars(&expr, x, &vars).unwrap_or(f64::NAN);
+            let fxh = eval_function_with_vars(&expr, x + h, &vars).unwrap_or(f64::NAN);
+            let fxmh = eval_function_with_vars(&expr, x - h, &vars).unwrap_or(f64::NAN);
+            let slope = (fxh - fxmh) / (2.0 * h);
+            if !fx.is_finite() || !slope.is_finite() {
+                return Some("No se puede calcular la normal en este punto".into());
+            }
+            let normal_slope = if slope.abs() < 1e-10 {
+                f64::INFINITY
+            } else {
+                -1.0 / slope
+            };
+            let p1 = Point2::new(x, fx);
+            let p2 = if normal_slope.is_infinite() {
+                Point2::new(x, fx + 1.0)
+            } else {
+                Point2::new(x + 1.0, fx + normal_slope)
+            };
+            document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("normal")));
+            Some(format!("Normal en x={:.4}", x))
+        }
+        "ArcLength" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let h = 1e-5;
+            let f = |x: f64| {
+                let fp = (eval_function_with_vars(&expr, x + h, &vars).unwrap_or(0.0)
+                    - eval_function_with_vars(&expr, x - h, &vars).unwrap_or(0.0))
+                    / (2.0 * h);
+                (1.0 + fp * fp).sqrt()
+            };
+            let length = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
+            Some(format!(
+                "Longitud de arco de {:.4} a {:.4}: {:.6}",
+                a, b, length
+            ))
+        }
+        "CurvatureAt" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let h = 1e-5;
+            let f = |xv: f64| eval_function_with_vars(&expr, xv, &vars).unwrap_or(0.0);
+            let fp = (f(x + h) - f(x - h)) / (2.0 * h);
+            let fpp = (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h);
+            let denom = (1.0 + fp * fp).powf(1.5);
+            let kappa = if denom > 1e-15 {
+                fpp.abs() / denom
+            } else {
+                f64::NAN
+            };
+            let radius = if kappa.abs() > 1e-15 {
+                1.0 / kappa
+            } else {
+                f64::INFINITY
+            };
+            Some(format!(
+                "Curvatura en x={:.4}: κ = {:.6}, Radio = {:.6}",
+                x, kappa, radius
+            ))
+        }
+        "VolumeOfRevolution" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let f = |x: f64| {
+                let y = eval_function_with_vars(&expr, x, &vars).unwrap_or(0.0);
+                std::f64::consts::PI * y * y
+            };
+            let volume = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
+            Some(format!(
+                "Volumen de revolución de {:.4} a {:.4}: {:.6}",
+                a, b, volume
+            ))
+        }
+        "SurfaceOfRevolution" => {
+            let expr = cmd.args.first()?.trim().to_string();
+            let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
+            let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
+            let vars: HashMap<String, f64> = document.variables.clone();
+            let h = 1e-5;
+            let f = |x: f64| {
+                let y = eval_function_with_vars(&expr, x, &vars).unwrap_or(0.0);
+                let fp = (eval_function_with_vars(&expr, x + h, &vars).unwrap_or(0.0)
+                    - eval_function_with_vars(&expr, x - h, &vars).unwrap_or(0.0))
+                    / (2.0 * h);
+                2.0 * std::f64::consts::PI * y.abs() * (1.0 + fp * fp).sqrt()
+            };
+            let surface = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
+            Some(format!(
+                "Superficie de revolución de {:.4} a {:.4}: {:.6}",
+                a, b, surface
+            ))
         }
         _ => None,
     }

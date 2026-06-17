@@ -57,140 +57,144 @@ impl HsvColorPicker {
         ui.columns(2, |cols| {
             // Columna Izquierda: Rueda
             cols[0].vertical_centered(|ui| {
-                changed |= self.show_wheel(ui, 150.0);
+                changed |= self.show_wheel(ui, 136.0);
             });
 
             // Columna Derecha: Slider y Preview
             cols[1].vertical_centered(|ui| {
-                ui.add_space(5.0);
-                changed |= self.show_value_slider(ui, 140.0);
-                ui.add_space(15.0);
-                self.show_preview(ui);
+                ui.add_space(2.0);
+                changed |= self.show_value_slider(ui, 136.0);
+                ui.add_space(12.0);
+                changed |= self.show_preview(ui, 136.0);
             });
         });
 
-        ui.add_space(15.0);
-        ui.vertical_centered(|ui| {
-            changed |= self.show_favorites(ui, favorites);
-        });
+        ui.add_space(12.0);
+        changed |= self.show_favorites(ui, favorites);
 
         changed
     }
 
-    /// Dibujar rueda de color HSV
+    /// Dibujar rueda de color HSV con un gradiente Mesh ultra-suave
     fn show_wheel(&mut self, ui: &mut Ui, size: f32) -> bool {
         let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
         let rect = response.rect;
         let center = rect.center();
         let radius = size * 0.45;
+        let inner_radius = radius * 0.3;
+        let outer_radius = radius;
 
-        // Dibujar rueda de color (círculo HSV)
+        // Generar malla (Mesh) para un gradiente continuo y perfecto
+        let mut mesh = egui::Mesh::default();
         let segments = 64;
+
         for i in 0..segments {
-            let angle1 = (i as f32 / segments as f32) * std::f32::consts::TAU;
-            let angle2 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let hue = (i as f32 / segments as f32) * 360.0;
 
-            // Dibujar sector con gradiente de saturación
-            let inner_radius = radius * 0.3;
-            let outer_radius = radius;
+            // Color en el borde exterior (saturación máxima, brillo máximo)
+            let c_out = hsv_to_color32(hue, 1.0, 1.0);
+            // Color en el borde interior (saturación 0 es blanco)
+            let c_in = Color32::WHITE;
 
-            for j in 0..8 {
-                let sat1 = j as f32 / 8.0;
-                let sat2 = (j + 1) as f32 / 8.0;
+            let cos = angle.cos();
+            let sin = angle.sin();
 
-                let hue = (i as f32 / segments as f32) * 360.0;
-                // Siempre dibujamos la rueda con valor = 1.0 para que se vean los colores
-                let color1 = hsv_to_color32(hue, sat1, 1.0);
+            let p_in = center + Vec2::new(cos, sin) * inner_radius;
+            let p_out = center + Vec2::new(cos, sin) * outer_radius;
 
-                let p1 = center
-                    + Vec2::new(angle1.cos(), angle1.sin())
-                        * (inner_radius + (outer_radius - inner_radius) * sat1);
-                let p2 = center
-                    + Vec2::new(angle1.cos(), angle1.sin())
-                        * (inner_radius + (outer_radius - inner_radius) * sat2);
-                let p3 = center
-                    + Vec2::new(angle2.cos(), angle2.sin())
-                        * (inner_radius + (outer_radius - inner_radius) * sat2);
-                let p4 = center
-                    + Vec2::new(angle2.cos(), angle2.sin())
-                        * (inner_radius + (outer_radius - inner_radius) * sat1);
-
-                painter.add(egui::Shape::convex_polygon(
-                    vec![p1, p2, p3, p4],
-                    color1,
-                    egui::Stroke::NONE,
-                ));
-            }
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: p_in,
+                uv: egui::Pos2::ZERO,
+                color: c_in,
+            });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: p_out,
+                uv: egui::Pos2::ZERO,
+                color: c_out,
+            });
         }
 
-        // Hue hueco en el medio, mejor borde suave (anti-aliasing)
-        painter.circle_stroke(
-            center,
-            radius * 0.3,
-            egui::Stroke::new(1.0, Color32::from_gray(100)),
-        );
-        painter.circle_stroke(
-            center,
-            radius,
-            egui::Stroke::new(1.0, Color32::from_gray(100)),
-        );
+        // Generar índices para las caras (triángulos) de la rueda
+        for i in 0..segments {
+            let next_i = (i + 1) % segments;
+            let v0 = 2 * i as u32;
+            let v1 = v0 + 1;
+            let v2 = 2 * next_i as u32;
+            let v3 = v2 + 1;
 
-        // Dibujar indicador de posición actual
+            mesh.indices.push(v0);
+            mesh.indices.push(v1);
+            mesh.indices.push(v2);
+
+            mesh.indices.push(v1);
+            mesh.indices.push(v3);
+            mesh.indices.push(v2);
+        }
+
+        painter.add(egui::Shape::Mesh(mesh));
+
+        // Bordes de la rueda adaptados al tema actual
+        let border_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        painter.circle_stroke(center, inner_radius, egui::Stroke::new(1.0, border_color));
+        painter.circle_stroke(center, outer_radius, egui::Stroke::new(1.0, border_color));
+
+        // Dibujar indicador de posición actual (anillo hueco con alto contraste)
         let angle = (self.hue / 360.0) * std::f32::consts::TAU;
-        let indicator_radius = radius * (0.3 + 0.7 * self.saturation);
+        let indicator_radius = inner_radius + (outer_radius - inner_radius) * self.saturation;
         let indicator_pos = center + Vec2::new(angle.cos(), angle.sin()) * indicator_radius;
 
-        // Sombra sutil del indicador
-        painter.circle_filled(
-            indicator_pos + Vec2::new(0.0, 2.0),
+        // Sombra sutil del anillo
+        painter.circle_stroke(
+            indicator_pos + Vec2::new(0.0, 1.5),
             6.0,
-            Color32::from_black_alpha(60),
+            egui::Stroke::new(2.0, Color32::from_black_alpha(80)),
         );
 
-        painter.circle_filled(indicator_pos, 6.0, Color32::WHITE);
-        painter.circle_stroke(indicator_pos, 6.0, egui::Stroke::new(2.0, Color32::BLACK));
+        // Anillo de selección: doble trazo para máxima visibilidad (blanco por fuera, negro por dentro)
+        painter.circle_stroke(indicator_pos, 6.0, egui::Stroke::new(2.0, Color32::WHITE));
+        painter.circle_stroke(indicator_pos, 5.0, egui::Stroke::new(1.0, Color32::BLACK));
 
-        // Manejar interacción — click+drag para posicionamiento absoluto
+        // Manejar interacción — click+drag continuo e intuitivo (incluso fuera del círculo)
         if response.clicked() || response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                // Black color fix: if value is 0, the wheel shows nothing (black * any hue = black).
-                // Auto-set value to 1.0 on first interaction so the selected color becomes visible.
                 if self.value < 0.01 {
                     self.value = 1.0;
                 }
-                let delta = pos - rect.center();
+                let delta = pos - center;
                 let distance = delta.length();
-                if distance <= radius {
-                    let clamped_dist = distance.clamp(radius * 0.3, radius);
-                    let angle = delta.y.atan2(delta.x);
-                    self.hue = ((angle / std::f32::consts::TAU) * 360.0 + 360.0) % 360.0;
-                    self.saturation =
-                        ((clamped_dist - radius * 0.3) / (radius * 0.7)).clamp(0.0, 1.0);
-                    return true;
-                }
+                let angle = delta.y.atan2(delta.x);
+                self.hue = ((angle / std::f32::consts::TAU) * 360.0 + 360.0) % 360.0;
+                self.saturation =
+                    ((distance - inner_radius) / (outer_radius - inner_radius)).clamp(0.0, 1.0);
+                return true;
             }
         }
 
         false
     }
 
-    /// Dibujar slider de valor (brightness)
+    /// Dibujar slider de valor (brightness) sin saltos y con indicador no recortado
     fn show_value_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
         let height = 24.0;
 
-        ui.label(egui::RichText::new("Valor (Brillo):").strong());
+        ui.label(
+            egui::RichText::new("Valor (Brillo):")
+                .strong()
+                .color(ui.visuals().hyperlink_color),
+        );
         ui.add_space(4.0);
 
         let (response, mut painter) =
             ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
         let rect = response.rect;
 
-        // Dibujar gradiente de valor con bordes redondeados
-        let segments = 32;
-        let rounding = 4.0;
-
-        // Usar clip rect para el redondeo
+        // Guardar clip rect original para evitar recortar el indicador
+        let original_clip_rect = painter.clip_rect();
         painter.set_clip_rect(rect);
+
+        // Dibujar gradiente con redondeo solo en los extremos (evita huecos visuales)
+        let segments = 32;
         for i in 0..segments {
             let val1 = i as f32 / segments as f32;
             let val2 = (i + 1) as f32 / segments as f32;
@@ -200,47 +204,64 @@ impl HsvColorPicker {
             let x1 = rect.left() + rect.width() * val1;
             let x2 = rect.left() + rect.width() * val2;
 
+            let rounding = if i == 0 {
+                egui::Rounding {
+                    nw: 6.0,
+                    ne: 0.0,
+                    sw: 6.0,
+                    se: 0.0,
+                }
+            } else if i == segments - 1 {
+                egui::Rounding {
+                    nw: 0.0,
+                    ne: 6.0,
+                    sw: 0.0,
+                    se: 6.0,
+                }
+            } else {
+                egui::Rounding::ZERO
+            };
+
             painter.rect_filled(
                 Rect::from_min_max(Pos2::new(x1, rect.top()), Pos2::new(x2, rect.bottom())),
-                if i == 0 || i == segments - 1 {
-                    rounding
-                } else {
-                    0.0
-                },
+                rounding,
                 color1,
             );
         }
 
-        // Bordes del slider
+        // Restaurar clip rect para el borde exterior y el indicador
+        painter.set_clip_rect(original_clip_rect);
+
+        // Borde exterior del slider adaptativo
         painter.rect_stroke(
             rect,
-            rounding,
-            egui::Stroke::new(1.0, Color32::from_gray(100)),
+            6.0,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
 
-        // Dibujar indicador
+        // Dibujar indicador (cápsula blanca con sombra y borde adaptado)
         let indicator_x = rect.left() + (rect.width() - 8.0) * self.value + 4.0;
         let ind_rect = Rect::from_center_size(
             Pos2::new(indicator_x, rect.center().y),
             Vec2::new(8.0, rect.height() + 4.0),
         );
 
-        // Sombra
+        // Sombra del indicador
         painter.rect_filled(
-            ind_rect.translate(Vec2::new(0.0, 1.0)),
-            3.0,
+            ind_rect.translate(Vec2::new(0.0, 1.5)),
+            4.0,
             Color32::from_black_alpha(60),
         );
 
-        // Indicador
-        painter.rect_filled(ind_rect, 3.0, Color32::WHITE);
+        // Cuerpo del indicador
+        painter.rect_filled(ind_rect, 4.0, Color32::WHITE);
         painter.rect_stroke(
             ind_rect,
-            3.0,
-            egui::Stroke::new(1.0, Color32::from_gray(80)),
+            4.0,
+            egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
 
-        // Manejar interacción — click+drag para posicionamiento absoluto
+        // Manejar interacción — click+drag absoluto
         if response.clicked() || response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let value = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -252,51 +273,116 @@ impl HsvColorPicker {
         false
     }
 
-    /// Dibujar preview de color (actual vs nuevo)
-    fn show_preview(&self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("Previsualización:").strong());
+    /// Dibujar preview de color (actual vs nuevo) como una tarjeta unificada dividida
+    fn show_preview(&mut self, ui: &mut Ui, width: f32) -> bool {
+        ui.label(
+            egui::RichText::new("Previsualización:")
+                .strong()
+                .color(ui.visuals().hyperlink_color),
+        );
         ui.add_space(4.0);
 
+        let height = 32.0;
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+        let painter = ui.painter();
+
+        let left_rect = Rect::from_min_max(rect.min, Pos2::new(rect.center().x, rect.max.y));
+        let right_rect = Rect::from_min_max(Pos2::new(rect.center().x, rect.min.y), rect.max);
+
+        let left_rounding = egui::Rounding {
+            nw: 6.0,
+            ne: 0.0,
+            sw: 6.0,
+            se: 0.0,
+        };
+        let right_rounding = egui::Rounding {
+            nw: 0.0,
+            ne: 6.0,
+            sw: 0.0,
+            se: 6.0,
+        };
+
+        painter.rect_filled(
+            left_rect,
+            left_rounding,
+            color_to_color32(self.original_color),
+        );
+        painter.rect_filled(
+            right_rect,
+            right_rounding,
+            color_to_color32(self.to_color()),
+        );
+
+        // Borde exterior
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+
+        // Línea divisoria sutil
+        painter.line_segment(
+            [rect.center_top(), rect.center_bottom()],
+            egui::Stroke::new(1.0, ui.visuals().panel_fill.linear_multiply(0.8)),
+        );
+
+        let mut changed = false;
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if pos.x < rect.center().x {
+                    let old_color = self.to_color();
+                    self.set_color(self.original_color);
+                    changed = self.to_color() != old_color;
+                }
+            }
+        }
+
+        response.on_hover_text("Clic en 'Original' para restaurar");
+
+        // Etiquetas
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
-            // Color original
-            ui.vertical_centered(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(60.0, 32.0), Sense::hover());
-                painter_draw_swatch(ui, rect, color_to_color32(self.original_color));
-                ui.add_space(2.0);
-                ui.label(
-                    egui::RichText::new("Original")
-                        .small()
-                        .color(Color32::from_gray(120)),
-                );
+            let half_w = width / 2.0;
+            ui.allocate_ui(Vec2::new(half_w, 16.0), |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("Original").small().weak());
+                });
             });
-
-            ui.add_space(16.0);
-
-            // Color nuevo
-            ui.vertical_centered(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(60.0, 32.0), Sense::hover());
-                painter_draw_swatch(ui, rect, color_to_color32(self.to_color()));
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("Nuevo").small().strong());
+            ui.allocate_ui(Vec2::new(half_w, 16.0), |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("Nuevo").small().strong());
+                });
             });
         });
+
+        changed
     }
 
-    /// Dibujar colores favoritos
+    /// Dibujar colores favoritos alineados y centrados horizontalmente
     fn show_favorites(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> bool {
         let mut changed = false;
 
-        ui.label(egui::RichText::new("Favoritos:").strong());
+        ui.label(
+            egui::RichText::new("Favoritos:")
+                .strong()
+                .color(ui.visuals().hyperlink_color),
+        );
         ui.add_space(4.0);
 
+        let item_w = 32.0;
+        let spacing = 8.0;
+        let total_width = 5.0 * item_w + 4.0 * spacing;
+
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+            let avail_w = ui.available_width();
+            let offset = ((avail_w - total_width) / 2.0).max(0.0);
+            ui.add_space(offset);
+
+            ui.spacing_mut().item_spacing.x = spacing;
             #[allow(clippy::needless_range_loop)]
             for i in 0..5 {
                 let color = favorites[i];
-                let size = 32.0;
-
-                let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+                let (rect, response) = ui.allocate_exact_size(Vec2::splat(item_w), Sense::click());
 
                 painter_draw_swatch_interactive(ui, &response, rect, color_to_color32(color));
 
@@ -325,11 +411,6 @@ impl HsvColorPicker {
 }
 
 // Funciones helpers para dibujar swatches con calidad premium
-fn painter_draw_swatch(ui: &mut Ui, rect: Rect, color: Color32) {
-    let painter = ui.painter();
-    painter.rect_filled(rect, 6.0, color);
-    painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_gray(100)));
-}
 
 fn painter_draw_swatch_interactive(
     ui: &mut Ui,
@@ -339,7 +420,7 @@ fn painter_draw_swatch_interactive(
 ) {
     let painter = ui.painter();
 
-    // Shadow
+    // Sombra
     painter.rect_filled(
         rect.translate(Vec2::new(0.0, 2.0)),
         6.0,
@@ -350,9 +431,17 @@ fn painter_draw_swatch_interactive(
     painter.rect_filled(rect, 6.0, color);
 
     if response.hovered() {
-        painter.rect_stroke(rect, 6.0, egui::Stroke::new(2.0, Color32::WHITE));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(2.0, ui.visuals().hyperlink_color),
+        );
     } else {
-        painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, Color32::from_gray(100)));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
     }
 }
 

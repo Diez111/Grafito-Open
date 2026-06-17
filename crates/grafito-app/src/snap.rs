@@ -236,6 +236,95 @@ fn snap_to_feature(
         feature: Some(f),
         label,
     })
+    .or_else(|| snap_to_intersections(world, document, tol))
+}
+
+/// Computa intersecciones entre pares de objetos visibles cercanos al cursor.
+fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option<SnapResult> {
+    use grafito_core::GeoObject;
+    use grafito_geometry::intersections::{
+        circle_circle, function_function, function_line, line_circle, line_line, IntersectionResult,
+    };
+
+    let mut nearby: Vec<&GeoObject> = Vec::new();
+    for (_, obj) in document.objects_iter() {
+        if !obj.is_visible() {
+            continue;
+        }
+        if matches!(
+            obj,
+            GeoObject::Line(_) | GeoObject::Circle(_) | GeoObject::Function(_)
+        ) {
+            nearby.push(obj);
+        }
+    }
+
+    let extract_points = |result: IntersectionResult| -> Vec<Point2> {
+        match result {
+            IntersectionResult::One(p) => vec![p],
+            IntersectionResult::Two(p1, p2) => vec![p1, p2],
+            _ => vec![],
+        }
+    };
+
+    let mut best: Option<(f64, Point2, String)> = None;
+    for i in 0..nearby.len() {
+        for j in (i + 1)..nearby.len() {
+            let a = nearby[i];
+            let b = nearby[j];
+            let points = match (a, b) {
+                (GeoObject::Line(l1), GeoObject::Line(l2)) => {
+                    let s1 = Point2::new(l1.start.x, l1.start.y);
+                    let e1 = Point2::new(l1.end.x, l1.end.y);
+                    let s2 = Point2::new(l2.start.x, l2.start.y);
+                    let e2 = Point2::new(l2.end.x, l2.end.y);
+                    extract_points(line_line(s1, e1, s2, e2))
+                }
+                (GeoObject::Line(l), GeoObject::Circle(c))
+                | (GeoObject::Circle(c), GeoObject::Line(l)) => {
+                    let s = Point2::new(l.start.x, l.start.y);
+                    let e = Point2::new(l.end.x, l.end.y);
+                    extract_points(line_circle(s, e, c.center, c.radius))
+                }
+                (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
+                    extract_points(circle_circle(c1.center, c1.radius, c2.center, c2.radius))
+                }
+                (GeoObject::Function(f), GeoObject::Line(l))
+                | (GeoObject::Line(l), GeoObject::Function(f)) => {
+                    let s = Point2::new(l.start.x, l.start.y);
+                    let e = Point2::new(l.end.x, l.end.y);
+                    let dx = e.x - s.x;
+                    let dy = e.y - s.y;
+                    if dx.abs() < 1e-12 {
+                        continue;
+                    }
+                    let slope = dy / dx;
+                    let intercept = s.y - slope * s.x;
+                    let x_min = s.x.min(e.x) - 5.0;
+                    let x_max = s.x.max(e.x) + 5.0;
+                    function_line(&f.expr, slope, intercept, x_min, x_max)
+                }
+                (GeoObject::Function(f1), GeoObject::Function(f2)) => {
+                    function_function(&f1.expr, &f2.expr, -20.0, 20.0)
+                }
+                _ => vec![],
+            };
+            for p in points {
+                let d = p.distance(&world);
+                if d <= tol
+                    && (best.is_none() || d < best.as_ref().map(|b| b.0).unwrap_or(f64::INFINITY))
+                {
+                    best = Some((d, p, format!("Intersección: ({:.3}, {:.3})", p.x, p.y)));
+                }
+            }
+        }
+    }
+    best.map(|(_, p, label)| SnapResult {
+        point: p,
+        kind: SnapKind::Feature,
+        feature: Some(AnalysisFeature::Intersection),
+        label,
+    })
 }
 
 fn snap_to_curve(
@@ -274,16 +363,39 @@ fn snap_to_curve(
                 }
                 let _ = f;
             } else if let grafito_core::GeoObject::Circle(c) = obj {
-                // Para círculos, "projection" devuelve distancia firmada al borde.
                 let d = proj;
                 if d.abs() * view_scale <= tol_screen {
-                    let _ = c;
+                    let dx = world.x - c.center.x;
+                    let dy = world.y - c.center.y;
+                    let dist = (dx * dx + dy * dy).sqrt().max(1e-10);
+                    let px = c.center.x + dx / dist * c.radius;
+                    let py = c.center.y + dy / dist * c.radius;
+                    return Some(SnapResult {
+                        point: Point2::new(px, py),
+                        kind: SnapKind::Curve,
+                        feature: None,
+                        label: format!("({:.3}, {:.3})", px, py),
+                    });
                 }
             } else if let grafito_core::GeoObject::Line(l) = obj {
-                // Para líneas, la distancia con signo ya es el "projection".
                 let d = proj;
                 if d.abs() * view_scale <= tol_screen {
-                    let _ = l;
+                    let start = Point2::new(l.start.x, l.start.y);
+                    let end = Point2::new(l.end.x, l.end.y);
+                    let dx = end.x - start.x;
+                    let dy = end.y - start.y;
+                    let len2 = dx * dx + dy * dy;
+                    if len2 > 1e-20 {
+                        let t = ((world.x - start.x) * dx + (world.y - start.y) * dy) / len2;
+                        let px = start.x + t * dx;
+                        let py = start.y + t * dy;
+                        return Some(SnapResult {
+                            point: Point2::new(px, py),
+                            kind: SnapKind::Curve,
+                            feature: None,
+                            label: format!("({:.3}, {:.3})", px, py),
+                        });
+                    }
                 }
             }
         }

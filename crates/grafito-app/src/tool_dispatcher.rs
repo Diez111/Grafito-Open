@@ -537,7 +537,38 @@ fn handle_measure(
             } else {
                 (dot / (m1 * m2)).clamp(-1.0, 1.0).acos().to_degrees()
             };
-            let lbl_pos = Point2::new(vertex.x + 0.3, vertex.y + 0.3);
+            // Arco visual: polígono en forma de sector entre los dos rayos
+            let theta1 = v1y.atan2(v1x);
+            let theta2 = v2y.atan2(v2x);
+            let arc_r = ((m1 + m2) * 0.1).clamp(0.5, 2.0);
+            let n = 32;
+            let mut verts = Vec::with_capacity(n + 2);
+            verts.push(vertex);
+            // Ir de theta1 a theta2 en el sentido corto
+            let mut dt = theta2 - theta1;
+            while dt > std::f64::consts::PI {
+                dt -= 2.0 * std::f64::consts::PI;
+            }
+            while dt < -std::f64::consts::PI {
+                dt += 2.0 * std::f64::consts::PI;
+            }
+            for k in 0..=n {
+                let t = theta1 + dt * (k as f64) / (n as f64);
+                verts.push(Point2::new(
+                    vertex.x + arc_r * t.cos(),
+                    vertex.y + arc_r * t.sin(),
+                ));
+            }
+            let mut arc_poly = grafito_core::PolygonObj::new(verts);
+            arc_poly.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 1.0);
+            arc_poly.width = 1.0;
+            arc_poly.fill_color = Some(grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.25));
+            arc_poly.label = String::new();
+            document.add_object(grafito_core::GeoObject::Polygon(arc_poly));
+            let lbl_pos = Point2::new(
+                vertex.x + arc_r * 0.7 * (theta1 + dt * 0.5).cos(),
+                vertex.y + arc_r * 0.7 * (theta1 + dt * 0.5).sin(),
+            );
             let txt = grafito_core::TextObj::new(format!("{:.1}°", angle), lbl_pos);
             document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
@@ -552,30 +583,42 @@ fn handle_measure(
                 let p1 = state.pending[0];
                 if let Some(id) = document.pick_object(p1, tolerance) {
                     if let Some(obj) = document.get_object(id).cloned() {
-                        let (area, label, center) = match &obj {
-                            grafito_core::GeoObject::Circle(c) => (
-                                std::f64::consts::PI * c.radius * c.radius,
-                                format!(
-                                    "Área círculo = {:.3}",
-                                    std::f64::consts::PI * c.radius * c.radius
-                                ),
-                                Some(c.center),
-                            ),
+                        let (area, label, fill_polygon) = match &obj {
+                            grafito_core::GeoObject::Circle(c) => {
+                                let n = 64;
+                                let mut verts = Vec::with_capacity(n);
+                                for k in 0..n {
+                                    let theta =
+                                        2.0 * std::f64::consts::PI * (k as f64) / (n as f64);
+                                    verts.push(Point2::new(
+                                        c.center.x + c.radius * theta.cos(),
+                                        c.center.y + c.radius * theta.sin(),
+                                    ));
+                                }
+                                let a = std::f64::consts::PI * c.radius * c.radius;
+                                (a, format!("A = {:.3}", a), Some(verts))
+                            }
                             grafito_core::GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
                                 let a = polygon_area(&poly.vertices);
-                                let n = poly.vertices.len() as f64;
-                                let center = Point2::new(
-                                    poly.vertices.iter().map(|v| v.x).sum::<f64>() / n,
-                                    poly.vertices.iter().map(|v| v.y).sum::<f64>() / n,
-                                );
-                                (a, format!("Área polígono = {:.3}", a), Some(center))
+                                (a, format!("A = {:.3}", a), Some(poly.vertices.clone()))
                             }
                             _ => (0.0, String::new(), None),
                         };
 
                         if area > 0.0 {
-                            if let Some(c) = center {
-                                let txt = grafito_core::TextObj::new(label.clone(), c);
+                            if let Some(verts) = fill_polygon {
+                                let n = verts.len() as f64;
+                                let cx = verts.iter().map(|v| v.x).sum::<f64>() / n;
+                                let cy = verts.iter().map(|v| v.y).sum::<f64>() / n;
+                                let mut fill_poly = grafito_core::PolygonObj::new(verts);
+                                fill_poly.color = grafito_geometry::Color::new(0.2, 0.5, 0.9, 1.0);
+                                fill_poly.width = 1.5;
+                                fill_poly.fill_color =
+                                    Some(grafito_geometry::Color::new(0.2, 0.5, 0.9, 0.3));
+                                fill_poly.label = String::new();
+                                document.add_object(grafito_core::GeoObject::Polygon(fill_poly));
+                                let txt =
+                                    grafito_core::TextObj::new(label.clone(), Point2::new(cx, cy));
                                 document.add_object(grafito_core::GeoObject::Text(txt));
                             }
                             state.pending.clear();
@@ -589,14 +632,18 @@ fn handle_measure(
                 }
                 return ToolResult {
                     objects: vec![],
-                    message: Some("Selecciona el segundo punto para área bajo la curva".into()),
+                    message: Some(
+                        "Selecciona un círculo o polígono, o dos puntos sobre una función".into(),
+                    ),
                     reset_tool: false,
                 };
             } else if state.pending.len() == 2 {
                 let p1 = state.pending[0];
                 let p2 = state.pending[1];
                 if let Some(id) = document.pick_object(p1, tolerance) {
-                    if let Some(grafito_core::GeoObject::Function(f)) = document.get_object(id) {
+                    if let Some(grafito_core::GeoObject::Function(f)) =
+                        document.get_object(id).cloned()
+                    {
                         let lo = p1.x.min(p2.x);
                         let hi = p1.x.max(p2.x);
                         let integral = grafito_geometry::integral::eval_integral_hybrid(
@@ -613,7 +660,28 @@ fn handle_measure(
                             200,
                         );
                         let a = integral.abs();
-                        let label = format!("Área bajo curva = {:.3}", a);
+                        let n = 80;
+                        let mut verts = Vec::with_capacity(n + 2);
+                        for k in 0..=n {
+                            let x = lo + (hi - lo) * (k as f64) / (n as f64);
+                            let y = grafito_geometry::expr::eval_function_with_vars(
+                                &f.expr,
+                                x,
+                                &document.variables,
+                            )
+                            .unwrap_or(0.0);
+                            verts.push(Point2::new(x, y));
+                        }
+                        verts.push(Point2::new(hi, 0.0));
+                        verts.push(Point2::new(lo, 0.0));
+                        let mut fill_poly = grafito_core::PolygonObj::new(verts);
+                        fill_poly.color = grafito_geometry::Color::new(0.2, 0.5, 0.9, 1.0);
+                        fill_poly.width = 1.5;
+                        fill_poly.fill_color =
+                            Some(grafito_geometry::Color::new(0.2, 0.5, 0.9, 0.3));
+                        fill_poly.label = String::new();
+                        document.add_object(grafito_core::GeoObject::Polygon(fill_poly));
+                        let label = format!("A = {:.3}", a);
                         let txt = grafito_core::TextObj::new(
                             label.clone(),
                             Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5),
