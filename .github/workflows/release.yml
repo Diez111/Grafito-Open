@@ -40,6 +40,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install dependencies (Ubuntu)
