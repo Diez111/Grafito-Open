@@ -1,0 +1,41 @@
+name: Build Windows Binary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab
+
+      - name: Build release
+        run: cargo build --release -p grafito-app
+
+      - name: Rename & Hash
+        shell: pwsh
+        run: |
+          $exe = "target/release/grafito.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          $name = "grafito-$(git describe --tags --always)-windows-x64.exe"
+          Copy-Item $exe $name
+          echo "sha256=$hash" >> $env:GITHUB_STEP_SUMMARY
+          echo "artifact=$name" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: grafito-windows-x64
+          path: grafito-*-windows-x64.exe
