@@ -111,6 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn type_scale_is_monotonic() {
         assert!(TYPE_XS < TYPE_SM);
         assert!(TYPE_SM < TYPE_BASE);
@@ -149,6 +150,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn spacing_scale_is_monotonic() {
         assert!(SPACE_XS < SPACE_SM);
         assert!(SPACE_SM < SPACE_MD);

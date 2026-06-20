@@ -1,8 +1,6 @@
 //! Verifica que el outline de x² + y² = 1 se genera y renderiza
 //! correctamente con el cache key completo.
 
-use grafito_geometry::ast::Expr;
-use grafito_geometry::ast::Expr::*;
 use grafito_geometry::expr::prepare_function_ast;
 use std::collections::HashMap;
 

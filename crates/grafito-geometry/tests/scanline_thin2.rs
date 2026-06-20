@@ -8,6 +8,7 @@ mod thin_tests {
     use std::collections::HashMap;
 
     /// Versión con stride del scanline.
+    #[allow(clippy::too_many_arguments)]
     fn scanline_thin(
         lhs: &Expr,
         rhs: &Expr,

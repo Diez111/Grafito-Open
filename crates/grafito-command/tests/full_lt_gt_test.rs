@@ -1,7 +1,7 @@
 //! Test end-to-end: el command processor + render del fill.
 
 use grafito_command::commands::process_input;
-use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_core::{Document, GeoObject, RelationOperator};
 use std::collections::HashMap;
 
 #[test]

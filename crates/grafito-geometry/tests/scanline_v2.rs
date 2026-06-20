@@ -9,6 +9,7 @@ mod scanline_v2_tests {
 
     /// Simula el scanline fill. Devuelve el número total de píxeles
     /// "dentro" (cuenta el área rellenada).
+    #[allow(clippy::too_many_arguments)]
     fn scanline_count_inside(
         lhs: &Expr,
         rhs: &Expr,

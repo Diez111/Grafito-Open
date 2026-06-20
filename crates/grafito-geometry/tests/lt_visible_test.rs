@@ -5,6 +5,7 @@ use grafito_geometry::ast::Expr;
 use grafito_geometry::expr::prepare_function_ast;
 use std::collections::HashMap;
 
+#[allow(clippy::too_many_arguments)]
 fn scanline_full(
     lhs: &Expr,
     rhs: &Expr,

@@ -1,6 +1,6 @@
 //! Verifica que el marching squares produce segmentos para casos comunes.
 
-use grafito_core::implicit_curve::{evaluate_implicit_curve, segments_or_compute};
+use grafito_core::implicit_curve::evaluate_implicit_curve;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
 use std::collections::HashMap;
 

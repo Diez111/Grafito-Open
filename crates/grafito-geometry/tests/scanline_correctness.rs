@@ -10,6 +10,7 @@ mod scanline_correctness {
     /// Versión standalone del scanline fill (mismo algoritmo que
     /// `draw_implicit_curve_fill` en `render_2d.rs`). Devuelve un
     /// `Vec<bool>` donde `true` = dentro.
+    #[allow(clippy::too_many_arguments)]
     fn scanline_fill_test(
         lhs: &Expr,
         rhs: &Expr,

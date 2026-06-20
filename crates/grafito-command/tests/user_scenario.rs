@@ -1,8 +1,7 @@
 //! Reproduce los escenarios exactos del usuario.
 
 use grafito_command::commands::process_input;
-use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use grafito_core::{Document, GeoObject, RelationOperator};
 
 #[test]
 fn test_user_scenario_eq_circle() {

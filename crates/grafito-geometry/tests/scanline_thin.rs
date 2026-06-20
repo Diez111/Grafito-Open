@@ -2,7 +2,6 @@
 
 #[cfg(test)]
 mod scanline_thin_tests {
-    use grafito_geometry::ast::Expr;
     use grafito_geometry::expr::prepare_function_ast;
     use std::collections::HashMap;
 

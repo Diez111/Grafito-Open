@@ -1816,9 +1816,11 @@ mod tests {
 
     #[test]
     fn test_extrema_sine() {
-        let mut opts = AnalysisOptions::default();
-        opts.domain_min = -5.0;
-        opts.domain_max = 5.0;
+        let opts = AnalysisOptions {
+            domain_min: -5.0,
+            domain_max: 5.0,
+            ..Default::default()
+        };
         let results = analyze_function("sin(x)", &empty_vars(), &opts);
         let maxima: Vec<_> = results
             .iter()
@@ -1943,9 +1945,11 @@ mod tests {
     #[test]
     fn test_analyze_xintercept_parametric() {
         // círculo unitario (cos t, sin t) corta el eje X en t=0, π, 2π
-        let mut opts = AnalysisOptions::default();
-        opts.domain_min = 0.0;
-        opts.domain_max = std::f64::consts::TAU;
+        let opts = AnalysisOptions {
+            domain_min: 0.0,
+            domain_max: std::f64::consts::TAU,
+            ..Default::default()
+        };
         let results = analyze_parametric_curve2d(
             "cos(t)",
             "sin(t)",

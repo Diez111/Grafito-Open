@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod tests_module {
     use crate::boolean::*;
     use crate::cas::*;
     use crate::expr::*;

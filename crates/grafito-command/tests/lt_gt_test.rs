@@ -2,7 +2,7 @@
 //! <, >, <=, >= para ImplicitCurve con Unicode.
 
 use grafito_command::commands::process_input;
-use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_core::{Document, GeoObject, RelationOperator};
 
 fn check(text: &str, expected_op: RelationOperator) {
     let mut doc = Document::new();

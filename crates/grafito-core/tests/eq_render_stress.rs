@@ -1,7 +1,6 @@
 //! Test de stress: simular el render de un ImplicitCurve con Eq
 //! en un view normal. Detecta crashes.
 
-use grafito_core::implicit_curve::evaluate_implicit_curve;
 use grafito_core::implicit_curve::segments_or_compute;
 use grafito_core::RenderQuality;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
@@ -43,7 +42,7 @@ fn stress_test_cached_asts_with_unusual_inputs() {
 
     let vars = HashMap::new();
     for (lhs, rhs, op) in &cases {
-        let ic = ImplicitCurveObj::new(lhs, rhs, op.clone());
+        let ic = ImplicitCurveObj::new(lhs, rhs, *op);
         let (l, r) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         // Solo verificar que eval no panic.
         let _ = l.eval_2d("x", 0.0, "y", 0.0);

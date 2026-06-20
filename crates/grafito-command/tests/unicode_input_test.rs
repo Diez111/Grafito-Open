@@ -2,7 +2,7 @@
 //! que el usuario podría escribir (x², π, etc.).
 
 use grafito_command::commands::process_input;
-use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_core::{Document, GeoObject, RelationOperator};
 
 #[test]
 fn test_x_squared_y_squared_eq_1() {

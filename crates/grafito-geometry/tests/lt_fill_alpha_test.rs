@@ -1,9 +1,6 @@
 //! Verifica que el fill con alpha 0.5 es visible.
 
-use grafito_geometry::ast::Expr;
-use grafito_geometry::expr::prepare_function_ast;
 use grafito_geometry::Color;
-use std::collections::HashMap;
 
 #[test]
 fn test_fill_alpha_visibility() {

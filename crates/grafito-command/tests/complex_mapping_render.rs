@@ -2,8 +2,7 @@
 //! se renderiza correctamente.
 
 use grafito_command::commands::process_input;
-use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
-use std::collections::HashMap;
+use grafito_core::{GeoObject, RelationOperator};
 
 #[test]
 fn test_complex_mapping_1_over_z_of_circle() {

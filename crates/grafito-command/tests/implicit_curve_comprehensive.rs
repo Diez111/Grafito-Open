@@ -2,7 +2,7 @@
 //! del command processor y verificar que el cache se llena.
 
 use grafito_command::commands::{process_input, CommandOutcome};
-use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_core::{GeoObject, RelationOperator};
 use std::collections::HashMap;
 
 #[test]

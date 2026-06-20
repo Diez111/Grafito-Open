@@ -9,6 +9,7 @@ mod scanline_stride_tests {
 
     /// Cuenta cuántos píxeles están "dentro" en una grilla cols×rows.
     /// Esta es la métrica de "área" del relleno.
+    #[allow(clippy::too_many_arguments)]
     fn count_inside(
         lhs: &Expr,
         rhs: &Expr,

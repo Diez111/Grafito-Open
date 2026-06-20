@@ -10,6 +10,7 @@ mod scanline_full_tests {
 
     /// Replica exacta del algoritmo de scanline fill con stride.
     /// Devuelve los segmentos `(x_left_world, x_right_world)` por fila.
+    #[allow(clippy::too_many_arguments)]
     fn scanline_full(
         lhs: &Expr,
         rhs: &Expr,

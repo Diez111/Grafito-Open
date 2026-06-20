@@ -35,7 +35,7 @@ mod scanline_speed_tests {
 
         for stride in &[1, 2, 4, 8, 16] {
             let start = Instant::now();
-            let count = scanline_simulate(rows, cols, *stride, &f);
+            let count = scanline_simulate(rows, cols, *stride, f);
             let elapsed = start.elapsed();
             let per_call = elapsed / count.max(1) as u32;
             println!(
@@ -57,7 +57,7 @@ mod scanline_speed_tests {
 
         for stride in &[1, 2, 4, 8, 16] {
             let start = Instant::now();
-            let count = scanline_simulate(rows, cols, *stride, &f);
+            let count = scanline_simulate(rows, cols, *stride, f);
             let elapsed = start.elapsed();
             let per_call = elapsed / count.max(1) as u32;
             println!(
