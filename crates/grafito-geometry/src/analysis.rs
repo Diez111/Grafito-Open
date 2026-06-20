@@ -4,7 +4,8 @@
 //! puntos de inflexión, interceptos, asíntotas y aproximaciones de Taylor.
 //! Las funciones son puras: no dependen de UI ni de estado de documento.
 
-use crate::expr::{eval_batch_1d, eval_batch_2d, eval_function_with_vars};
+use crate::expr::{eval_batch_1d, eval_batch_2d, eval_function, eval_function_with_vars};
+use crate::integral::composite_simpson;
 use crate::Point2;
 use std::collections::HashMap;
 
@@ -1783,6 +1784,187 @@ pub fn analyze_vector_field_equilibrium_class(
     }
 }
 
+// ============================================================================
+// Herramientas de cálculo: tangente, normal, longitud de arco, curvatura,
+// volumen y superficie de revolución.
+// ============================================================================
+//
+// Estas rutinas obtienen `f'(x)` y `f''(x)` por derivación simbólica
+// (`crate::symbolic::derivative`) sobre el AST nativo, y los evalúan
+// numéricamente con `crate::expr::eval_function`. Las integrales se reducen
+// con la regla de Simpson compuesta (`crate::integral::composite_simpson`).
+
+/// Cantidad de muestras por defecto para las cuadraturas de Simpson de las
+// herramientas de revolución y longitud de arco.
+const TOOL_SAMPLES: usize = 2000;
+
+/// Evaluación segura de `f(x)` (variable `x`). Devuelve `Err` si la
+/// expresión no parsea o si el resultado no es finito.
+fn tool_eval_finite(expr: &str, x: f64) -> Result<f64, String> {
+    let y = eval_function(expr, x)?;
+    if !y.is_finite() {
+        return Err(format!("f({x}) no es finito"));
+    }
+    Ok(y)
+}
+
+/// Derivada simbólica de `expr` respecto de `x`, evaluada en `x_val`.
+fn tool_derivative_at(expr: &str, x_val: f64) -> Result<f64, String> {
+    let d = crate::symbolic::derivative(expr, "x")?;
+    tool_eval_finite(&d, x_val)
+}
+
+/// Segunda derivada de `expr` respecto de `x` en `x_val`.
+///
+/// Intenta la derivación simbólica dos veces; si falla, cae a una segunda
+/// diferencia central numérica.
+fn tool_second_derivative_at(expr: &str, x_val: f64) -> Result<f64, String> {
+    match crate::symbolic::derivative(expr, "x")
+        .and_then(|d1| crate::symbolic::derivative(&d1, "x"))
+    {
+        Ok(d2) => tool_eval_finite(&d2, x_val),
+        Err(_) => {
+            let h = (x_val.abs().max(1.0) * 1e-6).max(1e-12);
+            let fm = tool_eval_finite(expr, x_val - h)?;
+            let f0 = tool_eval_finite(expr, x_val)?;
+            let fp = tool_eval_finite(expr, x_val + h)?;
+            Ok((fm - 2.0 * f0 + fp) / (h * h))
+        }
+    }
+}
+
+/// Integra `g(x)` en `[a, b]` con la regla de Simpson compuesta sobre `n`
+/// muestras uniformes.
+fn tool_simpson<F: Fn(f64) -> f64>(g: F, a: f64, b: f64, n: usize) -> f64 {
+    if (b - a).abs() < 1e-15 {
+        return 0.0;
+    }
+    let n = n.max(2);
+    let dx = (b - a) / (n - 1) as f64;
+    let ys: Vec<f64> = (0..n).map(|i| g(a + i as f64 * dx)).collect();
+    composite_simpson(&ys, dx)
+}
+
+/// Tangente a `f(x)` en `x = x0`.
+///
+/// Devuelve `(x0, f(x0), pendiente)` donde `pendiente = f'(x0)` se obtiene por
+/// derivación simbólica sobre el AST nativo.
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::tangent_line_at;
+/// let (x, y, m) = tangent_line_at("x^2", 1.0).unwrap();
+/// assert!((m - 2.0).abs() < 1e-9);
+/// ```
+pub fn tangent_line_at(expr: &str, x: f64) -> Result<(f64, f64, f64), String> {
+    let y = tool_eval_finite(expr, x)?;
+    let slope = tool_derivative_at(expr, x)?;
+    Ok((x, y, slope))
+}
+
+/// Normal a `f(x)` en `x = x0` (recta perpendicular a la tangente).
+///
+/// Devuelve `(x0, f(x0), pendiente_normal)` donde `pendiente_normal = -1/f'(x0)`.
+/// Si `f'(x0) ≈ 0` la normal es vertical y la pendiente devuelta es `+INFINITY`.
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::normal_line_at;
+/// let (_, _, m) = normal_line_at("x^2", 1.0).unwrap();
+/// assert!((m + 0.5).abs() < 1e-9);
+/// ```
+pub fn normal_line_at(expr: &str, x: f64) -> Result<(f64, f64, f64), String> {
+    let y = tool_eval_finite(expr, x)?;
+    let slope = tool_derivative_at(expr, x)?;
+    let normal_slope = if slope.abs() < 1e-12 {
+        f64::INFINITY
+    } else {
+        -1.0 / slope
+    };
+    Ok((x, y, normal_slope))
+}
+
+/// Longitud de arco de `f(x)` en `[a, b]`: `∫_a^b sqrt(1 + f'(x)²) dx`.
+///
+/// Usa derivación simbólica para `f'` y la regla de Simpson compuesta para la
+/// cuadratura.
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::arc_length;
+/// let l = arc_length("x", 0.0, 1.0).unwrap();
+/// assert!((l - 2.0_f64.sqrt()).abs() < 1e-6);
+/// ```
+pub fn arc_length(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    let d = crate::symbolic::derivative(expr, "x")?;
+    let g = |xv: f64| {
+        let dp = eval_function(&d, xv).unwrap_or(0.0);
+        (1.0 + dp * dp).sqrt()
+    };
+    Ok(tool_simpson(g, a, b, TOOL_SAMPLES))
+}
+
+/// Curvatura de `f(x)` en `x = x0`: `κ = |f''(x0)| / (1 + f'(x0)²)^(3/2)`.
+///
+/// Usa derivación simbólica dos veces; si la segunda derivada simbólica falla,
+/// cae a una aproximación numérica. Devuelve `INFINITY` cuando el denominador
+/// es cero (punto de inflexión con tangente horizontal y curvatura no definida
+/// por esta fórmula).
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::curvature_at;
+/// // y = x² tiene curvatura máxima en el vértice: κ(0) = |2| / 1 = 2.
+/// let k = curvature_at("x^2", 0.0).unwrap();
+/// assert!((k - 2.0).abs() < 1e-6);
+/// ```
+pub fn curvature_at(expr: &str, x: f64) -> Result<f64, String> {
+    let fp = tool_derivative_at(expr, x)?;
+    let fpp = tool_second_derivative_at(expr, x)?;
+    let denom = (1.0 + fp * fp).powf(1.5);
+    if denom < 1e-15 {
+        return Ok(f64::INFINITY);
+    }
+    Ok(fpp.abs() / denom)
+}
+
+/// Volumen de revolución de `f(x)` alrededor del eje X en `[a, b]`:
+/// `V = π · ∫_a^b f(x)² dx`.
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::volume_of_revolution;
+/// let v = volume_of_revolution("x", 0.0, 1.0).unwrap();
+/// assert!((v - std::f64::consts::PI / 3.0).abs() < 1e-6);
+/// ```
+pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    let g = |xv: f64| {
+        let y = eval_function(expr, xv).unwrap_or(0.0);
+        y * y
+    };
+    Ok(std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES))
+}
+
+/// Área de la superficie de revolución de `f(x)` alrededor del eje X en
+/// `[a, b]`: `S = 2π · ∫_a^b |f(x)| · sqrt(1 + f'(x)²) dx`.
+///
+/// # Ejemplo
+/// ```
+/// use grafito_geometry::analysis::surface_of_revolution;
+/// // f(x) = x en [0, 1]: S = 2π · √2 · ∫₀¹ x dx = π·√2.
+/// let s = surface_of_revolution("x", 0.0, 1.0).unwrap();
+/// assert!((s - std::f64::consts::PI * 2.0_f64.sqrt()).abs() < 1e-6);
+/// ```
+pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    let d = crate::symbolic::derivative(expr, "x")?;
+    let g = |xv: f64| {
+        let y = eval_function(expr, xv).unwrap_or(0.0);
+        let dp = eval_function(&d, xv).unwrap_or(0.0);
+        2.0 * std::f64::consts::PI * y.abs() * (1.0 + dp * dp).sqrt()
+    };
+    Ok(tool_simpson(g, a, b, TOOL_SAMPLES))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1969,5 +2151,108 @@ mod tests {
         assert!(xs.contains(&1.0));
         assert!(xs.contains(&-1.0));
         let _ = opts;
+    }
+
+    // ========================================================================
+    // Tests de las herramientas de cálculo (tangente, normal, arco, curvatura,
+    // volumen y superficie de revolución).
+    // ========================================================================
+
+    #[test]
+    fn test_tangent_line_at_parabola() {
+        // f(x) = x² en x = 1: f(1) = 1, f'(x) = 2x → pendiente 2.
+        let (x, y, m) = tangent_line_at("x^2", 1.0).expect("tangente");
+        assert!((x - 1.0).abs() < 1e-12);
+        assert!((y - 1.0).abs() < 1e-9);
+        assert!((m - 2.0).abs() < 1e-9, "pendiente esperada 2, got {m}");
+    }
+
+    #[test]
+    fn test_normal_line_at_parabola() {
+        // f(x) = x² en x = 1: pendiente normal = -1/f' = -1/2 = -0.5.
+        let (_, _, m) = normal_line_at("x^2", 1.0).expect("normal");
+        assert!(
+            (m + 0.5).abs() < 1e-9,
+            "pendiente normal esperada -0.5, got {m}"
+        );
+    }
+
+    #[test]
+    fn test_normal_line_at_horizontal_tangent_is_vertical() {
+        // f(x) = x² en x = 0: f'(0) = 0 → normal vertical → pendiente INFINITY.
+        let (_, _, m) = normal_line_at("x^2", 0.0).expect("normal");
+        assert!(m.is_infinite(), "normal vertical esperada, got {m}");
+    }
+
+    #[test]
+    fn test_arc_length_straight_line() {
+        // f(x) = x en [0, 1]: ∫₀¹ sqrt(1 + 1²) dx = sqrt(2).
+        let l = arc_length("x", 0.0, 1.0).expect("arco");
+        assert!(
+            (l - 2.0_f64.sqrt()).abs() < 1e-6,
+            "longitud esperada sqrt(2), got {l}"
+        );
+    }
+
+    #[test]
+    fn test_arc_length_parabola() {
+        // f(x) = x² en [0, 1]: ∫₀¹ sqrt(1 + 4x²) dx ≈ 1.4789428.
+        let expected = 0.5 * 5.0_f64.sqrt() + 0.25 * (2.0 + 5.0_f64.sqrt()).ln();
+        let l = arc_length("x^2", 0.0, 1.0).expect("arco");
+        assert!((l - expected).abs() < 1e-4, "esperada {expected}, got {l}");
+    }
+
+    #[test]
+    fn test_curvature_at_parabola_vertex() {
+        // y = x² en x = 0: f'(0) = 0, f''(0) = 2 → κ = |2| / (1 + 0)^(3/2) = 2.
+        //
+        // Nota: el vértice de una parábola es el punto de MÁXIMA curvatura, no
+        // cero. Que f'(0) = 0 (tangente horizontal) no implica curvatura nula:
+        // la curvatura depende de f''. Por eso κ(0) = 2 y el radio de curvatura
+        // es R = 1/κ = 0.5.
+        let k = curvature_at("x^2", 0.0).expect("curvatura");
+        assert!((k - 2.0).abs() < 1e-6, "curvatura esperada 2, got {k}");
+    }
+
+    #[test]
+    fn test_curvature_at_line_is_zero() {
+        // f(x) = 2x + 1 es una recta: f'' = 0 → κ = 0 en todo punto.
+        let k = curvature_at("2*x + 1", 3.0).expect("curvatura");
+        assert!(k.abs() < 1e-6, "curvatura de una recta esperada 0, got {k}");
+    }
+
+    #[test]
+    fn test_volume_of_revolution_line() {
+        // f(x) = x en [0, 1]: V = π ∫₀¹ x² dx = π/3.
+        let v = volume_of_revolution("x", 0.0, 1.0).expect("volumen");
+        assert!(
+            (v - std::f64::consts::PI / 3.0).abs() < 1e-6,
+            "volumen esperado π/3, got {v}"
+        );
+    }
+
+    #[test]
+    fn test_surface_of_revolution_line() {
+        // f(x) = x en [0, 1]: S = 2π ∫₀¹ x·sqrt(1 + 1²) dx = 2π·sqrt(2)·(1/2) = π·sqrt(2).
+        let s = surface_of_revolution("x", 0.0, 1.0).expect("superficie");
+        let expected = std::f64::consts::PI * 2.0_f64.sqrt();
+        assert!(
+            (s - expected).abs() < 1e-6,
+            "superficie esperada {expected}, got {s}"
+        );
+    }
+
+    #[test]
+    fn test_volume_of_revolution_parabola() {
+        // f(x) = x² en [0, 2]: V = π ∫₀² x⁴ dx = π · 32/5.
+        let v = volume_of_revolution("x^2", 0.0, 2.0).expect("volumen");
+        let expected = std::f64::consts::PI * 32.0 / 5.0;
+        assert!((v - expected).abs() < 1e-5, "esperado {expected}, got {v}");
+    }
+
+    #[test]
+    fn test_tangent_line_at_invalid_expression_errors() {
+        // f(x) = 1/x en x = 0 → f(0) no es finito → error.
+        assert!(tangent_line_at("1/x", 0.0).is_err());
     }
 }

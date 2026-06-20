@@ -8,7 +8,10 @@ use grafito_core::{
     PolarCurveObj, PolygonObj, RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj,
     Sphere3DObj, Surface3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
-use grafito_geometry::analysis::{analyze_intersection, AnalysisFeature, IntersectionCurve};
+use grafito_geometry::analysis::{
+    analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
+    tangent_line_at, volume_of_revolution, AnalysisFeature, IntersectionCurve,
+};
 use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::matrices::{taylor_series, Matrix};
@@ -44,6 +47,25 @@ fn replace_variable(expr: &str, from: &str, to: &str) -> String {
         i += ch_len;
     }
     result
+}
+
+/// Sustituye las variables de `document.variables` en la expresión, envolviendo
+/// cada valor entre paréntesis para preservar la precedencia (p. ej. valores
+/// negativos en exponentes). Las variables no finitas se ignoran.
+///
+/// Esto permite que las herramientas de análisis basadas en derivación
+/// simbólica (que operan sobre una expresión pura en `x`) respeten el contexto
+/// de variables del documento.
+fn substitute_document_vars(expr: &str, document: &Document) -> String {
+    let mut out = expr.to_string();
+    for (k, v) in &document.variables {
+        // `x` es la variable de la función: no se sustituye.
+        if k == "x" || !v.is_finite() {
+            continue;
+        }
+        out = replace_variable(&out, k, &format!("({})", v));
+    }
+    out
 }
 
 fn is_ident_char(b: u8) -> bool {
@@ -4231,126 +4253,98 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
             }
         }
         "TangentAt" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let h = 1e-6;
-            let fx = eval_function_with_vars(&expr, x, &vars).unwrap_or(f64::NAN);
-            let fxh = eval_function_with_vars(&expr, x + h, &vars).unwrap_or(f64::NAN);
-            let fxmh = eval_function_with_vars(&expr, x - h, &vars).unwrap_or(f64::NAN);
-            let slope = (fxh - fxmh) / (2.0 * h);
-            if !fx.is_finite() || !slope.is_finite() {
-                return Some("No se puede calcular la tangente en este punto".into());
+            let expr = substitute_document_vars(expr_raw, document);
+            match tangent_line_at(&expr, x) {
+                Ok((x0, fx, slope)) => {
+                    let p1 = Point2::new(x0, fx);
+                    let p2 = Point2::new(x0 + 1.0, fx + slope);
+                    document
+                        .add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("tangente")));
+                    Some(format!(
+                        "Tangente en x={:.4}: y = {:.4} + {:.4}·(x − {:.4})",
+                        x0, fx, slope, x0
+                    ))
+                }
+                Err(e) => Some(format!("Error en TangentAt: {e}")),
             }
-            let p1 = Point2::new(x, fx);
-            let p2 = Point2::new(x + 1.0, fx + slope);
-            document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("tangente")));
-            Some(format!(
-                "Tangente en x={:.4}: y = {:.4} + {:.4}·(x − {:.4})",
-                x, fx, slope, x
-            ))
         }
         "NormalAt" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let h = 1e-6;
-            let fx = eval_function_with_vars(&expr, x, &vars).unwrap_or(f64::NAN);
-            let fxh = eval_function_with_vars(&expr, x + h, &vars).unwrap_or(f64::NAN);
-            let fxmh = eval_function_with_vars(&expr, x - h, &vars).unwrap_or(f64::NAN);
-            let slope = (fxh - fxmh) / (2.0 * h);
-            if !fx.is_finite() || !slope.is_finite() {
-                return Some("No se puede calcular la normal en este punto".into());
+            let expr = substitute_document_vars(expr_raw, document);
+            match normal_line_at(&expr, x) {
+                Ok((x0, fx, normal_slope)) => {
+                    let p1 = Point2::new(x0, fx);
+                    let p2 = if normal_slope.is_infinite() {
+                        Point2::new(x0, fx + 1.0)
+                    } else {
+                        Point2::new(x0 + 1.0, fx + normal_slope)
+                    };
+                    document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("normal")));
+                    Some(format!("Normal en x={:.4}", x0))
+                }
+                Err(e) => Some(format!("Error en NormalAt: {e}")),
             }
-            let normal_slope = if slope.abs() < 1e-10 {
-                f64::INFINITY
-            } else {
-                -1.0 / slope
-            };
-            let p1 = Point2::new(x, fx);
-            let p2 = if normal_slope.is_infinite() {
-                Point2::new(x, fx + 1.0)
-            } else {
-                Point2::new(x + 1.0, fx + normal_slope)
-            };
-            document.add_object(GeoObject::Line(LineObj::new(p1, p2).with_label("normal")));
-            Some(format!("Normal en x={:.4}", x))
         }
         "ArcLength" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
             let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let h = 1e-5;
-            let f = |x: f64| {
-                let fp = (eval_function_with_vars(&expr, x + h, &vars).unwrap_or(0.0)
-                    - eval_function_with_vars(&expr, x - h, &vars).unwrap_or(0.0))
-                    / (2.0 * h);
-                (1.0 + fp * fp).sqrt()
-            };
-            let length = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
-            Some(format!(
-                "Longitud de arco de {:.4} a {:.4}: {:.6}",
-                a, b, length
-            ))
+            let expr = substitute_document_vars(expr_raw, document);
+            match arc_length(&expr, a, b) {
+                Ok(length) => Some(format!(
+                    "Longitud de arco de {:.4} a {:.4}: {:.6}",
+                    a, b, length
+                )),
+                Err(e) => Some(format!("Error en ArcLength: {e}")),
+            }
         }
         "CurvatureAt" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let x: f64 = cmd.args.get(1)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let h = 1e-5;
-            let f = |xv: f64| eval_function_with_vars(&expr, xv, &vars).unwrap_or(0.0);
-            let fp = (f(x + h) - f(x - h)) / (2.0 * h);
-            let fpp = (f(x + h) - 2.0 * f(x) + f(x - h)) / (h * h);
-            let denom = (1.0 + fp * fp).powf(1.5);
-            let kappa = if denom > 1e-15 {
-                fpp.abs() / denom
-            } else {
-                f64::NAN
-            };
-            let radius = if kappa.abs() > 1e-15 {
-                1.0 / kappa
-            } else {
-                f64::INFINITY
-            };
-            Some(format!(
-                "Curvatura en x={:.4}: κ = {:.6}, Radio = {:.6}",
-                x, kappa, radius
-            ))
+            let expr = substitute_document_vars(expr_raw, document);
+            match curvature_at(&expr, x) {
+                Ok(kappa) => {
+                    let radius = if kappa.is_finite() && kappa.abs() > 1e-15 {
+                        1.0 / kappa
+                    } else {
+                        f64::INFINITY
+                    };
+                    Some(format!(
+                        "Curvatura en x={:.4}: κ = {:.6}, Radio = {:.6}",
+                        x, kappa, radius
+                    ))
+                }
+                Err(e) => Some(format!("Error en CurvatureAt: {e}")),
+            }
         }
         "VolumeOfRevolution" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
             let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let f = |x: f64| {
-                let y = eval_function_with_vars(&expr, x, &vars).unwrap_or(0.0);
-                std::f64::consts::PI * y * y
-            };
-            let volume = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
-            Some(format!(
-                "Volumen de revolución de {:.4} a {:.4}: {:.6}",
-                a, b, volume
-            ))
+            let expr = substitute_document_vars(expr_raw, document);
+            match volume_of_revolution(&expr, a, b) {
+                Ok(volume) => Some(format!(
+                    "Volumen de revolución de {:.4} a {:.4}: {:.6}",
+                    a, b, volume
+                )),
+                Err(e) => Some(format!("Error en VolumeOfRevolution: {e}")),
+            }
         }
         "SurfaceOfRevolution" => {
-            let expr = cmd.args.first()?.trim().to_string();
+            let expr_raw = cmd.args.first()?.trim();
             let a: f64 = cmd.args.get(1)?.trim().parse().ok()?;
             let b: f64 = cmd.args.get(2)?.trim().parse().ok()?;
-            let vars: HashMap<String, f64> = document.variables.clone();
-            let h = 1e-5;
-            let f = |x: f64| {
-                let y = eval_function_with_vars(&expr, x, &vars).unwrap_or(0.0);
-                let fp = (eval_function_with_vars(&expr, x + h, &vars).unwrap_or(0.0)
-                    - eval_function_with_vars(&expr, x - h, &vars).unwrap_or(0.0))
-                    / (2.0 * h);
-                2.0 * std::f64::consts::PI * y.abs() * (1.0 + fp * fp).sqrt()
-            };
-            let surface = grafito_geometry::integral::eval_integral_hybrid(f, a, b, 200);
-            Some(format!(
-                "Superficie de revolución de {:.4} a {:.4}: {:.6}",
-                a, b, surface
-            ))
+            let expr = substitute_document_vars(expr_raw, document);
+            match surface_of_revolution(&expr, a, b) {
+                Ok(surface) => Some(format!(
+                    "Superficie de revolución de {:.4} a {:.4}: {:.6}",
+                    a, b, surface
+                )),
+                Err(e) => Some(format!("Error en SurfaceOfRevolution: {e}")),
+            }
         }
         _ => None,
     }

@@ -253,3 +253,93 @@ fn root_on_vector_field_finds_equilibrium() {
         points
     );
 }
+
+// ============================================================================
+// Tests de las herramientas de cálculo (TangentAt, NormalAt, ArcLength,
+// CurvatureAt, VolumeOfRevolution, SurfaceOfRevolution).
+// ============================================================================
+
+fn extract_message(out: &CommandOutcome) -> Option<&str> {
+    match out {
+        CommandOutcome::Message(s) => Some(s.as_str()),
+        CommandOutcome::Error(s) => Some(s.as_str()),
+        CommandOutcome::Ok => None,
+    }
+}
+
+#[test]
+fn tangent_at_creates_line_and_reports_slope() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "TangentAt[x^2, 1]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    assert!(msg.contains("Tangente"), "got {msg}");
+    // Debe crear un objeto Line (la tangente).
+    assert!(
+        doc.objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::Line(_))),
+        "esperaba una línea tangente"
+    );
+}
+
+#[test]
+fn normal_at_creates_perpendicular_line() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "NormalAt[x^2, 1]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    assert!(msg.contains("Normal"), "got {msg}");
+    assert!(
+        doc.objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::Line(_))),
+        "esperaba una línea normal"
+    );
+}
+
+#[test]
+fn arc_length_command_returns_sqrt2_for_line() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "ArcLength[x, 0, 1]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    let expected = 2.0_f64.sqrt();
+    assert!(msg.contains(&format!("{expected:.6}")), "got {msg}");
+}
+
+#[test]
+fn curvature_at_command_reports_kappa_for_parabola() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "CurvatureAt[x^2, 0]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    assert!(msg.contains("Curvatura"), "got {msg}");
+    // κ(0) = 2 para y = x².
+    assert!(
+        msg.contains("2.000000"),
+        "esperaba κ=2 en el mensaje: {msg}"
+    );
+}
+
+#[test]
+fn volume_of_revolution_command_returns_pi_over_3() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "VolumeOfRevolution[x, 0, 1]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    let expected = std::f64::consts::PI / 3.0;
+    assert!(msg.contains(&format!("{expected:.6}")), "got {msg}");
+}
+
+#[test]
+fn surface_of_revolution_command_returns_pi_sqrt2() {
+    let mut doc = Document::new();
+    let out = process_input(&mut doc, &mut "SurfaceOfRevolution[x, 0, 1]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    let expected = std::f64::consts::PI * 2.0_f64.sqrt();
+    assert!(msg.contains(&format!("{expected:.6}")), "got {msg}");
+}
+
+#[test]
+fn tangent_at_with_document_variable() {
+    // f(x) = a*x con a = 3 → en x = 2, f' = 3, tangente de pendiente 3.
+    let mut doc = Document::new();
+    doc.set_variable("a".to_string(), 3.0);
+    let out = process_input(&mut doc, &mut "TangentAt[a*x, 2]".to_string());
+    let msg = extract_message(&out).expect("mensaje");
+    assert!(msg.contains("3.0000"), "esperaba pendiente 3 en: {msg}");
+}

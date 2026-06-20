@@ -344,7 +344,7 @@ fn eval_bytecode(x: f32, y: f32) -> f32 {
             case OP_LOG10: {
                 sp = sp - 1;
                 let v = stack[sp];
-                if v <= 0.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = log10(v); }
+                if v <= 0.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = log2(v) / 3.3219280948873626; }
                 sp = sp + 1;
             }
             case OP_LOG2: {
