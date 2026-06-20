@@ -40,6 +40,35 @@ pub(crate) enum Op {
     Ceil = 19,
     Pi = 20,
     E = 21,
+    // Extended opcodes (Fase 1)
+    Asin = 22,
+    Acos = 23,
+    Atan = 24,
+    Sinh = 25,
+    Cosh = 26,
+    Tanh = 27,
+    Asinh = 28,
+    Acosh = 29,
+    Atanh = 30,
+    Sec = 31,
+    Csc = 32,
+    Cot = 33,
+    Sign = 34,
+    Heaviside = 35,
+    Cbrt = 36,
+    Mod = 37,
+    Round = 38,
+    Log10 = 39,
+    Log2 = 40,
+    Exp2 = 41,
+    Atan2 = 42,
+    Clamp = 43,
+    Lt = 44,
+    Gt = 45,
+    Le = 46,
+    Ge = 47,
+    Eq = 48,
+    Ne = 49,
 }
 
 impl Op {
@@ -190,6 +219,125 @@ pub(crate) fn compile_expr_with_mapping(
             compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             prog.code.push(Op::Ceil.encode(0));
         }
+        Expr::Asin(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Asin.encode(0));
+        }
+        Expr::Acos(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Acos.encode(0));
+        }
+        Expr::Atan(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Atan.encode(0));
+        }
+        Expr::Sinh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Sinh.encode(0));
+        }
+        Expr::Cosh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Cosh.encode(0));
+        }
+        Expr::Tanh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Tanh.encode(0));
+        }
+        Expr::Asinh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Asinh.encode(0));
+        }
+        Expr::Acosh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Acosh.encode(0));
+        }
+        Expr::Atanh(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Atanh.encode(0));
+        }
+        Expr::Sec(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Sec.encode(0));
+        }
+        Expr::Csc(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Csc.encode(0));
+        }
+        Expr::Cot(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Cot.encode(0));
+        }
+        Expr::Sign(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Sign.encode(0));
+        }
+        Expr::Heaviside(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Heaviside.encode(0));
+        }
+        Expr::Cbrt(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Cbrt.encode(0));
+        }
+        Expr::Round(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Round.encode(0));
+        }
+        Expr::Log(a) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            prog.code.push(Op::Log10.encode(0));
+        }
+        Expr::Modulo(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Mod.encode(0));
+        }
+        Expr::Atan2(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Atan2.encode(0));
+        }
+        Expr::Clamp(a, lo, hi) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(lo, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(hi, document_vars, var_map, prog)?;
+            prog.code.push(Op::Clamp.encode(0));
+        }
+        Expr::Lt(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Lt.encode(0));
+        }
+        Expr::Gt(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Gt.encode(0));
+        }
+        Expr::Le(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Le.encode(0));
+        }
+        Expr::Ge(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Ge.encode(0));
+        }
+        Expr::Eq(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Eq.encode(0));
+        }
+        Expr::Ne(a, b) => {
+            compile_expr_with_mapping(a, document_vars, var_map, prog)?;
+            compile_expr_with_mapping(b, document_vars, var_map, prog)?;
+            prog.code.push(Op::Ne.encode(0));
+        }
+        Expr::Piecewise(_, _) => {
+            // Piecewise requires a Select opcode and complex control flow.
+            // Falls back to CPU evaluator which handles it correctly.
+            return Err(CompileError::UnsupportedNode("Piecewise".to_string()));
+        }
         other => {
             return Err(CompileError::UnsupportedNode(format!("{:?}", other)));
         }
@@ -201,15 +349,29 @@ pub(crate) fn compile_expr_with_mapping(
     for &instr in &prog.code {
         let op = instr & 0xFFu32;
         match op {
+            // Push 1 value: PushConst(1), PushVar(2), Pi(20), E(21)
             1 | 2 | 20 | 21 => {
                 sp += 1;
                 if sp > max_sp {
                     max_sp = sp;
                 }
             }
-            3..=8 | 16 | 17 => {
+            // Binary ops: pop 2, push 1 → net -1
+            // Add(3), Sub(4), Mul(5), Div(6), Pow(7), Min(16), Max(17),
+            // Mod(37), Atan2(42), Clamp(43), Lt(44), Gt(45), Le(46), Ge(47), Eq(48), Ne(49)
+            3 | 4 | 5 | 6 | 7 | 16 | 17 | 37 | 42 | 44 | 45 | 46 | 47 | 48 | 49 => {
                 sp -= 1;
             }
+            // Clamp pops 3, pushes 1 → net -2
+            43 => {
+                sp -= 2;
+            }
+            // Unary ops: pop 1, push 1 → net 0. No stack change.
+            // Neg(8), Sin(9), Cos(10), Tan(11), Exp(12), Log(13), Sqrt(14),
+            // Abs(15), Floor(18), Ceil(19), Asin(22), Acos(23), Atan(24),
+            // Sinh(25), Cosh(26), Tanh(27), Asinh(28), Acosh(29), Atanh(30),
+            // Sec(31), Csc(32), Cot(33), Sign(34), Heaviside(35), Cbrt(36),
+            // Round(38), Log10(39), Log2(40), Exp2(41)
             _ => {}
         }
     }

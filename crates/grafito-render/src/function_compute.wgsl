@@ -51,6 +51,35 @@ const OP_FLOOR: u32 = 18u;
 const OP_CEIL: u32 = 19u;
 const OP_PI: u32 = 20u;
 const OP_E: u32 = 21u;
+// Extended opcodes
+const OP_ASIN: u32 = 22u;
+const OP_ACOS: u32 = 23u;
+const OP_ATAN: u32 = 24u;
+const OP_SINH: u32 = 25u;
+const OP_COSH: u32 = 26u;
+const OP_TANH: u32 = 27u;
+const OP_ASINH: u32 = 28u;
+const OP_ACOSH: u32 = 29u;
+const OP_ATANH: u32 = 30u;
+const OP_SEC: u32 = 31u;
+const OP_CSC: u32 = 32u;
+const OP_COT: u32 = 33u;
+const OP_SIGN: u32 = 34u;
+const OP_HEAVISIDE: u32 = 35u;
+const OP_CBRT: u32 = 36u;
+const OP_MOD: u32 = 37u;
+const OP_ROUND: u32 = 38u;
+const OP_LOG10: u32 = 39u;
+const OP_LOG2: u32 = 40u;
+const OP_EXP2: u32 = 41u;
+const OP_ATAN2: u32 = 42u;
+const OP_CLAMP: u32 = 43u;
+const OP_LT: u32 = 44u;
+const OP_GT: u32 = 45u;
+const OP_LE: u32 = 46u;
+const OP_GE: u32 = 47u;
+const OP_EQ: u32 = 48u;
+const OP_NE: u32 = 49u;
 
 const STACK_SIZE: i32 = 32;
 
@@ -203,6 +232,162 @@ fn eval_bytecode(x: f32) -> f32 {
             }
             case OP_E: {
                 stack[sp] = 2.71828182845904523536;
+                sp = sp + 1;
+            }
+            case OP_ASIN: {
+                sp = sp - 1;
+                let v = stack[sp];
+                stack[sp] = select(asin(clamp(v, -1.0, 1.0)), asin(v), abs(v) <= 1.0);
+                sp = sp + 1;
+            }
+            case OP_ACOS: {
+                sp = sp - 1;
+                let v = stack[sp];
+                stack[sp] = select(acos(clamp(v, -1.0, 1.0)), acos(v), abs(v) <= 1.0);
+                sp = sp + 1;
+            }
+            case OP_ATAN: {
+                sp = sp - 1;
+                stack[sp] = atan(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_SINH: {
+                sp = sp - 1;
+                stack[sp] = sinh(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_COSH: {
+                sp = sp - 1;
+                stack[sp] = cosh(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_TANH: {
+                sp = sp - 1;
+                stack[sp] = tanh(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_ASINH: {
+                sp = sp - 1;
+                stack[sp] = asinh(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_ACOSH: {
+                sp = sp - 1;
+                let v = stack[sp];
+                stack[sp] = select(acosh(max(v, 1.0)), acosh(v), v >= 1.0);
+                sp = sp + 1;
+            }
+            case OP_ATANH: {
+                sp = sp - 1;
+                let v = stack[sp];
+                stack[sp] = select(atanh(clamp(v, -0.99999994, 0.99999994)), atanh(v), abs(v) < 1.0);
+                sp = sp + 1;
+            }
+            case OP_SEC: {
+                sp = sp - 1;
+                let v = stack[sp];
+                let c = cos(v);
+                if abs(c) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / c; }
+                sp = sp + 1;
+            }
+            case OP_CSC: {
+                sp = sp - 1;
+                let v = stack[sp];
+                let s = sin(v);
+                if abs(s) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / s; }
+                sp = sp + 1;
+            }
+            case OP_COT: {
+                sp = sp - 1;
+                let v = stack[sp];
+                let t = tan(v);
+                if abs(t) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / t; }
+                sp = sp + 1;
+            }
+            case OP_SIGN: {
+                sp = sp - 1;
+                let v = stack[sp];
+                if v > 0.0 { stack[sp] = 1.0; } else if v < 0.0 { stack[sp] = -1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_HEAVISIDE: {
+                sp = sp - 1;
+                let v = stack[sp];
+                if v >= 0.0 { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_CBRT: {
+                sp = sp - 1;
+                let v = stack[sp];
+                if v < 0.0 { stack[sp] = -pow(-v, 1.0 / 3.0); } else { stack[sp] = pow(v, 1.0 / 3.0); }
+                sp = sp + 1;
+            }
+            case OP_MOD: {
+                sp = sp - 2;
+                let b = stack[sp + 1];
+                if abs(b) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = stack[sp] - b * floor(stack[sp] / b); }
+                sp = sp + 1;
+            }
+            case OP_ROUND: {
+                sp = sp - 1;
+                stack[sp] = floor(stack[sp] + 0.5);
+                sp = sp + 1;
+            }
+            case OP_LOG10: {
+                sp = sp - 1;
+                let v = stack[sp];
+                if v <= 0.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = log10(v); }
+                sp = sp + 1;
+            }
+            case OP_LOG2: {
+                sp = sp - 1;
+                let v = stack[sp];
+                if v <= 0.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = log2(v); }
+                sp = sp + 1;
+            }
+            case OP_EXP2: {
+                sp = sp - 1;
+                stack[sp] = exp2(stack[sp]);
+                sp = sp + 1;
+            }
+            case OP_ATAN2: {
+                sp = sp - 2;
+                stack[sp] = atan2(stack[sp], stack[sp + 1]);
+                sp = sp + 1;
+            }
+            case OP_CLAMP: {
+                sp = sp - 3;
+                stack[sp] = clamp(stack[sp], stack[sp + 1], stack[sp + 2]);
+                sp = sp + 1;
+            }
+            case OP_LT: {
+                sp = sp - 2;
+                if stack[sp] < stack[sp + 1] { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_GT: {
+                sp = sp - 2;
+                if stack[sp] > stack[sp + 1] { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_LE: {
+                sp = sp - 2;
+                if stack[sp] <= stack[sp + 1] { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_GE: {
+                sp = sp - 2;
+                if stack[sp] >= stack[sp + 1] { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_EQ: {
+                sp = sp - 2;
+                if abs(stack[sp] - stack[sp + 1]) < 1e-10 { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
+                sp = sp + 1;
+            }
+            case OP_NE: {
+                sp = sp - 2;
+                if abs(stack[sp] - stack[sp + 1]) >= 1e-10 { stack[sp] = 1.0; } else { stack[sp] = 0.0; }
                 sp = sp + 1;
             }
             default: {
