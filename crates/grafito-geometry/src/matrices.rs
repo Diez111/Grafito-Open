@@ -1,5 +1,7 @@
 use std::fmt;
 
+use nalgebra::{linalg::SymmetricEigen, DMatrix};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matrix {
     pub rows: usize,
@@ -349,6 +351,264 @@ pub fn solve_linear_system(a: &Matrix, b: &Matrix) -> Option<Matrix> {
     Some(result)
 }
 
+// ============================================================================
+// Operaciones avanzadas de álgebra lineal (implementadas sobre nalgebra)
+// ============================================================================
+
+/// Convierte una `Matrix` (row-major) en una `nalgebra::DMatrix<f64>`.
+fn to_nalgebra(m: &Matrix) -> DMatrix<f64> {
+    DMatrix::from_row_slice(m.rows, m.cols, &m.data)
+}
+
+/// Convierte una `nalgebra::DMatrix<f64>` de vuelta a `Matrix` (row-major).
+fn from_nalgebra(nmat: &DMatrix<f64>) -> Matrix {
+    let rows = nmat.nrows();
+    let cols = nmat.ncols();
+    let mut data = Vec::with_capacity(rows * cols);
+    for i in 0..rows {
+        for j in 0..cols {
+            data.push(nmat[(i, j)]);
+        }
+    }
+    Matrix { rows, cols, data }
+}
+
+/// Comprueba si una matriz densa es simétrica (dentro de una tolerancia
+/// relativa a su mayor valor absoluto).
+fn is_symmetric_dense(m: &DMatrix<f64>) -> bool {
+    let n = m.nrows();
+    if m.ncols() != n || n == 0 {
+        return false;
+    }
+    let scale = m.amax().max(1.0);
+    let tol = 1e-12 * scale;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if (m[(i, j)] - m[(j, i)]).abs() > tol {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Base del espacio nulo de una matriz densa vía SVD: vectores fila de V^T
+/// asociados a valores singulares cercanos a cero. Cada vector tiene longitud
+/// igual al número de columnas de `m`.
+fn null_space_basis_dense(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
+    let ncols = m.ncols();
+    if ncols == 0 || m.nrows() == 0 {
+        return Vec::new();
+    }
+    let svd = m.clone().svd(false, true);
+    let v_t = match svd.v_t {
+        Some(ref v) => v,
+        None => return Vec::new(),
+    };
+    let svs = &svd.singular_values;
+    let max_sv = svs.iter().copied().fold(0.0f64, f64::max).max(1e-300);
+    let thr = tol.max(1e-12 * max_sv);
+    let mut basis = Vec::new();
+    for i in 0..svs.len() {
+        if svs[i].abs() <= thr {
+            let vec: Vec<f64> = (0..ncols).map(|j| v_t[(i, j)]).collect();
+            basis.push(vec);
+        }
+    }
+    basis
+}
+
+/// Autovalores de una matriz cuadrada como pares `(parte_real, parte_imag)`.
+/// Usa la descomposición de Schur de nalgebra, que soporta matrices generales
+/// (reales y complejas conjugadas). Devuelve `None` si la matriz no es cuadrada.
+pub fn eigenvalues(m: &Matrix) -> Option<Vec<(f64, f64)>> {
+    if m.rows != m.cols || m.rows == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let eig = nmat.complex_eigenvalues();
+    Some(eig.iter().map(|c| (c.re, c.im)).collect())
+}
+
+/// Autovectores con sus autovalores asociados: `(vector, parte_real, parte_imag)`.
+/// Para matrices simétricas usa `SymmetricEigen` (autovalores y autovectores
+/// reales, normalizados). Para matrices generales, cada autovalor real obtiene
+/// su autovector del espacio nulo de `(A - λI)`; para autovalores complejos
+/// `λ = a + bi` se resuelve el sistema real de `2n × 2n`
+/// `[A-aI, bI; -bI, A-aI]` y se devuelve la parte real `u` del autovector
+/// complejo `u + w·i`.
+pub fn eigenvectors(m: &Matrix) -> Option<Vec<(Vec<f64>, f64, f64)>> {
+    if m.rows != m.cols || m.rows == 0 {
+        return None;
+    }
+    let n = m.rows;
+    let nmat = to_nalgebra(m);
+
+    if is_symmetric_dense(&nmat) {
+        let sym = SymmetricEigen::new(nmat);
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            let vec: Vec<f64> = (0..n).map(|r| sym.eigenvectors[(r, i)]).collect();
+            let val = sym.eigenvalues[i];
+            result.push((vec, val, 0.0));
+        }
+        return Some(result);
+    }
+
+    let eig = nmat.complex_eigenvalues();
+    let tol = 1e-9;
+    let mut result = Vec::with_capacity(n);
+    for c in &eig {
+        let re = c.re;
+        let im = c.im;
+        if im.abs() < tol {
+            let mut a_shifted = nmat.clone();
+            for i in 0..n {
+                a_shifted[(i, i)] -= re;
+            }
+            let basis = null_space_basis_dense(&a_shifted, tol);
+            let vec = basis.into_iter().next().unwrap_or_else(|| vec![0.0; n]);
+            result.push((vec, re, 0.0));
+        } else {
+            // Sistema real 2n×2n para el par complejo conjugado.
+            let mut big = DMatrix::zeros(2 * n, 2 * n);
+            for i in 0..n {
+                for j in 0..n {
+                    let aij = nmat[(i, j)];
+                    big[(i, j)] = aij - if i == j { re } else { 0.0 };
+                    big[(i, n + j)] = if i == j { im } else { 0.0 };
+                    big[(n + i, j)] = if i == j { -im } else { 0.0 };
+                    big[(n + i, n + j)] = aij - if i == j { re } else { 0.0 };
+                }
+            }
+            let basis = null_space_basis_dense(&big, tol);
+            let vec = if let Some(full) = basis.into_iter().next() {
+                full.into_iter().take(n).collect()
+            } else {
+                vec![0.0; n]
+            };
+            result.push((vec, re, im));
+        }
+    }
+    Some(result)
+}
+
+/// Descomposición en valores singulares: `(U, Σ, V^T)`.
+/// `Σ` se devuelve como vector de valores singulares (orden descendente).
+pub fn svd(m: &Matrix) -> Option<(Matrix, Vec<f64>, Matrix)> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let svd = nmat.svd(true, true);
+    let u = svd.u?;
+    let v_t = svd.v_t?;
+    let sigma: Vec<f64> = svd.singular_values.iter().copied().collect();
+    Some((from_nalgebra(&u), sigma, from_nalgebra(&v_t)))
+}
+
+/// Descomposición LU (con pivoteo parcial de nalgebra): `(L, U)`.
+/// `L` es triangular inferior con diagonal unidad y `U` triangular superior,
+/// de modo que `P·A = L·U` para alguna permutación `P`. Devuelve `None` si la
+/// matriz no es cuadrada.
+pub fn lu_decomposition(m: &Matrix) -> Option<(Matrix, Matrix)> {
+    if m.rows != m.cols || m.rows == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let lu = nmat.lu();
+    Some((from_nalgebra(&lu.l()), from_nalgebra(&lu.u())))
+}
+
+/// Descomposición QR: `(Q, R)` con `Q` ortogonal y `R` triangular superior.
+pub fn qr_decomposition(m: &Matrix) -> Option<(Matrix, Matrix)> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let qr = nmat.qr();
+    Some((from_nalgebra(&qr.q()), from_nalgebra(&qr.r())))
+}
+
+/// Factorización de Cholesky: `L` triangular inferior tal que `A = L·L^T`.
+/// Devuelve `None` si la matriz no es simétrica definida positiva.
+pub fn cholesky(m: &Matrix) -> Option<Matrix> {
+    if m.rows != m.cols || m.rows == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let chol = nmat.cholesky()?;
+    Some(from_nalgebra(&chol.l()))
+}
+
+/// Rango numérico de la matriz (número de valores singulares significativos).
+pub fn rank(m: &Matrix) -> Option<usize> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let svd = nmat.svd(false, false);
+    let svs = &svd.singular_values;
+    let max_sv = svs.iter().copied().fold(0.0f64, f64::max).max(1e-300);
+    let thr = 1e-9 * max_sv;
+    Some(svs.iter().filter(|s| s.abs() > thr).count())
+}
+
+/// Norma de Frobenius: `sqrt(Σ a_ij^2)`.
+pub fn norm_frobenius(m: &Matrix) -> f64 {
+    if m.rows == 0 || m.cols == 0 {
+        return 0.0;
+    }
+    to_nalgebra(m).norm()
+}
+
+/// Norma espectral (mayor valor singular). Devuelve `None` para matrices vacías.
+pub fn norm_2(m: &Matrix) -> Option<f64> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let svd = nmat.svd(false, false);
+    let svs = &svd.singular_values;
+    if svs.is_empty() {
+        return None;
+    }
+    Some(svs[0].abs())
+}
+
+/// Número de condición `σ_max / σ_min`. Para matrices singulares
+/// (`σ_min ≈ 0`) devuelve `f64::INFINITY`.
+pub fn condition_number(m: &Matrix) -> Option<f64> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    let svd = nmat.svd(false, false);
+    let svs = &svd.singular_values;
+    if svs.is_empty() {
+        return None;
+    }
+    let max_sv = svs[0].abs();
+    let min_sv = svs.iter().map(|s| s.abs()).fold(f64::INFINITY, f64::min);
+    let thr = 1e-12 * max_sv.max(1.0);
+    if min_sv <= thr {
+        Some(f64::INFINITY)
+    } else {
+        Some(max_sv / min_sv)
+    }
+}
+
+/// Espacio nulo (kernel) de la matriz: base ortonormal de vectores `x` tales
+/// que `A·x = 0`, obtenida de los vectores singulares derechos asociados a
+/// valores singulares cercanos a cero.
+pub fn null_space(m: &Matrix) -> Option<Vec<Vec<f64>>> {
+    if m.rows == 0 || m.cols == 0 {
+        return None;
+    }
+    let nmat = to_nalgebra(m);
+    Some(null_space_basis_dense(&nmat, 1e-9))
+}
+
 pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option<String> {
     use crate::ast::parse_ast;
     let ast = parse_ast(expr).ok()?;
@@ -486,5 +746,244 @@ mod tests {
         assert_eq!(c.get(0, 1), 22.0);
         assert_eq!(c.get(1, 0), 43.0);
         assert_eq!(c.get(1, 1), 50.0);
+    }
+
+    #[test]
+    fn test_eigenvalues_diagonal() {
+        let m = Matrix::from_rows(vec![vec![2.0, 0.0], vec![0.0, 3.0]]).unwrap();
+        let eig = eigenvalues(&m).unwrap();
+        assert_eq!(eig.len(), 2);
+        let has_2 = eig
+            .iter()
+            .any(|(re, im)| (re - 2.0).abs() < 1e-8 && im.abs() < 1e-8);
+        let has_3 = eig
+            .iter()
+            .any(|(re, im)| (re - 3.0).abs() < 1e-8 && im.abs() < 1e-8);
+        assert!(
+            has_2 && has_3,
+            "esperaba autovalores 2 y 3, obtuvo {:?}",
+            eig
+        );
+    }
+
+    #[test]
+    fn test_eigenvalues_nonsquare() {
+        let m = Matrix::from_rows(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]).unwrap();
+        assert_eq!(eigenvalues(&m), None);
+    }
+
+    #[test]
+    fn test_eigenvectors_diagonal() {
+        let m = Matrix::from_rows(vec![vec![2.0, 0.0], vec![0.0, 3.0]]).unwrap();
+        let vecs = eigenvectors(&m).unwrap();
+        assert_eq!(vecs.len(), 2);
+        let for_2 = vecs
+            .iter()
+            .find(|(_, re, im)| (re - 2.0).abs() < 1e-8 && im.abs() < 1e-8)
+            .unwrap();
+        assert!(
+            for_2.0[1].abs() < 1e-8 && for_2.0[0].abs() > 0.9,
+            "autovector de 2 no paralelo a [1,0]: {:?}",
+            for_2.0
+        );
+        let for_3 = vecs
+            .iter()
+            .find(|(_, re, im)| (re - 3.0).abs() < 1e-8 && im.abs() < 1e-8)
+            .unwrap();
+        assert!(
+            for_3.0[0].abs() < 1e-8 && for_3.0[1].abs() > 0.9,
+            "autovector de 3 no paralelo a [0,1]: {:?}",
+            for_3.0
+        );
+    }
+
+    #[test]
+    fn test_svd() {
+        let m = Matrix::from_rows(vec![vec![3.0, 0.0], vec![0.0, 4.0]]).unwrap();
+        let (u, sigma, vt) = svd(&m).unwrap();
+        assert_eq!(sigma.len(), 2);
+        // σ descendentes
+        assert!(sigma[0] >= sigma[1]);
+        // Reconstrucción U·Σ·V^T ≈ A
+        let k = sigma.len();
+        let mut s = Matrix::zeros(u.cols, vt.rows);
+        for (i, &val) in sigma.iter().enumerate().take(k) {
+            s.set(i, i, val);
+        }
+        let recon = u.mul(&s).unwrap().mul(&vt).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (recon.get(i, j) - m.get(i, j)).abs() < 1e-8,
+                    "reconstrucción SVD mismatch en ({},{}): {} vs {}",
+                    i,
+                    j,
+                    recon.get(i, j),
+                    m.get(i, j)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lu_decomposition() {
+        let m = Matrix::from_rows(vec![vec![4.0, 3.0], vec![6.0, 3.0]]).unwrap();
+        let (l, u) = lu_decomposition(&m).unwrap();
+        // L triangular inferior con diagonal unidad
+        for i in 0..2 {
+            assert!((l.get(i, i) - 1.0).abs() < 1e-10, "L diagonal no es 1");
+            for j in (i + 1)..2 {
+                assert!(l.get(i, j).abs() < 1e-10, "L no es triangular inferior");
+            }
+        }
+        // U triangular superior
+        for i in 0..2 {
+            for j in 0..i {
+                assert!(u.get(i, j).abs() < 1e-10, "U no es triangular superior");
+            }
+        }
+        // |det(U)| == |det(A)| (det(L)=1, det(P)=±1)
+        let det_u = u.get(0, 0) * u.get(1, 1) - u.get(0, 1) * u.get(1, 0);
+        let det_a = m.determinant().unwrap();
+        assert!(
+            (det_u.abs() - det_a.abs()).abs() < 1e-8,
+            "|det(U)|={} no coincide con |det(A)|={}",
+            det_u.abs(),
+            det_a.abs()
+        );
+    }
+
+    #[test]
+    fn test_qr_decomposition() {
+        let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
+        let (q, r) = qr_decomposition(&m).unwrap();
+        // Q·R = A
+        let recon = q.mul(&r).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (recon.get(i, j) - m.get(i, j)).abs() < 1e-8,
+                    "QR no reconstruye A"
+                );
+            }
+        }
+        // Q ortogonal: Q^T·Q = I
+        let qtq = q.transpose().mul(&q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((qtq.get(i, j) - expected).abs() < 1e-8, "Q no es ortogonal");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cholesky() {
+        let m = Matrix::from_rows(vec![vec![4.0, 2.0], vec![2.0, 3.0]]).unwrap();
+        let l = cholesky(&m).unwrap();
+        // L triangular inferior
+        for i in 0..2 {
+            for j in (i + 1)..2 {
+                assert!(l.get(i, j).abs() < 1e-10, "L no es triangular inferior");
+            }
+        }
+        // L·L^T = A
+        let recon = l.mul(&l.transpose()).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (recon.get(i, j) - m.get(i, j)).abs() < 1e-8,
+                    "Cholesky L·L^T != A"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cholesky_not_spd() {
+        // Matriz no definida positiva (autovalor negativo)
+        let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 1.0]]).unwrap();
+        assert!(cholesky(&m).is_none());
+    }
+
+    #[test]
+    fn test_rank() {
+        let singular = Matrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 4.0]]).unwrap();
+        assert_eq!(rank(&singular), Some(1));
+        let full = Matrix::identity(3);
+        assert_eq!(rank(&full), Some(3));
+    }
+
+    #[test]
+    fn test_condition_number_singular() {
+        let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 4.0]]).unwrap();
+        let cn = condition_number(&m).unwrap();
+        assert!(
+            cn.is_infinite(),
+            "esperaba número de condición infinito, obtuvo {}",
+            cn
+        );
+    }
+
+    #[test]
+    fn test_condition_number_well_conditioned() {
+        let m = Matrix::identity(3);
+        let cn = condition_number(&m).unwrap();
+        assert!(
+            (cn - 1.0).abs() < 1e-8,
+            "identidad debe tener κ=1, obtuvo {}",
+            cn
+        );
+    }
+
+    #[test]
+    fn test_null_space() {
+        let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 4.0]]).unwrap();
+        let ns = null_space(&m).unwrap();
+        assert_eq!(ns.len(), 1, "esperaba 1 vector en el espacio nulo");
+        let v = &ns[0];
+        // A·v ≈ 0
+        let mv0 = m.get(0, 0) * v[0] + m.get(0, 1) * v[1];
+        let mv1 = m.get(1, 0) * v[0] + m.get(1, 1) * v[1];
+        assert!(
+            mv0.abs() < 1e-8 && mv1.abs() < 1e-8,
+            "vector no está en el kernel: A·v = ({}, {})",
+            mv0,
+            mv1
+        );
+        // Paralelo a [2, -1]  =>  v[0] + 2·v[1] ≈ 0
+        assert!(
+            (v[0] + 2.0 * v[1]).abs() < 1e-8,
+            "vector del kernel no paralelo a [2,-1]: {:?}",
+            v
+        );
+    }
+
+    #[test]
+    fn test_null_space_full_rank() {
+        let m = Matrix::identity(3);
+        let ns = null_space(&m).unwrap();
+        assert!(ns.is_empty(), "identidad debe tener kernel vacío");
+    }
+
+    #[test]
+    fn test_norm_frobenius() {
+        let m = Matrix::identity(3);
+        let n = norm_frobenius(&m);
+        assert!(
+            (n - 3.0_f64.sqrt()).abs() < 1e-10,
+            "Frobenius(I_3) != sqrt(3)"
+        );
+    }
+
+    #[test]
+    fn test_norm_2() {
+        let m = Matrix::from_rows(vec![vec![3.0, 0.0], vec![0.0, 4.0]]).unwrap();
+        let n = norm_2(&m).unwrap();
+        assert!(
+            (n - 4.0).abs() < 1e-8,
+            "norma espectral esperaba 4, obtuvo {}",
+            n
+        );
     }
 }

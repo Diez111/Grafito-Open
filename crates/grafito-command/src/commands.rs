@@ -3706,7 +3706,8 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
                     .unwrap_or_else(|_| current[range.clone()].to_string());
             }
             "Factor" => {
-                resolved_expr = symbolic::factor(&expr_arg)
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                resolved_expr = symbolic::factor(&expr_arg, var)
                     .unwrap_or_else(|_| current[range.clone()].to_string());
             }
             "Simplify" => {
@@ -4210,7 +4211,7 @@ pub fn execute_cas_command(document: &mut Document, cmd: &CasCmd) -> Option<Stri
         }
         "Factor" => {
             let expr = expand_all_cas(cmd.args.first()?, document);
-            match symbolic::factor(&expr) {
+            match symbolic::factor(&expr, "x") {
                 Ok(factors) => Some(format!("{} = {}", expr, factors)),
                 Err(e) => Some(format!("Factor error: {}", e)),
             }
