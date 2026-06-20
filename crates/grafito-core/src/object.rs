@@ -1,5 +1,6 @@
 use crate::id::ObjectId;
 use crate::pencil::PencilObj;
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1666,12 +1667,15 @@ pub struct ComplexMappingObj {
     pub id: ObjectId,
     pub label: String,
     pub expr: String,
-    pub target: ObjectId, // ID of the region/polygon/curve to transform
+    pub target: ObjectId,
     pub color: Color,
     pub visible: bool,
+    #[serde(skip)]
+    pub conformal_cache: Option<ConformalMap>,
 }
 impl ComplexMappingObj {
     pub fn new(expr: &str, target: ObjectId) -> Self {
+        let conformal_cache = ConformalMap::from_expr_string(expr);
         Self {
             id: ObjectId::new(),
             label: String::new(),
@@ -1679,11 +1683,15 @@ impl ComplexMappingObj {
             target,
             color: Color::new(0.5, 0.0, 0.5, 1.0),
             visible: true,
+            conformal_cache,
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
+    }
+    pub fn refresh_cache(&mut self) {
+        self.conformal_cache = ConformalMap::from_expr_string(&self.expr);
     }
 }
 
@@ -1891,6 +1899,9 @@ pub struct ImplicitCurveObj {
     pub expr_rhs: String,
     pub operator: RelationOperator,
     pub color: Color,
+    /// Color de relleno para regiones (Less/LessEq/Greater/GreaterEq) o para
+    /// el interior de curvas cerradas (Eq). Si es `None`, no se rellena.
+    pub fill_color: Option<Color>,
     pub visible: bool,
     pub width: f32,
     pub contour_levels: Option<Vec<f64>>,
@@ -1907,6 +1918,24 @@ pub struct ImplicitCurveObj {
     /// geometry without re-evaluation.
     #[serde(skip)]
     pub cached_region: Arc<RwLock<Option<CachedRegion>>>,
+    /// ASTs parseados de lhs y rhs, cacheados juntos. Se cachean porque
+    /// el render de relleno llama `eval_2d` millones de veces por frame;
+    /// parsear el AST en cada llamada era el cuello de botella que
+    /// causaba lag/cuelgues con expresiones no triviales. La clave es el
+    /// hash de **ambas** expresiones combinadas, así que no se confunden
+    /// lhs y rhs (bug anterior: un solo cache se sobreescribía entre
+    /// llamadas a lhs y rhs).
+    #[serde(skip)]
+    #[allow(private_interfaces)]
+    pub cached_asts: Arc<RwLock<Option<CachedAsts>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedAsts {
+    lhs: grafito_geometry::ast::Expr,
+    rhs: grafito_geometry::ast::Expr,
+    /// Hash de lhs + rhs + variables combinadas.
+    hash: u64,
 }
 
 impl Clone for ImplicitCurveObj {
@@ -1918,6 +1947,7 @@ impl Clone for ImplicitCurveObj {
             expr_rhs: self.expr_rhs.clone(),
             operator: self.operator,
             color: self.color,
+            fill_color: self.fill_color,
             visible: self.visible,
             width: self.width,
             contour_levels: self.contour_levels.clone(),
@@ -1925,6 +1955,7 @@ impl Clone for ImplicitCurveObj {
             cached_segments: self.cached_segments.clone(),
             cached_key: self.cached_key.clone(),
             cached_region: self.cached_region.clone(),
+            cached_asts: self.cached_asts.clone(),
         }
     }
 }
@@ -1953,6 +1984,10 @@ impl ImplicitCurveObj {
             expr_rhs: expr_rhs.to_string(),
             operator,
             color: Color::new(0.6, 0.2, 0.8, 1.0),
+            // Por defecto, regiones y curvas cerradas se rellenan con un
+            // violeta claramente visible (alpha 0.5). El usuario puede
+            // desactivarlo. Con alpha 0.2 el fill era casi invisible.
+            fill_color: Some(Color::new(0.6, 0.2, 0.8, 0.5)),
             visible: true,
             width: 2.0,
             contour_levels: None,
@@ -1960,11 +1995,70 @@ impl ImplicitCurveObj {
             cached_segments: Arc::new(RwLock::new(ImplicitCurveSegments::new())),
             cached_key: Arc::new(RwLock::new(None)),
             cached_region: Arc::new(RwLock::new(None)),
+            cached_asts: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
+    }
+    pub fn with_fill(mut self, fill: Option<Color>) -> Self {
+        self.fill_color = fill;
+        self
+    }
+
+    /// Devuelve los ASTs parseados de `expr_lhs` y `expr_rhs`, cacheándolos
+    /// juntos para no reparsear en cada frame. Devuelve `None` si alguna
+    /// expresión no parsea (en cuyo caso el render debe omitir el objeto).
+    ///
+    /// La caché se invalida automáticamente cuando cambia el texto de las
+    /// expresiones o las variables del documento.
+    ///
+    /// Importante: el cache es **combinado** para lhs y rhs (un solo slot)
+    /// porque antes había un bug donde llamadas separadas a lhs y rhs se
+    /// sobreescribían mutuamente, devolviendo el AST incorrecto.
+    pub fn get_cached_asts(
+        &self,
+        variables: &HashMap<String, f64>,
+        var_names: &[&str],
+    ) -> Option<(grafito_geometry::ast::Expr, grafito_geometry::ast::Expr)> {
+        // Hash combinado de lhs + rhs + variables.
+        let mut hasher = DefaultHasher::new();
+        self.expr_lhs.hash(&mut hasher);
+        self.expr_rhs.hash(&mut hasher);
+        for v in variables {
+            v.0.hash(&mut hasher);
+            v.1.to_bits().hash(&mut hasher);
+        }
+        let combined_hash = hasher.finish();
+
+        // Verificar cache.
+        if let Some(cached) = self
+            .cached_asts
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            if cached.hash == combined_hash {
+                return Some((cached.lhs, cached.rhs));
+            }
+        }
+
+        // Re-parsear ambos juntos.
+        let lhs =
+            grafito_geometry::expr::prepare_function_ast(&self.expr_lhs, variables, var_names)
+                .ok()?;
+        let rhs =
+            grafito_geometry::expr::prepare_function_ast(&self.expr_rhs, variables, var_names)
+                .ok()?;
+
+        let new_cache = CachedAsts {
+            lhs: lhs.clone(),
+            rhs: rhs.clone(),
+            hash: combined_hash,
+        };
+        *self.cached_asts.write().unwrap_or_else(|p| p.into_inner()) = Some(new_cache);
+        Some((lhs, rhs))
     }
 }
 
@@ -2532,5 +2626,62 @@ impl RegressionLineObj {
         self.y_min = y.0;
         self.y_max = y.1;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_implicit_curve_caches_asts() {
+        // Llamar get_cached_asts dos veces con la misma expresión debe
+        // devolver los mismos ASTs cacheados.
+        let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
+        let vars = HashMap::new();
+        let (lhs1, rhs1) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        let (lhs2, rhs2) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        assert_eq!(lhs1, lhs2);
+        assert_eq!(rhs1, rhs2);
+    }
+
+    #[test]
+    fn test_implicit_curve_cache_does_not_mix_lhs_and_rhs() {
+        // **Test de regresión crítico**: antes el cache se compartía entre
+        // lhs y rhs y se sobreescribían. Verificamos que ahora cada slot
+        // tiene el AST correcto.
+        let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
+        let vars = HashMap::new();
+        let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        // lhs debe evaluar como x²+y² (en (0,0) es 0).
+        assert_eq!(lhs.eval_2d("x", 0.0, "y", 0.0), 0.0);
+        assert_eq!(lhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
+        // rhs debe evaluar como 1 (constante).
+        assert_eq!(rhs.eval_2d("x", 0.0, "y", 0.0), 1.0);
+        assert_eq!(rhs.eval_2d("x", 100.0, "y", 200.0), 1.0);
+    }
+
+    #[test]
+    fn test_implicit_curve_cache_invalidates_on_change() {
+        // Cambiar la expresión debe reparsear.
+        let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
+        let vars = HashMap::new();
+        let _ = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        ic.expr_lhs = "x^2 + y^2 + 1".to_string();
+        let (lhs_new, _) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        // El nuevo lhs debe evaluar como x²+y²+1 (en (0,0) es 1, no 0).
+        assert_eq!(lhs_new.eval_2d("x", 0.0, "y", 0.0), 1.0);
+    }
+
+    #[test]
+    fn test_implicit_curve_cache_handles_eq_operator() {
+        // **Test de regresión crítico**: para `x^2 + y^2 = 1` (Eq), el
+        // scanline fill no debe ejecutarse (Eq es solo contorno). El cache
+        // no debería romperse con esta configuración.
+        let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
+        let vars = HashMap::new();
+        let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
+        assert_eq!(lhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
+        assert_eq!(rhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
     }
 }

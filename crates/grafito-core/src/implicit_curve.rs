@@ -101,14 +101,20 @@ pub fn segments_or_compute<'a>(
 
     {
         let cached_key = ic.cached_key.read().unwrap_or_else(|p| p.into_inner());
-        if cached_key.as_ref().map(|k| k.view_bounds) == Some(padded_bounds)
-            && cached_key.as_ref().map(|k| k.grid_size) == Some(grid_size)
-        {
-            let cached_region = ic.cached_region.read().unwrap_or_else(|p| p.into_inner());
-            if let Some((rx_min, rx_max, ry_min, ry_max)) = *cached_region {
-                let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
-                if vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max {
-                    return ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+        if let Some(cached) = cached_key.as_ref() {
+            if cached.view_bounds == padded_bounds
+                && cached.grid_size == grid_size
+                && cached.expr_lhs == ic.expr_lhs
+                && cached.expr_rhs == ic.expr_rhs
+                && cached.operator == ic.operator
+            {
+                let cached_region = ic.cached_region.read().unwrap_or_else(|p| p.into_inner());
+                if let Some((rx_min, rx_max, ry_min, ry_max)) = *cached_region {
+                    let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
+                    if vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max
+                    {
+                        return ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                    }
                 }
             }
         }
@@ -326,4 +332,90 @@ fn marching_squares_level(
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ImplicitCurveObj, RelationOperator};
+    use std::collections::HashMap;
+
+    fn make_circle() -> ImplicitCurveObj {
+        ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq)
+    }
+
+    #[test]
+    fn test_circle_segments_centroid_is_origin() {
+        // Diagnóstico: el render del ImplicitCurve en producción mostraba el
+        // círculo desplazado. Este test verifica que el centroide de los
+        // segmentos está cerca de (0, 0), NO cerca de otro punto.
+        let ic = make_circle();
+        let view_bounds = (-2.0, 2.0, -2.0, 2.0);
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        assert!(!segments.is_empty(), "should produce at least one level");
+        let (_, segs) = &segments[0];
+        assert!(!segs.is_empty(), "should produce at least one segment");
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut n = 0;
+        for (a, b) in segs {
+            cx += a.x + b.x;
+            cy += a.y + b.y;
+            n += 2;
+        }
+        cx /= n as f64;
+        cy /= n as f64;
+        assert!(
+            cx.abs() < 0.05,
+            "centroide x = {} (expected ~0). Si falla, el render está dibujando \
+             los segmentos en una posición desplazada. El bug típico es que \
+             `world_to_screen` recibe un `screen_size` que no coincide con el \
+             canvas, o que `padded_snapped_bounds` está mal calibrado.",
+            cx
+        );
+        assert!(cy.abs() < 0.05, "centroide y = {} (expected ~0)", cy);
+    }
+
+    #[test]
+    fn test_circle_radius_is_one() {
+        // Verifica que los segmentos están a distancia 1 del origen
+        // (con tolerancia por la discretización del marching squares).
+        let ic = make_circle();
+        let view_bounds = (-2.0, 2.0, -2.0, 2.0);
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        let (_, segs) = &segments[0];
+        for (a, b) in segs {
+            let da = (a.x * a.x + a.y * a.y).sqrt();
+            let db = (b.x * b.x + b.y * b.y).sqrt();
+            assert!((da - 1.0).abs() < 0.05, "punto a en círculo: r = {}", da);
+            assert!((db - 1.0).abs() < 0.05, "punto b en círculo: r = {}", db);
+        }
+    }
+
+    #[test]
+    fn test_disk_region_segments_fill_inside() {
+        // Para `x^2 + y^2 <= 1` (región), los segmentos del marching squares
+        // forman el **contorno** de la región, no el interior. El relleno
+        // del interior se hace por separado en el render (scanline fill).
+        // Este test verifica que los segmentos están en el contorno.
+        let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::LessEq);
+        let view_bounds = (-2.0, 2.0, -2.0, 2.0);
+        let segments = evaluate_implicit_curve(&ic, view_bounds, 256, &HashMap::new());
+        let (_, segs) = &segments[0];
+        assert!(!segs.is_empty(), "should produce segments");
+        for (a, b) in segs {
+            let da = (a.x * a.x + a.y * a.y).sqrt();
+            let db = (b.x * b.x + b.y * b.y).sqrt();
+            assert!(
+                (da - 1.0).abs() < 0.05,
+                "el contorno del disco debe estar a r=1, pero a está en r={}",
+                da
+            );
+            assert!(
+                (db - 1.0).abs() < 0.05,
+                "el contorno del disco debe estar a r=1, pero b está en r={}",
+                db
+            );
+        }
+    }
 }

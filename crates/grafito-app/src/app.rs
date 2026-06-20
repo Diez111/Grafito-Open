@@ -11,7 +11,7 @@ use grafito_core::{
     PointObj, PolygonObj, RenderQuality, Sphere3DObj,
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
-use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
+use grafito_ui::theme::{DARK, LIGHT};
 use grafito_ui::Tool;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -167,6 +167,8 @@ pub struct GrafitoApp {
     pub cas_history: Vec<String>,
     pub sidebar_tab: usize,
     pub recent_files: Vec<String>,
+    /// Timestamp de inicio de la app (splash screen). None = ya pasó.
+    pub splash_start: Option<Instant>,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<Document>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
@@ -293,9 +295,9 @@ impl GrafitoApp {
         let config = load_config();
         let dark_mode = config.dark_mode;
         if dark_mode {
-            THEME_DARK.apply(&cc.egui_ctx);
+            DARK.apply(&cc.egui_ctx);
         } else {
-            THEME_LIGHT.apply(&cc.egui_ctx);
+            LIGHT.apply(&cc.egui_ctx);
         }
 
         let snapshot_version = document.version;
@@ -330,6 +332,7 @@ impl GrafitoApp {
             table_step: "1.0".to_string(),
             cas_history: Vec::new(),
             sidebar_tab: 0,
+            splash_start: Some(Instant::now()),
             recent_files: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1413,6 +1416,92 @@ impl eframe::App for GrafitoApp {
         }
 
         crate::ui::draw_color_picker(self, ctx);
+
+        // Splash screen overlay (PR 6 polish): aparece por 1.5s al inicio
+        // con el logo, nombre y versión. Se desvanece con un fade-out.
+        if let Some(start) = self.splash_start {
+            let elapsed = start.elapsed();
+            let total_ms = 1500_u128;
+            let fade_out_start_ms = 1000_u128;
+            let elapsed_ms = elapsed.as_millis();
+            if elapsed_ms < total_ms {
+                let _theme = grafito_ui::theme::current_theme(ctx);
+                let alpha = if elapsed_ms < fade_out_start_ms {
+                    1.0
+                } else {
+                    let t = (elapsed_ms - fade_out_start_ms) as f32
+                        / (total_ms - fade_out_start_ms) as f32;
+                    1.0 - t
+                };
+                egui::Area::new(egui::Id::new("splash_overlay"))
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        let screen = ui.ctx().screen_rect();
+                        ui.painter().rect_filled(
+                            screen,
+                            0.0,
+                            egui::Color32::from_black_alpha((220.0 * alpha) as u8),
+                        );
+                        // Logo + nombre centrados
+                        ui.vertical_centered(|ui| {
+                            let (logo_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(128.0, 128.0),
+                                egui::Sense::hover(),
+                            );
+                            if ui.is_rect_visible(logo_rect) {
+                                if let Ok(img) = image::open("assets/grafito-icon-256x256.png") {
+                                    let rgba = img.to_rgba8();
+                                    let (w, h) = (rgba.width() as f32, rgba.height() as f32);
+                                    let size = logo_rect.width().min(logo_rect.height());
+                                    let tex = ctx.load_texture(
+                                        "splash_logo",
+                                        egui::ColorImage::from_rgba_unmultiplied(
+                                            [w as usize, h as usize],
+                                            rgba.as_raw(),
+                                        ),
+                                        egui::TextureOptions::LINEAR,
+                                    );
+                                    let rect = egui::Rect::from_center_size(
+                                        logo_rect.center(),
+                                        egui::vec2(size, size),
+                                    );
+                                    ui.painter().image(
+                                        tex.id(),
+                                        rect,
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(0.0, 0.0),
+                                            egui::pos2(1.0, 1.0),
+                                        ),
+                                        egui::Color32::from_white_alpha((255.0 * alpha) as u8),
+                                    );
+                                }
+                            }
+                            ui.add_space(16.0);
+                            ui.label(
+                                egui::RichText::new("Grafito")
+                                    .size(36.0)
+                                    .strong()
+                                    .color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                    .size(14.0)
+                                    .color(egui::Color32::from_white_alpha((180.0 * alpha) as u8)),
+                            );
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Geometría interactiva · Álgebra · Cálculo")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
+                            );
+                        });
+                    });
+                ctx.request_repaint();
+            } else {
+                self.splash_start = None;
+            }
+        }
 
         egui::Area::new(egui::Id::new("toasts"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-12.0, -12.0))

@@ -1355,6 +1355,34 @@ impl Expr {
         s.trig_simplify()
     }
 
+    /// Cuenta el número de nodos en el AST (recursivo, exhaustivo).
+    /// Útil para dimensionar la estrategia de evaluación: ASTs grandes
+    /// pueden justificar strides mayores o path de eval distintos.
+    pub fn node_count(&self) -> usize {
+        use Expr::*;
+        match self {
+            Const(_) | Var(_) => 1,
+            // Unarios
+            Neg(a) | Sin(a) | Cos(a) | Tan(a) | Asin(a) | Acos(a) | Atan(a) | Exp(a) | Ln(a)
+            | Log(a) | Sqrt(a) | Abs(a) | Sinh(a) | Cosh(a) | Tanh(a) | Asinh(a) | Acosh(a)
+            | Atanh(a) | Sec(a) | Csc(a) | Cot(a) | Floor(a) | Ceil(a) | Round(a) | Sign(a)
+            | Heaviside(a) | Cbrt(a) | Re(a) | Im(a) | Arg(a) | Conj(a) | Erf(a) | Erfc(a)
+            | Gamma(a) | LnGamma(a) | Digamma(a) => 1 + a.node_count(),
+            // Binarios
+            Add(a, b)
+            | Sub(a, b)
+            | Mul(a, b)
+            | Div(a, b)
+            | Pow(a, b)
+            | Atan2(a, b)
+            | Modulo(a, b)
+            | Min(a, b)
+            | Max(a, b) => 1 + a.node_count() + b.node_count(),
+            // Variantes sin hijos (no debería haber)
+            _ => 1,
+        }
+    }
+
     fn trig_simplify(&self) -> Expr {
         use Expr::*;
         match self {

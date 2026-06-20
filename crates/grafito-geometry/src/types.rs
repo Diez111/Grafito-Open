@@ -250,3 +250,45 @@ impl Color {
         [self.r, self.g, self.b, self.a]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_world_to_screen_origin_with_no_offset() {
+        // Diagnóstico: el render del ImplicitCurve mostraba la curva
+        // desplazada del origen. Este test verifica que
+        // `world_to_screen((0, 0))` con `offset = (0, 0)` retorna
+        // exactamente el centro del screen.
+        let v = ViewTransform::new(800.0, 600.0);
+        let s = v.world_to_screen(Point2::new(0.0, 0.0));
+        assert_eq!(s.x, 400.0, "center x debe ser 400 (sw/2)");
+        assert_eq!(s.y, 300.0, "center y debe ser 300 (sh/2)");
+    }
+
+    #[test]
+    fn test_world_to_screen_origin_with_offset() {
+        // Con `offset = (-50, 0)`, el centro del mundo (0, 0) se dibuja
+        // 50 píxeles a la izquierda del centro del screen.
+        let mut v = ViewTransform::new(800.0, 600.0);
+        v.offset = Point2::new(-50.0, 0.0);
+        let s = v.world_to_screen(Point2::new(0.0, 0.0));
+        assert_eq!(s.x, 350.0);
+        assert_eq!(s.y, 300.0);
+    }
+
+    #[test]
+    fn test_circle_world_points_map_to_circle_screen_points() {
+        // Para una circunferencia unitaria, todos los puntos están
+        // a distancia 1 del origen. La distancia en screen debe ser
+        // proporcional a `scale` (= 50.0 por default).
+        let v = ViewTransform::new(800.0, 600.0);
+        let s = v.world_to_screen(Point2::new(1.0, 0.0));
+        // (1, 0) en mundo → (400 + 1*50, 300) = (450, 300) en screen
+        assert_eq!(s.x, 450.0);
+        let s2 = v.world_to_screen(Point2::new(0.0, 1.0));
+        // (0, 1) en mundo → (400, 300 - 1*50) = (400, 250) en screen
+        assert_eq!(s2.y, 250.0);
+    }
+}

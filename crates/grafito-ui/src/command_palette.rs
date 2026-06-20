@@ -473,7 +473,17 @@ impl CommandPaletteState {
             .show(ctx, |ui| {
                 // Search field
                 ui.horizontal(|ui| {
-                    ui.label("🔍");
+                    let (search_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                    if ui.is_rect_visible(search_rect) {
+                        let theme = crate::theme::current_theme(ui.ctx());
+                        crate::icons::draw_icon(
+                            ui.painter(),
+                            search_rect,
+                            crate::icons::Icon::Search,
+                            theme.text_secondary,
+                        );
+                    }
                     let response = ui.text_edit_singleline(&mut self.search);
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let filtered = self.filtered_commands();

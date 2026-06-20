@@ -466,14 +466,23 @@ fn replace_standalone_var(expr: &str, var: &str, value: f64) -> String {
 fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
     let chars: Vec<char> = expr.chars().collect();
     let patterns: &[(&str, bool)] = &[("sum(", false), ("product(", true), ("prod(", true)];
-    for i in 0..chars.len() {
+    for (i, _c) in chars.iter().enumerate() {
         for &(pat, is_prod) in patterns {
-            if expr[i..].starts_with(pat) {
+            // **Bug fix**: `i` es un char index pero `expr[i..]` espera byte
+            // index. Para strings ASCII funciona, pero con caracteres
+            // multi-byte (como `x²` donde `²` son 2 bytes UTF-8), panic.
+            // Convertimos el char index a byte index.
+            let byte_offset = expr
+                .char_indices()
+                .nth(i)
+                .map(|(b, _)| b)
+                .unwrap_or(expr.len());
+            if expr[byte_offset..].starts_with(pat) {
                 let is_standalone = i == 0 || !chars[i - 1].is_ascii_alphabetic();
                 if is_standalone {
-                    let open_paren = i + pat.len() - 1;
+                    let open_paren = byte_offset + pat.len() - 1;
                     if let Some(close) = find_matching_close(expr, open_paren) {
-                        return Some((i, close, is_prod));
+                        return Some((byte_offset, close, is_prod));
                     }
                 }
             }
@@ -569,13 +578,22 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
     Some(format!("{}{}{}", prefix, expanded, suffix))
 }
 
+/// Encuentra el byte offset del paréntesis de cierre que corresponde
+/// al paréntesis de apertura en `open` (también byte offset).
+/// Retorna el byte offset del `)`, o None si no se encuentra.
 fn find_matching_close(s: &str, open: usize) -> Option<usize> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut depth = 0;
-    for (i, ch) in chars.iter().enumerate().skip(open) {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
+    let bytes = s.as_bytes();
+    if open >= bytes.len() || bytes[open] != b'(' {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    // Iteramos sobre bytes (no chars) porque los paréntesis son ASCII
+    // y esto es más simple. Para UTF-8, los paréntesis `(` y `)` siempre
+    // son 1 byte.
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -690,6 +708,27 @@ pub fn preprocess_expr(expr: &str) -> String {
         .replace("\\tan", "tan")
         .replace("\\ln", "ln")
         .replace("\\log", "log")
+        // **Superscripts Unicode**: x², y², etc. Se reemplazan al cargar
+        // archivos .json o cualquier expresión que no pase por el
+        // command processor. Sin esto, el AST no se puede parsear y el
+        // render falla silenciosamente.
+        .replace("x²", "x^2")
+        .replace("y²", "y^2")
+        .replace("z²", "z^2")
+        .replace("t²", "t^2")
+        .replace("r²", "r^2")
+        .replace("a²", "a^2")
+        .replace("b²", "b^2")
+        .replace("c²", "c^2")
+        .replace("n²", "n^2")
+        .replace("θ²", "θ^2")
+        .replace("φ²", "φ^2")
+        .replace("x³", "x^3")
+        .replace("y³", "y^3")
+        .replace("z³", "z^3")
+        .replace("√", "sqrt")
+        .replace("|x|", "abs(x)")
+        .replace("·", "*")
         .replace("f'(x)", "deriv(f(x))")
         .replace("g'(x)", "deriv(g(x))")
         .replace("h'(x)", "deriv(h(x))")

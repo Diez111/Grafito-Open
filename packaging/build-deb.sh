@@ -5,7 +5,7 @@ echo "Building Grafito .deb package..."
 
 # Variables
 PKG_NAME="grafito"
-PKG_VERSION="1.0.0-beta"
+PKG_VERSION="$(grep -E '^version\s*=\s*"' ../Cargo.toml | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"
 PKG_ARCH="amd64"
 BUILD_DIR="build/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}"
 DEBIAN_DIR="debian"

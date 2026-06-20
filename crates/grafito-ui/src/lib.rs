@@ -19,13 +19,17 @@
 pub mod animation;
 pub mod color_picker;
 pub mod command_palette;
+pub mod icons;
 pub mod keyboard;
 pub mod theme;
 pub mod toast;
+pub mod tokens;
 pub mod toolbar;
 
 use egui::{Color32, Response, Ui};
 use grafito_core::{Document, ObjectId};
+
+use crate::theme::current_theme;
 
 pub enum AlgebraAction {
     Delete(ObjectId),
@@ -38,35 +42,73 @@ pub fn algebra_view(
     selected: &mut Option<ObjectId>,
 ) -> Vec<AlgebraAction> {
     let mut actions = Vec::new();
+    let theme = current_theme(ui.ctx());
+
+    // Empty state (PR 6 polish): cuando no hay objetos, mostrar mensaje
+    // amigable con icono vectorial e instrucciones.
+    if document.objects_iter().count() == 0 {
+        ui.vertical_centered(|ui| {
+            ui.add_space(32.0);
+            // Icono vectorial grande
+            let (icon_rect, _) =
+                ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
+            if ui.is_rect_visible(icon_rect) {
+                crate::icons::draw_icon(
+                    ui.painter(),
+                    icon_rect,
+                    crate::icons::Icon::Point,
+                    theme.text_tertiary,
+                );
+            }
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new("Sin objetos")
+                    .size(15.0)
+                    .color(theme.text_secondary),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Escribí en la barra inferior\npara crear tu primer objeto")
+                    .size(12.0)
+                    .color(theme.text_tertiary),
+            );
+        });
+        return actions;
+    }
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         // Collect object IDs first to avoid mutable borrow issues while iterating
         let object_ids: Vec<ObjectId> = document.objects_iter().map(|(id, _)| *id).collect();
 
         for id in object_ids {
             let is_selected = selected.map(|s| s == id).unwrap_or(false);
+            let is_hovered = false;
 
             // Outer frame for the item to give it nice hover effects and padding
             let mut frame = egui::Frame::default().inner_margin(egui::vec2(16.0, 12.0));
             if is_selected {
-                frame.fill = if ui.visuals().dark_mode {
-                    Color32::from_gray(35)
-                } else {
-                    Color32::from_rgb(245, 245, 250)
-                };
+                frame.fill = theme.selection_bg;
             }
 
             let response = frame
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if let Some(obj) = document.get_object(id) {
+                            // Color del objeto según la leyenda semántica del tema
                             let color = match obj.name() {
-                                "Point" | "Point3D" => Color32::from_rgb(50, 100, 255),
-                                "Line" => Color32::from_rgb(100, 110, 120),
-                                "Function" => Color32::from_rgb(16, 185, 129),
+                                "Point" | "Point3D" => theme.object_point,
+                                "Line" => theme.object_line,
+                                "Function" => theme.object_function,
                                 "Circle" | "Ellipse" | "Sphere3D" | "Cube3D" | "Polygon" => {
-                                    Color32::from_rgb(239, 68, 68)
+                                    theme.object_polygon
                                 }
-                                _ => Color32::GRAY,
+                                name if name.contains("Conic")
+                                    || name == "Parabola"
+                                    || name == "Hyperbola" =>
+                                {
+                                    theme.object_conic
+                                }
+                                _ => theme.object_line,
                             };
                             let (dot_rect, _) = ui
                                 .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
@@ -74,36 +116,49 @@ pub fn algebra_view(
 
                             ui.add_space(8.0);
                             let text = format!("{}: {}", obj.label(), obj.name());
-                            ui.label(egui::RichText::new(text).size(15.0).color(
-                                if ui.visuals().dark_mode {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::BLACK
-                                },
-                            ));
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .size(15.0)
+                                    .color(theme.text_primary),
+                            );
 
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(egui::RichText::new("🗑").size(14.0))
-                                                .frame(false),
-                                        )
-                                        .on_hover_text("Eliminar objeto")
-                                        .clicked()
-                                    {
+                                    // Botón de eliminar (icono vectorial outlined)
+                                    let (del_rect, del_resp) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if ui.is_rect_visible(del_rect) {
+                                        icons::draw_icon(
+                                            ui.painter(),
+                                            del_rect,
+                                            icons::Icon::Delete,
+                                            theme.text_secondary,
+                                        );
+                                    }
+                                    if del_resp.on_hover_text("Eliminar objeto").clicked() {
                                         actions.push(AlgebraAction::Delete(id));
                                     }
-                                    let eye = if obj.is_visible() { "👁" } else { "Ø" };
-                                    if ui
-                                        .add(
-                                            egui::Button::new(egui::RichText::new(eye).size(14.0))
-                                                .frame(false),
-                                        )
-                                        .on_hover_text("Alternar visibilidad")
-                                        .clicked()
-                                    {
+                                    // Botón de visibilidad (iconos eye/eye_off)
+                                    let (eye_rect, eye_resp) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if ui.is_rect_visible(eye_rect) {
+                                        icons::draw_icon(
+                                            ui.painter(),
+                                            eye_rect,
+                                            if obj.is_visible() {
+                                                icons::Icon::Eye
+                                            } else {
+                                                icons::Icon::EyeOff
+                                            },
+                                            theme.text_secondary,
+                                        );
+                                    }
+                                    if eye_resp.on_hover_text("Alternar visibilidad").clicked() {
                                         actions.push(AlgebraAction::ToggleVisibility(id));
                                     }
                                 },
@@ -116,7 +171,7 @@ pub fn algebra_view(
                         ui.add_space(16.0);
                         ui.label(
                             egui::RichText::new("Propiedades")
-                                .color(Color32::from_gray(120))
+                                .color(theme.text_label)
                                 .size(14.0),
                         );
                         ui.add_space(8.0);
@@ -127,19 +182,23 @@ pub fn algebra_view(
                                 ui.vertical(|ui| {
                                     ui.label(
                                         egui::RichText::new(format!("Tipo: {}", obj.name()))
-                                            .size(13.0),
+                                            .size(13.0)
+                                            .color(theme.text_secondary),
                                     );
                                     ui.add_space(4.0);
                                     ui.label(
                                         egui::RichText::new(format!("Etiqueta: {}", obj.label()))
-                                            .size(13.0),
+                                            .size(13.0)
+                                            .color(theme.text_secondary),
                                     );
                                     ui.add_space(4.0);
                                     let mut vis = obj.is_visible();
                                     if ui
                                         .checkbox(
                                             &mut vis,
-                                            egui::RichText::new("Visible").size(13.0),
+                                            egui::RichText::new("Visible")
+                                                .size(13.0)
+                                                .color(theme.text_primary),
                                         )
                                         .changed()
                                     {
@@ -162,6 +221,16 @@ pub fn algebra_view(
                 }
             }
 
+            // Hover overlay (PR 6 polish) — rect filled on top del frame
+            if interact_resp.hovered() && !is_selected {
+                ui.painter().rect_filled(
+                    response.rect,
+                    egui::Rounding::same(6.0),
+                    theme.hover_overlay,
+                );
+            }
+
+            // Separator entre items
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 1.0),
@@ -169,9 +238,12 @@ pub fn algebra_view(
                 );
                 ui.painter().line_segment(
                     [rect.left_top(), rect.right_top()],
-                    egui::Stroke::new(1.0, Color32::from_gray(240)),
+                    egui::Stroke::new(1.0, theme.separator),
                 );
             });
+
+            // Suprimir warning de variable no usada
+            let _ = is_hovered;
         }
     });
     actions
@@ -179,17 +251,22 @@ pub fn algebra_view(
 
 /// Display the Properties panel for a selected object.
 pub fn properties_panel(ui: &mut Ui, document: &mut Document, id: ObjectId) {
+    let theme = current_theme(ui.ctx());
     ui.heading("Propiedades");
     ui.separator();
     if let Some(obj) = document.get_object_mut(id) {
         // Basic properties
-        ui.label(egui::RichText::new(format!("Tipo: {}", obj.name())).strong());
+        ui.label(
+            egui::RichText::new(format!("Tipo: {}", obj.name()))
+                .strong()
+                .color(theme.text_primary),
+        );
         ui.add_space(4.0);
 
         // Editable label
         let mut label = obj.label().to_string();
         ui.horizontal(|ui| {
-            ui.label("Etiqueta:");
+            ui.label(egui::RichText::new("Etiqueta:").color(theme.text_secondary));
             if ui.text_edit_singleline(&mut label).changed() {
                 obj.set_label(label);
             }

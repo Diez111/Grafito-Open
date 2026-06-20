@@ -1,6 +1,12 @@
 //! Grafito Toast Notifications — Non-intrusive feedback messages.
+//!
+//! Los colores se resuelven dinámicamente desde el [`Theme`] activo usando
+//! [`current_theme`]. Esto garantiza que los toasts respeten el modo
+//! claro/oscuro sin hardcodear valores.
 
 use egui::{Align2, Color32, FontId, Stroke, Vec2};
+
+use crate::theme::current_theme;
 
 #[derive(Clone)]
 pub struct Toast {
@@ -19,12 +25,14 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
-    pub fn color(&self) -> Color32 {
+    /// Color del borde/acento del toast según el tema activo.
+    pub fn color(&self, ctx: &egui::Context) -> Color32 {
+        let t = current_theme(ctx);
         match self {
-            ToastKind::Info => Color32::from_rgb(80, 150, 255),
-            ToastKind::Success => Color32::from_rgb(80, 210, 80),
-            ToastKind::Error => Color32::from_rgb(255, 80, 80),
-            ToastKind::Cas => Color32::from_rgb(160, 100, 255),
+            ToastKind::Info => t.toast_info,
+            ToastKind::Success => t.toast_success,
+            ToastKind::Error => t.toast_error,
+            ToastKind::Cas => t.toast_cas,
         }
     }
 }
@@ -51,7 +59,9 @@ impl ToastManager {
             return;
         }
 
-        let screen_rect = ui.ctx().screen_rect();
+        let ctx = ui.ctx().clone();
+        let theme = current_theme(&ctx);
+        let screen_rect = ctx.screen_rect();
         let mut y_offset = 0.0_f32;
 
         for toast in &self.toasts {
@@ -71,7 +81,7 @@ impl ToastManager {
             let font = FontId::proportional(13.0);
             let galley =
                 ui.painter()
-                    .layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE);
+                    .layout_no_wrap(text.to_string(), font.clone(), theme.toast_text);
             let w = galley.size().x + 24.0;
             let h = 30.0_f32.max(galley.size().y + 12.0);
             y_offset += h + 8.0;
@@ -79,11 +89,18 @@ impl ToastManager {
             let pos = screen_rect.max - Vec2::new(12.0 + w, y_offset);
             let painter = ui.painter();
             let rect = egui::Rect::from_min_size(pos, Vec2::new(w, h));
-            let bg = Color32::from_rgba_premultiplied(30, 33, 44, (220.0 * alpha) as u8);
+            let kind_color = toast.kind.color(&ctx);
+            let bg_alpha = (theme.toast_bg.a() as f32 * alpha) as u8;
+            let bg = Color32::from_rgba_premultiplied(
+                theme.toast_bg.r(),
+                theme.toast_bg.g(),
+                theme.toast_bg.b(),
+                bg_alpha,
+            );
             let border = Color32::from_rgba_premultiplied(
-                toast.kind.color().r(),
-                toast.kind.color().g(),
-                toast.kind.color().b(),
+                kind_color.r(),
+                kind_color.g(),
+                kind_color.b(),
                 (100.0 * alpha) as u8,
             );
             painter.rect_filled(rect, egui::Rounding::same(8.0), bg);
@@ -93,7 +110,12 @@ impl ToastManager {
                 Align2::CENTER_CENTER,
                 text,
                 font,
-                Color32::from_rgba_premultiplied(255, 255, 255, (255.0 * alpha) as u8),
+                Color32::from_rgba_premultiplied(
+                    theme.toast_text.r(),
+                    theme.toast_text.g(),
+                    theme.toast_text.b(),
+                    (theme.toast_text.a() as f32 * alpha) as u8,
+                ),
             );
         }
     }

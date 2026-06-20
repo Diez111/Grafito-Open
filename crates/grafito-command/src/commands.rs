@@ -292,7 +292,21 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         .replace("Y", "y")
         .replace("F(x)", "f(x)")
         .replace("G(x)", "g(x)")
+        // **Superscripts Unicode**: el usuario escribe `x²` desde el teclado
+        // virtual. El parser no entiende `²` (es un caracter Unicode, no un
+        // operador). Reemplazamos TODAS las variables comunes elevadas al
+        // cuadrado: x², y², z², t², r², a², b², c², n², θ², φ².
         .replace("x²", "x^2")
+        .replace("y²", "y^2")
+        .replace("z²", "z^2")
+        .replace("t²", "t^2")
+        .replace("r²", "r^2")
+        .replace("a²", "a^2")
+        .replace("b²", "b^2")
+        .replace("c²", "c^2")
+        .replace("n²", "n^2")
+        .replace("θ²", "θ^2")
+        .replace("φ²", "φ^2")
         .replace("√", "sqrt")
         .replace("|x|", "abs(x)")
         .replace("π", "pi")
@@ -300,7 +314,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         .replace("÷", "/")
         .replace("×", "*")
         .replace("≤", "<=")
-        .replace("≥", ">=");
+        .replace("≥", ">=")
+        // **Cubos y potencias mayores**: x³, x⁴, etc. (sufijos Unicode U+00B3, U+2074, etc.)
+        .replace("x³", "x^3")
+        .replace("y³", "y^3")
+        .replace("z³", "z^3");
 
     auto_define_variables(&text, document);
 
@@ -3151,6 +3169,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 // Split LHS/RHS using relation-aware splitting
                 let (lhs, rhs, op) = split_relation(expr);
                 let mut obj = ImplicitCurveObj::new(lhs, rhs, op);
+                obj.label = next_implicit_label(document);
                 obj.contour_levels = Some(levels);
                 document.add_object(GeoObject::ImplicitCurve(obj));
                 input_text.clear();
@@ -3159,7 +3178,8 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             "ImplicitCurve" if !cmd.args.is_empty() => {
                 let expr = cmd.args[0].trim();
                 let (lhs, rhs, op) = split_relation(expr);
-                let obj = ImplicitCurveObj::new(lhs, rhs, op);
+                let mut obj = ImplicitCurveObj::new(lhs, rhs, op);
+                obj.label = next_implicit_label(document);
                 document.add_object(GeoObject::ImplicitCurve(obj));
                 input_text.clear();
                 return CommandOutcome::Message("Implicit curve created".into());
@@ -3306,6 +3326,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             {
                 if levels.len() >= 2 {
                     let mut obj = ImplicitCurveObj::new(name, "0", RelationOperator::Eq);
+                    obj.label = next_implicit_label(document);
                     obj.contour_levels = Some(levels);
                     document.add_object(GeoObject::ImplicitCurve(obj));
                     input_text.clear();
@@ -3314,44 +3335,33 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
         }
 
-        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(name, rest, RelationOperator::Eq));
-        document.add_object(obj);
+        let mut obj = ImplicitCurveObj::new(name, rest, RelationOperator::Eq);
+        obj.label = next_implicit_label(document);
+        document.add_object(GeoObject::ImplicitCurve(obj));
         input_text.clear();
         return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once("<=") {
-        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
-            lhs.trim(),
-            rhs.trim(),
-            RelationOperator::LessEq,
-        ));
-        document.add_object(obj);
+        let mut obj = ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::LessEq);
+        obj.label = next_implicit_label(document);
+        document.add_object(GeoObject::ImplicitCurve(obj));
         input_text.clear();
         return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once(">=") {
-        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
-            lhs.trim(),
-            rhs.trim(),
-            RelationOperator::GreaterEq,
-        ));
-        document.add_object(obj);
+        let mut obj = ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::GreaterEq);
+        obj.label = next_implicit_label(document);
+        document.add_object(GeoObject::ImplicitCurve(obj));
         input_text.clear();
         return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once('<') {
-        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
-            lhs.trim(),
-            rhs.trim(),
-            RelationOperator::Less,
-        ));
-        document.add_object(obj);
+        let mut obj = ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::Less);
+        obj.label = next_implicit_label(document);
+        document.add_object(GeoObject::ImplicitCurve(obj));
         input_text.clear();
         return CommandOutcome::Ok;
     } else if let Some((lhs, rhs)) = text.split_once('>') {
-        let obj = GeoObject::ImplicitCurve(ImplicitCurveObj::new(
-            lhs.trim(),
-            rhs.trim(),
-            RelationOperator::Greater,
-        ));
-        document.add_object(obj);
+        let mut obj = ImplicitCurveObj::new(lhs.trim(), rhs.trim(), RelationOperator::Greater);
+        obj.label = next_implicit_label(document);
+        document.add_object(GeoObject::ImplicitCurve(obj));
         input_text.clear();
         return CommandOutcome::Ok;
     } else {
@@ -4565,6 +4575,33 @@ pub fn next_function_label(document: &Document) -> String {
     format!("f{}(x)", document.object_count())
 }
 
+/// Devuelve el siguiente label disponible para una `ImplicitCurve`:
+/// `I`, `J`, `K`, ... evitando colisiones con labels ya usados.
+///
+/// Esto permite que el usuario escriba `ComplexMapping[1/z, I]`
+/// después de crear la primera implícita con `x^2 + y^2 = 1`,
+/// en vez de tener que recordar el label vacío que se asignaba antes.
+pub fn next_implicit_label(document: &Document) -> String {
+    let used: HashSet<String> = document
+        .objects_iter()
+        .filter_map(|(_, obj)| {
+            if let GeoObject::ImplicitCurve(ic) = obj {
+                Some(ic.label.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for c in 'I'..='Z' {
+        let label = c.to_string();
+        if !used.contains(&label) {
+            return label;
+        }
+    }
+    // Después de I..Z (que es 18 letras mayúsculas), usar un sufijo numérico.
+    format!("I{}", document.object_count())
+}
+
 pub fn find_extrema<F: Fn(f64) -> f64>(f: &F, a: f64, b: f64, find_max: bool) -> Vec<(f64, f64)> {
     let mut pts = Vec::new();
     let steps = 200;
@@ -4716,7 +4753,64 @@ fn parse_matrix_arg(s: &str) -> Option<Matrix> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafito_core::Document;
+    use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+
+    #[test]
+    fn test_next_implicit_label_assigns_i_first() {
+        let doc = Document::new();
+        assert_eq!(next_implicit_label(&doc), "I");
+    }
+
+    #[test]
+    fn test_next_implicit_label_skips_used() {
+        let mut doc = Document::new();
+        let mut ic = ImplicitCurveObj::new("x^2 + y^2 - 4", "0", RelationOperator::Eq);
+        ic.label = "I".to_string();
+        doc.add_object(GeoObject::ImplicitCurve(ic));
+        assert_eq!(next_implicit_label(&doc), "J");
+    }
+
+    #[test]
+    fn test_next_implicit_label_ignores_other_types() {
+        let mut doc = Document::new();
+        // Una Function con label "I" no debe interferir con la numeración de
+        // implícitas. Las implícitas siguen su propio namespace.
+        let f = grafito_core::FunctionObj::new("x^2");
+        doc.add_object(GeoObject::Function(f));
+        assert_eq!(next_implicit_label(&doc), "I");
+    }
+
+    #[test]
+    fn test_implicit_curve_gets_auto_label_via_process_input() {
+        // El flujo principal: el usuario escribe `x^2 + y^2 = 1` y la implícita
+        // se crea con label "I" (no vacío). Luego puede hacer
+        // `ComplexMapping[1/z, I]` y encontrar el target.
+        let mut doc = Document::new();
+        process_input(&mut doc, &mut "x^2 + y^2 = 1".to_string());
+        let label = doc
+            .objects_iter()
+            .find_map(|(_, o)| {
+                if let GeoObject::ImplicitCurve(ic) = o {
+                    Some(ic.label.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("should have created an ImplicitCurve");
+        assert_eq!(label, "I");
+
+        // Ahora el ComplexMapping debe poder encontrar el target por label.
+        let mut out = "ComplexMapping[1/z, I]".to_string();
+        let outcome = process_input(&mut doc, &mut out);
+        assert!(
+            !matches!(outcome, CommandOutcome::Error(_)),
+            "ComplexMapping should find the implicit curve by label 'I'"
+        );
+        let has_cm = doc
+            .objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)));
+        assert!(has_cm, "ComplexMapping object should have been created");
+    }
 
     #[test]
     fn test_polygon_union_command() {

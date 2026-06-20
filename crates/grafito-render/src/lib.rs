@@ -1024,42 +1024,14 @@ impl Renderer {
                         }
                     }
                 }
-                GeoObject::ImplicitCurve(ic) => {
-                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                    let view_bounds = (
-                        world_tl.x.min(world_br.x),
-                        world_tl.x.max(world_br.x),
-                        world_br.y.min(world_tl.y),
-                        world_br.y.max(world_tl.y),
-                    );
-                    let quality = document.render_quality;
-                    let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
-                        view_transform.screen_size.x,
-                        view_transform.screen_size.y,
-                        quality,
-                    );
-                    let levels = grafito_core::implicit_curve::segments_or_compute(
-                        ic,
-                        view_bounds,
-                        grid_size,
-                        &document.variables,
-                        quality,
-                    );
-                    for (_level, segs) in levels.iter() {
-                        for (a, b) in segs {
-                            let sa = view_transform.world_to_screen(*a);
-                            let sb = view_transform.world_to_screen(*b);
-                            Self::add_line_segment(
-                                &mut vertices,
-                                &mut indices,
-                                sa,
-                                sb,
-                                ic.width,
-                                ic.color,
-                            );
-                        }
-                    }
+                GeoObject::ImplicitCurve(_) => {
+                    // El render del ImplicitCurve se hace por CPU (ver
+                    // `render_2d.rs::draw_object_styled` → brazo
+                    // `GeoObject::ImplicitCurve`). Esto evita el doble render
+                    // y los problemas de offset que ocurrían cuando GPU y CPU
+                    // dibujaban el mismo objeto en sistemas de coordenadas
+                    // distintos. La GPU sigue acelerando el cómputo de
+                    // marching squares vía `implicit_compute`.
                 }
                 GeoObject::Histogram(h) => {
                     let bins = grafito_geometry::statistics::histogram(&h.data, h.bins);
@@ -1355,7 +1327,35 @@ impl Renderer {
                             _ => {}
                         }
                         if sample_pts.len() >= 2 {
-                            if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cm.expr) {
+                            if let Some(map) = cm.conformal_cache {
+                                let mut prev: Option<glam::Vec2> = None;
+                                for pt in &sample_pts {
+                                    let z = num_complex::Complex64::new(pt.x, pt.y);
+                                    if let Some(fz) = map.apply(z) {
+                                        if fz.re.is_finite() && fz.im.is_finite() {
+                                            let tw = Point2::new(fz.re, fz.im);
+                                            let ts = view_transform.world_to_screen(tw);
+                                            if let Some(ps) = prev {
+                                                if (ts.x - ps.x).abs() < 300.0
+                                                    && (ts.y - ps.y).abs() < 300.0
+                                                {
+                                                    Self::add_line_segment(
+                                                        &mut vertices,
+                                                        &mut indices,
+                                                        ps,
+                                                        ts,
+                                                        1.5,
+                                                        cm.color,
+                                                    );
+                                                }
+                                            }
+                                            prev = Some(ts);
+                                        }
+                                    }
+                                }
+                            } else if let Ok(parsed) =
+                                grafito_geometry::complex_expr::parse(&cm.expr)
+                            {
                                 let mut prev: Option<glam::Vec2> = None;
                                 let mut vars = std::collections::HashMap::new();
                                 for pt in &sample_pts {

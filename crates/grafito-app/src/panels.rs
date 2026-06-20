@@ -4,45 +4,39 @@ use crate::{commands, GrafitoApp, ViewMode};
 use egui::Color32;
 use grafito_core::{GeoObject, PointObj};
 use grafito_geometry::Point2;
-use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
+use grafito_ui::theme::{current_theme, DARK, LIGHT};
 
 type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
 
-fn panel_theme(app: &GrafitoApp) -> (bool, Color32, Color32, Color32, Color32, Color32, Color32) {
-    let is_dark = app.dark_mode;
-    let accent = Color32::from_rgb(53, 132, 228);
-    let alg_fill = if is_dark {
-        Color32::from_rgb(24, 26, 34)
-    } else {
-        Color32::from_rgb(248, 249, 252)
-    };
-    let sep_col = if is_dark {
-        Color32::from_rgb(55, 55, 60)
-    } else {
-        Color32::from_rgb(175, 175, 180)
-    };
-    let txt_col = if is_dark {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(26, 26, 26)
-    };
-    let txt_dim = if is_dark {
-        Color32::from_gray(140)
-    } else {
-        Color32::from_gray(110)
-    };
-    let hdr_col = if is_dark {
-        Color32::from_gray(160)
-    } else {
-        Color32::from_gray(80)
-    };
+/// Helper de retrocompatibilidad. Devuelve la tupla histórica
+/// `(is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col)`
+/// usando el Theme activo.
+#[allow(clippy::type_complexity)]
+fn panel_theme_local(
+    ctx: &egui::Context,
+) -> (bool, Color32, Color32, Color32, Color32, Color32, Color32) {
+    let t = current_theme(ctx);
+    let is_dark = t.canvas_bg.r() < 100;
     (
-        is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col,
+        is_dark,
+        t.accent,
+        t.panel_bg,
+        t.separator,
+        t.text_primary,
+        t.text_tertiary,
+        t.text_secondary,
     )
 }
 
 pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme(app);
+    let _ = app;
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    let alg_fill = theme.panel_bg;
+    let sep_col = theme.separator;
+    let txt_col = theme.text_primary;
+    let txt_dim = theme.text_tertiary;
+    let _hdr_col = theme.text_secondary;
 
     // ── CAS PANEL (tab 1) ──
     egui::SidePanel::left("cas_panel")
@@ -122,7 +116,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme(app);
+    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     // ── VIEW/SETTINGS PANEL (tab 4) ──
     egui::SidePanel::left("view_panel")
@@ -161,9 +155,9 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .changed()
                     .then(|| {
                         if app.dark_mode {
-                            THEME_DARK.apply(ui.ctx());
+                            DARK.apply(ui.ctx());
                         } else {
-                            THEME_LIGHT.apply(ui.ctx());
+                            LIGHT.apply(ui.ctx());
                         }
                     });
                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
@@ -203,7 +197,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme(app);
+    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("spreadsheet_panel")
         .default_width(260.0)
@@ -326,7 +320,7 @@ pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
 }
 
 pub(crate) fn draw_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme(app);
+    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("table_panel")
         .default_width(240.0)
@@ -530,8 +524,9 @@ pub(crate) fn draw_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 }
 
-pub(crate) fn draw_empty_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) = panel_theme(app);
+pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
+    let (_is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
 
     egui::SidePanel::left("empty_panel")
         .default_width(220.0)
@@ -551,7 +546,8 @@ pub(crate) fn draw_empty_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) = panel_theme(app);
+    let (is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
 
     // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
     if app.show_spreadsheet {

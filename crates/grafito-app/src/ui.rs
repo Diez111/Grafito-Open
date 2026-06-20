@@ -2,36 +2,21 @@
 //! and the floating color-picker dialog.
 
 use crate::{commands, GrafitoApp, ViewMode};
-use egui::Color32;
-use grafito_ui::theme::{DARK as THEME_DARK, LIGHT as THEME_LIGHT};
+use egui::{Align2, Color32};
+use grafito_ui::icons::{draw_icon, Icon};
+use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::Tool;
 
 pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
     #[cfg(feature = "profile")]
     puffin::profile_scope!("ui_top_bar");
 
-    let is_dark = app.dark_mode;
-    let accent = Color32::from_rgb(53, 132, 228); // GNOME blue
-    let bar_fill = if is_dark {
-        Color32::from_rgb(36, 36, 36)
-    } else {
-        Color32::WHITE
-    };
-    let side_fill = if is_dark {
-        Color32::from_rgb(30, 30, 38)
-    } else {
-        Color32::from_rgb(250, 250, 252)
-    };
-    let sep_col = if is_dark {
-        Color32::from_rgb(55, 55, 60)
-    } else {
-        Color32::from_rgb(175, 175, 180)
-    };
-    let _txt_col = if is_dark {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(26, 26, 26)
-    };
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    let bar_fill = theme.toolbar_bg;
+    let side_fill = theme.sidebar_bg;
+    let sep_col = theme.separator;
+    let _txt_col = theme.text_primary;
 
     // ── MENU BAR + QUICK CONTROLS ──
     egui::TopBottomPanel::top("menu_bar")
@@ -75,9 +60,9 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                         .clicked()
                         .then(|| {
                             if app.dark_mode {
-                                THEME_DARK.apply(ui.ctx());
+                                DARK.apply(ui.ctx());
                             } else {
-                                THEME_LIGHT.apply(ui.ctx());
+                                LIGHT.apply(ui.ctx());
                             }
                         });
                     ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula")
@@ -120,9 +105,9 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     {
                         app.dark_mode = !app.dark_mode;
                         if app.dark_mode {
-                            THEME_DARK.apply(ui.ctx());
+                            DARK.apply(ui.ctx());
                         } else {
-                            THEME_LIGHT.apply(ui.ctx());
+                            LIGHT.apply(ui.ctx());
                         }
                     }
 
@@ -168,13 +153,17 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
-    let tabs: &[(&str, &str, &str)] = &[
-        ("Álgebra", "A", "Objetos, variables, comandos"),
-        ("Herram.", "H", "Herramientas de construcción y análisis"),
-        ("CAS", "C", "Cálculo simbólico paso a paso"),
-        ("Tabla", "T", "Valores numéricos x|f(x)"),
-        ("Hoja", "S", "Hoja de cálculo"),
-        ("Vista", "V", "Cuadrícula, ejes, etiquetas"),
+    let tabs: &[(&str, Icon, &str)] = &[
+        ("Álgebra", Icon::Menu, "Objetos, variables, comandos"),
+        (
+            "Herram.",
+            Icon::Settings,
+            "Herramientas de construcción y análisis",
+        ),
+        ("CAS", Icon::Analyze, "Cálculo simbólico paso a paso"),
+        ("Tabla", Icon::Function, "Valores numéricos x|f(x)"),
+        ("Hoja", Icon::Grid, "Hoja de cálculo"),
+        ("Vista", Icon::Eye, "Cuadrícula, ejes, etiquetas"),
     ];
     egui::SidePanel::left("icon_bar")
         .exact_width(52.0)
@@ -192,35 +181,33 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 for (i, (label, icon, tip)) in tabs.iter().enumerate() {
                     let active = app.sidebar_tab == i;
                     let bg = if active {
-                        Color32::from_rgba_unmultiplied(53, 132, 228, 50)
+                        theme.sidebar_tab_active_bg
                     } else {
                         Color32::TRANSPARENT
                     };
-                    let ic = if active {
-                        accent
+                    let ic_color = if active {
+                        theme.sidebar_tab_active
                     } else {
-                        Color32::from_gray(130)
+                        theme.sidebar_tab_inactive
                     };
 
                     let (rect, resp) =
                         ui.allocate_exact_size(egui::vec2(46.0, 48.0), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         ui.painter().rect_filled(rect, 6.0, bg);
-                        // Draw the icon
-                        ui.painter().text(
-                            rect.center() - egui::vec2(0.0, 6.0),
-                            egui::Align2::CENTER_CENTER,
-                            *icon,
-                            egui::FontId::proportional(16.0),
-                            ic,
+                        // Icono vectorial (sin emojis, sin letras sueltas)
+                        let icon_rect = egui::Rect::from_center_size(
+                            rect.center() - egui::vec2(0.0, 7.0),
+                            egui::vec2(20.0, 20.0),
                         );
-                        // Draw the text
+                        draw_icon(ui.painter(), icon_rect, *icon, ic_color);
+                        // Texto debajo
                         ui.painter().text(
-                            rect.center() + egui::vec2(0.0, 12.0),
-                            egui::Align2::CENTER_CENTER,
+                            rect.center() + egui::vec2(0.0, 14.0),
+                            Align2::CENTER_CENTER,
                             *label,
                             egui::FontId::proportional(9.0),
-                            ic,
+                            ic_color,
                         );
                     }
 
@@ -228,7 +215,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app.sidebar_tab = i;
                         if i == 4 {
                             // index 4 is now Hoja
-                            app.show_spreadsheet = false; // Never auto-open right panel when switching to Hoja
+                            app.show_spreadsheet = false;
                         }
                     }
                     resp.on_hover_text(*tip);
@@ -242,23 +229,11 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
     #[cfg(feature = "profile")]
     puffin::profile_scope!("ui_bottom_bar");
 
-    let is_dark = app.dark_mode;
-    let accent = Color32::from_rgb(53, 132, 228);
-    let sep_col = if is_dark {
-        Color32::from_rgb(55, 55, 60)
-    } else {
-        Color32::from_rgb(175, 175, 180)
-    };
-    let txt_dim = if is_dark {
-        Color32::from_gray(140)
-    } else {
-        Color32::from_gray(110)
-    };
-    let txt_col = if is_dark {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(26, 26, 26)
-    };
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    let sep_col = theme.separator;
+    let txt_dim = theme.text_tertiary;
+    let txt_col = theme.text_primary;
 
     // ── INPUT BAR (always visible, like GeoGebra) ──
     {
@@ -267,11 +242,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
             .exact_height(32.0)
             .frame(
                 egui::Frame::none()
-                    .fill(if is_dark {
-                        Color32::from_rgb(32, 32, 40)
-                    } else {
-                        Color32::from_rgb(245, 246, 250)
-                    })
+                    .fill(theme.input_bar_bg)
                     .stroke(egui::Stroke::new(1.0, sep_col))
                     .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
             )
@@ -315,11 +286,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         .exact_height(22.0)
         .frame(
             egui::Frame::none()
-                .fill(if is_dark {
-                    Color32::from_rgb(28, 28, 34)
-                } else {
-                    Color32::from_rgb(240, 241, 245)
-                })
+                .fill(theme.status_bar_bg)
                 .stroke(egui::Stroke::new(1.0, sep_col))
                 .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
         )

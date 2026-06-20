@@ -4,30 +4,16 @@
 use crate::{commands, GrafitoApp, ViewMode};
 use egui::{Color32, Key};
 use grafito_core::{GeoObject, ObjectId};
+use grafito_ui::icons::{draw_icon, Icon};
+use grafito_ui::theme::current_theme;
 
 pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let is_dark = app.dark_mode;
-    let accent = Color32::from_rgb(53, 132, 228);
-    let alg_fill = if is_dark {
-        Color32::from_rgb(24, 26, 34)
-    } else {
-        Color32::from_rgb(248, 249, 252)
-    };
-    let sep_col = if is_dark {
-        Color32::from_rgb(55, 55, 60)
-    } else {
-        Color32::from_rgb(175, 175, 180)
-    };
-    let txt_col = if is_dark {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(26, 26, 26)
-    };
-    let _txt_dim = if is_dark {
-        Color32::from_gray(140)
-    } else {
-        Color32::from_gray(110)
-    };
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    let alg_fill = theme.panel_bg;
+    let sep_col = theme.separator;
+    let txt_col = theme.text_primary;
+    let _txt_dim = theme.text_tertiary;
 
     egui::SidePanel::left("algebra_panel")
     .default_width(220.0)
@@ -37,7 +23,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     .show(ctx, |ui| {
         // Input row
         egui::Frame::none()
-            .fill(if is_dark { Color32::from_gray(33) } else { Color32::from_gray(248) })
+            .fill(theme.input_bg)
             .inner_margin(egui::Margin { left:8.0, right:8.0, top:6.0, bottom:6.0 })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -196,14 +182,14 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                 let is_sel = app.selected_object == Some(oid);
                 let frame_fill = if is_sel {
-                    if is_dark { Color32::from_rgba_unmultiplied(94, 139, 255, 40) } else { Color32::from_rgba_unmultiplied(38, 99, 255, 30) }
+                    theme.accent_muted
                 } else {
-                    if is_dark { Color32::from_gray(30) } else { Color32::from_rgb(255, 255, 255) }
+                    theme.panel_bg
                 };
                 let border = if is_sel {
-                    egui::Stroke::new(1.0, if is_dark { Color32::from_rgb(94, 139, 255) } else { Color32::from_rgb(38, 99, 255) })
+                    egui::Stroke::new(1.0, theme.accent)
                 } else {
-                    egui::Stroke::new(1.0, if is_dark { Color32::from_gray(40) } else { Color32::from_rgb(230, 230, 235) })
+                    egui::Stroke::new(1.0, theme.separator)
                 };
 
                 let mut row_clicked = false;
@@ -218,11 +204,29 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         ui.horizontal(|ui| {
                             // Right-side controls drawn first
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add_sized([28.0, 24.0], egui::Button::new("🗑").frame(false)).on_hover_text("Eliminar").clicked() {
+                                let (del_rect, del_resp) = ui.allocate_exact_size(
+                                    egui::vec2(28.0, 24.0),
+                                    egui::Sense::click(),
+                                );
+                                if ui.is_rect_visible(del_rect) {
+                                    draw_icon(ui.painter(), del_rect.shrink(4.0), Icon::Delete, theme.text_secondary);
+                                }
+                                if del_resp.on_hover_text("Eliminar").clicked() {
                                     delete_id = Some(oid);
                                 }
-                                let eye = if obj_vis { "👁" } else { "Ø" };
-                                if ui.add_sized([28.0, 24.0], egui::Button::new(eye).frame(false)).on_hover_text("Visibilidad").clicked() {
+                                let (eye_rect, eye_resp) = ui.allocate_exact_size(
+                                    egui::vec2(28.0, 24.0),
+                                    egui::Sense::click(),
+                                );
+                                if ui.is_rect_visible(eye_rect) {
+                                    draw_icon(
+                                        ui.painter(),
+                                        eye_rect.shrink(4.0),
+                                        if obj_vis { Icon::Eye } else { Icon::EyeOff },
+                                        theme.text_secondary,
+                                    );
+                                }
+                                if eye_resp.on_hover_text("Visibilidad").clicked() {
                                     if let Some(o) = app.document.get_object_mut(oid) {
                                         let v = o.is_visible(); o.set_visible(!v);
                                     }

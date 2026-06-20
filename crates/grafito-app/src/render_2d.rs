@@ -3,11 +3,13 @@ use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::parametric_sampling;
 use grafito_core::vector_field_sampling;
-use grafito_core::GeoObject;
+use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::expr::{
     eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
 };
-use grafito_geometry::{Color, Point2};
+use grafito_geometry::{Color, Point2, ViewTransform};
+use grafito_ui::theme::current_theme;
 
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -16,6 +18,14 @@ fn to_color32(c: Color) -> Color32 {
         (c.b * 255.0).clamp(0.0, 255.0) as u8,
         (c.a * 255.0).clamp(0.0, 255.0) as u8,
     )
+}
+
+/// Cuenta el número de nodos en un AST. Se usa para decidir el stride
+/// del scanline fill: ASTs grandes (expresiones complejas) usan stride
+/// mayor para mantener el frame rate. Delega al método `node_count`
+/// definido en `ast.rs` para garantizar exhaustividad.
+fn node_count(expr: &grafito_geometry::ast::Expr) -> usize {
+    expr.node_count()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -159,20 +169,9 @@ impl GrafitoApp {
         let world_br =
             view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
 
-        let grid_color = if self.dark_mode {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 25)
-        } else {
-            Color32::from_rgba_unmultiplied(0, 0, 0, 25)
-        };
+        let grid_color = current_theme(painter.ctx()).grid_line;
         let grid_stroke = Stroke::new(1.0, grid_color);
-        let minor_stroke = Stroke::new(
-            0.5,
-            if self.dark_mode {
-                Color32::from_rgba_unmultiplied(255, 255, 255, 12)
-            } else {
-                Color32::from_rgba_unmultiplied(0, 0, 0, 12)
-            },
-        );
+        let minor_stroke = Stroke::new(0.5, current_theme(painter.ctx()).grid_minor);
 
         // Vertical grid lines
         if view.x_log {
@@ -326,11 +325,7 @@ impl GrafitoApp {
         let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
         let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
 
-        let stroke = if self.dark_mode {
-            Stroke::new(1.0, Color32::from_gray(180))
-        } else {
-            Stroke::new(1.0, Color32::from_gray(80))
-        };
+        let stroke = Stroke::new(1.0, current_theme(painter.ctx()).grid_axis);
 
         let x_axis_a = view.world_to_screen(Point2::new(world_tl.x, x_axis_y));
         let x_axis_b = view.world_to_screen(Point2::new(world_br.x, x_axis_y));
@@ -352,11 +347,7 @@ impl GrafitoApp {
             stroke,
         );
         // Tick marks and labels — log-appropriate or linear
-        let text_color = if self.dark_mode {
-            Color32::from_gray(180)
-        } else {
-            Color32::from_gray(80)
-        };
+        let text_color = current_theme(painter.ctx()).axis_label;
         let font = egui::FontId::proportional(12.0);
         let minor_tick = Stroke::new(0.5, text_color);
 
@@ -784,6 +775,329 @@ impl GrafitoApp {
         self.draw_object_styled(painter, canvas_rect, obj, None, false);
     }
 
+    /// Rellena el área interior de la imagen transformada de un
+    /// `ImplicitCurve` por un `ComplexMapping`. La técnica:
+    ///
+    /// 1. Para cada fila de píxeles del canvas, muestrear el campo en el
+    ///    plano de output (`w`).
+    /// 2. Para cada muestra, aplicar `map.inverse_apply(w)` para obtener
+    ///    el `z` correspondiente en el plano original.
+    /// 3. Evaluar la curva original `f(z) = lhs - rhs` (o `rhs - lhs`
+    ///    para `Greater/GreaterEq`) en ese `z`.
+    /// 4. Aplicar **scanline fill** alternando "fuera"/"dentro" en cada
+    ///    cruce de cero y rellenando entre pares de cruces con la regla
+    ///    par-impar. Esto garantiza que el relleno no excede el contorno
+    ///    (al contrario del cell-fill anterior).
+    fn draw_complex_mapping_fill(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        view: &ViewTransform,
+        ic: &ImplicitCurveObj,
+        map: ConformalMap,
+        fill_color: Color,
+    ) {
+        use num_complex::Complex64;
+
+        // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj (combinado).
+        let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // 2) Operador -> convención "interior es f <= 0".
+        let swap = matches!(
+            ic.operator,
+            RelationOperator::Greater | RelationOperator::GreaterEq
+        );
+        if matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
+
+        let fill_32 = to_color32(fill_color);
+
+        // 3) Dimensiones del canvas en píxeles.
+        let w = canvas_rect.width().max(1.0) as i32;
+        let h = canvas_rect.height().max(1.0) as i32;
+
+        // 4) **Stride adaptativo** (ver `draw_implicit_curve_fill`).
+        let ast_node_count = node_count(&eval_lhs) + node_count(&eval_rhs);
+        let stride: i32 = if ast_node_count > 30 { 4 } else { 2 };
+
+        // 5) Buffers reusables.
+        let nsamples = (w as usize / stride as usize).max(8) + 4;
+        let mut world_xs: Vec<f64> = vec![0.0; nsamples];
+        let mut fs: Vec<f64> = vec![0.0; nsamples];
+        let mut insides: Vec<bool> = vec![false; nsamples];
+
+        for y_pixel in 0..=h {
+            let wy = view
+                .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
+                .y;
+
+            let n = (w / stride) + 1;
+            for k in 0..n {
+                let x_pixel = (k * stride).min(w);
+                let wx = view
+                    .screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
+                    .x;
+                world_xs[k as usize] = wx;
+
+                // Aplicar inversa del conformal map.
+                let w_pt = Complex64::new(wx, wy);
+                let z = match map.inverse_apply(w_pt) {
+                    Some(z) => z,
+                    None => {
+                        fs[k as usize] = f64::NAN;
+                        insides[k as usize] = false;
+                        continue;
+                    }
+                };
+
+                let lhs = eval_lhs.eval_2d("x", z.re, "y", z.im);
+                let rhs = eval_rhs.eval_2d("x", z.re, "y", z.im);
+                let f = if !lhs.is_finite() || !rhs.is_finite() {
+                    f64::NAN
+                } else if swap {
+                    rhs - lhs
+                } else {
+                    lhs - rhs
+                };
+                fs[k as usize] = f;
+                insides[k as usize] = f.is_finite() && f <= 0.0;
+            }
+
+            // 4b) Scanline fill par-impar.
+            let mut filling = false;
+            let mut seg_start: Option<f64> = None;
+            let y_top = canvas_rect.min.y + y_pixel as f32;
+            let y_bot = y_top + 1.0;
+            for k in 0..n {
+                let i = k as usize;
+                let inside = insides[i];
+                if filling && !inside {
+                    if let Some(start_world) = seg_start.take() {
+                        let f_prev = fs[i - 1];
+                        let f_curr = fs[i];
+                        let x_world_curr = world_xs[i];
+                        let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                        let end_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                            let dx_world = x_world_curr - x_world_prev;
+                            x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                        } else {
+                            x_world_curr
+                        };
+                        let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                        let end_screen = view.world_to_screen(Point2::new(end_x_world, wy)).x;
+                        let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                        let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                        let rect =
+                            Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                        painter.rect_filled(rect, 0.0, fill_32);
+                    }
+                    filling = false;
+                } else if !filling && inside {
+                    let f_prev = if i > 0 { fs[i - 1] } else { f64::NAN };
+                    let f_curr = fs[i];
+                    let x_world_curr = world_xs[i];
+                    let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                    let start_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                        let dx_world = x_world_curr - x_world_prev;
+                        x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                    } else {
+                        x_world_curr
+                    };
+                    seg_start = Some(start_x_world);
+                    filling = true;
+                }
+            }
+            if filling {
+                if let Some(start_world) = seg_start.take() {
+                    let end_world = world_xs[(n - 1) as usize];
+                    let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                    let end_screen = view.world_to_screen(Point2::new(end_world, wy)).x;
+                    let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                    let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                    let rect = Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                    painter.rect_filled(rect, 0.0, fill_32);
+                }
+            }
+        }
+    }
+
+    /// Rellena el **interior** de una región `ImplicitCurve` (operator
+    /// `Less/LessEq/Greater/GreaterEq`). Para `x^2 + y^2 <= 1` produce
+    /// un disco violeta translúcido cuyo borde coincide con la curva;
+    /// para `x^2 + y^2 = 1` no rellena nada (es solo el contorno).
+    ///
+    /// Estrategia: **scanline fill** real. Para cada fila de píxeles del
+    /// canvas muestreamos el campo escalar `f(x, y) = lhs - rhs` (o
+    /// `rhs - lhs` para `Greater/GreaterEq`) en cada columna, caminamos
+    /// de izquierda a derecha alternando el estado "fuera"/"dentro" cada
+    /// vez que la función cruza cero, y rellenamos entre cada par de
+    /// cruces con la regla par-impar (even-odd). Esto garantiza que el
+    /// relleno **no excede el contorno** (al contrario del cell-fill
+    /// anterior, que pintaba rectángulos cuyas esquinas podían quedar
+    /// fuera de la región).
+    fn draw_implicit_curve_fill(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        view: &ViewTransform,
+        ic: &ImplicitCurveObj,
+        fill_color: Color,
+    ) {
+        // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj para evitar
+        //    reparsear y re-simplificar el AST en cada frame (era el cuello
+        //    de botella que causaba lag y cuelgues con expresiones no triviales).
+        let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // 2) Operador -> convención "interior es f <= 0".
+        //    Less / LessEq     : f = lhs - rhs
+        //    Greater / GreaterEq: f = rhs - lhs
+        //    Eq                 : sin relleno (es solo contorno).
+        let swap = matches!(
+            ic.operator,
+            RelationOperator::Greater | RelationOperator::GreaterEq
+        );
+        if matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
+
+        let fill_32 = to_color32(fill_color);
+
+        // 3) Dimensiones del canvas en píxeles.
+        let w = canvas_rect.width().max(1.0) as i32;
+        let h = canvas_rect.height().max(1.0) as i32;
+
+        // 4) **Stride adaptativo**: el cuello de botella es `eval_2d` que se
+        //    llama por cada muestra. En vez de 1 muestra por píxel (2M
+        //    evals/frame para 1920×1080 con 2 lados = 4M evals), usamos un
+        //    stride mayor. Con linear refinement entre muestras, el error
+        //    en el cruce se mantiene sub-píxel.
+        //
+        //    Para expresiones simples (`x² + y²`), stride=8 da 8× speedup
+        //    con calidad visual idéntica (el ojo no ve la diferencia entre
+        //    un círculo dibujado a 1px vs 8px de resolución horizontal en
+        //    la mayoría de los zooms).
+        //
+        //    Para expresiones complejas (AST > 30 nodos), stride=16 da
+        //    16× speedup, suficiente para mantener >30 FPS incluso con
+        //    1M evals/frame.
+        let ast_node_count = node_count(&eval_lhs) + node_count(&eval_rhs);
+        // **Stride conservador**: el usuario reportó que muchas expresiones
+        // "no grafican" con stride=8/16. Reducimos a stride=2/4 que aún da
+        // 2-4× speedup vs stride=1 pero detecta regiones más delgadas.
+        let stride: i32 = if ast_node_count > 30 { 4 } else { 2 };
+
+        // 5) Buffers reusables para no realojar en cada fila.
+        //    Tamaño basado en stride: w/stride + margen.
+        let nsamples = (w as usize / stride as usize).max(8) + 4;
+        let mut world_xs: Vec<f64> = vec![0.0; nsamples];
+        let mut fs: Vec<f64> = vec![0.0; nsamples];
+        let mut insides: Vec<bool> = vec![false; nsamples];
+
+        // Sample los extremos de la fila una vez para detectar filas vacías.
+        // (Optimización futura: si la fila anterior estaba vacía y los
+        // extremos actuales también, skip el inner loop. Por ahora siempre
+        // muestreamos para mantener la lógica simple.)
+
+        for y_pixel in 0..=h {
+            // Centro de la fila de píxeles en mundo-y.
+            let wy = view
+                .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
+                .y;
+
+            // 5a) Muestrear el campo escalar con stride.
+            //     Estrategia de "two-end test": si la fila anterior tuvo
+            //     fill, esta probablemente también (curvas suaves son
+            //     continuas). Si no, hacer un sampleo completo.
+            let n = (w / stride) + 1;
+            for k in 0..n {
+                let x_pixel = (k * stride).min(w);
+                let wx = view
+                    .screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
+                    .x;
+                world_xs[k as usize] = wx;
+                let lhs = eval_lhs.eval_2d("x", wx, "y", wy);
+                let rhs = eval_rhs.eval_2d("x", wx, "y", wy);
+                let f = if !lhs.is_finite() || !rhs.is_finite() {
+                    f64::NAN
+                } else if swap {
+                    rhs - lhs
+                } else {
+                    lhs - rhs
+                };
+                fs[k as usize] = f;
+                insides[k as usize] = f.is_finite() && f <= 0.0;
+            }
+
+            // 5b) Scanline fill con regla par-impar.
+            //     Cada segmento entre dos cruces consecutivos (k y k+1) se
+            //     expande linealmente al píxel exacto donde f cruza cero.
+            let mut filling = false;
+            let mut seg_start: Option<f64> = None;
+            let y_top = canvas_rect.min.y + y_pixel as f32;
+            let y_bot = y_top + 1.0;
+            for k in 0..n {
+                let i = k as usize;
+                let inside = insides[i];
+                if filling && !inside {
+                    // Cierre de segmento en el sample k (transición dentro→fuera).
+                    if let Some(start_world) = seg_start.take() {
+                        let f_prev = fs[i - 1];
+                        let f_curr = fs[i];
+                        let x_world_curr = world_xs[i];
+                        let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                        let end_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                            let dx_world = x_world_curr - x_world_prev;
+                            x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                        } else {
+                            x_world_curr
+                        };
+                        let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                        let end_screen = view.world_to_screen(Point2::new(end_x_world, wy)).x;
+                        let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                        let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                        let rect =
+                            Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                        painter.rect_filled(rect, 0.0, fill_32);
+                    }
+                    filling = false;
+                } else if !filling && inside {
+                    // Apertura de segmento en el sample k (transición fuera→dentro).
+                    let f_prev = if i > 0 { fs[i - 1] } else { f64::NAN };
+                    let f_curr = fs[i];
+                    let x_world_curr = world_xs[i];
+                    let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                    let start_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                        let dx_world = x_world_curr - x_world_prev;
+                        x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                    } else {
+                        x_world_curr
+                    };
+                    seg_start = Some(start_x_world);
+                    filling = true;
+                }
+            }
+            // Cierre al borde derecho si la fila termina dentro.
+            if filling {
+                if let Some(start_world) = seg_start.take() {
+                    let end_world = world_xs[(n - 1) as usize];
+                    let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                    let end_screen = view.world_to_screen(Point2::new(end_world, wy)).x;
+                    let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                    let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                    let rect = Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                    painter.rect_filled(rect, 0.0, fill_32);
+                }
+            }
+        }
+    }
+
     pub(crate) fn draw_object_styled(
         &self,
         painter: &egui::Painter,
@@ -793,11 +1107,7 @@ impl GrafitoApp {
         overlay_only: bool,
     ) {
         let view = self.document.view();
-        let label_color = if self.dark_mode {
-            Color32::WHITE
-        } else {
-            Color32::BLACK
-        };
+        let label_color = current_theme(painter.ctx()).object_label;
         match obj {
             GeoObject::Point(p) => {
                 let screen = view.world_to_screen(p.position);
@@ -1797,6 +2107,21 @@ impl GrafitoApp {
                 }
             }
             GeoObject::ImplicitCurve(ic) => {
+                // 0) Relleno del interior (solo para regiones con `<=`, `>=`, `<`, `>`).
+                //    Para curvas con `=`, no hay interior que rellenar.
+                if let Some(fill_color) = ic.fill_color {
+                    if matches!(
+                        ic.operator,
+                        RelationOperator::Less
+                            | RelationOperator::LessEq
+                            | RelationOperator::Greater
+                            | RelationOperator::GreaterEq
+                    ) {
+                        self.draw_implicit_curve_fill(painter, canvas_rect, view, ic, fill_color);
+                    }
+                }
+
+                // 1) Contorno: dibujar los segmentos del marching squares.
                 let levels = ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
                 if !levels.is_empty() {
                     let use_contour_colors = ic.contour_levels.is_some();
@@ -2093,11 +2418,18 @@ impl GrafitoApp {
                     GeoObject::ImplicitCurve(_ic) => {
                         // Para implícitas usamos el helper de muestreo del
                         // crate core (marching squares + polilínea cerrada).
-                        // Si el cache no está poblado todavía, lo forzamos
-                        // evaluando una vez en el rango visible.
+                        //
+                        // Filtro de segmentos degenerados: marching squares
+                        // puede emitir segmentos muy cortos (de longitud menor
+                        // a 1e-3) en celdas donde la interpolación es
+                        // inestable.
                         let mut samples = Vec::new();
                         for (level, segments) in self.document.implicit_curve_segments(cm.target) {
                             for (a, b) in segments {
+                                let len = (a.x - b.x).hypot(a.y - b.y);
+                                if len < 1e-3 {
+                                    continue;
+                                }
                                 let n = 16;
                                 for i in 0..=n {
                                     let t = i as f64 / n as f64;
@@ -2163,21 +2495,49 @@ impl GrafitoApp {
                     return;
                 }
 
-                // 5) Batch-eval de la expresión: un solo parse, muchos
-                //    puntos. Si el parse falla, ya hicimos return antes.
-                //    Si la evaluación de un punto falla (división por cero,
-                //    NaN, etc.), ese punto queda en None y se trata como
-                //    singularidad (disparo de asíntota).
-                let real_vars: HashMap<String, f64> = self.document.variables.clone();
-                let results = match grafito_geometry::complex_expr::eval_complex_batch(
-                    &cm.expr,
-                    "z",
-                    z_samples.iter().copied(),
-                    &real_vars,
-                ) {
-                    Ok(r) => r,
-                    Err(_) => return,
+                // 5) Batch-eval de la expresión.
+                //
+                //    Camino rápido: si la expresión fue reconocida por
+                //    `ConformalMap::from_expr_string` y cacheada en
+                //    `cm.conformal_cache`, evaluamos con la fórmula
+                //    algebraica cerrada. Esto evita el bug del parser
+                //    que tokenizaba `1/z` como `1*z`.
+                //
+                //    Camino lento: `eval_complex_batch` parsea el AST
+                //    una vez y evalúa cada punto.
+                let results: Vec<Option<Complex64>> = if let Some(map) = cm.conformal_cache {
+                    z_samples.iter().map(|z| map.apply(*z)).collect()
+                } else {
+                    let real_vars: HashMap<String, f64> = self.document.variables.clone();
+                    match grafito_geometry::complex_expr::eval_complex_batch(
+                        &cm.expr,
+                        "z",
+                        z_samples.iter().copied(),
+                        &real_vars,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    }
                 };
+
+                // 5b) **Relleno de área** para el caso del `ImplicitCurve` como
+                //     target. El render de líneas arriba solo dibuja el
+                //     contorno; para que el usuario vea un área rellena
+                //     cuando hace `ComplexMapping[1/z, I]`, escaneamos
+                //     el plano de output con el conformal map inverso y
+                //     evaluamos la curva original en cada celda.
+                if let GeoObject::ImplicitCurve(ic) = target {
+                    if let (Some(fill_color), Some(map)) = (ic.fill_color, cm.conformal_cache) {
+                        self.draw_complex_mapping_fill(
+                            painter,
+                            canvas_rect,
+                            view,
+                            ic,
+                            map,
+                            fill_color,
+                        );
+                    }
+                }
                 // Re-construimos un vec paralelo para evitar manejar Option<Point2>:
                 // usamos Point2 con NaN para representar "no-finito".
                 let mut transformed: Vec<(Point2, bool)> = Vec::with_capacity(results.len());

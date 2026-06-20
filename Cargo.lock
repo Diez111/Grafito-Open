@@ -1894,6 +1894,7 @@ dependencies = [
  "grafito-core",
  "grafito-geometry",
  "log",
+ "once_cell",
 ]
 
 [[package]]
