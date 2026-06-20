@@ -1,0 +1,37 @@
+# Code Owners
+
+# This file defines who is responsible for different parts of the codebase.
+# GitHub will automatically request reviews from these owners when a PR
+# modifies files they own.
+
+# Default owners for everything in the repo
+* @Diez111
+
+# Core math engine
+/crates/grafito-geometry/ @Diez111
+
+# Document model and constraints
+/crates/grafito-core/ @Diez111
+
+# GPU rendering pipeline
+/crates/grafito-render/ @Diez111
+
+# UI components
+/crates/grafito-ui/ @Diez111
+
+# Desktop application
+/crates/grafito-app/ @Diez111
+
+# Command processor
+/crates/grafito-command/ @Diez111
+
+# GitHub Actions and CI/CD
+/.github/ @Diez111
+
+# Build and packaging
+/packaging/ @Diez111
+
+# Documentation
+/README.md @Diez111
+/CHANGELOG.md @Diez111
+/LICENSE @Diez111

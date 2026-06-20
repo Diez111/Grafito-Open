@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Grafito
+Comment=Mathematical function graphing calculator
+Exec=grafito
+Icon=grafito
+Terminal=false
+Type=Application
+Categories=Graphics;Science;Math;Education;
+Keywords=math;graph;function;calculator;plot;
+StartupNotify=false
+StartupWMClass=Grafito

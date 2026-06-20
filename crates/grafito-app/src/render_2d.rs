@@ -1,0 +1,2652 @@
+use crate::GrafitoApp;
+use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
+use glam::Vec2 as GlamVec2;
+use grafito_core::parametric_sampling;
+use grafito_core::vector_field_sampling;
+use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
+use grafito_geometry::expr::{
+    eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
+};
+use grafito_geometry::{Color, Point2, ViewTransform};
+use grafito_ui::theme::current_theme;
+
+fn to_color32(c: Color) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        (c.r * 255.0).clamp(0.0, 255.0) as u8,
+        (c.g * 255.0).clamp(0.0, 255.0) as u8,
+        (c.b * 255.0).clamp(0.0, 255.0) as u8,
+        (c.a * 255.0).clamp(0.0, 255.0) as u8,
+    )
+}
+
+/// Cuenta el número de nodos en un AST. Se usa para decidir el stride
+/// del scanline fill: ASTs grandes (expresiones complejas) usan stride
+/// mayor para mantener el frame rate. Delega al método `node_count`
+/// definido en `ast.rs` para garantizar exhaustividad.
+fn node_count(expr: &grafito_geometry::ast::Expr) -> usize {
+    expr.node_count()
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct StyleOverride {
+    pub color: Option<Color>,
+    pub color_alpha_multiplier: Option<f32>,
+    pub width: Option<f32>,
+    pub width_scale: Option<f32>,
+    pub size_scale: Option<f32>,
+    pub hide_label: bool,
+    pub clear_fill_color: bool,
+}
+
+fn get_color(base: Color, style: Option<StyleOverride>) -> Color {
+    let mut c = base;
+    if let Some(s) = style {
+        if let Some(over) = s.color {
+            c = over;
+        }
+        if let Some(mult) = s.color_alpha_multiplier {
+            c.a = (c.a * mult).max(0.05);
+        }
+    }
+    c
+}
+
+fn get_fill_color(base: Option<Color>, style: Option<StyleOverride>) -> Option<Color> {
+    if style.is_some_and(|s| s.clear_fill_color) {
+        return None;
+    }
+    base.map(|c| get_color(c, style))
+}
+
+fn get_width(base: f32, style: Option<StyleOverride>) -> f32 {
+    let mut w = base;
+    if let Some(s) = style {
+        if let Some(over) = s.width {
+            w = over;
+        }
+        if let Some(scale) = s.width_scale {
+            w *= scale;
+        }
+    }
+    w
+}
+
+fn get_size(base: f32, style: Option<StyleOverride>) -> f32 {
+    let mut size = base;
+    if let Some(s) = style {
+        if let Some(scale) = s.size_scale {
+            size *= scale;
+        }
+    }
+    size
+}
+
+fn get_label(base: &str, style: Option<StyleOverride>) -> &str {
+    if let Some(s) = style {
+        if s.hide_label {
+            return "";
+        }
+    }
+    base
+}
+
+/// HSL to RGB conversion for domain coloring
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let hue_to_rgb = |p: f64, q: f64, mut t: f64| -> f64 {
+        while t < 0.0 {
+            t += 1.0;
+        }
+        while t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 1.0 / 2.0 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
+}
+
+/// Thermal colormap for heat maps: blue → cyan → green → yellow → red
+fn thermal_colormap(t: f64) -> (f64, f64, f64) {
+    let t = t.clamp(0.0, 1.0);
+    let r = (t * 3.0 - 1.5).clamp(0.0, 1.0).min(1.0);
+    let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0);
+    let b = (1.5 - t * 3.0).clamp(0.0, 1.0);
+    (r, g, b)
+}
+
+/// Convert integer exponent to Unicode superscript (e.g. 3 → "³", -2 → "⁻²")
+fn superscript(exp: i32) -> String {
+    let digits: Vec<char> = exp.to_string().chars().collect();
+    let mut result = String::new();
+    for &c in &digits {
+        result.push(match c {
+            '-' => '⁻',
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            _ => c,
+        });
+    }
+    result
+}
+
+#[allow(dead_code)]
+impl GrafitoApp {
+    pub(crate) fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        if !self.show_grid {
+            return;
+        }
+        let view = self.document.view();
+        let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+        let world_br =
+            view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+
+        let grid_color = current_theme(painter.ctx()).grid_line;
+        let grid_stroke = Stroke::new(1.0, grid_color);
+        let minor_stroke = Stroke::new(0.5, current_theme(painter.ctx()).grid_minor);
+
+        // Vertical grid lines
+        if view.x_log {
+            let x_min = world_tl.x.min(world_br.x);
+            let x_max = world_tl.x.max(world_br.x);
+            if x_max > 0.0 {
+                let positive_min = x_min.max(1e-12);
+                let min_pow = positive_min.log10().floor() as i32 - 1;
+                let max_pow = x_max.log10().ceil() as i32 + 1;
+                for pow in min_pow..=max_pow {
+                    let x = 10_f64.powf(pow as f64);
+                    if x < positive_min || x > x_max {
+                        continue;
+                    }
+                    let a = view.world_to_screen(Point2::new(x, world_br.y));
+                    let b = view.world_to_screen(Point2::new(x, world_tl.y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        grid_stroke,
+                    );
+                    // Minor grid at 2..9 * 10^pow
+                    if pow < max_pow {
+                        for k in 2..=9 {
+                            let xm = k as f64 * 10_f64.powf(pow as f64);
+                            if xm < positive_min || xm > x_max {
+                                continue;
+                            }
+                            let am = view.world_to_screen(Point2::new(xm, world_br.y));
+                            let bm = view.world_to_screen(Point2::new(xm, world_tl.y));
+                            painter.line_segment(
+                                [
+                                    canvas_rect.min + Vec2::new(am.x, am.y),
+                                    canvas_rect.min + Vec2::new(bm.x, bm.y),
+                                ],
+                                minor_stroke,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 {
+                1.0 * base
+            } else if factor < 5.0 {
+                2.0 * base
+            } else {
+                5.0 * base
+            };
+            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
+            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            for xi in min_x..=max_x {
+                let x = xi as f64 * major_step;
+                let a = view.world_to_screen(Point2::new(x, world_br.y.min(world_tl.y)));
+                let b = view.world_to_screen(Point2::new(x, world_br.y.max(world_tl.y)));
+                painter.line_segment(
+                    [
+                        canvas_rect.min + Vec2::new(a.x, a.y),
+                        canvas_rect.min + Vec2::new(b.x, b.y),
+                    ],
+                    grid_stroke,
+                );
+            }
+        }
+
+        // Horizontal grid lines
+        if view.y_log {
+            let y_min = world_tl.y.min(world_br.y);
+            let y_max = world_tl.y.max(world_br.y);
+            if y_max > 0.0 {
+                let positive_min = y_min.max(1e-12);
+                let min_pow = positive_min.log10().floor() as i32 - 1;
+                let max_pow = y_max.log10().ceil() as i32 + 1;
+                for pow in min_pow..=max_pow {
+                    let y = 10_f64.powf(pow as f64);
+                    if y < positive_min || y > y_max {
+                        continue;
+                    }
+                    let a = view.world_to_screen(Point2::new(world_tl.x, y));
+                    let b = view.world_to_screen(Point2::new(world_br.x, y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        grid_stroke,
+                    );
+                    // Minor grid at 2..9 * 10^pow
+                    if pow < max_pow {
+                        for k in 2..=9 {
+                            let ym = k as f64 * 10_f64.powf(pow as f64);
+                            if ym < positive_min || ym > y_max {
+                                continue;
+                            }
+                            let am = view.world_to_screen(Point2::new(world_tl.x, ym));
+                            let bm = view.world_to_screen(Point2::new(world_br.x, ym));
+                            painter.line_segment(
+                                [
+                                    canvas_rect.min + Vec2::new(am.x, am.y),
+                                    canvas_rect.min + Vec2::new(bm.x, bm.y),
+                                ],
+                                minor_stroke,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 {
+                1.0 * base
+            } else if factor < 5.0 {
+                2.0 * base
+            } else {
+                5.0 * base
+            };
+            let min_y = (world_br.y / major_step).floor() as i32 - 1;
+            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            for yi in min_y..=max_y {
+                let y = yi as f64 * major_step;
+                let a = view.world_to_screen(Point2::new(world_tl.x, y));
+                let b = view.world_to_screen(Point2::new(world_br.x, y));
+                painter.line_segment(
+                    [
+                        canvas_rect.min + Vec2::new(a.x, a.y),
+                        canvas_rect.min + Vec2::new(b.x, b.y),
+                    ],
+                    grid_stroke,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn draw_axes(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        let view = self.document.view();
+        let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+        let world_br =
+            view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+
+        let x_axis_y = 0.0f64.clamp(world_br.y, world_tl.y);
+        let y_axis_x = 0.0f64.clamp(world_tl.x, world_br.x);
+
+        let stroke = Stroke::new(1.0, current_theme(painter.ctx()).grid_axis);
+
+        let x_axis_a = view.world_to_screen(Point2::new(world_tl.x, x_axis_y));
+        let x_axis_b = view.world_to_screen(Point2::new(world_br.x, x_axis_y));
+        painter.line_segment(
+            [
+                canvas_rect.min + Vec2::new(x_axis_a.x, x_axis_a.y),
+                canvas_rect.min + Vec2::new(x_axis_b.x, x_axis_b.y),
+            ],
+            stroke,
+        );
+
+        let y_axis_a = view.world_to_screen(Point2::new(y_axis_x, world_br.y));
+        let y_axis_b = view.world_to_screen(Point2::new(y_axis_x, world_tl.y));
+        painter.line_segment(
+            [
+                canvas_rect.min + Vec2::new(y_axis_a.x, y_axis_a.y),
+                canvas_rect.min + Vec2::new(y_axis_b.x, y_axis_b.y),
+            ],
+            stroke,
+        );
+        // Tick marks and labels — log-appropriate or linear
+        let text_color = current_theme(painter.ctx()).axis_label;
+        let font = egui::FontId::proportional(12.0);
+        let minor_tick = Stroke::new(0.5, text_color);
+
+        // X-axis ticks
+        if view.x_log {
+            let min_pow = world_tl.x.max(1e-300).log10().floor() as i32 - 1;
+            let max_pow = world_br.x.max(1e-300).log10().ceil() as i32 + 1;
+            for pow in min_pow..=max_pow {
+                let x = 10_f64.powf(pow as f64);
+                let s = view.world_to_screen(Point2::new(x, x_axis_y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment(
+                    [pos + Vec2::new(0.0, -4.0), pos + Vec2::new(0.0, 4.0)],
+                    stroke,
+                );
+                let label = if pow == 0 {
+                    "1".into()
+                } else if pow == 1 {
+                    "10".into()
+                } else if pow == -1 {
+                    "10⁻¹".into()
+                } else {
+                    format!("10{}", superscript(pow))
+                };
+                painter.text(
+                    pos + Vec2::new(0.0, 6.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    font.clone(),
+                    text_color,
+                );
+                // Minor ticks at 2..9 * 10^pow
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let xm = k as f64 * 10_f64.powf(pow as f64);
+                        let sm = view.world_to_screen(Point2::new(xm, x_axis_y));
+                        let posm = canvas_rect.min + Vec2::new(sm.x, sm.y);
+                        painter.line_segment(
+                            [posm + Vec2::new(0.0, -2.0), posm + Vec2::new(0.0, 2.0)],
+                            minor_tick,
+                        );
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 {
+                1.0 * base
+            } else if factor < 5.0 {
+                2.0 * base
+            } else {
+                5.0 * base
+            };
+            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
+            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            for xi in min_x..=max_x {
+                let x = xi as f64 * major_step;
+                if x.abs() < 1e-9 {
+                    continue;
+                }
+                let s = view.world_to_screen(Point2::new(x, x_axis_y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment(
+                    [pos + Vec2::new(0.0, -3.0), pos + Vec2::new(0.0, 3.0)],
+                    stroke,
+                );
+                // Format nicely
+                let label = if (x.fract()).abs() < 1e-9 {
+                    format!("{}", x as i64)
+                } else {
+                    format!("{:.2}", x)
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string()
+                };
+                painter.text(
+                    pos + Vec2::new(0.0, 6.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    font.clone(),
+                    text_color,
+                );
+            }
+        }
+
+        // Y-axis ticks
+        if view.y_log {
+            let min_pow = world_br.y.max(1e-300).log10().floor() as i32 - 1;
+            let max_pow = world_tl.y.max(1e-300).log10().ceil() as i32 + 1;
+            for pow in min_pow..=max_pow {
+                let y = 10_f64.powf(pow as f64);
+                let s = view.world_to_screen(Point2::new(y_axis_x, y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment(
+                    [pos + Vec2::new(-4.0, 0.0), pos + Vec2::new(4.0, 0.0)],
+                    stroke,
+                );
+                let label = if pow == 0 {
+                    "1".into()
+                } else if pow == 1 {
+                    "10".into()
+                } else if pow == -1 {
+                    "10⁻¹".into()
+                } else {
+                    format!("10{}", superscript(pow))
+                };
+                painter.text(
+                    pos + Vec2::new(-6.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    label,
+                    font.clone(),
+                    text_color,
+                );
+                if pow < max_pow {
+                    for k in 2..=9 {
+                        let ym = k as f64 * 10_f64.powf(pow as f64);
+                        let sm = view.world_to_screen(Point2::new(y_axis_x, ym));
+                        let posm = canvas_rect.min + Vec2::new(sm.x, sm.y);
+                        painter.line_segment(
+                            [posm + Vec2::new(-2.0, 0.0), posm + Vec2::new(2.0, 0.0)],
+                            minor_tick,
+                        );
+                    }
+                }
+            }
+        } else {
+            let pixels_per_unit = view.scale;
+            let target_world_step = 80.0 / pixels_per_unit.max(1e-50);
+            let magnitude = target_world_step.log10().floor();
+            let base = 10f64.powf(magnitude);
+            let factor = target_world_step / base;
+            let major_step = if factor < 2.0 {
+                1.0 * base
+            } else if factor < 5.0 {
+                2.0 * base
+            } else {
+                5.0 * base
+            };
+            let min_y = (world_br.y / major_step).floor() as i32 - 1;
+            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            for yi in min_y..=max_y {
+                let y = yi as f64 * major_step;
+                if y.abs() < 1e-9 {
+                    continue;
+                }
+                let s = view.world_to_screen(Point2::new(y_axis_x, y));
+                let pos = canvas_rect.min + Vec2::new(s.x, s.y);
+                painter.line_segment(
+                    [pos + Vec2::new(-3.0, 0.0), pos + Vec2::new(3.0, 0.0)],
+                    stroke,
+                );
+                let label = if (y.fract()).abs() < 1e-9 {
+                    format!("{}", y as i64)
+                } else {
+                    format!("{:.2}", y)
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string()
+                };
+                painter.text(
+                    pos + Vec2::new(-6.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    label,
+                    font.clone(),
+                    text_color,
+                );
+            }
+        }
+
+        let origin = view.world_to_screen(Point2::new(0.0, 0.0));
+        let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
+        painter.text(
+            origin_pos + Vec2::new(-6.0, 6.0),
+            egui::Align2::RIGHT_TOP,
+            "0",
+            font,
+            text_color,
+        );
+    }
+
+    pub(crate) fn draw_objects(
+        &mut self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        overlay_only: bool,
+    ) {
+        // Pre-compute (or reuse cached) implicit-curve geometry before the
+        // immutable draw pass. The cache lives inside each ImplicitCurveObj and
+        // is invalidated only when expression, view bounds or variables change.
+        {
+            let view = *self.document.view();
+            let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+            let world_br =
+                view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
+            let view_bounds = (
+                world_tl.x.min(world_br.x),
+                world_tl.x.max(world_br.x),
+                world_br.y.min(world_tl.y),
+                world_br.y.max(world_tl.y),
+            );
+            let quality = self.document.render_quality;
+            let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
+                canvas_rect.width(),
+                canvas_rect.height(),
+                quality,
+            );
+            let variables = &self.document.variables;
+            for (_, obj) in self.document.objects_iter() {
+                if let GeoObject::ImplicitCurve(ic) = obj {
+                    let _unused = grafito_core::implicit_curve::segments_or_compute(
+                        ic,
+                        view_bounds,
+                        grid_size,
+                        variables,
+                        quality,
+                    );
+                }
+            }
+        }
+
+        let mut hovered_object_for_tool = None;
+        if matches!(
+            self.current_tool,
+            grafito_ui::Tool::Root
+                | grafito_ui::Tool::Extremum
+                | grafito_ui::Tool::Inflection
+                | grafito_ui::Tool::YIntercept
+                | grafito_ui::Tool::XIntercept
+                | grafito_ui::Tool::Analyze
+                | grafito_ui::Tool::Intersect
+                | grafito_ui::Tool::Distance
+                | grafito_ui::Tool::Angle
+                | grafito_ui::Tool::Area
+                | grafito_ui::Tool::Slope
+        ) {
+            if let Some(pos) = self.last_mouse_pos {
+                let view = *self.document.view();
+                let local = pos - canvas_rect.min;
+                let world = view.screen_to_world(GlamVec2::new(local.x, local.y));
+                let tolerance = 10.0 / view.scale;
+                hovered_object_for_tool = self.document.pick_object(world, tolerance);
+            }
+        }
+
+        for (id, obj) in self.document.objects_iter() {
+            if !obj.is_visible() {
+                continue;
+            }
+            // Skip 3D objects in 2D view — they can't be rendered here
+            if matches!(
+                obj,
+                GeoObject::Point3D(_)
+                    | GeoObject::Segment3D(_)
+                    | GeoObject::Sphere3D(_)
+                    | GeoObject::Cube3D(_)
+                    | GeoObject::Pyramid3D(_)
+                    | GeoObject::Cone3D(_)
+                    | GeoObject::Cylinder3D(_)
+                    | GeoObject::Surface3D(_)
+                    | GeoObject::ParametricCurve3D(_)
+                    | GeoObject::Attractor3D(_)
+                    | GeoObject::HyperSurface4D(_)
+                    | GeoObject::VectorField3D(_)
+            ) {
+                continue;
+            }
+
+            let is_tool_hovered = hovered_object_for_tool == Some(*id);
+            let is_driver = self.tool_state.driver == Some(*id);
+
+            let style = if is_tool_hovered || is_driver {
+                Some(StyleOverride {
+                    width_scale: Some(1.5),
+                    color: Some(Color {
+                        r: 0.8,
+                        g: 0.8,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+            self.draw_object_styled(painter, canvas_rect, obj, style, overlay_only);
+        }
+
+        if let Some(preview) = &self.preview_object {
+            let style = StyleOverride {
+                color: Some(Color {
+                    r: 0.4,
+                    g: 0.4,
+                    b: 0.4,
+                    a: 0.8,
+                }),
+                hide_label: true,
+                width: if matches!(preview, GeoObject::Function(_)) {
+                    Some(2.5)
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            self.draw_object_styled(painter, canvas_rect, preview, Some(style), false);
+        }
+
+        // Draw hover analytics
+        if let Some(hover) = &self.hovered_analysis {
+            let view = *self.document.view();
+            let screen_pos = view.world_to_screen(hover.point);
+            let pos = canvas_rect.min + egui::Vec2::new(screen_pos.x, screen_pos.y);
+
+            let color = Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
+            let radius = if hover.is_snap { 6.0 } else { 4.0 };
+            painter.circle_filled(pos, radius, color);
+            painter.circle_stroke(
+                pos,
+                radius + 1.0,
+                egui::Stroke::new(1.0, egui::Color32::WHITE),
+            );
+
+            let font = egui::FontId::proportional(14.0);
+            painter.text(
+                pos + egui::Vec2::new(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                &hover.label,
+                font,
+                color,
+            );
+        }
+    }
+
+    pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
+        // Disabled
+    }
+
+    fn hovered_analysis_color(
+        is_snap: bool,
+        feature: Option<grafito_geometry::analysis::AnalysisFeature>,
+        snap_kind: Option<crate::snap::SnapKind>,
+    ) -> egui::Color32 {
+        use crate::snap::SnapKind;
+        use egui::Color32;
+        use grafito_geometry::analysis::AnalysisFeature;
+        if is_snap {
+            match feature {
+                Some(AnalysisFeature::Root) | Some(AnalysisFeature::XIntercept) => {
+                    Color32::from_rgb(255, 100, 100)
+                }
+                Some(AnalysisFeature::YIntercept) => Color32::from_rgb(100, 180, 255),
+                Some(AnalysisFeature::LocalMaximum) => Color32::from_rgb(74, 222, 128),
+                Some(AnalysisFeature::LocalMinimum) => Color32::from_rgb(34, 211, 238),
+                Some(AnalysisFeature::Inflection) => Color32::from_rgb(251, 146, 60),
+                Some(AnalysisFeature::Centroid) => Color32::from_rgb(120, 220, 120),
+                Some(AnalysisFeature::Intersection) | Some(AnalysisFeature::Equilibrium) => {
+                    Color32::from_rgb(220, 100, 220)
+                }
+                _ => Color32::from_rgb(255, 100, 100),
+            }
+        } else {
+            // El snap no es a una característica, pero el cursor está cerca
+            // de algo: diferenciamos por `SnapKind` para que el usuario vea
+            // visualmente qué tipo de snap aplicó.
+            match snap_kind {
+                Some(SnapKind::Axis) => Color32::from_rgb(180, 180, 255),
+                Some(SnapKind::Grid) => Color32::from_rgb(180, 180, 180),
+                Some(SnapKind::Object) => Color32::from_rgb(200, 200, 120),
+                Some(SnapKind::Curve) => Color32::from_rgb(160, 220, 200),
+                _ => Color32::from_rgb(160, 160, 160),
+            }
+        }
+    }
+
+    fn draw_arrowhead(painter: &egui::Painter, from: Pos2, to: Pos2, width: f32, color: Color32) {
+        let dir = to - from;
+        let len = dir.length();
+        if len < 1e-3 {
+            return;
+        }
+        let dir = dir / len;
+        let normal = Vec2::new(-dir.y, dir.x);
+        let arrow_len = (width * 4.0).max(6.0).min(len * 0.5);
+        let arrow_width = arrow_len * 0.5;
+
+        let tip_back = to - dir * arrow_len;
+        let left = tip_back + normal * arrow_width;
+        let right = tip_back - normal * arrow_width;
+
+        painter.line_segment([to, left], Stroke::new(width, color));
+        painter.line_segment([to, right], Stroke::new(width, color));
+    }
+
+    pub(crate) fn draw_tool_ghost(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        if let Some(ghost) = &self.tool_ghost {
+            let mut style = StyleOverride {
+                color_alpha_multiplier: Some(0.3),
+                ..Default::default()
+            };
+            match ghost {
+                GeoObject::Point(_) => {
+                    style.size_scale = Some(1.3);
+                }
+                GeoObject::Line(_) => {
+                    style.width_scale = Some(0.7);
+                }
+                GeoObject::Circle(_) => {
+                    style.width_scale = Some(0.7);
+                    style.clear_fill_color = true;
+                }
+                GeoObject::Polygon(_) => {
+                    style.width_scale = Some(0.7);
+                    style.color_alpha_multiplier = Some(0.2);
+                }
+                _ => {}
+            }
+            self.draw_object_styled(painter, canvas_rect, ghost, Some(style), false);
+        }
+    }
+
+    pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
+        self.draw_object_styled(painter, canvas_rect, obj, None, false);
+    }
+
+    /// Rellena el área interior de la imagen transformada de un
+    /// `ImplicitCurve` por un `ComplexMapping`. La técnica:
+    ///
+    /// 1. Para cada fila de píxeles del canvas, muestrear el campo en el
+    ///    plano de output (`w`).
+    /// 2. Para cada muestra, aplicar `map.inverse_apply(w)` para obtener
+    ///    el `z` correspondiente en el plano original.
+    /// 3. Evaluar la curva original `f(z) = lhs - rhs` (o `rhs - lhs`
+    ///    para `Greater/GreaterEq`) en ese `z`.
+    /// 4. Aplicar **scanline fill** alternando "fuera"/"dentro" en cada
+    ///    cruce de cero y rellenando entre pares de cruces con la regla
+    ///    par-impar. Esto garantiza que el relleno no excede el contorno
+    ///    (al contrario del cell-fill anterior).
+    fn draw_complex_mapping_fill(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        view: &ViewTransform,
+        ic: &ImplicitCurveObj,
+        map: ConformalMap,
+        fill_color: Color,
+    ) {
+        use num_complex::Complex64;
+
+        // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj (combinado).
+        let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // 2) Operador -> convención "interior es f <= 0".
+        let swap = matches!(
+            ic.operator,
+            RelationOperator::Greater | RelationOperator::GreaterEq
+        );
+        if matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
+
+        let fill_32 = to_color32(fill_color);
+
+        // 3) Dimensiones del canvas en píxeles.
+        let w = canvas_rect.width().max(1.0) as i32;
+        let h = canvas_rect.height().max(1.0) as i32;
+
+        // 4) **Stride adaptativo** (ver `draw_implicit_curve_fill`).
+        let ast_node_count = node_count(&eval_lhs) + node_count(&eval_rhs);
+        let stride: i32 = if ast_node_count > 30 { 4 } else { 2 };
+
+        // 5) Buffers reusables.
+        let nsamples = (w as usize / stride as usize).max(8) + 4;
+        let mut world_xs: Vec<f64> = vec![0.0; nsamples];
+        let mut fs: Vec<f64> = vec![0.0; nsamples];
+        let mut insides: Vec<bool> = vec![false; nsamples];
+
+        for y_pixel in 0..=h {
+            let wy = view
+                .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
+                .y;
+
+            let n = (w / stride) + 1;
+            for k in 0..n {
+                let x_pixel = (k * stride).min(w);
+                let wx = view
+                    .screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
+                    .x;
+                world_xs[k as usize] = wx;
+
+                // Aplicar inversa del conformal map.
+                let w_pt = Complex64::new(wx, wy);
+                let z = match map.inverse_apply(w_pt) {
+                    Some(z) => z,
+                    None => {
+                        fs[k as usize] = f64::NAN;
+                        insides[k as usize] = false;
+                        continue;
+                    }
+                };
+
+                let lhs = eval_lhs.eval_2d("x", z.re, "y", z.im);
+                let rhs = eval_rhs.eval_2d("x", z.re, "y", z.im);
+                let f = if !lhs.is_finite() || !rhs.is_finite() {
+                    f64::NAN
+                } else if swap {
+                    rhs - lhs
+                } else {
+                    lhs - rhs
+                };
+                fs[k as usize] = f;
+                insides[k as usize] = f.is_finite() && f <= 0.0;
+            }
+
+            // 4b) Scanline fill par-impar.
+            let mut filling = false;
+            let mut seg_start: Option<f64> = None;
+            let y_top = canvas_rect.min.y + y_pixel as f32;
+            let y_bot = y_top + 1.0;
+            for k in 0..n {
+                let i = k as usize;
+                let inside = insides[i];
+                if filling && !inside {
+                    if let Some(start_world) = seg_start.take() {
+                        let f_prev = fs[i - 1];
+                        let f_curr = fs[i];
+                        let x_world_curr = world_xs[i];
+                        let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                        let end_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                            let dx_world = x_world_curr - x_world_prev;
+                            x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                        } else {
+                            x_world_curr
+                        };
+                        let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                        let end_screen = view.world_to_screen(Point2::new(end_x_world, wy)).x;
+                        let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                        let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                        let rect =
+                            Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                        painter.rect_filled(rect, 0.0, fill_32);
+                    }
+                    filling = false;
+                } else if !filling && inside {
+                    let f_prev = if i > 0 { fs[i - 1] } else { f64::NAN };
+                    let f_curr = fs[i];
+                    let x_world_curr = world_xs[i];
+                    let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                    let start_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                        let dx_world = x_world_curr - x_world_prev;
+                        x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                    } else {
+                        x_world_curr
+                    };
+                    seg_start = Some(start_x_world);
+                    filling = true;
+                }
+            }
+            if filling {
+                if let Some(start_world) = seg_start.take() {
+                    let end_world = world_xs[(n - 1) as usize];
+                    let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                    let end_screen = view.world_to_screen(Point2::new(end_world, wy)).x;
+                    let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                    let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                    let rect = Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                    painter.rect_filled(rect, 0.0, fill_32);
+                }
+            }
+        }
+    }
+
+    /// Rellena el **interior** de una región `ImplicitCurve` (operator
+    /// `Less/LessEq/Greater/GreaterEq`). Para `x^2 + y^2 <= 1` produce
+    /// un disco violeta translúcido cuyo borde coincide con la curva;
+    /// para `x^2 + y^2 = 1` no rellena nada (es solo el contorno).
+    ///
+    /// Estrategia: **scanline fill** real. Para cada fila de píxeles del
+    /// canvas muestreamos el campo escalar `f(x, y) = lhs - rhs` (o
+    /// `rhs - lhs` para `Greater/GreaterEq`) en cada columna, caminamos
+    /// de izquierda a derecha alternando el estado "fuera"/"dentro" cada
+    /// vez que la función cruza cero, y rellenamos entre cada par de
+    /// cruces con la regla par-impar (even-odd). Esto garantiza que el
+    /// relleno **no excede el contorno** (al contrario del cell-fill
+    /// anterior, que pintaba rectángulos cuyas esquinas podían quedar
+    /// fuera de la región).
+    fn draw_implicit_curve_fill(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        view: &ViewTransform,
+        ic: &ImplicitCurveObj,
+        fill_color: Color,
+    ) {
+        // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj para evitar
+        //    reparsear y re-simplificar el AST en cada frame (era el cuello
+        //    de botella que causaba lag y cuelgues con expresiones no triviales).
+        let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // 2) Operador -> convención "interior es f <= 0".
+        //    Less / LessEq     : f = lhs - rhs
+        //    Greater / GreaterEq: f = rhs - lhs
+        //    Eq                 : sin relleno (es solo contorno).
+        let swap = matches!(
+            ic.operator,
+            RelationOperator::Greater | RelationOperator::GreaterEq
+        );
+        if matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
+
+        let fill_32 = to_color32(fill_color);
+
+        // 3) Dimensiones del canvas en píxeles.
+        let w = canvas_rect.width().max(1.0) as i32;
+        let h = canvas_rect.height().max(1.0) as i32;
+
+        // 4) **Stride adaptativo**: el cuello de botella es `eval_2d` que se
+        //    llama por cada muestra. En vez de 1 muestra por píxel (2M
+        //    evals/frame para 1920×1080 con 2 lados = 4M evals), usamos un
+        //    stride mayor. Con linear refinement entre muestras, el error
+        //    en el cruce se mantiene sub-píxel.
+        //
+        //    Para expresiones simples (`x² + y²`), stride=8 da 8× speedup
+        //    con calidad visual idéntica (el ojo no ve la diferencia entre
+        //    un círculo dibujado a 1px vs 8px de resolución horizontal en
+        //    la mayoría de los zooms).
+        //
+        //    Para expresiones complejas (AST > 30 nodos), stride=16 da
+        //    16× speedup, suficiente para mantener >30 FPS incluso con
+        //    1M evals/frame.
+        let ast_node_count = node_count(&eval_lhs) + node_count(&eval_rhs);
+        // **Stride conservador**: el usuario reportó que muchas expresiones
+        // "no grafican" con stride=8/16. Reducimos a stride=2/4 que aún da
+        // 2-4× speedup vs stride=1 pero detecta regiones más delgadas.
+        let stride: i32 = if ast_node_count > 30 { 4 } else { 2 };
+
+        // 5) Buffers reusables para no realojar en cada fila.
+        //    Tamaño basado en stride: w/stride + margen.
+        let nsamples = (w as usize / stride as usize).max(8) + 4;
+        let mut world_xs: Vec<f64> = vec![0.0; nsamples];
+        let mut fs: Vec<f64> = vec![0.0; nsamples];
+        let mut insides: Vec<bool> = vec![false; nsamples];
+
+        // Sample los extremos de la fila una vez para detectar filas vacías.
+        // (Optimización futura: si la fila anterior estaba vacía y los
+        // extremos actuales también, skip el inner loop. Por ahora siempre
+        // muestreamos para mantener la lógica simple.)
+
+        for y_pixel in 0..=h {
+            // Centro de la fila de píxeles en mundo-y.
+            let wy = view
+                .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
+                .y;
+
+            // 5a) Muestrear el campo escalar con stride.
+            //     Estrategia de "two-end test": si la fila anterior tuvo
+            //     fill, esta probablemente también (curvas suaves son
+            //     continuas). Si no, hacer un sampleo completo.
+            let n = (w / stride) + 1;
+            for k in 0..n {
+                let x_pixel = (k * stride).min(w);
+                let wx = view
+                    .screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
+                    .x;
+                world_xs[k as usize] = wx;
+                let lhs = eval_lhs.eval_2d("x", wx, "y", wy);
+                let rhs = eval_rhs.eval_2d("x", wx, "y", wy);
+                let f = if !lhs.is_finite() || !rhs.is_finite() {
+                    f64::NAN
+                } else if swap {
+                    rhs - lhs
+                } else {
+                    lhs - rhs
+                };
+                fs[k as usize] = f;
+                insides[k as usize] = f.is_finite() && f <= 0.0;
+            }
+
+            // 5b) Scanline fill con regla par-impar.
+            //     Cada segmento entre dos cruces consecutivos (k y k+1) se
+            //     expande linealmente al píxel exacto donde f cruza cero.
+            let mut filling = false;
+            let mut seg_start: Option<f64> = None;
+            let y_top = canvas_rect.min.y + y_pixel as f32;
+            let y_bot = y_top + 1.0;
+            for k in 0..n {
+                let i = k as usize;
+                let inside = insides[i];
+                if filling && !inside {
+                    // Cierre de segmento en el sample k (transición dentro→fuera).
+                    if let Some(start_world) = seg_start.take() {
+                        let f_prev = fs[i - 1];
+                        let f_curr = fs[i];
+                        let x_world_curr = world_xs[i];
+                        let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                        let end_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                            let dx_world = x_world_curr - x_world_prev;
+                            x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                        } else {
+                            x_world_curr
+                        };
+                        let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                        let end_screen = view.world_to_screen(Point2::new(end_x_world, wy)).x;
+                        let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                        let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                        let rect =
+                            Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                        painter.rect_filled(rect, 0.0, fill_32);
+                    }
+                    filling = false;
+                } else if !filling && inside {
+                    // Apertura de segmento en el sample k (transición fuera→dentro).
+                    let f_prev = if i > 0 { fs[i - 1] } else { f64::NAN };
+                    let f_curr = fs[i];
+                    let x_world_curr = world_xs[i];
+                    let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
+                    let start_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
+                        let dx_world = x_world_curr - x_world_prev;
+                        x_world_prev + dx_world * f_prev / (f_prev - f_curr)
+                    } else {
+                        x_world_curr
+                    };
+                    seg_start = Some(start_x_world);
+                    filling = true;
+                }
+            }
+            // Cierre al borde derecho si la fila termina dentro.
+            if filling {
+                if let Some(start_world) = seg_start.take() {
+                    let end_world = world_xs[(n - 1) as usize];
+                    let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
+                    let end_screen = view.world_to_screen(Point2::new(end_world, wy)).x;
+                    let min_x = canvas_rect.min.x + start_screen.min(end_screen);
+                    let max_x = canvas_rect.min.x + start_screen.max(end_screen);
+                    let rect = Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
+                    painter.rect_filled(rect, 0.0, fill_32);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_object_styled(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        obj: &GeoObject,
+        style: Option<StyleOverride>,
+        overlay_only: bool,
+    ) {
+        let view = self.document.view();
+        let label_color = current_theme(painter.ctx()).object_label;
+        match obj {
+            GeoObject::Point(p) => {
+                let screen = view.world_to_screen(p.position);
+                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                let size = get_size(p.size, style).max(1.0);
+                let color = to_color32(get_color(p.color, style));
+                let label = get_label(&p.label, style);
+                painter.circle_filled(pos, size, color);
+                // Marcas de eje para puntos de intercepto (cerca de x=0 o y=0).
+                let axis_tol = 1e-6f64.max(2.0 / view.scale);
+                let tick_world = 6.0 / view.scale;
+                if p.position.x.abs() <= axis_tol {
+                    let a = view.world_to_screen(Point2::new(-tick_world, p.position.y));
+                    let b = view.world_to_screen(Point2::new(tick_world, p.position.y));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        Stroke::new(1.5, color),
+                    );
+                }
+                if p.position.y.abs() <= axis_tol {
+                    let a = view.world_to_screen(Point2::new(p.position.x, -tick_world));
+                    let b = view.world_to_screen(Point2::new(p.position.x, tick_world));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        Stroke::new(1.5, color),
+                    );
+                }
+                if !label.is_empty() {
+                    painter.text(
+                        pos + Vec2::new(size + 2.0, -size - 2.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Line(l) => {
+                let width = get_width(l.width, style);
+                let color = get_color(l.color, style);
+                let label = get_label(&l.label, style);
+                let start = Point2::new(
+                    self.document.resolve_expr(&l.start_x_expr, l.start.x),
+                    self.document.resolve_expr(&l.start_y_expr, l.start.y),
+                );
+                let end = Point2::new(
+                    self.document.resolve_expr(&l.end_x_expr, l.end.x),
+                    self.document.resolve_expr(&l.end_y_expr, l.end.y),
+                );
+
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let view_bounds = grafito_geometry::AABB::new(
+                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                );
+
+                let stroke = Stroke::new(width, to_color32(color));
+                let clipped = match l.kind {
+                    grafito_core::LineKind::Segment => {
+                        grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Ray => {
+                        grafito_geometry::clip_ray_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Line => {
+                        grafito_geometry::clip_line_to_rect(start, end, view_bounds)
+                    }
+                };
+                if let Some((clip_start, clip_end)) = clipped {
+                    let a = view.world_to_screen(clip_start);
+                    let b = view.world_to_screen(clip_end);
+                    let pa = canvas_rect.min + Vec2::new(a.x, a.y);
+                    let pb = canvas_rect.min + Vec2::new(b.x, b.y);
+                    if !overlay_only {
+                        painter.line_segment([pa, pb], stroke);
+                    }
+
+                    // Arrowhead for vectors at the forward (t=1) end.
+                    let is_vector = label == "v";
+                    if is_vector && !overlay_only {
+                        Self::draw_arrowhead(painter, pa, pb, width, to_color32(color));
+                    }
+                }
+                if !label.is_empty() {
+                    let mid = if l.kind == grafito_core::LineKind::Segment {
+                        let a = view.world_to_screen(start);
+                        let b = view.world_to_screen(end);
+                        (a + b) * 0.5
+                    } else {
+                        // Place label near the start for rays/lines.
+                        view.world_to_screen(start)
+                    };
+                    painter.text(
+                        canvas_rect.min + Vec2::new(mid.x, mid.y) + Vec2::new(0.0, -8.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Circle(c) => {
+                let center = view.world_to_screen(c.center);
+                let radius = (c.radius * view.scale) as f32;
+                let radius = radius.clamp(0.5, 50000.0);
+                let pos = canvas_rect.min + Vec2::new(center.x, center.y);
+                let width = get_width(c.width, style);
+                let color = get_color(c.color, style);
+                let fill_color = get_fill_color(c.fill_color, style);
+                let label = get_label(&c.label, style);
+                let stroke = Stroke::new(width, to_color32(color));
+                if !overlay_only {
+                    if let Some(fill) = fill_color {
+                        painter.circle_filled(pos, radius, to_color32(fill));
+                    }
+                    painter.circle_stroke(pos, radius, stroke);
+                }
+                if !label.is_empty() {
+                    painter.text(
+                        pos + Vec2::new(radius + 2.0, -radius - 2.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                let points: Vec<_> = poly
+                    .vertices
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let x = self
+                            .document
+                            .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                        let y = self
+                            .document
+                            .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                        let s = view.world_to_screen(Point2::new(x, y));
+                        canvas_rect.min + Vec2::new(s.x, s.y)
+                    })
+                    .collect();
+                let width = get_width(poly.width, style);
+                let color = get_color(poly.color, style);
+                let fill_color = get_fill_color(poly.fill_color, style);
+                let label = get_label(&poly.label, style);
+                let stroke = Stroke::new(width, to_color32(color));
+                let fill = fill_color.map(to_color32).unwrap_or(Color32::TRANSPARENT);
+                if !overlay_only {
+                    painter.add(Shape::convex_polygon(points.clone(), fill, stroke));
+                }
+                if !label.is_empty() {
+                    let cx: f32 = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
+                    let cy: f32 = points.iter().map(|p| p.y).sum::<f32>() / points.len() as f32;
+                    painter.text(
+                        Pos2::new(cx, cy),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+                // Polilínea: dibuja cada par consecutivo como segmento.
+                let width = get_width(pencil.width, style);
+                let color = to_color32(get_color(pencil.color, style));
+                let stroke = Stroke::new(width, color);
+                for w in pencil.points.windows(2) {
+                    let a = view.world_to_screen(w[0]);
+                    let b = view.world_to_screen(w[1]);
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(a.x, a.y),
+                            canvas_rect.min + Vec2::new(b.x, b.y),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+            GeoObject::Function(fun) => {
+                let width = get_width(fun.width, style);
+                let color = get_color(fun.color, style);
+                let fill_color = get_fill_color(fun.fill_color, style);
+                let label = get_label(&fun.label, style);
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let min_x = self
+                    .document
+                    .resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap_or(world_tl.x));
+                let max_x = self
+                    .document
+                    .resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x));
+
+                let variables = &self.document.variables;
+                let samples: Vec<(f64, Option<f64>)> = if fun.is_integral {
+                    let screen_width = canvas_rect.width() as f64;
+                    let world_width = max_x - min_x;
+
+                    let mut steps = screen_width.clamp(400.0, 4000.0) as usize;
+                    let max_world_step = 0.01;
+                    let mut step = world_width / steps as f64;
+                    if step > max_world_step {
+                        steps = (world_width / max_world_step).ceil() as usize;
+                    }
+                    steps = steps.min(500_000);
+                    step = world_width / steps as f64;
+
+                    let xs = (0..=steps).map(|i| min_x + i as f64 * step);
+
+                    let mut s: Vec<(f64, Option<f64>)> = Vec::with_capacity(steps + 1);
+                    let batch_results = eval_integral_batch(
+                        &fun.expr,
+                        &fun.integral_var,
+                        fun.integral_lower,
+                        xs.clone(),
+                        variables,
+                    );
+
+                    for (x, y_opt) in
+                        xs.zip(batch_results.into_iter().chain(std::iter::repeat(None)))
+                    {
+                        if let Some(y) = y_opt {
+                            if y.is_finite() && y.abs() < 1e50 {
+                                s.push((x, Some(y)));
+                                continue;
+                            }
+                        }
+                        let eps = 1e-9;
+                        if let (Ok(y1), Ok(y2)) = (
+                            eval_function_with_vars(&fun.expr, x - eps, variables),
+                            eval_function_with_vars(&fun.expr, x + eps, variables),
+                        ) {
+                            if y1.is_finite() && y2.is_finite() && (y1 - y2).abs() < 1.0 {
+                                s.push((x, Some((y1 + y2) * 0.5)));
+                                continue;
+                            }
+                        }
+                        if let Ok(y) = eval_function_with_vars(&fun.expr, x, variables) {
+                            if y.is_finite() && y.abs() < 1e50 {
+                                s.push((x, Some(y)));
+                                continue;
+                            }
+                        }
+                        s.push((x, None));
+                    }
+                    s
+                } else {
+                    let domain = (min_x, max_x);
+                    let grid_size =
+                        grafito_core::function_sampling::recommended_grid_size_for_quality(
+                            canvas_rect.width(),
+                            self.document.render_quality,
+                        );
+                    grafito_core::function_sampling::samples_or_compute(
+                        fun, domain, grid_size, variables,
+                    )
+                    .clone()
+                };
+
+                let mut refined_samples = Vec::with_capacity(samples.len() + 100);
+                for i in 0..samples.len() {
+                    refined_samples.push(samples[i]);
+                    if i + 1 < samples.len() {
+                        let (x1, y1_opt) = samples[i];
+                        let (x2, y2_opt) = samples[i + 1];
+                        if y1_opt.is_some() != y2_opt.is_some() {
+                            let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
+                            let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
+                            let mut best_y = if let Some(y1) = y1_opt {
+                                y1
+                            } else {
+                                y2_opt.unwrap_or(0.0)
+                            };
+
+                            for _ in 0..24 {
+                                let mid = (good_x + bad_x) * 0.5;
+                                if let Ok(y) = eval_function_with_vars(&fun.expr, mid, variables) {
+                                    if y.is_finite() && y.abs() < 1e50 {
+                                        good_x = mid;
+                                        best_y = y;
+                                    } else {
+                                        bad_x = mid;
+                                    }
+                                } else {
+                                    bad_x = mid;
+                                }
+                            }
+
+                            refined_samples.push((good_x, Some(best_y)));
+                        }
+                    }
+                }
+                let samples = refined_samples;
+
+                // Fill area under curve if fill_color is set
+                if let Some(fill) = fill_color {
+                    let mut fill_pts: Vec<Pos2> = Vec::new();
+                    // Top edge: left to right along the curve
+                    for &(x, y_opt) in &samples {
+                        if let Some(y) = y_opt {
+                            if y.is_finite() {
+                                let s = view.world_to_screen(Point2::new(x, y));
+                                fill_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                            }
+                        }
+                    }
+                    // Bottom edge: right to left along y=0 (or min_y)
+                    if !fill_pts.is_empty() {
+                        let mut bottom_pts: Vec<Pos2> = Vec::new();
+                        for &(x, _) in samples.iter().rev() {
+                            let s = view.world_to_screen(Point2::new(x, 0.0));
+                            bottom_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                        }
+                        fill_pts.append(&mut bottom_pts);
+                        // Close polygon on the left
+                        if let Some(first) = fill_pts.first() {
+                            fill_pts.push(*first);
+                        }
+                        if fill_pts.len() >= 3 {
+                            let fill_rgba = to_color32(fill);
+                            let fill_stroke = Stroke::new(0.5, fill_rgba);
+                            painter.add(Shape::line(fill_pts.clone(), fill_stroke));
+                            painter.add(Shape::convex_polygon(fill_pts, fill_rgba, Stroke::NONE));
+                        }
+                    }
+                }
+
+                let stroke = Stroke::new(width, to_color32(color));
+                let mut optimized_points = Vec::new();
+                let mut i = 0;
+                while i < samples.len() {
+                    let (x, y_opt) = samples[i];
+                    if let Some(y) = y_opt {
+                        let p = view.world_to_screen(Point2::new(x, y));
+                        let px = p.x.round() as i32;
+                        let first_y = p.y;
+                        let mut min_y = p.y;
+                        let mut max_y = p.y;
+                        let mut min_j = i;
+                        let mut max_j = i;
+                        let mut last_y = p.y;
+
+                        let mut j = i + 1;
+                        while j < samples.len() {
+                            if let Some(y2) = samples[j].1 {
+                                let p2 = view.world_to_screen(Point2::new(samples[j].0, y2));
+                                if (p2.x.round() as i32) == px {
+                                    if p2.y < min_y {
+                                        min_y = p2.y;
+                                        min_j = j;
+                                    }
+                                    if p2.y > max_y {
+                                        max_y = p2.y;
+                                        max_j = j;
+                                    }
+                                    last_y = p2.y;
+                                    j += 1;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        optimized_points.push(canvas_rect.min + Vec2::new(px as f32, first_y));
+                        if (min_y - first_y).abs() > 1.0 || (max_y - first_y).abs() > 1.0 {
+                            if min_j < max_j {
+                                optimized_points
+                                    .push(canvas_rect.min + Vec2::new(px as f32, min_y));
+                                optimized_points
+                                    .push(canvas_rect.min + Vec2::new(px as f32, max_y));
+                            } else {
+                                optimized_points
+                                    .push(canvas_rect.min + Vec2::new(px as f32, max_y));
+                                optimized_points
+                                    .push(canvas_rect.min + Vec2::new(px as f32, min_y));
+                            }
+                        }
+                        optimized_points.push(canvas_rect.min + Vec2::new(px as f32, last_y));
+                        i = j;
+                    } else {
+                        if !optimized_points.is_empty() {
+                            painter.add(Shape::line(std::mem::take(&mut optimized_points), stroke));
+                        }
+                        i += 1;
+                    }
+                }
+                if !optimized_points.is_empty() {
+                    painter.add(Shape::line(optimized_points, stroke));
+                }
+
+                if !label.is_empty() {
+                    let mid_x = (min_x + max_x) * 0.5;
+                    if let Ok(y) = grafito_geometry::expr::eval_function_with_vars(
+                        &fun.expr,
+                        mid_x,
+                        &self.document.variables,
+                    ) {
+                        let s = view.world_to_screen(Point2::new(mid_x, y));
+                        painter.text(
+                            canvas_rect.min + Vec2::new(s.x, s.y + 14.0),
+                            egui::Align2::CENTER_TOP,
+                            label,
+                            egui::FontId::proportional(12.0),
+                            label_color,
+                        );
+                    }
+                }
+            }
+            GeoObject::Ellipse(el) => {
+                let stroke = Stroke::new(el.width, to_color32(el.color));
+                let n = 64;
+                let mut pts = Vec::with_capacity(n);
+                for i in 0..n {
+                    let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                    let x = el.center.x + el.rx * t.cos() * el.angle.cos()
+                        - el.ry * t.sin() * el.angle.sin();
+                    let y = el.center.y
+                        + el.rx * t.cos() * el.angle.sin()
+                        + el.ry * t.sin() * el.angle.cos();
+                    let s = view.world_to_screen(Point2::new(x, y));
+                    pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                }
+                if let Some(fill) = el.fill_color {
+                    painter.add(Shape::convex_polygon(
+                        pts.clone(),
+                        to_color32(fill),
+                        Stroke::NONE,
+                    ));
+                }
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    painter.line_segment([pts[i], pts[j]], stroke);
+                }
+                if !el.label.is_empty() {
+                    let s = view.world_to_screen(el.center);
+                    painter.text(
+                        canvas_rect.min
+                            + Vec2::new(s.x, s.y + el.ry as f32 * view.scale as f32 + 14.0),
+                        egui::Align2::CENTER_TOP,
+                        &el.label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Parabola(pb) => {
+                if pb.p <= 0.0 {
+                    return;
+                }
+                let stroke = Stroke::new(pb.width, to_color32(pb.color));
+                let steps = 128;
+                let range = (20.0 / view.scale).clamp(0.1, 500.0);
+                let p_safe = pb.p;
+                let cos_a = pb.angle.cos();
+                let sin_a = pb.angle.sin();
+                let mut prev: Option<Pos2> = None;
+                for i in 0..=steps {
+                    let t = -range + 2.0 * range * i as f64 / steps as f64;
+                    let lx = t;
+                    let ly = t * t / (4.0 * p_safe);
+                    let wx = pb.vertex.x + lx * cos_a - ly * sin_a;
+                    let wy = pb.vertex.y + lx * sin_a + ly * cos_a;
+                    let s = view.world_to_screen(Point2::new(wx, wy));
+                    let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                    if wx.is_finite() && wy.is_finite() {
+                        if let Some(prev_p) = prev {
+                            if (p.x - prev_p.x).abs() < 300.0 {
+                                painter.line_segment([prev_p, p], stroke);
+                            }
+                        }
+                        prev = Some(p);
+                    }
+                }
+                if !pb.label.is_empty() {
+                    let s = view.world_to_screen(Point2::new(pb.vertex.x, pb.vertex.y - 1.0));
+                    painter.text(
+                        canvas_rect.min + Vec2::new(s.x, s.y - 8.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        &pb.label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Hyperbola(hb) => {
+                let stroke = Stroke::new(hb.width, to_color32(hb.color));
+                let n = 64;
+                let epsilon = 0.05;
+                let cos_a = hb.angle.cos();
+                let sin_a = hb.angle.sin();
+                for branch in 0..2 {
+                    let t_start = -std::f64::consts::FRAC_PI_2
+                        + epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let t_end = std::f64::consts::FRAC_PI_2 - epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let mut prev: Option<Pos2> = None;
+                    for i in 0..=n {
+                        let t = t_start + (t_end - t_start) * i as f64 / n as f64;
+                        let sec = 1.0 / t.cos();
+                        let tan = t.tan();
+                        let (lx, ly) = if hb.horizontal {
+                            (hb.a * sec, hb.b * tan)
+                        } else {
+                            (hb.b * tan, hb.a * sec)
+                        };
+                        let wx = hb.center.x + lx * cos_a - ly * sin_a;
+                        let wy = hb.center.y + lx * sin_a + ly * cos_a;
+                        if wx.is_finite() && wy.is_finite() {
+                            let s = view.world_to_screen(Point2::new(wx, wy));
+                            let p = canvas_rect.min + Vec2::new(s.x, s.y);
+                            if let Some(prev_p) = prev {
+                                if (p.x - prev_p.x).abs() < 300.0 {
+                                    painter.line_segment([prev_p, p], stroke);
+                                }
+                            }
+                            prev = Some(p);
+                        }
+                    }
+                }
+                if !hb.label.is_empty() {
+                    let s =
+                        view.world_to_screen(Point2::new(hb.center.x, hb.center.y + hb.b + 0.5));
+                    painter.text(
+                        canvas_rect.min + Vec2::new(s.x, s.y),
+                        egui::Align2::CENTER_BOTTOM,
+                        &hb.label,
+                        egui::FontId::proportional(12.0),
+                        label_color,
+                    );
+                }
+            }
+            GeoObject::Text(txt) => {
+                let s = view.world_to_screen(txt.position);
+                painter.text(
+                    canvas_rect.min + Vec2::new(s.x, s.y),
+                    egui::Align2::LEFT_CENTER,
+                    &txt.content,
+                    egui::FontId::proportional(txt.font_size.max(8.0)),
+                    to_color32(txt.color),
+                );
+            }
+            GeoObject::Histogram(h) => {
+                let bins = grafito_geometry::statistics::histogram(&h.data, h.bins);
+                let max_count = bins.iter().map(|(_, _, c)| *c).fold(0.0f64, f64::max);
+                if max_count <= 0.0 {
+                    return;
+                }
+                let stroke = Stroke::new(h.width, to_color32(h.color));
+                let fill = h
+                    .fill_color
+                    .map(to_color32)
+                    .unwrap_or(Color32::from_rgba_premultiplied(50, 120, 220, 100));
+                let y_scale = (h.y_max - h.y_min) / max_count;
+                for (left, right, count) in &bins {
+                    let bl = view.world_to_screen(Point2::new(*left, h.y_min));
+                    let tr = view.world_to_screen(Point2::new(*right, h.y_min + count * y_scale));
+                    let rect = Rect::from_min_max(
+                        canvas_rect.min + Vec2::new(tr.x, bl.y),
+                        canvas_rect.min + Vec2::new(bl.x, tr.y),
+                    );
+                    painter.rect_filled(rect, 0.0, fill);
+                    painter.rect_stroke(rect, 0.0, stroke);
+                }
+            }
+            GeoObject::ScatterPlot(sp) => {
+                let color = to_color32(sp.color);
+                let r = sp.point_size.max(1.0);
+                for (x, y) in sp.xs.iter().zip(sp.ys.iter()) {
+                    let s = view.world_to_screen(Point2::new(*x, *y));
+                    painter.circle_filled(canvas_rect.min + Vec2::new(s.x, s.y), r, color);
+                }
+            }
+            GeoObject::BoxPlot(bp) => {
+                if let Some((wl, q1, med, q3, wh, outliers)) =
+                    grafito_geometry::statistics::boxplot_stats(&bp.data)
+                {
+                    let stroke = Stroke::new(bp.width, to_color32(bp.color));
+                    let fill = bp
+                        .fill_color
+                        .map(to_color32)
+                        .unwrap_or(Color32::from_rgba_premultiplied(50, 120, 220, 80));
+                    let half_w = bp.width_box * 0.5;
+                    let bx_min = bp.position - half_w;
+                    let bx_max = bp.position + half_w;
+                    let s_q1 = view.world_to_screen(Point2::new(bx_min, q1));
+                    let s_q3 = view.world_to_screen(Point2::new(bx_max, q3));
+                    let box_rect = Rect::from_min_max(
+                        canvas_rect.min + Vec2::new(s_q3.x, s_q3.y),
+                        canvas_rect.min + Vec2::new(s_q1.x, s_q1.y),
+                    );
+                    painter.rect_filled(box_rect, 0.0, fill);
+                    painter.rect_stroke(box_rect, 0.0, stroke);
+                    let s_med_l = view.world_to_screen(Point2::new(bx_min, med));
+                    let s_med_r = view.world_to_screen(Point2::new(bx_max, med));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(s_med_l.x, s_med_l.y),
+                            canvas_rect.min + Vec2::new(s_med_r.x, s_med_r.y),
+                        ],
+                        Stroke::new(bp.width * 2.0, to_color32(bp.color)),
+                    );
+                    let s_wl = view.world_to_screen(Point2::new(bp.position, wl));
+                    let s_q1c = view.world_to_screen(Point2::new(bp.position, q1));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(s_wl.x, s_wl.y),
+                            canvas_rect.min + Vec2::new(s_q1c.x, s_q1c.y),
+                        ],
+                        stroke,
+                    );
+                    let s_wh = view.world_to_screen(Point2::new(bp.position, wh));
+                    let s_q3c = view.world_to_screen(Point2::new(bp.position, q3));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(s_wh.x, s_wh.y),
+                            canvas_rect.min + Vec2::new(s_q3c.x, s_q3c.y),
+                        ],
+                        stroke,
+                    );
+                    let wl_half = half_w * 0.4;
+                    let s_wl_l = view.world_to_screen(Point2::new(bp.position - wl_half, wl));
+                    let s_wl_r = view.world_to_screen(Point2::new(bp.position + wl_half, wl));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(s_wl_l.x, s_wl_l.y),
+                            canvas_rect.min + Vec2::new(s_wl_r.x, s_wl_r.y),
+                        ],
+                        stroke,
+                    );
+                    let s_wh_l = view.world_to_screen(Point2::new(bp.position - wl_half, wh));
+                    let s_wh_r = view.world_to_screen(Point2::new(bp.position + wl_half, wh));
+                    painter.line_segment(
+                        [
+                            canvas_rect.min + Vec2::new(s_wh_l.x, s_wh_l.y),
+                            canvas_rect.min + Vec2::new(s_wh_r.x, s_wh_r.y),
+                        ],
+                        stroke,
+                    );
+                    for &o in &outliers {
+                        let s_o = view.world_to_screen(Point2::new(bp.position, o));
+                        painter.circle_stroke(
+                            canvas_rect.min + Vec2::new(s_o.x, s_o.y),
+                            3.0,
+                            stroke,
+                        );
+                    }
+                }
+            }
+            GeoObject::RegressionLine(rl) => {
+                let stroke = Stroke::new(rl.width, to_color32(rl.color));
+                let x0 = rl.x_min;
+                let x1 = rl.x_max;
+                let y0 = rl.slope * x0 + rl.intercept;
+                let y1 = rl.slope * x1 + rl.intercept;
+                let s0 = view.world_to_screen(Point2::new(x0, y0));
+                let s1 = view.world_to_screen(Point2::new(x1, y1));
+                painter.line_segment(
+                    [
+                        canvas_rect.min + Vec2::new(s0.x, s0.y),
+                        canvas_rect.min + Vec2::new(s1.x, s1.y),
+                    ],
+                    stroke,
+                );
+                let pt_color = to_color32(rl.color);
+                for (x, y) in rl.xs.iter().zip(rl.ys.iter()) {
+                    let s = view.world_to_screen(Point2::new(*x, *y));
+                    painter.circle_filled(canvas_rect.min + Vec2::new(s.x, s.y), 4.0, pt_color);
+                }
+                if !rl.label.is_empty() {
+                    let s = view.world_to_screen(Point2::new(
+                        (x0 + x1) * 0.5,
+                        rl.slope * (x0 + x1) * 0.5 + rl.intercept,
+                    ));
+                    painter.text(
+                        canvas_rect.min + Vec2::new(s.x, s.y - 12.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        &rl.label,
+                        egui::FontId::proportional(11.0),
+                        to_color32(rl.color),
+                    );
+                }
+            }
+            GeoObject::Fractal2D(fr) => {
+                use grafito_geometry::fractals::{compute_fractal, fractal_color_hsv, FractalType};
+                let fractal_type = match fr.fractal_type.as_str() {
+                    "julia" if fr.params.len() >= 2 => FractalType::Julia {
+                        cr: fr.params[0],
+                        ci: fr.params[1],
+                        max_iter: fr.max_iter,
+                    },
+                    "burning_ship" => FractalType::BurningShip {
+                        max_iter: fr.max_iter,
+                    },
+                    "tricorn" => FractalType::Tricorn {
+                        max_iter: fr.max_iter,
+                    },
+                    _ => FractalType::Mandelbrot {
+                        max_iter: fr.max_iter,
+                    },
+                };
+                let res = fr.resolution.clamp(20, 400);
+                let pixels = compute_fractal(
+                    &fractal_type,
+                    fr.x_min,
+                    fr.x_max,
+                    fr.y_min,
+                    fr.y_max,
+                    res,
+                    res,
+                );
+                let dx = (fr.x_max - fr.x_min) / res as f64;
+                let dy = (fr.y_max - fr.y_min) / res as f64;
+                for px in &pixels {
+                    let (r, g, b, a) = fractal_color_hsv(px.iter, px.max_iter, px.smooth_value);
+                    let bl = view.world_to_screen(Point2::new(px.x, px.y));
+                    let tr = view.world_to_screen(Point2::new(px.x + dx, px.y + dy));
+                    let rect = Rect::from_min_max(
+                        canvas_rect.min + Vec2::new(bl.x, tr.y),
+                        canvas_rect.min + Vec2::new(tr.x, bl.y),
+                    );
+                    painter.rect_filled(
+                        rect,
+                        0.0,
+                        Color32::from_rgba_premultiplied(
+                            (r * 255.0) as u8,
+                            (g * 255.0) as u8,
+                            (b * 255.0) as u8,
+                            (a * 255.0) as u8,
+                        ),
+                    );
+                }
+            }
+            GeoObject::ParametricCurve2D(pc) => {
+                let steps = 4000;
+                let samples = parametric_sampling::samples_or_compute_curve_2d(
+                    pc,
+                    steps,
+                    &self.document.variables,
+                );
+                let mut prev: Option<Pos2> = None;
+                for &(x, y) in samples.iter() {
+                    if x.is_finite() && y.is_finite() {
+                        let screen = view.world_to_screen(Point2::new(x, y));
+                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        if let Some(prev_pos) = prev {
+                            painter.line_segment(
+                                [prev_pos, pos],
+                                Stroke::new(pc.width, to_color32(pc.color)),
+                            );
+                        }
+                        prev = Some(pos);
+                    } else {
+                        prev = None;
+                    }
+                }
+            }
+            GeoObject::PolarCurve(pol) => {
+                let steps = 4000;
+                let samples = parametric_sampling::samples_or_compute_polar(
+                    pol,
+                    steps,
+                    &self.document.variables,
+                );
+                let mut prev: Option<Pos2> = None;
+                let mut all_pts: Vec<Pos2> = Vec::new();
+                for &(x, y) in samples.iter() {
+                    if x.is_finite() && y.is_finite() {
+                        let screen = view.world_to_screen(Point2::new(x, y));
+                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        if let Some(prev_pos) = prev {
+                            painter.line_segment(
+                                [prev_pos, pos],
+                                Stroke::new(pol.width, to_color32(pol.color)),
+                            );
+                        }
+                        all_pts.push(pos);
+                        prev = Some(pos);
+                    } else {
+                        prev = None;
+                    }
+                }
+                // Fill from origin
+                if let Some(fill) = pol.fill_color {
+                    if all_pts.len() >= 3 {
+                        let origin = view.world_to_screen(Point2::new(0.0, 0.0));
+                        let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
+                        let mut fill_pts = all_pts.clone();
+                        fill_pts.push(origin_pos);
+                        if let Some(&first) = all_pts.first() {
+                            fill_pts.push(first);
+                        }
+                        painter.add(Shape::convex_polygon(
+                            fill_pts,
+                            to_color32(fill),
+                            Stroke::NONE,
+                        ));
+                    }
+                }
+            }
+            GeoObject::VectorField2D(vf) => {
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let view_bounds = (
+                    world_tl.x.min(world_br.x),
+                    world_tl.x.max(world_br.x),
+                    world_br.y.min(world_tl.y),
+                    world_br.y.max(world_tl.y),
+                );
+                let grid_size = vf.density.clamp(5, 80);
+                let dx = (world_br.x - world_tl.x) / grid_size as f64;
+                let dy = (world_br.y - world_tl.y) / grid_size as f64;
+                let arrow_length = dx.min(dy) * 0.8;
+
+                let samples = vector_field_sampling::samples_or_compute(
+                    vf,
+                    view_bounds,
+                    grid_size,
+                    &self.document.variables,
+                )
+                .clone();
+
+                for (x, y, u, v) in samples {
+                    if x < world_tl.x - dx
+                        || x > world_br.x + dx
+                        || y < world_tl.y - dy
+                        || y > world_br.y + dy
+                    {
+                        continue;
+                    }
+                    if u.is_finite() && v.is_finite() {
+                        let mag = (u * u + v * v).sqrt();
+                        if mag > 1e-10 {
+                            let nu = u / mag * arrow_length;
+                            let nv = v / mag * arrow_length;
+
+                            let start = view.world_to_screen(Point2::new(x, y));
+                            let end = view.world_to_screen(Point2::new(x + nu, y + nv));
+                            let start_pos = canvas_rect.min + Vec2::new(start.x, start.y);
+                            let end_pos = canvas_rect.min + Vec2::new(end.x, end.y);
+
+                            painter.line_segment(
+                                [start_pos, end_pos],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
+
+                            // Arrow head
+                            let angle = (nv as f32).atan2(nu as f32);
+                            let head_len = arrow_length as f32 * 0.3;
+                            let head1 = end_pos
+                                + Vec2::new(
+                                    -head_len * (angle - 0.4).cos(),
+                                    -head_len * (angle - 0.4).sin(),
+                                );
+                            let head2 = end_pos
+                                + Vec2::new(
+                                    -head_len * (angle + 0.4).cos(),
+                                    -head_len * (angle + 0.4).sin(),
+                                );
+                            painter.line_segment(
+                                [end_pos, head1],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
+                            painter.line_segment(
+                                [end_pos, head2],
+                                Stroke::new(1.5, to_color32(vf.color)),
+                            );
+                        }
+                    }
+                }
+                // Streamlines: trace from seed points using RK4
+                let sl_steps = 200;
+                let sl_dt = 0.05;
+                let sl_color = Color32::from_rgba_unmultiplied(180, 100, 200, 180);
+                let sl_stroke = Stroke::new(1.2, sl_color);
+                // Distribute seeds uniformly
+                let seeds_x = 5;
+                let seeds_y = 5;
+                let sx = (world_br.x - world_tl.x) / (seeds_x + 1) as f64;
+                let sy = (world_br.y - world_tl.y) / (seeds_y + 1) as f64;
+                for si in 1..=seeds_x {
+                    for sj in 1..=seeds_y {
+                        let mut x = world_tl.x + si as f64 * sx;
+                        let mut y = world_tl.y + sj as f64 * sy;
+                        let mut prev: Option<Pos2> = None;
+                        for _ in 0..sl_steps {
+                            let vars_eval = vec![("x".to_string(), x), ("y".to_string(), y)];
+                            if let (Ok(u), Ok(v)) = (
+                                grafito_geometry::expr::evaluate(&vf.expr_u, &vars_eval),
+                                grafito_geometry::expr::evaluate(&vf.expr_v, &vars_eval),
+                            ) {
+                                if !u.is_finite() || !v.is_finite() {
+                                    break;
+                                }
+                                let k1x = u;
+                                let k1y = v;
+                                let half_dt = sl_dt * 0.5;
+                                // k2
+                                let (k2x, k2y) = match (
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_u,
+                                        &[
+                                            ("x".into(), x + half_dt * k1x),
+                                            ("y".into(), y + half_dt * k1y),
+                                        ],
+                                    ),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_v,
+                                        &[
+                                            ("x".into(), x + half_dt * k1x),
+                                            ("y".into(), y + half_dt * k1y),
+                                        ],
+                                    ),
+                                ) {
+                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
+                                    _ => {
+                                        break;
+                                    }
+                                };
+                                // k3
+                                let (k3x, k3y) = match (
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_u,
+                                        &[
+                                            ("x".into(), x + half_dt * k2x),
+                                            ("y".into(), y + half_dt * k2y),
+                                        ],
+                                    ),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_v,
+                                        &[
+                                            ("x".into(), x + half_dt * k2x),
+                                            ("y".into(), y + half_dt * k2y),
+                                        ],
+                                    ),
+                                ) {
+                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
+                                    _ => {
+                                        break;
+                                    }
+                                };
+                                // k4
+                                let (k4x, k4y) = match (
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_u,
+                                        &[
+                                            ("x".into(), x + sl_dt * k3x),
+                                            ("y".into(), y + sl_dt * k3y),
+                                        ],
+                                    ),
+                                    grafito_geometry::expr::evaluate(
+                                        &vf.expr_v,
+                                        &[
+                                            ("x".into(), x + sl_dt * k3x),
+                                            ("y".into(), y + sl_dt * k3y),
+                                        ],
+                                    ),
+                                ) {
+                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
+                                    _ => {
+                                        break;
+                                    }
+                                };
+                                x += sl_dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
+                                y += sl_dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
+                                let screen = view.world_to_screen(Point2::new(x, y));
+                                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                                if x < world_tl.x - dx
+                                    || x > world_br.x + dx
+                                    || y < world_tl.y - dy
+                                    || y > world_br.y + dy
+                                {
+                                    break;
+                                }
+                                if let Some(prev_pos) = prev {
+                                    painter.line_segment([prev_pos, pos], sl_stroke);
+                                }
+                                prev = Some(pos);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            GeoObject::ImplicitCurve(ic) => {
+                // 0) Relleno del interior (solo para regiones con `<=`, `>=`, `<`, `>`).
+                //    Para curvas con `=`, no hay interior que rellenar.
+                if let Some(fill_color) = ic.fill_color {
+                    if matches!(
+                        ic.operator,
+                        RelationOperator::Less
+                            | RelationOperator::LessEq
+                            | RelationOperator::Greater
+                            | RelationOperator::GreaterEq
+                    ) {
+                        self.draw_implicit_curve_fill(painter, canvas_rect, view, ic, fill_color);
+                    }
+                }
+
+                // 1) Contorno: dibujar los segmentos del marching squares.
+                let levels = ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                if !levels.is_empty() {
+                    let use_contour_colors = ic.contour_levels.is_some();
+                    let contour_count = levels.len();
+                    let palette = ic.contour_colors.as_deref().unwrap_or(&[]);
+                    for (idx, (_level, segs)) in levels.iter().enumerate() {
+                        let color = if use_contour_colors {
+                            palette.get(idx).cloned().unwrap_or_else(|| {
+                                let t = idx as f64 / contour_count.max(1) as f64;
+                                Color::new(
+                                    (0.5 + t * 0.5) as f32,
+                                    (0.2 + (1.0 - t) * 0.6) as f32,
+                                    0.2,
+                                    1.0,
+                                )
+                            })
+                        } else {
+                            ic.color
+                        };
+                        let stroke = Stroke::new(ic.width, to_color32(color));
+                        for (a, b) in segs {
+                            let p1 = view.world_to_screen(*a);
+                            let p2 = view.world_to_screen(*b);
+                            let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
+                            let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
+                            painter.line_segment([pos1, pos2], stroke);
+                        }
+                    }
+                }
+            }
+            GeoObject::ComplexGrid(cg) => {
+                use num_complex::Complex64;
+                use std::collections::HashMap;
+
+                if cg.render_mode == 1 || cg.render_mode == 2 {
+                    // Domain coloring (complex f(z)) or Heat map (real f(x,y))
+                    let res = cg.density.clamp(50, 500);
+                    let dx = (cg.x_max - cg.x_min) / res as f64;
+                    let dy = (cg.y_max - cg.y_min) / res as f64;
+
+                    let is_heatmap = cg.render_mode == 2;
+
+                    if is_heatmap {
+                        // Heat map: evaluate f(x,y) using real AST
+                        let prepared =
+                            prepare_function_ast(&cg.expr, &self.document.variables, &["x", "y"]);
+
+                        if let Ok(ast) = prepared {
+                            for j in 0..res {
+                                let y = cg.y_min + (res - 1 - j) as f64 * dy;
+                                for i in 0..res {
+                                    let x = cg.x_min + i as f64 * dx;
+                                    let val = ast.eval_2d("x", x, "y", y);
+                                    if val.is_finite() {
+                                        // Thermal colormap: blue(cold) through green to red(hot)
+                                        let t = (val.atan() / std::f64::consts::FRAC_PI_2)
+                                            .clamp(-1.0, 1.0);
+                                        let t = (t + 1.0) * 0.5; // [0, 1]
+                                        let (r, g, b) = thermal_colormap(t);
+                                        let sp1 = view.world_to_screen(Point2::new(
+                                            cg.x_min + i as f64 * dx,
+                                            cg.y_min + (res - 1 - j) as f64 * dy,
+                                        ));
+                                        let sp2 = view.world_to_screen(Point2::new(
+                                            cg.x_min + (i + 1) as f64 * dx,
+                                            cg.y_min + (res - j) as f64 * dy,
+                                        ));
+                                        let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
+                                        let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
+                                        let c = Color32::from_rgb(
+                                            (r * 255.0) as u8,
+                                            (g * 255.0) as u8,
+                                            (b * 255.0) as u8,
+                                        );
+                                        painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Domain coloring: evaluate complex f(z)
+                        let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
+                            Ok(e) => e,
+                            Err(_) => return,
+                        };
+                        let mut vars: HashMap<String, Complex64> = HashMap::new();
+                        for (name, val) in &self.document.variables {
+                            vars.insert(name.clone(), Complex64::new(*val, 0.0));
+                        }
+                        for j in 0..res {
+                            let y = cg.y_min + (res - 1 - j) as f64 * dy;
+                            for i in 0..res {
+                                let x = cg.x_min + i as f64 * dx;
+                                vars.insert("z".to_string(), Complex64::new(x, y));
+                                if let Ok(fz) = expr.eval(&vars) {
+                                    if fz.re.is_finite() && fz.im.is_finite() {
+                                        let arg = fz.arg();
+                                        let mag = fz.norm();
+                                        let hue = (arg + std::f64::consts::PI)
+                                            / (2.0 * std::f64::consts::PI);
+                                        let lightness = (mag.max(1e-10).ln().atan()
+                                            / std::f64::consts::FRAC_PI_2)
+                                            * 0.5
+                                            + 0.5;
+                                        let (r, g, b) =
+                                            hsl_to_rgb(hue, 0.85, lightness.clamp(0.0, 1.0));
+                                        let sp1 = view.world_to_screen(Point2::new(
+                                            cg.x_min + i as f64 * dx,
+                                            cg.y_min + (res - 1 - j) as f64 * dy,
+                                        ));
+                                        let sp2 = view.world_to_screen(Point2::new(
+                                            cg.x_min + (i + 1) as f64 * dx,
+                                            cg.y_min + (res - j) as f64 * dy,
+                                        ));
+                                        let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
+                                        let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
+                                        let c = Color32::from_rgb(
+                                            (r * 255.0) as u8,
+                                            (g * 255.0) as u8,
+                                            (b * 255.0) as u8,
+                                        );
+                                        painter.rect_filled(Rect::from_min_max(min, max), 0.0, c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Original: Draw deformed grid under complex mapping
+                let grid_lines = cg.density;
+                let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
+                let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
+
+                let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
+                    Ok(e) => e,
+                    Err(_) => return,
+                };
+
+                let mut vars: HashMap<String, Complex64> = HashMap::new();
+                for (name, val) in &self.document.variables {
+                    vars.insert(name.clone(), Complex64::new(*val, 0.0));
+                }
+
+                // Draw horizontal lines (constant imaginary part)
+                for j in 0..=grid_lines {
+                    let y = cg.y_min + j as f64 * dy;
+                    let mut prev: Option<Pos2> = None;
+                    for i in 0..=grid_lines * 4 {
+                        let x = cg.x_min + i as f64 * dx / 4.0;
+                        vars.insert("z".to_string(), Complex64::new(x, y));
+
+                        if let Ok(result) = expr.eval(&vars) {
+                            if result.re.is_finite()
+                                && result.im.is_finite()
+                                && result.re.abs() < 1e6
+                                && result.im.abs() < 1e6
+                            {
+                                let screen =
+                                    view.world_to_screen(Point2::new(result.re, result.im));
+                                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                                if let Some(prev_pos) = prev {
+                                    painter.line_segment(
+                                        [prev_pos, pos],
+                                        Stroke::new(1.0, to_color32(cg.color)),
+                                    );
+                                }
+                                prev = Some(pos);
+                            } else {
+                                prev = None;
+                            }
+                        } else {
+                            prev = None;
+                        }
+                    }
+                }
+
+                // Draw vertical lines (constant real part)
+                for i in 0..=grid_lines {
+                    let x = cg.x_min + i as f64 * dx;
+                    let mut prev: Option<Pos2> = None;
+                    for j in 0..=grid_lines * 4 {
+                        let y = cg.y_min + j as f64 * dy / 4.0;
+                        vars.insert("z".to_string(), Complex64::new(x, y));
+
+                        if let Ok(result) = expr.eval(&vars) {
+                            if result.re.is_finite()
+                                && result.im.is_finite()
+                                && result.re.abs() < 1e6
+                                && result.im.abs() < 1e6
+                            {
+                                let screen =
+                                    view.world_to_screen(Point2::new(result.re, result.im));
+                                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                                if let Some(prev_pos) = prev {
+                                    painter.line_segment(
+                                        [prev_pos, pos],
+                                        Stroke::new(1.0, to_color32(cg.color)),
+                                    );
+                                }
+                                prev = Some(pos);
+                            } else {
+                                prev = None;
+                            }
+                        } else {
+                            prev = None;
+                        }
+                    }
+                }
+            }
+            GeoObject::ComplexMapping(cm) => {
+                use num_complex::Complex64;
+                use std::collections::HashMap;
+
+                // 1) Validar que la expresión compleja parsea. Si falla,
+                //    skip (es comportamiento lazy: el objeto queda creado pero
+                //    no se dibuja hasta que la expresión sea válida).
+                //    La validación la hace `eval_complex_batch` más abajo
+                //    (parsea internamente y devuelve Err si no parsea).
+                if grafito_geometry::complex_expr::parse(&cm.expr).is_err() {
+                    return;
+                }
+
+                // 2) Resolver el target. Si no existe o el tipo no está
+                //    soportado, no dibujamos nada.
+                let target = match self.document.get_object(cm.target) {
+                    Some(t) => t,
+                    None => return,
+                };
+
+                // 3) Extraer el dominio visible para sampling de Function y
+                //    cotas de muestreo para ParametricCurve2D / PolarCurve.
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
+
+                // 4) Generar la lista de puntos complejos z que vamos a
+                //    transformar. Cada target emite un Vec<Complex64> en
+                //    orden (puntos densos para curvas, vértices para
+                //    polígonos, grid para Function, etc.).
+                let z_samples: Vec<Complex64> = match target {
+                    GeoObject::Polygon(poly) => poly
+                        .vertices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            let x = self
+                                .document
+                                .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                            let y = self
+                                .document
+                                .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                            Complex64::new(x, y)
+                        })
+                        .collect(),
+                    GeoObject::Line(line) => {
+                        let start = Point2::new(
+                            self.document.resolve_expr(&line.start_x_expr, line.start.x),
+                            self.document.resolve_expr(&line.start_y_expr, line.start.y),
+                        );
+                        let end = Point2::new(
+                            self.document.resolve_expr(&line.end_x_expr, line.end.x),
+                            self.document.resolve_expr(&line.end_y_expr, line.end.y),
+                        );
+                        let steps = 50;
+                        (0..=steps)
+                            .map(|i| {
+                                let t = i as f64 / steps as f64;
+                                Complex64::new(
+                                    start.x + t * (end.x - start.x),
+                                    start.y + t * (end.y - start.y),
+                                )
+                            })
+                            .collect()
+                    }
+                    GeoObject::Function(f) => {
+                        let n = 400;
+                        (0..=n)
+                            .map(|i| {
+                                let t = i as f64 / n as f64;
+                                let x = xmin + t * (xmax - xmin);
+                                let y = grafito_geometry::expr::eval_function_with_vars(
+                                    &f.expr,
+                                    x,
+                                    &self.document.variables,
+                                )
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::ImplicitCurve(_ic) => {
+                        // Para implícitas usamos el helper de muestreo del
+                        // crate core (marching squares + polilínea cerrada).
+                        //
+                        // Filtro de segmentos degenerados: marching squares
+                        // puede emitir segmentos muy cortos (de longitud menor
+                        // a 1e-3) en celdas donde la interpolación es
+                        // inestable.
+                        let mut samples = Vec::new();
+                        for (level, segments) in self.document.implicit_curve_segments(cm.target) {
+                            for (a, b) in segments {
+                                let len = (a.x - b.x).hypot(a.y - b.y);
+                                if len < 1e-3 {
+                                    continue;
+                                }
+                                let n = 16;
+                                for i in 0..=n {
+                                    let t = i as f64 / n as f64;
+                                    samples.push(Complex64::new(
+                                        a.x + t * (b.x - a.x),
+                                        a.y + t * (b.y - a.y),
+                                    ));
+                                }
+                                let _ = level;
+                            }
+                        }
+                        samples
+                    }
+                    GeoObject::ParametricCurve2D(c) => {
+                        let n = 200;
+                        (0..=n)
+                            .map(|i| {
+                                let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+                                let x = eval_batch_1d(
+                                    &c.expr_x,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                let y = eval_batch_1d(
+                                    &c.expr_y,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::PolarCurve(c) => {
+                        let n = 200;
+                        (0..=n)
+                            .map(|i| {
+                                let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+                                let r = eval_batch_1d(
+                                    &c.expr_r,
+                                    "t",
+                                    std::iter::once(t),
+                                    &self.document.variables,
+                                )
+                                .ok()
+                                .and_then(|mut v| v.pop().flatten())
+                                .unwrap_or(f64::NAN);
+                                Complex64::new(r * t.cos(), r * t.sin())
+                            })
+                            .collect()
+                    }
+                    _ => return,
+                };
+
+                if z_samples.is_empty() {
+                    return;
+                }
+
+                // 5) Batch-eval de la expresión.
+                //
+                //    Camino rápido: si la expresión fue reconocida por
+                //    `ConformalMap::from_expr_string` y cacheada en
+                //    `cm.conformal_cache`, evaluamos con la fórmula
+                //    algebraica cerrada. Esto evita el bug del parser
+                //    que tokenizaba `1/z` como `1*z`.
+                //
+                //    Camino lento: `eval_complex_batch` parsea el AST
+                //    una vez y evalúa cada punto.
+                let results: Vec<Option<Complex64>> = if let Some(map) = cm.conformal_cache {
+                    z_samples.iter().map(|z| map.apply(*z)).collect()
+                } else {
+                    let real_vars: HashMap<String, f64> = self.document.variables.clone();
+                    match grafito_geometry::complex_expr::eval_complex_batch(
+                        &cm.expr,
+                        "z",
+                        z_samples.iter().copied(),
+                        &real_vars,
+                    ) {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    }
+                };
+
+                // 5b) **Relleno de área** para el caso del `ImplicitCurve` como
+                //     target. El render de líneas arriba solo dibuja el
+                //     contorno; para que el usuario vea un área rellena
+                //     cuando hace `ComplexMapping[1/z, I]`, escaneamos
+                //     el plano de output con el conformal map inverso y
+                //     evaluamos la curva original en cada celda.
+                if let GeoObject::ImplicitCurve(ic) = target {
+                    if let (Some(fill_color), Some(map)) = (ic.fill_color, cm.conformal_cache) {
+                        self.draw_complex_mapping_fill(
+                            painter,
+                            canvas_rect,
+                            view,
+                            ic,
+                            map,
+                            fill_color,
+                        );
+                    }
+                }
+                // Re-construimos un vec paralelo para evitar manejar Option<Point2>:
+                // usamos Point2 con NaN para representar "no-finito".
+                let mut transformed: Vec<(Point2, bool)> = Vec::with_capacity(results.len());
+                for (z_in, w_out) in z_samples.iter().zip(results.iter()) {
+                    match w_out {
+                        Some(w) if w.re.is_finite() && w.im.is_finite() => {
+                            transformed.push((Point2::new(w.re, w.im), true));
+                        }
+                        _ => {
+                            // Guardamos el z original (no el resultado) como
+                            // "último punto conocido antes de la singularidad"
+                            // para dibujar la asíntota desde donde el trazo
+                            // sale del plano visible.
+                            let _ = z_in;
+                            transformed.push((Point2::new(f64::NAN, f64::NAN), false));
+                        }
+                    }
+                }
+
+                // 6) Render: dibujar segmentos sólidos entre puntos finitos
+                //    consecutivos, y asíntotas punteadas en los huecos no
+                //    finitos. La asíntota se traza desde el último punto
+                //    finito en la dirección del último delta (en world), lo
+                //    que aproxima la tangente de la curva justo antes de la
+                //    singularidad.
+                let stroke = Stroke::new(2.0, to_color32(cm.color));
+                let to_screen = |world: Point2| -> Pos2 {
+                    let s = view.world_to_screen(world);
+                    canvas_rect.min + Vec2::new(s.x, s.y)
+                };
+                let to_screen_dir = |dx: f64, dy: f64| -> Vec2 {
+                    let s1 = view.world_to_screen(Point2::new(0.0, 0.0));
+                    let s2 = view.world_to_screen(Point2::new(dx, dy));
+                    Vec2::new(s2.x - s1.x, s2.y - s1.y)
+                };
+                let dashed_stroke = Stroke::new(1.0, to_color32(cm.color).gamma_multiply(0.7));
+
+                let mut prev: Option<(Point2, Pos2, Vec2)> = None;
+                // (world_pos, screen_pos, screen_dir_of_tangent)
+
+                for (world_pt, is_finite) in transformed.iter() {
+                    if *is_finite {
+                        let screen_pt = to_screen(*world_pt);
+                        if let Some((prev_world, prev_screen, _)) = prev {
+                            // Trazo sólido.
+                            painter.line_segment([prev_screen, screen_pt], stroke);
+                            // Actualizar dirección tangente.
+                            let dx = world_pt.x - prev_world.x;
+                            let dy = world_pt.y - prev_world.y;
+                            if dx.hypot(dy) > 1e-9 {
+                                let dir_screen = to_screen_dir(dx, dy);
+                                prev = Some((*world_pt, screen_pt, dir_screen));
+                            }
+                        } else {
+                            // Primer punto finito después de una
+                            // singularidad. Si la dirección tangente no
+                            // existe aún, la dejamos en (0,1) (hacia
+                            // abajo) como placeholder.
+                            prev = Some((*world_pt, screen_pt, Vec2::new(0.0, 1.0)));
+                        }
+                    } else {
+                        // Punto no finito: dibujar la asíntota desde el
+                        // último punto finito en la dirección de la
+                        // tangente, en pasos pequeños hasta que aparezca
+                        // un nuevo punto finito o agotemos N pasos.
+                        if let Some((_, prev_screen, dir_screen)) = prev {
+                            if dir_screen.length() > 0.5 {
+                                // Normalizar y dibujar ~30 píxeles de
+                                // asíntota en esa dirección.
+                                let step_px = 6.0_f32;
+                                let n_dashes = 6;
+                                let dir_norm = dir_screen.normalized();
+                                let mut last = prev_screen;
+                                for i in 1..=n_dashes {
+                                    let next = Pos2::new(
+                                        last.x + dir_norm.x * step_px,
+                                        last.y + dir_norm.y * step_px,
+                                    );
+                                    // Patrón: dibujar 1, saltar 1, dibujar
+                                    // 1, ... para que parezca punteado.
+                                    if i % 2 == 1 {
+                                        painter.line_segment([last, next], dashed_stroke);
+                                    }
+                                    last = next;
+                                }
+                            } else {
+                                // Sin dirección: marcar con una X roja
+                                // en el último punto finito conocido.
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(prev_screen.x - 6.0, prev_screen.y - 6.0),
+                                        Pos2::new(prev_screen.x + 6.0, prev_screen.y + 6.0),
+                                    ],
+                                    Stroke::new(1.5, Color32::from_rgb(220, 30, 30)),
+                                );
+                                painter.line_segment(
+                                    [
+                                        Pos2::new(prev_screen.x - 6.0, prev_screen.y + 6.0),
+                                        Pos2::new(prev_screen.x + 6.0, prev_screen.y - 6.0),
+                                    ],
+                                    Stroke::new(1.5, Color32::from_rgb(220, 30, 30)),
+                                );
+                            }
+                        }
+                        prev = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}

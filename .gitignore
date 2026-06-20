@@ -1,0 +1,34 @@
+target/
+**/*.rs.bk
+*.pdb
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local/agent/tool artifacts
+.cargo/
+!.cargo/config.toml
+.codex/
+.opencode/
+.commandcode/
+.megamemory/
+AGENTS.md
+GPUCache/
+crash_log.txt
+graphify-out/
+
+# Scratch & test files
+scratch*
+test_*
+debug_patch2
+debug_cam.rs
+refactor.py
+update_ast.py
+update_preprocess.py
+packaging/build/
+
+# Release binaries (built by CI)
+grafito-*.exe
+grafito

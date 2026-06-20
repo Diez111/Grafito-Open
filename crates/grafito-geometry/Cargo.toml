@@ -1,0 +1,29 @@
+[package]
+name = "grafito-geometry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glam.workspace = true
+nalgebra.workspace = true
+geo.workspace = true
+geo-types.workspace = true
+spade.workspace = true
+robust.workspace = true
+evalexpr.workspace = true
+serde.workspace = true
+log.workspace = true
+libm = "0.2"
+num-complex.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "expr_bench"
+harness = false

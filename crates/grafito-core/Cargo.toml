@@ -1,0 +1,31 @@
+[package]
+name = "grafito-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+grafito-geometry.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+log.workspace = true
+rstar.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+geo.workspace = true
+
+[[bench]]
+name = "solver_bench"
+harness = false
+
+[[bench]]
+name = "document_scenarios"
+harness = false
