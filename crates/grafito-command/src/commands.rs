@@ -3128,6 +3128,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
             "Function" if !cmd.args.is_empty() => {
                 let expr = cmd.args.join(", ");
+                if expr.trim().is_empty() {
+                    input_text.clear();
+                    return CommandOutcome::Error("Function: se requiere una expresión".into());
+                }
                 let label = next_function_label(document);
                 document.add_object(GeoObject::Function(
                     FunctionObj::new(&expr).with_label(&label),
@@ -3211,7 +3215,10 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         result = match execute_cas_command(document, &cmd) {
             Some(msg) if msg.to_lowercase().contains("error") => CommandOutcome::Error(msg),
             Some(msg) => CommandOutcome::Message(msg),
-            None => CommandOutcome::Ok,
+            None => CommandOutcome::Error(format!(
+                "Comando no reconocido o argumentos insuficientes: '{}'",
+                cmd.command
+            )),
         };
         input_text.clear();
         return result;

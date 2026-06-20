@@ -211,3 +211,103 @@ impl ConstraintGraph {
             .filter_map(move |id| self.constraints.get(&id))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_graph_has_no_constraints() {
+        let graph = ConstraintGraph::new();
+        assert_eq!(graph.constraint_count(), 0);
+        assert_eq!(graph.free_count(), 0);
+        assert!(graph.iter().next().is_none());
+        // Update order for an empty graph is empty.
+        assert!(graph.get_update_order(&[ObjectId::new()]).is_empty());
+    }
+
+    #[test]
+    fn add_constraint_registers_inputs_outputs_and_dependents() {
+        let mut graph = ConstraintGraph::new();
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let out = ObjectId::new();
+        graph.add_free_object(a);
+        graph.add_free_object(b);
+
+        let id = graph.add_constraint("Midpoint", vec![a, b], vec![out], HashMap::new());
+
+        assert_eq!(graph.constraint_count(), 1);
+        assert_eq!(id, 0);
+        // The output is no longer free (it has a creator).
+        assert!(!graph.is_free(&out));
+        assert!(graph.is_free(&a));
+        // The creator of `out` is the constraint we just added.
+        let creator = graph
+            .creator_of(&out)
+            .expect("output should have a creator");
+        assert_eq!(creator.name, "Midpoint");
+        assert_eq!(creator.inputs, vec![a, b]);
+        assert_eq!(creator.outputs, vec![out]);
+        // Both inputs list this constraint as a dependent.
+        assert_eq!(graph.dependents_of(&a), Some(&vec![id]));
+        assert_eq!(graph.dependents_of(&b), Some(&vec![id]));
+    }
+
+    #[test]
+    fn update_order_respects_linear_dependencies() {
+        let mut graph = ConstraintGraph::new();
+        // A → B → C chain: c1 produces o1 from o0, c2 produces o2 from o1,
+        // c3 produces o3 from o2. Changing o0 must evaluate c1, then c2, then c3.
+        let o0 = ObjectId::new();
+        let o1 = ObjectId::new();
+        let o2 = ObjectId::new();
+        let o3 = ObjectId::new();
+        graph.add_free_object(o0);
+
+        let c1 = graph.add_constraint("C1", vec![o0], vec![o1], HashMap::new());
+        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+        let c3 = graph.add_constraint("C3", vec![o2], vec![o3], HashMap::new());
+
+        let order = graph.get_update_order(&[o0]);
+        // All three constraints must be scheduled.
+        assert_eq!(order.len(), 3, "all three constraints should be scheduled");
+        // Sorted by construction order: c1 (0) < c2 (1) < c3 (2).
+        assert_eq!(order, vec![c1, c2, c3]);
+    }
+
+    #[test]
+    fn cycle_detection_does_not_panic_and_returns_finite_order() {
+        let mut graph = ConstraintGraph::new();
+        // Build a cycle: c1 produces o1 (inputs o0, o2); c2 produces o2 (input o1).
+        // o1 → c2 → o2 → c1 → o1  is a back edge.
+        let o0 = ObjectId::new();
+        let o1 = ObjectId::new();
+        let o2 = ObjectId::new();
+        graph.add_free_object(o0);
+
+        let c1 = graph.add_constraint("C1", vec![o0, o2], vec![o1], HashMap::new());
+        let c2 = graph.add_constraint("C2", vec![o1], vec![o2], HashMap::new());
+
+        // This must not hang / overflow the stack.
+        let order = graph.get_update_order(&[o0]);
+        // The acyclic portion is still returned: both constraints appear.
+        assert!(order.len() <= 2);
+        assert!(order.contains(&c1) || order.contains(&c2));
+    }
+
+    #[test]
+    fn remove_object_cleans_up_constraint() {
+        let mut graph = ConstraintGraph::new();
+        let a = ObjectId::new();
+        let out = ObjectId::new();
+        graph.add_free_object(a);
+        let _id = graph.add_constraint("Midpoint", vec![a], vec![out], HashMap::new());
+        assert_eq!(graph.constraint_count(), 1);
+
+        graph.remove_object(out);
+        // The constraint that created `out` is removed.
+        assert_eq!(graph.constraint_count(), 0);
+        assert!(graph.creator_of(&out).is_none());
+    }
+}

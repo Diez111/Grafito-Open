@@ -2339,3 +2339,137 @@ fn doc_intersect(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
         _ => vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CircleObj;
+
+    #[test]
+    fn new_document_is_empty() {
+        let doc = Document::new();
+        assert_eq!(doc.object_count(), 0);
+        assert!(doc.objects_iter().next().is_none());
+        assert_eq!(doc.constraints.constraint_count(), 0);
+    }
+
+    #[test]
+    fn add_point_stores_object() {
+        let mut doc = Document::new();
+        let id = doc.add_point(Point2::new(1.5, -2.0));
+        assert_eq!(doc.object_count(), 1);
+        assert!(doc.get_object(id).is_some());
+        let pos = doc.point_position(id).unwrap();
+        assert!((pos.x - 1.5).abs() < 1e-12);
+        assert!((pos.y + 2.0).abs() < 1e-12);
+        // A user-created point is registered as free.
+        assert!(doc.constraints.is_free(&id));
+    }
+
+    #[test]
+    fn remove_object_by_id_drops_it() {
+        let mut doc = Document::new();
+        let id = doc.add_point(Point2::new(0.0, 0.0));
+        assert_eq!(doc.object_count(), 1);
+        let removed = doc.remove_object(id);
+        assert!(removed.is_some());
+        assert!(doc.get_object(id).is_none());
+        assert_eq!(doc.object_count(), 0);
+        // Removing a non-existent id returns None and is a no-op.
+        assert!(doc.remove_object(id).is_none());
+    }
+
+    #[test]
+    fn set_variable_recomputes_bound_point() {
+        let mut doc = Document::new();
+        // Create a point whose coordinates are bound to document variables.
+        let mut p = PointObj::new(Point2::new(0.0, 0.0));
+        p.x_expr = Some("a".to_string());
+        p.y_expr = Some("b * 2".to_string());
+        let id = doc.add_object(GeoObject::Point(p));
+
+        // Before setting variables, the fallback (0.0) is used.
+        let pos0 = doc.point_position(id).unwrap();
+        assert!((pos0.x).abs() < 1e-9 && (pos0.y).abs() < 1e-9);
+
+        doc.set_variable("a".to_string(), 3.0);
+        doc.set_variable("b".to_string(), 5.0);
+
+        let pos = doc.point_position(id).unwrap();
+        assert!((pos.x - 3.0).abs() < 1e-9, "x should be a=3, got {}", pos.x);
+        assert!(
+            (pos.y - 10.0).abs() < 1e-9,
+            "y should be b*2=10, got {}",
+            pos.y
+        );
+        assert_eq!(doc.get_variable("a"), Some(3.0));
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_objects_and_variables() {
+        let mut doc = Document::new();
+        let a = doc.add_point(Point2::new(0.0, 0.0));
+        let b = doc.add_point(Point2::new(4.0, 0.0));
+        let circle = doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(2.0, 1.0),
+            1.5,
+        )));
+        doc.set_variable("r".to_string(), 1.5);
+        let (_mid, _) = doc.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)).with_label("M")),
+            "Midpoint",
+            &[a, b],
+        );
+        let n_before = doc.object_count();
+        let c_before = doc.constraints.constraint_count();
+
+        let json = serde_json::to_string(&doc).expect("serialize");
+        let doc2: Document = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(doc2.object_count(), n_before);
+        assert_eq!(doc2.constraints.constraint_count(), c_before);
+        assert!(doc2.get_object(a).is_some());
+        assert!(doc2.get_object(b).is_some());
+        assert!(doc2.get_object(circle).is_some());
+        if let GeoObject::Circle(c) = doc2.get_object(circle).unwrap() {
+            assert!((c.radius - 1.5).abs() < 1e-9);
+        } else {
+            panic!("expected circle after roundtrip");
+        }
+        // Variables survive the round-trip.
+        assert_eq!(doc2.get_variable("r"), Some(1.5));
+    }
+
+    #[test]
+    fn re_evaluate_constraints_midpoint() {
+        let mut doc = Document::new();
+        let a = doc.add_point(Point2::new(0.0, 0.0));
+        let b = doc.add_point(Point2::new(4.0, 0.0));
+        let (mid, _) = doc.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)).with_label("M")),
+            "Midpoint",
+            &[a, b],
+        );
+
+        // Initial evaluation: midpoint of (0,0) and (4,0) is (2,0).
+        let order = doc.propagation_order(&[a, b]);
+        doc.re_evaluate_constraints(&order);
+        if let GeoObject::Point(m) = doc.get_object(mid).unwrap() {
+            assert!((m.position.x - 2.0).abs() < 1e-9);
+            assert!(m.position.y.abs() < 1e-9);
+        } else {
+            panic!("expected midpoint point");
+        }
+
+        // Move a free point and re-evaluate; midpoint must follow.
+        doc.move_point(a, Point2::new(2.0, 0.0));
+        let order = doc.propagation_order(&[a]);
+        doc.re_evaluate_constraints(&order);
+        if let GeoObject::Point(m) = doc.get_object(mid).unwrap() {
+            assert!((m.position.x - 3.0).abs() < 1e-9, "midpoint x after move");
+            assert!(m.position.y.abs() < 1e-9);
+        } else {
+            panic!("expected midpoint point after move");
+        }
+    }
+}
