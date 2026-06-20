@@ -4,7 +4,7 @@
 //! `eframe::App::update` loop that dispatches rendering to focused UI modules.
 
 use crate::utils::{configure_modern_style, load_config, save_config, AppConfig};
-use crate::ViewMode;
+use crate::{Perspective, ViewMode};
 use egui::{Color32, Key, Pos2};
 use grafito_core::{
     CircleObj, Cube3DObj, Document, EllipseObj, FunctionObj, GeoObject, LineObj, ObjectId,
@@ -142,6 +142,8 @@ pub struct GrafitoApp {
     pub current_tool: Tool,
     pub previous_tool: Tool,
     pub current_view: ViewMode,
+    /// Perspectiva activa (estilo GeoGebra). `current_view` se deriva de ésta.
+    pub perspective: Perspective,
     pub camera: Camera3D,
     pub show_grid: bool,
     pub snap_to_grid: bool,
@@ -172,6 +174,11 @@ pub struct GrafitoApp {
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<Document>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
+    /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
+    /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
+    /// `&self`). La clave es el `ObjectId` de la `ImplicitCurveObj`.
+    pub fill_textures:
+        std::sync::RwLock<std::collections::HashMap<ObjectId, crate::render_2d::FillTextureCache>>,
     pub active_color_picker: Option<(ObjectId, grafito_ui::color_picker::HsvColorPicker)>,
     pub color_favorites: [grafito_geometry::Color; 5],
     pub tool_ghost: Option<GeoObject>,
@@ -188,6 +195,7 @@ pub struct GrafitoApp {
     pub document_snapshot: std::sync::Arc<Document>,
     pub snapshot_version: u64,
     pub style_applied: Option<bool>,
+    pub command_palette: grafito_ui::command_palette::CommandPaletteState,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +316,7 @@ impl GrafitoApp {
             current_tool: Tool::default(),
             previous_tool: Tool::default(),
             current_view: ViewMode::D2,
+            perspective: Perspective::Geometry2D,
             camera: Camera3D::new(1280.0 / 720.0),
             show_grid: config.show_grid,
             snap_to_grid: config.snap_to_grid,
@@ -337,6 +346,7 @@ impl GrafitoApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             attractor_cache: std::collections::HashMap::new(),
+            fill_textures: std::sync::RwLock::new(std::collections::HashMap::new()),
             active_color_picker: None,
             tool_ghost: None,
             tool_state: crate::tool_dispatcher::ToolState::default(),
@@ -359,6 +369,7 @@ impl GrafitoApp {
             document_snapshot,
             snapshot_version,
             style_applied: None,
+            command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
         }
     }
 
@@ -416,6 +427,115 @@ impl GrafitoApp {
                 );
             }
         }
+    }
+
+    /// Ejecuta la acción elegida desde la paleta de comandos (Ctrl+K).
+    ///
+    /// Los comandos de tipo herramienta seleccionan el `Tool` correspondiente;
+    /// las acciones inmediatas (vista/archivo/exportación) se ejecutan directo;
+    /// el resto se inserta en la barra de entrada como `Nombre[` para que el
+    /// usuario complete los argumentos y se procese vía `process_input`.
+    pub(crate) fn apply_palette_command(&mut self, name: &str, ctx: &egui::Context) {
+        // 1) Selección de herramienta.
+        let tool = match name {
+            "Point Tool" => Some(Tool::Point),
+            "Line Tool" => Some(Tool::Line),
+            "Circle Tool" => Some(Tool::Circle),
+            "Polygon Tool" => Some(Tool::Polygon),
+            "Function Tool" => Some(Tool::Function),
+            "Pencil" => Some(Tool::Pencil),
+            "Eraser" => Some(Tool::Eraser),
+            _ => None,
+        };
+        if let Some(tool) = tool {
+            self.current_tool = tool;
+            self.previous_tool = tool;
+            self.tool_ghost = None;
+            self.reset_tool_input();
+            return;
+        }
+
+        // 2) Acciones inmediatas de vista y archivo.
+        match name {
+            "Zoom to Fit" => {
+                self.zoom_to_fit();
+                return;
+            }
+            "Toggle Grid" => {
+                self.show_grid = !self.show_grid;
+                return;
+            }
+            "Toggle Dark Mode" => {
+                self.dark_mode = !self.dark_mode;
+                if self.dark_mode {
+                    DARK.apply(ctx);
+                } else {
+                    LIGHT.apply(ctx);
+                }
+                return;
+            }
+            "Save" => {
+                self.save_to_file();
+                return;
+            }
+            "Export SVG" => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SVG", &["svg"])
+                    .save_file()
+                {
+                    let svg = crate::export::export_svg(&self.document, 1280.0, 720.0);
+                    if let Err(e) = std::fs::write(&path, svg) {
+                        self.toasts.push(
+                            format!("Error SVG: {}", e),
+                            grafito_ui::toast::ToastKind::Error,
+                            5.0,
+                        );
+                    }
+                }
+                return;
+            }
+            "Export PNG" => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .save_file()
+                {
+                    if let Err(e) = crate::export::export_png(
+                        &self.document,
+                        1280,
+                        720,
+                        &path.to_string_lossy(),
+                    ) {
+                        self.toasts.push(
+                            format!("Error PNG: {}", e),
+                            grafito_ui::toast::ToastKind::Error,
+                            5.0,
+                        );
+                    }
+                }
+                return;
+            }
+            "Export TikZ" => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("TeX", &["tex"])
+                    .save_file()
+                {
+                    let tex = crate::export::export_latex(&self.document);
+                    if let Err(e) = std::fs::write(&path, tex) {
+                        self.toasts.push(
+                            format!("Error TikZ: {}", e),
+                            grafito_ui::toast::ToastKind::Error,
+                            5.0,
+                        );
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // 3) Resto: insertar `Nombre[` en la barra de entrada para que el
+        //    usuario complete los argumentos y se procese vía `process_input`.
+        self.input_text = format!("{}[", name);
     }
 
     pub(crate) fn undo(&mut self) {
@@ -559,6 +679,118 @@ impl GrafitoApp {
             self.tool_state.last_erased = None;
             self.tool_state.drawing_pencil = None;
             self.previous_tool = self.current_tool;
+        }
+    }
+
+    /// Cambia la perspectiva activa, sincroniza `current_view` y la herramienta
+    /// por defecto, y carga objetos de ejemplo si el documento está vacío.
+    pub(crate) fn set_perspective(&mut self, p: Perspective) {
+        if self.perspective == p {
+            return;
+        }
+        self.perspective = p;
+        let layout = p.layout();
+        let target_view = p.view_mode();
+        let view_changed = self.current_view != target_view;
+        self.current_view = target_view;
+        self.current_tool = layout.default_tool;
+        self.previous_tool = layout.default_tool;
+        self.tool_ghost = None;
+        self.reset_tool_input();
+        self.clear_pending_action();
+        // Visibilidad del teclado matemático según la perspectiva.
+        self.keyboard_visible = layout.show_math_keyboard;
+        // Ajuste del panel izquierdo: mapea el contenido declarado al tab
+        // existente más cercano del sidebar.
+        self.sidebar_tab = layout.left_panel.default_sidebar_tab();
+        // Panel derecho: la hoja de cálculo lateral se muestra sólo cuando la
+        // perspectiva la solicita explícitamente.
+        self.show_spreadsheet = matches!(
+            layout.right_panel,
+            Some(crate::RightPanelContent::Spreadsheet)
+                | Some(crate::RightPanelContent::Data)
+                | Some(crate::RightPanelContent::Regression)
+        );
+        // Cargar ejemplos si el documento está vacío.
+        if self.document.object_count() == 0 {
+            self.load_perspective_examples(p);
+        }
+        if view_changed {
+            self.document.bump_version();
+        }
+    }
+
+    /// Carga objetos de ejemplo apropiados para la perspectiva dada.
+    ///
+    /// Se invoca al cambiar de perspectiva cuando el documento está vacío,
+    /// ofreciendo un punto de partida similar a GeoGebra.
+    pub(crate) fn load_perspective_examples(&mut self, p: Perspective) {
+        let time = 0.0;
+        let run = |app: &mut Self, cmd: &str| {
+            let mut buf = cmd.to_string();
+            let outcome = crate::commands::process_input(&mut app.document, &mut buf);
+            app.handle_command_outcome(outcome, time, cmd);
+        };
+        match p {
+            Perspective::Geometry2D => {
+                self.document.add_object(GeoObject::Point(
+                    PointObj::new(Point2::new(0.0, 0.0)).with_label("A"),
+                ));
+                self.document.add_object(GeoObject::Point(
+                    PointObj::new(Point2::new(3.0, 2.0)).with_label("B"),
+                ));
+                self.document.add_object(GeoObject::Line(
+                    LineObj::new(Point2::new(-2.0, -1.0), Point2::new(4.0, 3.0)).with_label("l"),
+                ));
+                self.document.add_object(GeoObject::Circle(
+                    CircleObj::new(Point2::new(1.0, 1.0), 2.0).with_label("c"),
+                ));
+                self.document.add_object(GeoObject::Function(
+                    FunctionObj::new("sin(x)").with_label("f(x)"),
+                ));
+            }
+            Perspective::Geometry3D => {
+                self.document.add_object(GeoObject::Cube3D(
+                    Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0).with_label("C1"),
+                ));
+                self.document.add_object(GeoObject::Sphere3D(
+                    Sphere3DObj::new(Point3D::new(2.0, 1.0, 0.0), 1.0).with_label("S1"),
+                ));
+            }
+            Perspective::AlgebraCas => {
+                self.document.add_object(GeoObject::Function(
+                    FunctionObj::new("x^2").with_label("f(x)"),
+                ));
+                self.document.add_object(GeoObject::Function(
+                    FunctionObj::new("sin(x)").with_label("g(x)"),
+                ));
+            }
+            Perspective::Calculus => {
+                self.document.add_object(GeoObject::Function(
+                    FunctionObj::new("x^3").with_label("f(x)"),
+                ));
+                run(self, "Integral[x^3, x, 0, x]");
+            }
+            Perspective::Probability => {
+                run(self, "Normal[0, 1]");
+            }
+            Perspective::Statistics => {
+                run(self, "Scatter[(1,2),(2,3),(3,5),(4,4),(5,6)]");
+            }
+            Perspective::Complex => {
+                // ComplexMapping[1/z, I] requiere un target etiquetado "I".
+                run(self, "x^2 + y^2 = 1");
+                run(self, "ComplexMapping[1/z, I]");
+            }
+            Perspective::Dynamics => {
+                run(self, "Lorenz[]");
+            }
+            Perspective::DataAnalysis => {
+                run(self, "Scatter[(1,2),(2,3),(3,5),(4,4),(5,6)]");
+            }
+            Perspective::Exam => {
+                // Modo examen: documento vacío intencionalmente.
+            }
         }
     }
 
@@ -1063,7 +1295,7 @@ impl eframe::App for GrafitoApp {
             self.undo();
         }
         if ctx.input(|i| i.key_pressed(Key::Z) && i.modifiers.ctrl && i.modifiers.shift)
-            || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl)
+            || ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl && !i.modifiers.shift)
         {
             self.redo();
         }
@@ -1143,7 +1375,7 @@ impl eframe::App for GrafitoApp {
             self.tool_ghost = None;
             self.reset_tool_input();
         }
-        if ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl) {
+        if ctx.input(|i| i.key_pressed(Key::Y) && i.modifiers.ctrl && i.modifiers.shift) {
             self.current_tool = Tool::YIntercept;
             self.tool_ghost = None;
             self.reset_tool_input();
@@ -1192,6 +1424,33 @@ impl eframe::App for GrafitoApp {
                 snap_to_grid: self.snap_to_grid,
                 snap: self.snap_config.clone(),
             });
+        }
+        // Ctrl+Shift+1..9,0: cambiar de perspectiva (1=Geometry2D … 9=DataAnalysis, 0=Exam).
+        {
+            const NUM_KEYS: [(Key, Perspective); 10] = [
+                (Key::Num1, Perspective::Geometry2D),
+                (Key::Num2, Perspective::Geometry3D),
+                (Key::Num3, Perspective::AlgebraCas),
+                (Key::Num4, Perspective::Calculus),
+                (Key::Num5, Perspective::Probability),
+                (Key::Num6, Perspective::Statistics),
+                (Key::Num7, Perspective::Complex),
+                (Key::Num8, Perspective::Dynamics),
+                (Key::Num9, Perspective::DataAnalysis),
+                (Key::Num0, Perspective::Exam),
+            ];
+            for (key, p) in NUM_KEYS {
+                if ctx.input(|i| i.key_pressed(key) && i.modifiers.ctrl && i.modifiers.shift) {
+                    self.set_perspective(p);
+                    break;
+                }
+            }
+        }
+        // Ctrl+K: abrir la paleta de comandos.
+        if ctx.input(|i| i.key_pressed(Key::K) && i.modifiers.ctrl && !i.modifiers.shift) {
+            self.command_palette.open = true;
+            self.command_palette.search.clear();
+            self.command_palette.selected_index = 0;
         }
 
         let is_dark = self.dark_mode;
@@ -1501,6 +1760,11 @@ impl eframe::App for GrafitoApp {
             } else {
                 self.splash_start = None;
             }
+        }
+
+        // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
+        if let Some(name) = self.command_palette.show(ctx) {
+            self.apply_palette_command(&name, ctx);
         }
 
         egui::Area::new(egui::Id::new("toasts"))

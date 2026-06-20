@@ -471,7 +471,7 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> Response {
             tool_btn(ui, current_tool, Tool::Root, "Raíz", "R");
             tool_btn(ui, current_tool, Tool::Extremum, "Extremo", "E");
             tool_btn(ui, current_tool, Tool::Inflection, "Inflexión", "N");
-            tool_btn(ui, current_tool, Tool::YIntercept, "InterY", "Ctrl+Y");
+            tool_btn(ui, current_tool, Tool::YIntercept, "InterY", "Ctrl+Shift+Y");
             tool_btn(ui, current_tool, Tool::XIntercept, "InterX", "I");
             tool_btn(ui, current_tool, Tool::Analyze, "Analizar", "Ctrl+A");
 

@@ -1,10 +1,11 @@
 //! Top-level egui chrome: menu bar, toolbar, icon sidebar, input/status bars,
 //! and the floating color-picker dialog.
 
-use crate::{commands, GrafitoApp, ViewMode};
+use crate::{commands, GrafitoApp, Perspective, ViewMode};
 use egui::{Align2, Color32};
 use grafito_ui::icons::{draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
+use grafito_ui::toolbar::ToolGroupId;
 use grafito_ui::Tool;
 
 pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
@@ -78,6 +79,19 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.separator();
                     ui.checkbox(&mut app.use_gpu, "Renderizado GPU");
                 });
+                ui.menu_button("Perspectivas", |ui| {
+                    let mut selected = app.perspective;
+                    for p in Perspective::ALL {
+                        ui.radio_value(
+                            &mut selected,
+                            p,
+                            format!("{}  (Ctrl+Shift+{})", p.title(), p.shortcut_number()),
+                        );
+                    }
+                    if selected != app.perspective {
+                        app.set_perspective(selected);
+                    }
+                });
                 ui.menu_button("Herramientas", |ui| {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                 });
@@ -145,11 +159,14 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("ui_toolbar");
-            grafito_ui::toolbar::toolbar(
-                ui,
-                &mut app.current_tool,
-                app.current_view == ViewMode::D3,
-            );
+            // Filtra los grupos de herramientas según la perspectiva activa.
+            let mut groups: Vec<ToolGroupId> =
+                app.perspective.layout().visible_tool_groups.to_vec();
+            let is_3d = app.current_view == ViewMode::D3;
+            if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
+                groups.push(ToolGroupId::ThreeD);
+            }
+            grafito_ui::toolbar::toolbar_filtered(ui, &mut app.current_tool, &groups);
         });
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
@@ -178,6 +195,47 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
             puffin::profile_scope!("ui_sidebar");
             ui.vertical_centered(|ui| {
                 ui.add_space(6.0);
+                // ── Selector de Perspectivas (fila superior del sidebar) ──
+                for p in Perspective::ALL {
+                    let active = app.perspective == p;
+                    let bg = if active {
+                        theme.sidebar_tab_active_bg
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    let ic_color = if active {
+                        theme.sidebar_tab_active
+                    } else {
+                        theme.sidebar_tab_inactive
+                    };
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(46.0, 22.0), egui::Sense::click());
+                    if ui.is_rect_visible(rect) {
+                        ui.painter().rect_filled(rect, 5.0, bg);
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            p.short_label(),
+                            egui::FontId::proportional(11.0),
+                            ic_color,
+                        );
+                    }
+                    if resp.clicked() {
+                        app.set_perspective(p);
+                    }
+                    resp.on_hover_text(p.title());
+                    ui.add_space(1.0);
+                }
+                // Separador entre perspectivas y tabs.
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(ui.min_rect().min.x + 8.0, ui.min_rect().min.y),
+                        egui::pos2(ui.min_rect().max.x - 8.0, ui.min_rect().min.y),
+                    ],
+                    egui::Stroke::new(1.0, sep_col),
+                );
+                ui.add_space(4.0);
+                // ── Tabs existentes del sidebar ──
                 for (i, (label, icon, tip)) in tabs.iter().enumerate() {
                     let active = app.sidebar_tab == i;
                     let bg = if active {
@@ -215,7 +273,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app.sidebar_tab = i;
                         if i == 4 {
                             // index 4 is now Hoja
-                            app.show_spreadsheet = false;
+                            app.show_spreadsheet = true;
                         }
                     }
                     resp.on_hover_text(*tip);

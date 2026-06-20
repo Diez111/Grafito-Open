@@ -7,7 +7,8 @@ use std::f32::consts::TAU;
 
 use crate::Tool;
 
-type ToolEntry = (Tool, &'static str, &'static str);
+/// Una entrada de la toolbar: `(Tool, etiqueta, atajo)`.
+pub type ToolEntry = (Tool, &'static str, &'static str);
 
 const GROUP_MOVE: &[ToolEntry] = &[(Tool::Select, "↖ Seleccionar", "F1")];
 
@@ -110,6 +111,73 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
     (Tool::Slider, "═ Deslizador", ""),
     (Tool::Button, "☑ Checkbox/Botón", ""),
     (Tool::Image, "🖼 Imagen", ""),
+];
+
+/// Identificador de un grupo de herramientas de la toolbar.
+///
+/// Cada variante resuelve su icono vectorial y su lista estática de
+/// [`ToolEntry`] mediante [`ToolGroupId::def`]. Esto permite a las
+/// perspectivas referenciar grupos de forma compacta (`&'static [ToolGroupId]`)
+/// sin perder la asociación grupo↔icono y sin asignaciones en tiempo de
+/// ejecución.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolGroupId {
+    Move,
+    Point,
+    Line,
+    Circle,
+    Polygon,
+    Pencil,
+    Eraser,
+    Conic,
+    Curve,
+    Measure,
+    Analysis,
+    Constraint,
+    Boolean,
+    ThreeD,
+    Advanced,
+}
+
+impl ToolGroupId {
+    /// Devuelve el icono y la lista de herramientas del grupo.
+    pub const fn def(self) -> (IconFn, &'static [ToolEntry]) {
+        match self {
+            ToolGroupId::Move => (icon_move, GROUP_MOVE),
+            ToolGroupId::Point => (icon_point, GROUP_POINT),
+            ToolGroupId::Line => (icon_line, GROUP_LINE),
+            ToolGroupId::Circle => (icon_circle, GROUP_CIRCLE),
+            ToolGroupId::Polygon => (icon_polygon, GROUP_POLYGON),
+            ToolGroupId::Pencil => (icon_pencil, GROUP_PENCIL),
+            ToolGroupId::Eraser => (icon_eraser, GROUP_ERASER),
+            ToolGroupId::Conic => (icon_conic, GROUP_CONIC),
+            ToolGroupId::Curve => (icon_curve, GROUP_CURVE),
+            ToolGroupId::Measure => (icon_measure, GROUP_MEASURE),
+            ToolGroupId::Analysis => (icon_analysis, GROUP_ANALYSIS),
+            ToolGroupId::Constraint => (icon_constraint, GROUP_CONSTRAINT),
+            ToolGroupId::Boolean => (icon_boolean, GROUP_BOOLEAN),
+            ToolGroupId::ThreeD => (icon_3d, GROUP_3D),
+            ToolGroupId::Advanced => (icon_advanced, GROUP_ADVANCED),
+        }
+    }
+}
+
+/// Todos los grupos en el orden clásico de la toolbar (sin `ThreeD`).
+pub const ALL_GROUPS: &[ToolGroupId] = &[
+    ToolGroupId::Move,
+    ToolGroupId::Point,
+    ToolGroupId::Line,
+    ToolGroupId::Circle,
+    ToolGroupId::Polygon,
+    ToolGroupId::Pencil,
+    ToolGroupId::Eraser,
+    ToolGroupId::Conic,
+    ToolGroupId::Curve,
+    ToolGroupId::Measure,
+    ToolGroupId::Analysis,
+    ToolGroupId::Constraint,
+    ToolGroupId::Boolean,
+    ToolGroupId::Advanced,
 ];
 
 // ── Vector icon drawing functions ──
@@ -336,11 +404,33 @@ fn icon_boolean(painter: &Painter, rect: Rect, color: Color32) {
     painter.circle_filled(c, 2.0, color);
 }
 
-type IconFn = fn(&Painter, Rect, Color32);
+/// Función de dibujo de icono vectorial para un grupo de la toolbar.
+pub type IconFn = fn(&Painter, Rect, Color32);
 
 // ── Public toolbar ──
 
+/// Toolbar clásica: muestra todos los grupos (más el grupo 3D si `is_3d`).
+///
+/// Equivalente a [`toolbar_filtered`] con [`ALL_GROUPS`] y, opcionalmente,
+/// `ToolGroupId::ThreeD`.
 pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Response {
+    if is_3d {
+        let mut groups: Vec<ToolGroupId> = ALL_GROUPS.to_vec();
+        groups.push(ToolGroupId::ThreeD);
+        toolbar_filtered(ui, current_tool, &groups)
+    } else {
+        toolbar_filtered(ui, current_tool, ALL_GROUPS)
+    }
+}
+
+/// Toolbar filtrada: renderiza únicamente los `groups` indicados, en el orden
+/// dado. Usada por el sistema de perspectivas para mostrar sólo las
+/// herramientas relevantes.
+pub fn toolbar_filtered(
+    ui: &mut Ui,
+    current_tool: &mut Tool,
+    groups: &[ToolGroupId],
+) -> egui::Response {
     let is_dark = ui.visuals().dark_mode;
     let txt = if is_dark {
         Color32::WHITE
@@ -365,135 +455,10 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Respo
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(1.0, 0.0);
             ui.horizontal(|ui| {
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_move,
-                    GROUP_MOVE,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_point,
-                    GROUP_POINT,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_line,
-                    GROUP_LINE,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_circle,
-                    GROUP_CIRCLE,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_polygon,
-                    GROUP_POLYGON,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_pencil,
-                    GROUP_PENCIL,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_eraser,
-                    GROUP_ERASER,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_conic,
-                    GROUP_CONIC,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_curve,
-                    GROUP_CURVE,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_measure,
-                    GROUP_MEASURE,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_analysis,
-                    GROUP_ANALYSIS,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_constraint,
-                    GROUP_CONSTRAINT,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_boolean,
-                    GROUP_BOOLEAN,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
-                if is_3d {
-                    tool_group(ui, current_tool, icon_3d, GROUP_3D, accent, txt, txt_dim);
+                for &gid in groups {
+                    let (icon_fn, tools) = gid.def();
+                    tool_group(ui, current_tool, icon_fn, tools, accent, txt, txt_dim);
                 }
-                tool_group(
-                    ui,
-                    current_tool,
-                    icon_advanced,
-                    GROUP_ADVANCED,
-                    accent,
-                    txt,
-                    txt_dim,
-                );
             })
         })
         .response
