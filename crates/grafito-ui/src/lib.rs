@@ -1144,6 +1144,7 @@ fn tool_btn(ui: &mut Ui, current: &mut Tool, tool: Tool, name: &str, _key: &str)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Tool {
     // Basic 2D tools
     #[default]

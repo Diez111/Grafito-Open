@@ -295,6 +295,7 @@ impl GrafitoApp {
             | Tool::PolygonXor => {
                 // These tools are driven by the pending_action state machine in app.rs.
             }
+            _ => {}
         }
     }
 

@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 /// A geometric object in the document (2D and 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum GeoObject {
     // 2D
     Point(PointObj),
