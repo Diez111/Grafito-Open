@@ -80,11 +80,9 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                 if execute_cas && !app.input_text.is_empty() {
                     app.save_state();
-                    let mut cmd = app.input_text.clone();
                     let input_was = app.input_text.clone();
-                    let outcome = crate::commands::process_input(&mut app.document, &mut cmd);
                     let time = ui.ctx().input(|i| i.time);
-                    app.handle_command_outcome(outcome, time, &input_was);
+                    app.execute_command_and_record(&input_was, time);
                     app.input_text.clear();
                 }
             });
@@ -644,4 +642,242 @@ pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) 
                     });
             });
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Protocolo de Construcción (panel derecho, perspectiva Geometry2D)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Escapa caracteres especiales de LaTeX.
+fn escape_latex(s: &str) -> String {
+    s.replace('\\', "\\textbackslash{}")
+        .replace('_', "\\_")
+        .replace('%', "\\%")
+        .replace('&', "\\&")
+        .replace('#', "\\#")
+        .replace('$', "\\$")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+}
+
+/// Genera una lista enumerada en LaTeX a partir del registro de construcción.
+fn construction_log_to_latex(log: &[crate::app::ConstructionStep]) -> String {
+    let mut s = String::new();
+    s.push_str("% Protocolo de Construcción — Grafito\n");
+    s.push_str("\\begin{enumerate}\n");
+    for step in log {
+        let inputs = if step.inputs.is_empty() {
+            "\\textemdash".to_string()
+        } else {
+            step.inputs.join(", ")
+        };
+        let output = if step.output.is_empty() {
+            "\\textemdash".to_string()
+        } else {
+            step.output.clone()
+        };
+        let disabled = if step.disabled {
+            " (deshabilitado)"
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "  \\item {}{}: {} $\\rightarrow$ {}\n",
+            escape_latex(&step.action),
+            disabled,
+            escape_latex(&inputs),
+            escape_latex(&output),
+        ));
+    }
+    s.push_str("\\end{enumerate}\n");
+    s
+}
+
+pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Context) {
+    if !app.show_construction_protocol {
+        return;
+    }
+    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::right("construction_protocol")
+        .resizable(true)
+        .default_width(300.0)
+        .min_width(200.0)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Protocolo de Construcción")
+                        .color(accent)
+                        .strong()
+                        .size(15.0),
+                );
+            });
+            ui.add_space(2.0);
+            ui.separator();
+
+            // Toolbar: exportar LaTeX + limpiar
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Exportar LaTeX").clicked() {
+                            let latex = construction_log_to_latex(&app.construction_log);
+                            if let Some(path) =
+                                rfd::FileDialog::new().add_filter("TeX", &["tex"]).save_file()
+                            {
+                                if let Err(e) = std::fs::write(&path, latex) {
+                                    app.toasts.push(
+                                        format!("Error LaTeX: {}", e),
+                                        grafito_ui::toast::ToastKind::Error,
+                                        5.0,
+                                    );
+                                } else {
+                                    app.toasts.push(
+                                        "Protocolo exportado a LaTeX".to_string(),
+                                        grafito_ui::toast::ToastKind::Success,
+                                        3.0,
+                                    );
+                                }
+                            }
+                        }
+                        if ui.button("Limpiar").clicked() {
+                            app.construction_log.clear();
+                        }
+                    });
+                });
+            ui.separator();
+
+            // Lista de pasos con botones up/down y habilitar/deshabilitar.
+            let mut move_idx: Option<(usize, i32)> = None;
+            let mut toggle_idx: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height() - 8.0)
+                .show(ui, |ui| {
+                    if app.construction_log.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Sin pasos de construcción.\nCrea objetos o restricciones para verlos aquí.",
+                            )
+                            .size(12.0)
+                            .color(txt_dim),
+                        );
+                    } else {
+                        let total = app.construction_log.len();
+                        for i in 0..total {
+                            let (n, action, inputs, output, disabled) = {
+                                let step = &app.construction_log[i];
+                                (
+                                    step.n,
+                                    step.action.clone(),
+                                    step.inputs.clone(),
+                                    step.output.clone(),
+                                    step.disabled,
+                                )
+                            };
+                            let inputs_str =
+                                if inputs.is_empty() { "—".to_string() } else { inputs.join(", ") };
+                            let output_str =
+                                if output.is_empty() { "—".to_string() } else { output };
+                            let bg = if disabled {
+                                Color32::from_gray(60)
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            egui::Frame::none()
+                                .fill(bg)
+                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("{}", n))
+                                                .color(accent)
+                                                .strong(),
+                                        );
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(&action)
+                                                        .color(txt_col)
+                                                        .strong()
+                                                        .size(12.0),
+                                                );
+                                                if disabled {
+                                                    ui.label(
+                                                        egui::RichText::new("(deshabilitado)")
+                                                            .color(txt_dim)
+                                                            .size(10.0),
+                                                    );
+                                                }
+                                            });
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{} → {}",
+                                                    inputs_str, output_str
+                                                ))
+                                                .size(11.0)
+                                                .color(txt_dim),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let up_enabled = i > 0;
+                                                let down_enabled = i + 1 < total;
+                                                if ui
+                                                    .add_enabled(
+                                                        up_enabled,
+                                                        egui::Button::new("↑"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    move_idx = Some((i, -1));
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        down_enabled,
+                                                        egui::Button::new("↓"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    move_idx = Some((i, 1));
+                                                }
+                                                if ui
+                                                    .button(if disabled { "✓" } else { "✕" })
+                                                    .clicked()
+                                                {
+                                                    toggle_idx = Some(i);
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            ui.add_space(2.0);
+                        }
+                    }
+                });
+
+            // Aplicar reordenar / toggle tras iterar (no se puede mutar
+            // mientras se itera con borrow inmutable).
+            if let Some((i, dir)) = move_idx {
+                let j = (i as i32 + dir).max(0) as usize;
+                if j < app.construction_log.len() {
+                    app.construction_log.swap(i, j);
+                    for (k, step) in app.construction_log.iter_mut().enumerate() {
+                        step.n = k + 1;
+                    }
+                }
+            }
+            if let Some(i) = toggle_idx {
+                if let Some(step) = app.construction_log.get_mut(i) {
+                    step.disabled = !step.disabled;
+                }
+            }
+        });
 }

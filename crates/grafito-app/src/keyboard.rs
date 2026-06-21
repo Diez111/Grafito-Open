@@ -3,7 +3,7 @@
 //! Provides tabbed key pads (numeric, function, alphabetic, 3D shortcuts) and
 //! dispatches typed text to the active input field.
 
-use crate::{commands, GrafitoApp};
+use crate::GrafitoApp;
 use egui::Color32;
 
 pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
@@ -332,12 +332,8 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 if resp.clicked() {
                                     app.save_state();
                                     let input_was = app.input_text.clone();
-                                    let outcome = commands::process_input(
-                                        &mut app.document,
-                                        &mut app.input_text,
-                                    );
                                     let time = ui.ctx().input(|i| i.time);
-                                    app.handle_command_outcome(outcome, time, &input_was);
+                                    app.execute_command_and_record(&input_was, time);
                                 }
                             }
                         });

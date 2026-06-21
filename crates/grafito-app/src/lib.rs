@@ -170,7 +170,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
                 left_panel: LeftPanelContent::Algebra,
-                right_panel: Some(RightPanelContent::Properties),
+                right_panel: Some(RightPanelContent::ConstructionProtocol),
                 visible_tool_groups: &[
                     G::Move,
                     G::Point,

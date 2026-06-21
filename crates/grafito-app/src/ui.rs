@@ -1,7 +1,8 @@
 //! Top-level egui chrome: menu bar, toolbar, icon sidebar, input/status bars,
 //! and the floating color-picker dialog.
 
-use crate::{commands, GrafitoApp, Perspective, ViewMode};
+use crate::app::AutocompleteItem;
+use crate::{GrafitoApp, Perspective, ViewMode};
 use egui::{Align2, Color32};
 use grafito_ui::icons::{draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
@@ -314,9 +315,47 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                             .frame(false)
                             .text_color(txt_col),
                     );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let has_focus = r.has_focus();
+
+                    // Sugerencias de autocompletado (comandos, objetos, variables).
+                    let suggestions = if !app.input_text.is_empty() {
+                        compute_autocomplete_suggestions(&app.input_text, &app.document)
+                    } else {
+                        Vec::new()
+                    };
+                    let show_popup = !suggestions.is_empty() && has_focus;
+                    app.autocomplete.open = show_popup;
+
+                    if show_popup {
+                        if app.autocomplete.selected >= suggestions.len() {
+                            app.autocomplete.selected = 0;
+                        }
+                        let len = suggestions.len();
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                            app.autocomplete.selected = (app.autocomplete.selected + 1) % len;
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                            app.autocomplete.selected = (app.autocomplete.selected + len - 1) % len;
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            app.autocomplete.open = false;
+                            app.autocomplete.selected = 0;
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            if let Some(item) = suggestions.get(app.autocomplete.selected) {
+                                apply_autocomplete_item(&mut app.input_text, item);
+                                app.autocomplete.open = false;
+                                app.autocomplete.selected = 0;
+                                r.request_focus();
+                            }
+                        }
+                    } else if r.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !app.input_text.is_empty()
+                    {
                         should_exec = true;
                     }
+
                     if ui
                         .add_sized(
                             [28.0, 22.0],
@@ -326,16 +365,54 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     {
                         should_exec = true;
                     }
+
+                    // Popup de autocompletado (Area flotante bajo el input bar).
+                    if show_popup {
+                        let popup_pos = egui::pos2(r.rect.min.x, r.rect.max.y);
+                        let selected = app.autocomplete.selected;
+                        let display: Vec<(String, String)> = suggestions
+                            .iter()
+                            .take(8)
+                            .map(|it| (it.text.clone(), it.detail.clone()))
+                            .collect();
+                        let popup_id = ui.id().with("autocomplete_popup");
+                        let mut clicked: Option<usize> = None;
+                        egui::Area::new(popup_id)
+                            .fixed_pos(popup_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    for (i, (text, detail)) in display.iter().enumerate() {
+                                        let is_sel = i == selected;
+                                        let resp = ui.add(egui::SelectableLabel::new(
+                                            is_sel,
+                                            format!("{}  · {}", text, detail),
+                                        ));
+                                        if resp.clicked() {
+                                            clicked = Some(i);
+                                        }
+                                    }
+                                });
+                            });
+                        if let Some(i) = clicked {
+                            if let Some(item) = suggestions.get(i) {
+                                apply_autocomplete_item(&mut app.input_text, item);
+                                app.autocomplete.open = false;
+                                app.autocomplete.selected = 0;
+                                r.request_focus();
+                            }
+                        }
+                    }
                 });
             });
         if should_exec && !app.input_text.is_empty() {
             app.save_state();
-            let mut cmd = app.input_text.clone();
             let input_was = app.input_text.clone();
-            let outcome = commands::process_input(&mut app.document, &mut cmd);
             let time = ctx.input(|i| i.time);
-            app.handle_command_outcome(outcome, time, &input_was);
+            app.execute_command_and_record(&input_was, time);
             app.input_text.clear();
+            app.autocomplete.open = false;
+            app.autocomplete.selected = 0;
         }
     }
 
@@ -462,5 +539,92 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         } else {
             app.active_color_picker = None;
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Autocompletado de la barra de entrada
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Coincidencia difusa por subsecuencia (case-insensitive).
+/// Devuelve `true` si todos los caracteres de `needle` aparecen en `haystack`
+/// en el mismo orden (no necesariamente contiguos).
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let haystack_lower = haystack.to_lowercase();
+    let mut it = haystack_lower.chars();
+    needle
+        .to_lowercase()
+        .chars()
+        .all(|nc| it.any(|hc| hc == nc))
+}
+
+/// Calcula hasta 8 sugerencias de autocompletado para el texto de entrada,
+/// combinando comandos de la paleta, etiquetas de objetos y variables del
+/// documento. Ordena primero las que comienzan con el prefijo escrito.
+fn compute_autocomplete_suggestions(
+    input: &str,
+    document: &grafito_core::Document,
+) -> Vec<AutocompleteItem> {
+    let mut items: Vec<AutocompleteItem> = Vec::new();
+
+    for cmd in grafito_ui::command_palette::all_commands() {
+        if fuzzy_match(input, cmd.name) {
+            items.push(AutocompleteItem {
+                text: cmd.name.to_string(),
+                detail: cmd.category.to_string(),
+                bracket: cmd.syntax_hint.contains('['),
+            });
+        }
+    }
+
+    for (_, obj) in document.objects_iter() {
+        let label = obj.label();
+        if !label.is_empty() && fuzzy_match(input, label) {
+            items.push(AutocompleteItem {
+                text: label.to_string(),
+                detail: obj.name().to_string(),
+                bracket: false,
+            });
+        }
+    }
+
+    for k in document.variables().keys() {
+        if fuzzy_match(input, k) {
+            items.push(AutocompleteItem {
+                text: k.clone(),
+                detail: "variable".to_string(),
+                bracket: false,
+            });
+        }
+    }
+
+    let input_lower = input.to_lowercase();
+    items.sort_by(|a, b| {
+        let ap = a.text.to_lowercase().starts_with(&input_lower);
+        let bp = b.text.to_lowercase().starts_with(&input_lower);
+        bp.cmp(&ap)
+            .then_with(|| a.text.to_lowercase().cmp(&b.text.to_lowercase()))
+    });
+    items.truncate(8);
+    items
+}
+
+/// Reemplaza el token actual (el fragmento que se está escribiendo tras el
+/// último separador) por el item seleccionado. Para comandos bracket, añade
+/// `[` al final para que el usuario complete los argumentos.
+fn apply_autocomplete_item(input: &mut String, item: &AutocompleteItem) {
+    let separators = ['[', '(', ',', ' ', '\t', '='];
+    let token_start = input
+        .rfind(|c: char| separators.contains(&c))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let prefix = &input[..token_start];
+    if item.bracket {
+        *input = format!("{}{}[", prefix, item.text);
+    } else {
+        *input = format!("{}{}", prefix, item.text);
     }
 }

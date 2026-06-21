@@ -42,9 +42,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         app.save_state();
                         let input_was = app.input_text.clone();
-                        let outcome = commands::process_input(&mut app.document, &mut app.input_text);
                         let time = ui.ctx().input(|i| i.time);
-                        app.handle_command_outcome(outcome, time, &input_was);
+                        app.execute_command_and_record(&input_was, time);
                     }
                 });
             });

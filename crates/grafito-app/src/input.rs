@@ -3,7 +3,7 @@
 //! Covers 2D/3D drag, pan, zoom, selection, tool clicks, and the transient
 //! tool-ghost preview that follows the pointer.
 
-use crate::{commands, GrafitoApp, PendingAction};
+use crate::{GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
@@ -77,8 +77,7 @@ impl GrafitoApp {
             }
             Tool::Point => {
                 self.save_state();
-                self.document
-                    .add_object(GeoObject::Point(PointObj::new(world)));
+                self.add_object_logged(GeoObject::Point(PointObj::new(world)), "Point");
                 self.tool_ghost = None;
             }
             Tool::Line => {
@@ -87,8 +86,7 @@ impl GrafitoApp {
                     let a = self.tool_state.pending[0];
                     let b = self.tool_state.pending[1];
                     self.save_state();
-                    self.document
-                        .add_object(GeoObject::Line(LineObj::new(a, b)));
+                    self.add_object_logged(GeoObject::Line(LineObj::new(a, b)), "Line");
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
@@ -100,8 +98,10 @@ impl GrafitoApp {
                     let edge = self.tool_state.pending[1];
                     let radius = center.distance(&edge);
                     self.save_state();
-                    self.document
-                        .add_object(GeoObject::Circle(CircleObj::new(center, radius)));
+                    self.add_object_logged(
+                        GeoObject::Circle(CircleObj::new(center, radius)),
+                        "Circle",
+                    );
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
@@ -110,16 +110,16 @@ impl GrafitoApp {
                 self.tool_state.pending.push(world);
             }
             Tool::Function => {
-                let mut cmd = "y = x^2".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("y = x^2", time);
                 self.current_tool = Tool::Select;
             }
             Tool::Point3D => {
                 let p3 = Point3D::new(world.x, world.y, 0.0);
                 self.save_state();
-                self.document
-                    .add_object(GeoObject::Point3D(grafito_core::Point3DObj::new(p3)));
+                self.add_object_logged(
+                    GeoObject::Point3D(grafito_core::Point3DObj::new(p3)),
+                    "Point3D",
+                );
                 self.tool_ghost = None;
             }
             Tool::Sphere3D => {
@@ -130,10 +130,10 @@ impl GrafitoApp {
                     let edge = self.pending_points_3d[1];
                     let radius = center.distance(&edge);
                     self.save_state();
-                    self.document
-                        .add_object(GeoObject::Sphere3D(grafito_core::Sphere3DObj::new(
-                            center, radius,
-                        )));
+                    self.add_object_logged(
+                        GeoObject::Sphere3D(grafito_core::Sphere3DObj::new(center, radius)),
+                        "Sphere3D",
+                    );
                     self.pending_points_3d.clear();
                     self.tool_ghost = None;
                 }
@@ -146,37 +146,31 @@ impl GrafitoApp {
                     let p2 = self.pending_points_3d[1];
                     let size = p1.distance(&p2);
                     self.save_state();
-                    self.document
-                        .add_object(GeoObject::Cube3D(grafito_core::Cube3DObj::new(p1, size)));
+                    self.add_object_logged(
+                        GeoObject::Cube3D(grafito_core::Cube3DObj::new(p1, size)),
+                        "Cube3D",
+                    );
                     self.pending_points_3d.clear();
                     self.tool_ghost = None;
                 }
             }
             Tool::Attractor => {
-                let mut cmd = "Lorenz[]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("Lorenz[]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::Fractal => {
-                let mut cmd = "Mandelbrot[]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("Mandelbrot[]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::Histogram => {
-                let mut cmd = "Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("Histogram[{1,2,3,4,5,6,4,3,2,5,3,4,3}, 5]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::ScatterPlot => {
-                let mut cmd = "ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("ScatterPlot[{1,2,3,4,5}, {2,3,5,7,11}]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
@@ -185,12 +179,11 @@ impl GrafitoApp {
                 if self.tool_state.pending.len() == 2 {
                     let p1 = self.tool_state.pending[0];
                     let p2 = self.tool_state.pending[1];
-                    let mut cmd = format!(
+                    let cmd = format!(
                         "Tangent[({:.2}, {:.2}), 1, ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
-                    let outcome = commands::process_input(&mut self.document, &mut cmd);
-                    self.handle_command_outcome(outcome, time, &cmd);
+                    self.execute_command_and_record(&cmd, time);
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
@@ -201,35 +194,28 @@ impl GrafitoApp {
                 if self.tool_state.pending.len() == 2 {
                     let p1 = self.tool_state.pending[0];
                     let p2 = self.tool_state.pending[1];
-                    let mut cmd = format!(
+                    let cmd = format!(
                         "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
                         p1.x, p1.y, p2.x, p2.y
                     );
-                    let outcome = commands::process_input(&mut self.document, &mut cmd);
-                    self.handle_command_outcome(outcome, time, &cmd);
+                    self.execute_command_and_record(&cmd, time);
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                     self.current_tool = Tool::Select;
                 }
             }
             Tool::DomainColoring => {
-                let mut cmd = "DomainColoring[z^2 + 1, -3, 3, -3, 3, 200]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("DomainColoring[z^2 + 1, -3, 3, -3, 3, 200]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::HeatMap => {
-                let mut cmd = "HeatMap[x^2 + y^2, -5, 5, -5, 5, 150]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("HeatMap[x^2 + y^2, -5, 5, -5, 5, 150]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
             Tool::ComplexGrid => {
-                let mut cmd = "ComplexGrid[sin(z), -3, 3, -3, 3]".to_string();
-                let outcome = commands::process_input(&mut self.document, &mut cmd);
-                self.handle_command_outcome(outcome, time, &cmd);
+                self.execute_command_and_record("ComplexGrid[sin(z), -3, 3, -3, 3]", time);
                 self.selected_object = None;
                 self.current_tool = Tool::Select;
             }
@@ -257,6 +243,7 @@ impl GrafitoApp {
             | Tool::PolarCurve
             | Tool::ImplicitCurve
             | Tool::VectorField2D => {
+                let tool_name = self.current_tool.name();
                 let mut state = self.tool_state.clone();
                 let result = crate::tool_dispatcher::dispatch_tool(
                     self.current_tool,
@@ -272,10 +259,10 @@ impl GrafitoApp {
                     self.cas_result = msg;
                 }
                 if let Some(outcome) = self.tool_state.last_outcome.take() {
-                    self.handle_command_outcome(outcome, time, self.current_tool.name());
+                    self.handle_command_outcome(outcome, time, tool_name);
                 }
                 for obj in result.objects {
-                    self.document.add_object(obj);
+                    self.add_object_logged(obj, tool_name);
                 }
             }
             Tool::Coincident
@@ -495,7 +482,7 @@ impl GrafitoApp {
                     let mut pencil = PencilObj::new(vec![world]);
                     pencil.color = self.color_favorites[0];
                     pencil.width = 2.0;
-                    let id = self.document.add_object(GeoObject::Pencil(pencil));
+                    let id = self.add_object_logged(GeoObject::Pencil(pencil), "Pencil");
                     self.tool_state.drawing_pencil = Some(id);
                 }
             }
@@ -529,7 +516,7 @@ impl GrafitoApp {
                 let mut pencil = PencilObj::new(vec![world]);
                 pencil.color = self.color_favorites[0];
                 pencil.width = 2.0;
-                let id = self.document.add_object(GeoObject::Pencil(pencil));
+                let id = self.add_object_logged(GeoObject::Pencil(pencil), "Pencil");
                 self.tool_state.drawing_pencil = Some(id);
                 self.is_view_changing = true;
             }
@@ -803,8 +790,7 @@ impl GrafitoApp {
             if self.current_tool == Tool::Polygon && self.tool_state.pending.len() >= 3 {
                 self.save_state();
                 let vertices = self.tool_state.pending.clone();
-                self.document
-                    .add_object(GeoObject::Polygon(PolygonObj::new(vertices)));
+                self.add_object_logged(GeoObject::Polygon(PolygonObj::new(vertices)), "Polygon");
                 self.tool_state.pending.clear();
                 self.tool_ghost = None;
             } else if !self.tool_state.pending.is_empty() {

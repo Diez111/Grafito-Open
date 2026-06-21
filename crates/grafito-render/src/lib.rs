@@ -25,6 +25,7 @@ use grafito_core::{Document, GeoObject};
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use wgpu::util::DeviceExt;
 
+pub mod fill_compute;
 pub mod function_compute;
 pub mod implicit_compute;
 pub mod parametric_compute;
@@ -98,6 +99,7 @@ pub struct Renderer {
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
     pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
     pub vector_compute: Option<crate::vector_compute::VectorComputePipeline>,
+    pub fill_compute: Option<crate::fill_compute::FillComputePipeline>,
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
@@ -253,6 +255,7 @@ impl Renderer {
         let vector_compute = Some(crate::vector_compute::VectorComputePipeline::new(
             device, queue, 128,
         ));
+        let fill_compute = Some(crate::fill_compute::FillComputePipeline::new(device, queue));
 
         Self {
             pipeline,
@@ -264,6 +267,7 @@ impl Renderer {
             function_compute,
             parametric_compute,
             vector_compute,
+            fill_compute,
         }
     }
 

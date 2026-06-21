@@ -196,6 +196,14 @@ pub struct GrafitoApp {
     pub snapshot_version: u64,
     pub style_applied: Option<bool>,
     pub command_palette: grafito_ui::command_palette::CommandPaletteState,
+    /// Protocolo de construcción: historial de pasos que crean objetos o
+    /// restricciones. Se muestra en el panel derecho de la perspectiva
+    /// Geometry2D.
+    pub construction_log: Vec<ConstructionStep>,
+    /// Visibilidad del panel derecho "Protocolo de Construcción".
+    pub show_construction_protocol: bool,
+    /// Estado del popup de autocompletado de la barra de entrada.
+    pub autocomplete: InputAutocomplete,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +213,36 @@ pub struct HoveredAnalysis {
     pub is_snap: bool,
     pub feature: Option<grafito_geometry::analysis::AnalysisFeature>,
     pub snap_kind: Option<crate::snap::SnapKind>,
+}
+
+/// Entrada del protocolo de construcción (estilo GeoGebra Construction Protocol).
+///
+/// Cada vez que se añade un objeto o restricción al documento se registra un
+/// paso con la acción que lo originó, las etiquetas de los objetos de entrada
+/// y la etiqueta del objeto resultante.
+#[derive(Debug, Clone)]
+pub struct ConstructionStep {
+    pub n: usize,
+    pub action: String,
+    pub inputs: Vec<String>,
+    pub output: String,
+    pub disabled: bool,
+    pub timestamp: f64,
+}
+
+/// Estado del autocompletado de la barra de entrada.
+#[derive(Debug, Clone, Default)]
+pub struct InputAutocomplete {
+    pub open: bool,
+    pub selected: usize,
+}
+
+/// Item sugerido por el autocompletado.
+#[derive(Debug, Clone)]
+pub struct AutocompleteItem {
+    pub text: String,
+    pub detail: String,
+    pub bracket: bool,
 }
 
 impl GrafitoApp {
@@ -370,6 +408,9 @@ impl GrafitoApp {
             snapshot_version,
             style_applied: None,
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
+            construction_log: Vec::new(),
+            show_construction_protocol: true,
+            autocomplete: InputAutocomplete::default(),
         }
     }
 
@@ -427,6 +468,100 @@ impl GrafitoApp {
                 );
             }
         }
+    }
+
+    /// Devuelve el conjunto de etiquetas de objetos actualmente en el
+    /// documento. Útil para snapshot+diff al registrar pasos de construcción.
+    pub(crate) fn object_labels_snapshot(&self) -> std::collections::HashSet<String> {
+        self.document
+            .objects_iter()
+            .filter(|(_, o)| !o.label().is_empty())
+            .map(|(_, o)| o.label().to_string())
+            .collect()
+    }
+
+    /// Registra un paso en el protocolo de construcción.
+    pub(crate) fn record_construction_step(
+        &mut self,
+        action: &str,
+        inputs: Vec<String>,
+        output: &str,
+    ) {
+        let n = self.construction_log.len() + 1;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.construction_log.push(ConstructionStep {
+            n,
+            action: action.to_string(),
+            inputs,
+            output: output.to_string(),
+            disabled: false,
+            timestamp,
+        });
+    }
+
+    /// Registra un paso comparando las etiquetas del documento antes y
+    /// después de una operación. Los nuevos objetos son el `output`; las
+    /// etiquetas mencionadas en `action` son los `inputs`.
+    pub(crate) fn record_step_from_diff(
+        &mut self,
+        action: &str,
+        before: &std::collections::HashSet<String>,
+    ) {
+        let after = self.object_labels_snapshot();
+        let new_labels: Vec<String> = after.difference(before).cloned().collect();
+        if new_labels.is_empty() {
+            return;
+        }
+        let output = new_labels.join(", ");
+        let inputs: Vec<String> = before
+            .iter()
+            .filter(|l| action.contains(l.as_str()))
+            .cloned()
+            .collect();
+        self.record_construction_step(action, inputs, &output);
+    }
+
+    /// Añade un objeto al documento y registra el paso correspondiente en el
+    /// protocolo de construcción.
+    pub(crate) fn add_object_logged(&mut self, obj: GeoObject, action: &str) -> ObjectId {
+        let id = self.document.add_object(obj);
+        let output = self
+            .document
+            .get_object(id)
+            .map(|o| o.label().to_string())
+            .unwrap_or_default();
+        self.record_construction_step(action, Vec::new(), &output);
+        id
+    }
+
+    /// Ejecuta un comando de texto, gestiona su `CommandOutcome` y registra
+    /// el paso de construcción resultante (snapshot+diff de etiquetas).
+    pub(crate) fn execute_command_and_record(&mut self, cmd: &str, time: f64) {
+        let before = self.object_labels_snapshot();
+        let mut buf = cmd.to_string();
+        let outcome = crate::commands::process_input(&mut self.document, &mut buf);
+        self.handle_command_outcome(outcome, time, cmd);
+        self.record_step_from_diff(cmd, &before);
+    }
+
+    /// Etiqueta de un objeto por id (cadena vacía si no existe).
+    pub(crate) fn label_of(&self, id: ObjectId) -> String {
+        self.document
+            .get_object(id)
+            .map(|o| o.label().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Etiquetas de objetos añadidas al documento desde el snapshot `before`.
+    pub(crate) fn new_labels_since(
+        &self,
+        before: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        let after = self.object_labels_snapshot();
+        after.difference(before).cloned().collect()
     }
 
     /// Ejecuta la acción elegida desde la paleta de comandos (Ctrl+K).
@@ -711,6 +846,12 @@ impl GrafitoApp {
                 | Some(crate::RightPanelContent::Data)
                 | Some(crate::RightPanelContent::Regression)
         );
+        // Panel derecho: Protocolo de Construcción se muestra sólo cuando la
+        // perspectiva lo solicita explícitamente.
+        self.show_construction_protocol = matches!(
+            layout.right_panel,
+            Some(crate::RightPanelContent::ConstructionProtocol)
+        );
         // Cargar ejemplos si el documento está vacío.
         if self.document.object_count() == 0 {
             self.load_perspective_examples(p);
@@ -921,6 +1062,7 @@ impl GrafitoApp {
     pub(crate) fn handle_pending_object_click(&mut self, id: ObjectId, time: f64) {
         use std::mem;
         let action = mem::take(&mut self.pending_action);
+        let before = self.object_labels_snapshot();
         match action {
             PendingAction::None => {
                 self.pending_action = PendingAction::None;
@@ -940,6 +1082,11 @@ impl GrafitoApp {
                         let target = p1.distance(&p2);
                         self.document.add_distance_constraint(first, id, target);
                         self.re_evaluate_constraints(&[]);
+                        self.record_construction_step(
+                            "Distance",
+                            vec![self.label_of(first), self.label_of(id)],
+                            "",
+                        );
                     }
                 } else {
                     self.pending_action = PendingAction::Distance { first: Some(id) };
@@ -956,6 +1103,11 @@ impl GrafitoApp {
                         self.save_state();
                         self.document.add_angle_constraint(first, id, target);
                         self.re_evaluate_constraints(&[]);
+                        self.record_construction_step(
+                            "Angle",
+                            vec![self.label_of(first), self.label_of(id)],
+                            "",
+                        );
                     }
                 } else {
                     self.pending_action = PendingAction::Angle { first: Some(id) };
@@ -976,6 +1128,11 @@ impl GrafitoApp {
                     self.save_state();
                     self.document.add_tangent_constraint(first, id);
                     self.re_evaluate_constraints(&[]);
+                    self.record_construction_step(
+                        "Tangent",
+                        vec![self.label_of(first), self.label_of(id)],
+                        "",
+                    );
                 } else {
                     self.pending_action = PendingAction::Tangent { first: Some(id) };
                     return;
@@ -990,6 +1147,11 @@ impl GrafitoApp {
                     self.save_state();
                     self.document.add_coincident_constraint(first, id);
                     self.re_evaluate_constraints(&[]);
+                    self.record_construction_step(
+                        "Coincident",
+                        vec![self.label_of(first), self.label_of(id)],
+                        "",
+                    );
                 } else {
                     self.pending_action = PendingAction::Coincident { first: Some(id) };
                     return;
@@ -1003,6 +1165,7 @@ impl GrafitoApp {
                 self.save_state();
                 self.document.add_horizontal_constraint(id);
                 self.re_evaluate_constraints(&[]);
+                self.record_construction_step("Horizontal", vec![self.label_of(id)], "");
             }
             PendingAction::Vertical { line: _ } => {
                 if !self.is_line(id) {
@@ -1012,6 +1175,7 @@ impl GrafitoApp {
                 self.save_state();
                 self.document.add_vertical_constraint(id);
                 self.re_evaluate_constraints(&[]);
+                self.record_construction_step("Vertical", vec![self.label_of(id)], "");
             }
             PendingAction::EqualLength { first } => {
                 if !self.is_line(id) {
@@ -1022,6 +1186,11 @@ impl GrafitoApp {
                     self.save_state();
                     self.document.add_equal_length_constraint(first, id);
                     self.re_evaluate_constraints(&[]);
+                    self.record_construction_step(
+                        "EqualLength",
+                        vec![self.label_of(first), self.label_of(id)],
+                        "",
+                    );
                 } else {
                     self.pending_action = PendingAction::EqualLength { first: Some(id) };
                     return;
@@ -1065,6 +1234,11 @@ impl GrafitoApp {
                     self.save_state();
                     self.document.add_symmetry_constraint(p, m, id);
                     self.re_evaluate_constraints(&[]);
+                    self.record_construction_step(
+                        "Symmetry",
+                        vec![self.label_of(p), self.label_of(m), self.label_of(id)],
+                        "",
+                    );
                 } else {
                     // Estado inconsistente: devolver la acción para reintentar
                     self.pending_action = PendingAction::Symmetry {
@@ -1093,6 +1267,9 @@ impl GrafitoApp {
                         .add_ellipse_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
                     let order = self.document.propagation_order(&inputs);
                     self.re_evaluate_constraints(&order);
+                    let labels: Vec<String> = inputs.iter().map(|&i| self.label_of(i)).collect();
+                    let output = self.new_labels_since(&before).join(", ");
+                    self.record_construction_step("EllipseByFoci", labels, &output);
                 }
             }
             PendingAction::ParabolaByFocusDirectrix { focus, directrix } => {
@@ -1120,6 +1297,9 @@ impl GrafitoApp {
                         .add_parabola_by_focus_directrix_constraint(inputs[0], inputs[1]);
                     let order = self.document.propagation_order(&inputs);
                     self.re_evaluate_constraints(&order);
+                    let labels: Vec<String> = inputs.iter().map(|&i| self.label_of(i)).collect();
+                    let output = self.new_labels_since(&before).join(", ");
+                    self.record_construction_step("ParabolaByFocusDirectrix", labels, &output);
                 }
             }
             PendingAction::HyperbolaByFoci { f1, f2 } => {
@@ -1140,6 +1320,9 @@ impl GrafitoApp {
                         .add_hyperbola_by_foci_constraint(inputs[0], inputs[1], inputs[2]);
                     let order = self.document.propagation_order(&inputs);
                     self.re_evaluate_constraints(&order);
+                    let labels: Vec<String> = inputs.iter().map(|&i| self.label_of(i)).collect();
+                    let output = self.new_labels_since(&before).join(", ");
+                    self.record_construction_step("HyperbolaByFoci", labels, &output);
                 }
             }
             PendingAction::ConicByFivePoints { mut points } => {
@@ -1157,6 +1340,9 @@ impl GrafitoApp {
                 let order = self.document.propagation_order(&points);
                 self.re_evaluate_constraints(&order);
                 let _ = cons;
+                let labels: Vec<String> = points.iter().map(|&i| self.label_of(i)).collect();
+                let output = self.new_labels_since(&before).join(", ");
+                self.record_construction_step("ConicByFivePoints", labels, &output);
             }
             PendingAction::BooleanUnion { .. }
             | PendingAction::BooleanIntersection { .. }
@@ -1184,10 +1370,9 @@ impl GrafitoApp {
                         .map(|o| o.label().to_string())
                         .unwrap_or_default();
                     let cmd_name = action.boolean_cmd_name().unwrap_or("PolygonUnion");
-                    let mut cmd = format!("{}[{}, {}]", cmd_name, first_label, second_label);
+                    let cmd = format!("{}[{}, {}]", cmd_name, first_label, second_label);
                     self.save_state();
-                    let outcome = crate::commands::process_input(&mut self.document, &mut cmd);
-                    self.handle_command_outcome(outcome, time, &cmd);
+                    self.execute_command_and_record(&cmd, time);
                 } else {
                     self.pending_action = action.with_boolean_first(id);
                     return;
@@ -1479,6 +1664,9 @@ impl eframe::App for GrafitoApp {
             if self.show_spreadsheet {
                 crate::panels::draw_right_spreadsheet(self, ctx);
             }
+
+            // Panel derecho: Protocolo de Construcción (perspectiva Geometry2D).
+            crate::panels::draw_construction_protocol(self, ctx);
         }
 
         // Central canvas: 2D or 3D view.
