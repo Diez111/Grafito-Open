@@ -1434,11 +1434,15 @@ impl eframe::App for GrafitoApp {
             configure_modern_style(ctx);
             self.style_applied = Some(self.dark_mode);
         }
-        if self.is_view_changing
-            && self.last_interaction_time.elapsed() > Duration::from_millis(150)
-        {
-            self.is_view_changing = false;
-            self.document.render_quality = RenderQuality::High;
+        if self.is_view_changing {
+            if self.last_interaction_time.elapsed() > Duration::from_millis(150) {
+                self.is_view_changing = false;
+                self.document.render_quality = RenderQuality::High;
+            } else {
+                // Seguir repintando hasta que se cumpla el plazo de hysteresis
+                // para que la promoción a High dispare aunque no haya más input.
+                ctx.request_repaint();
+            }
         }
 
         let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;

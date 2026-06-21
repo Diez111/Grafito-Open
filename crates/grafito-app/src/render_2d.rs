@@ -48,6 +48,42 @@ pub struct FillTextureCache {
     pub cached_region: (f64, f64, f64, f64),
 }
 
+/// Calcula la cache key del fill de una curva implícita.
+///
+/// La key depende de (expr_lhs, expr_rhs, operator, padded_bounds,
+/// canvas_w, canvas_h, variables, fill_color). Dos llamadas con la misma
+/// key indican que el caché puede reusarse sin recalcular la rasterización.
+pub fn compute_fill_cache_key(
+    ic: &ImplicitCurveObj,
+    padded_bounds: (f64, f64, f64, f64),
+    canvas_size: (u32, u32),
+    variables: &std::collections::HashMap<String, f64>,
+    fill_color: Color,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    ic.expr_lhs.hash(&mut hasher);
+    ic.expr_rhs.hash(&mut hasher);
+    std::mem::discriminant(&ic.operator).hash(&mut hasher);
+    padded_bounds.0.to_bits().hash(&mut hasher);
+    padded_bounds.1.to_bits().hash(&mut hasher);
+    padded_bounds.2.to_bits().hash(&mut hasher);
+    padded_bounds.3.to_bits().hash(&mut hasher);
+    canvas_size.0.hash(&mut hasher);
+    canvas_size.1.hash(&mut hasher);
+    for (k, v) in variables {
+        k.hash(&mut hasher);
+        v.to_bits().hash(&mut hasher);
+    }
+    fill_color.r.to_bits().hash(&mut hasher);
+    fill_color.g.to_bits().hash(&mut hasher);
+    fill_color.b.to_bits().hash(&mut hasher);
+    fill_color.a.to_bits().hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct StyleOverride {
     pub color: Option<Color>,
@@ -966,9 +1002,6 @@ impl GrafitoApp {
         ic: &ImplicitCurveObj,
         fill_color: Color,
     ) {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj para evitar
         //    reparsear y re-simplificar el AST en cada frame.
         let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
@@ -1009,27 +1042,13 @@ impl GrafitoApp {
 
         // 5) Calcular hash de la cache key: (expr_lhs, expr_rhs, operator,
         //    padded_bounds, canvas_w, canvas_h, variables, fill_color).
-        let cache_key = {
-            let mut hasher = DefaultHasher::new();
-            ic.expr_lhs.hash(&mut hasher);
-            ic.expr_rhs.hash(&mut hasher);
-            std::mem::discriminant(&ic.operator).hash(&mut hasher);
-            padded_bounds.0.to_bits().hash(&mut hasher);
-            padded_bounds.1.to_bits().hash(&mut hasher);
-            padded_bounds.2.to_bits().hash(&mut hasher);
-            padded_bounds.3.to_bits().hash(&mut hasher);
-            w.hash(&mut hasher);
-            h.hash(&mut hasher);
-            for (k, v) in &self.document.variables {
-                k.hash(&mut hasher);
-                v.to_bits().hash(&mut hasher);
-            }
-            fill_color.r.to_bits().hash(&mut hasher);
-            fill_color.g.to_bits().hash(&mut hasher);
-            fill_color.b.to_bits().hash(&mut hasher);
-            fill_color.a.to_bits().hash(&mut hasher);
-            hasher.finish()
-        };
+        let cache_key = compute_fill_cache_key(
+            ic,
+            padded_bounds,
+            (w, h),
+            &self.document.variables,
+            fill_color,
+        );
 
         // 6) Verificar caché: si la key coincide y los view_bounds están
         //    dentro de la región cacheada, blitear la textura y retornar.
