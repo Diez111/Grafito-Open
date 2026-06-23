@@ -202,8 +202,16 @@ pub struct GrafitoApp {
     pub construction_log: Vec<ConstructionStep>,
     /// Visibilidad del panel derecho "Protocolo de Construcción".
     pub show_construction_protocol: bool,
+    /// Datos numéricos para el panel de Estadística (ingresados por el usuario).
+    pub statistics_data: Vec<f64>,
+    /// Buffer de texto crudo para el `TextEdit` del panel de Estadística.
+    /// Se parsea a `statistics_data` sólo al perder foco, para no destruir
+    /// la entrada del usuario frame a frame.
+    pub statistics_input_buf: String,
     /// Estado del popup de autocompletado de la barra de entrada.
     pub autocomplete: InputAutocomplete,
+    /// Visibilidad de la ventana modal "Acerca de Grafito".
+    pub show_about: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -410,7 +418,10 @@ impl GrafitoApp {
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
             construction_log: Vec::new(),
             show_construction_protocol: true,
+            statistics_data: Vec::new(),
+            statistics_input_buf: String::new(),
             autocomplete: InputAutocomplete::default(),
+            show_about: false,
         }
     }
 
@@ -545,6 +556,22 @@ impl GrafitoApp {
         let outcome = crate::commands::process_input(&mut self.document, &mut buf);
         self.handle_command_outcome(outcome, time, cmd);
         self.record_step_from_diff(cmd, &before);
+    }
+
+    /// Ejecuta el contenido actual de la barra de entrada compartida y limpia
+    /// todo el estado transitorio asociado al preview/autocompletado.
+    pub(crate) fn submit_input_text(&mut self, time: f64) {
+        if self.input_text.trim().is_empty() {
+            return;
+        }
+
+        self.save_state();
+        let input_was = self.input_text.clone();
+        self.execute_command_and_record(&input_was, time);
+        self.input_text.clear();
+        self.preview_object = None;
+        self.autocomplete.open = false;
+        self.autocomplete.selected = 0;
     }
 
     /// Etiqueta de un objeto por id (cadena vacía si no existe).
@@ -817,20 +844,29 @@ impl GrafitoApp {
         }
     }
 
-    /// Cambia la perspectiva activa, sincroniza `current_view` y la herramienta
-    /// por defecto, y carga objetos de ejemplo si el documento está vacío.
+    /// Cambia la perspectiva activa, sincroniza `current_view`, la herramienta
+    /// por defecto, los paneles y carga ejemplos. Siempre limpia el estado
+    /// transitorio (selección, preview, color picker) para evitar residuos de
+    /// la perspectiva anterior.
     pub(crate) fn set_perspective(&mut self, p: Perspective) {
         if self.perspective == p {
             return;
         }
+        // Reset de estado transitorio: la perspectiva anterior puede tener
+        // objetos seleccionados que no existen o no se renderizan en la nueva.
+        self.selected_object = None;
+        self.preview_object = None;
+        self.active_color_picker = None;
+        self.tool_ghost = None;
+        self.canvas_drag_start = None;
+        self.canvas_is_panning = false;
+
         self.perspective = p;
         let layout = p.layout();
         let target_view = p.view_mode();
-        let view_changed = self.current_view != target_view;
         self.current_view = target_view;
         self.current_tool = layout.default_tool;
         self.previous_tool = layout.default_tool;
-        self.tool_ghost = None;
         self.reset_tool_input();
         self.clear_pending_action();
         // Visibilidad del teclado matemático según la perspectiva.
@@ -852,13 +888,19 @@ impl GrafitoApp {
             layout.right_panel,
             Some(crate::RightPanelContent::ConstructionProtocol)
         );
-        // Cargar ejemplos si el documento está vacío.
-        if self.document.object_count() == 0 {
-            self.load_perspective_examples(p);
-        }
-        if view_changed {
-            self.document.bump_version();
-        }
+        // Exam mode: la perspectiva Examen es la única que fuerza exam_mode=true,
+        // las demás lo apagan (a menos que el usuario lo haya activado desde el
+        // menú Vista — en ese caso se respeta el flag manual via set_exam_mode
+        // externo). Aquí sólo sincronizamos el default de la perspective.
+        self.exam_mode = matches!(p, Perspective::Exam);
+        // Cargar ejemplos SIEMPRE al cambiar de perspectiva. El usuario puede
+        // deshacer con Ctrl+Z si quería mantener su trabajo. Esto hace que el
+        // switch sea visualmente obvio (la queja "no veo que cambie nada").
+        self.save_state();
+        self.document.clear();
+        self.load_perspective_examples(p);
+        // Siempre bump_version para invalidar caches GPU.
+        self.document.bump_version();
     }
 
     /// Carga objetos de ejemplo apropiados para la perspectiva dada.
@@ -916,18 +958,24 @@ impl GrafitoApp {
                 run(self, "Normal[0, 1]");
             }
             Perspective::Statistics => {
-                run(self, "Scatter[(1,2),(2,3),(3,5),(4,4),(5,6)]");
+                run(self, "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]");
+                self.statistics_data = vec![2.0, 3.0, 5.0, 4.0, 6.0];
+                self.statistics_input_buf = "2, 3, 5, 4, 6".to_string();
             }
             Perspective::Complex => {
                 // ComplexMapping[1/z, I] requiere un target etiquetado "I".
-                run(self, "x^2 + y^2 = 1");
+                // Usamos "<" (Less) en vez de "=" para que el fill del interior
+                // se renderice — el renderer fill excluye RelationOperator::Eq.
+                run(self, "x^2 + y^2 < 1");
                 run(self, "ComplexMapping[1/z, I]");
             }
             Perspective::Dynamics => {
                 run(self, "Lorenz[]");
             }
             Perspective::DataAnalysis => {
-                run(self, "Scatter[(1,2),(2,3),(3,5),(4,4),(5,6)]");
+                run(self, "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]");
+                self.statistics_data = vec![2.0, 3.0, 5.0, 4.0, 6.0];
+                self.statistics_input_buf = "2, 3, 5, 4, 6".to_string();
             }
             Perspective::Exam => {
                 // Modo examen: documento vacío intencionalmente.
@@ -1468,14 +1516,16 @@ impl eframe::App for GrafitoApp {
         }
 
         for (name, new_val, new_speed) in changes {
-            self.document.variables.insert(name.clone(), new_val);
+            // set_variable se encarga de recompute_bound_parameters() y bump_version()
+            // para que los objetos enlazados a la variable se actualicen en cada frame.
+            self.document.set_variable(name.clone(), new_val);
             if let Some(meta) = self.document.variable_meta.get_mut(&name) {
                 meta.animation_speed = new_speed;
             }
         }
 
         if any_animating {
-            self.document.bump_version();
+            // Ya hicimos bump_version() via set_variable; sólo pedimos repaint.
             ctx.request_repaint();
         }
 
@@ -1650,10 +1700,30 @@ impl eframe::App for GrafitoApp {
             crate::ui::draw_top_bar(self, ctx);
             self.sync_pending_action_with_tool();
             match self.sidebar_tab {
-                0 => crate::algebra::draw_algebra_panel(self, ctx),
-                1 => crate::tools_panel::draw_tools_panel(self, ctx),
+                0 => {
+                    // Álgebra por defecto, Complejos si la perspectiva es Complex.
+                    match self.perspective {
+                        Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
+                        _ => crate::algebra::draw_algebra_panel(self, ctx),
+                    }
+                }
+                1 => {
+                    // Herram. por defecto, Attractores si la perspectiva es Dynamics.
+                    match self.perspective {
+                        Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
+                        _ => crate::tools_panel::draw_tools_panel(self, ctx),
+                    }
+                }
                 2 => crate::panels::draw_cas_panel(self, ctx),
-                3 => crate::panels::draw_table_panel(self, ctx),
+                3 => {
+                    // Tabla por defecto, Estadística si la perspectiva es Stats/Probability.
+                    match self.perspective {
+                        Perspective::Probability | Perspective::Statistics => {
+                            crate::panels::draw_statistics_panel(self, ctx)
+                        }
+                        _ => crate::panels::draw_table_panel(self, ctx),
+                    }
+                }
                 4 => crate::panels::draw_spreadsheet_panel(self, ctx),
                 5 => crate::panels::draw_view_panel(self, ctx),
                 _ => crate::panels::draw_empty_panel(self, ctx),
@@ -1665,12 +1735,32 @@ impl eframe::App for GrafitoApp {
                 crate::keyboard::draw_math_keyboard(self, ctx);
             }
 
-            if self.show_spreadsheet {
-                crate::panels::draw_right_spreadsheet(self, ctx);
+            // Panel derecho: dispatch por layout.right_panel en lugar de flags
+            // booleanos separados. Sincroniza exactamente con la perspectiva.
+            use crate::RightPanelContent;
+            match self.perspective.layout().right_panel {
+                None => {} // sin panel derecho
+                Some(RightPanelContent::ConstructionProtocol) => {
+                    crate::panels::draw_construction_protocol(self, ctx);
+                }
+                Some(RightPanelContent::Spreadsheet)
+                | Some(RightPanelContent::Data)
+                | Some(RightPanelContent::Regression) => {
+                    crate::panels::draw_right_spreadsheet(self, ctx);
+                }
+                Some(RightPanelContent::Properties) => {
+                    crate::panels::draw_right_properties_panel(self, ctx);
+                }
+                Some(RightPanelContent::Table) => {
+                    crate::panels::draw_right_table_panel(self, ctx);
+                }
+                Some(RightPanelContent::DomainColoring) => {
+                    crate::panels::draw_right_domain_coloring_panel(self, ctx);
+                }
+                Some(RightPanelContent::Parameters) => {
+                    crate::panels::draw_right_parameters_panel(self, ctx);
+                }
             }
-
-            // Panel derecho: Protocolo de Construcción (perspectiva Geometry2D).
-            crate::panels::draw_construction_protocol(self, ctx);
         }
 
         // Central canvas: 2D or 3D view.
@@ -1753,6 +1843,7 @@ impl eframe::App for GrafitoApp {
                             painter.set_clip_rect(canvas_rect);
                             self.draw_grid(&painter, canvas_rect);
                             self.draw_axes(&painter, canvas_rect);
+                            self.draw_implicit_curve_fills(&painter, canvas_rect);
 
                             let callback = egui_wgpu::Callback::new_paint_callback(
                                 canvas_rect,
@@ -1965,7 +2056,189 @@ impl eframe::App for GrafitoApp {
                 let time = ui.ctx().input(|i| i.time);
                 self.toasts.draw(ui, time);
             });
+
+        // Modal "Acerca de Grafito": muestra versión y resumen de los cambios
+        // de la release 1.1.4 en español. Se abre desde Ayuda → Acerca de.
+        if self.show_about {
+            self.draw_about_window(ctx);
+        }
     }
+}
+
+impl GrafitoApp {
+    /// Dibuja la ventana modal "Acerca de Grafito": versión, licencia, autor y
+    /// un resumen en español de los cambios principales de la release actual.
+    fn draw_about_window(&mut self, ctx: &egui::Context) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Acerca de Grafito")
+            .id(egui::Id::new("about_window"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.toolbar_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+            )
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Grafito")
+                            .size(28.0)
+                            .strong()
+                            .color(theme.accent),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION")))
+                            .size(13.0)
+                            .color(theme.text_secondary),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Geometría interactiva · Álgebra · Cálculo · CAS")
+                            .size(12.0)
+                            .color(theme.text_tertiary),
+                    );
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new("¿Qué es Grafito?")
+                                .size(14.0)
+                                .strong()
+                                .color(theme.text_primary),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Grafito es una calculadora gráfica matemática \
+                                 moderna y de alto rendimiento escrita en Rust. \
+                                 Permite graficar funciones en 2D y 3D, curvas \
+                                 paramétricas e implícitas, resolver EDOs y \
+                                 sistemas, hacer análisis simbólico (raíces, \
+                                 extremos, integrales, tangentes, curvatura) y \
+                                 trabajar con mapeos complejos, estadística, \
+                                 probabilidad y mucho más.",
+                            )
+                            .size(12.0)
+                            .color(theme.text_primary),
+                        );
+
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("Cambios principales de esta versión")
+                                .size(14.0)
+                                .strong()
+                                .color(theme.text_primary),
+                        );
+                        ui.add_space(4.0);
+
+                        let cambios = build_about_changelog();
+                        for linea in cambios {
+                            ui.label(
+                                egui::RichText::new(format!("• {}", linea))
+                                    .size(12.0)
+                                    .color(theme.text_primary),
+                            );
+                        }
+
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("Información")
+                                .size(14.0)
+                                .strong()
+                                .color(theme.text_primary),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Licencia: GPL-3.0-or-later. Código abierto. \
+                                 Hecho con Rust + egui + wgpu.",
+                            )
+                            .size(12.0)
+                            .color(theme.text_secondary),
+                        );
+                    });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new("Cerrar").size(13.0))
+                                .min_size(egui::vec2(96.0, 28.0)),
+                        )
+                        .clicked()
+                    {
+                        self.show_about = false;
+                    }
+                });
+            });
+    }
+}
+
+/// Resumen en español de los cambios de la release 1.1.4 para la ventana
+/// "Acerca de Grafito". Se mantiene en un helper para que sea fácil de
+/// actualizar cuando se libera una nueva versión.
+fn build_about_changelog() -> &'static [&'static str] {
+    &[
+        "Mapeos conformes algebraicos de primera clase (1/z, z^n, exp, log, sin, cos, Joukowski, Möbius, etc.).",
+        "13 nuevos mapeos algebraicos con detección automática desde la expresión.",
+        "Operadores de relación (Lt, Gt, Le, Ge, Eq, Ne) en el AST con precedencia y render.",
+        "Módulo conformal/ separado: complex_expr, algebraic_mappings, domain_coloring.",
+        "Suite de 70+ iconos vectoriales estilo macOS/iOS, idénticos en Windows, macOS y Linux.",
+        "Design tokens semánticos (Theme): escalas tipográficas, spacing y radios.",
+        "Splash screen al inicio con logo, nombre y versión.",
+        "Empty state y hover overlay en el panel de Álgebra.",
+        "Render de ComplexMapping con fórmula cerrada para expresiones reconocidas.",
+        "Filtro de segmentos degenerados en marching squares (sin relleno espurio).",
+        "Sidebar con iconos vectoriales coherentes con la toolbar.",
+        "Corrección de lexer: 1/z, log(z), z^2 ya no se confunden con multiplicación implícita.",
+        "Fill de ImplicitCurve con scanline real y stride adaptativo, sin pixelado ni lag.",
+        "AST cacheado en ImplicitCurveObj: 60+ FPS con expresiones complejas.",
+        "Cache del AST separa lhs y rhs correctamente.",
+        "Soporte para superscripts Unicode (x², y², z², t², θ², φ², x³, y³, z³) sin panics UTF-8.",
+        "Operadores <, >, <=, >= grafican correctamente (fill, contorno, exterior).",
+        "Paleta unificada: paneles, algebra, tools y keyboard usan el mismo Theme.",
+        "Validación de BesselJ/Y/I (orden saturado, NaN→0) y Sec/Csc/Cot en singularidad.",
+        "Color clamping RGBA a [0, 255] en to_color32, algebra, SVG y ghost rendering.",
+        "Reemplazo de unwrap() críticos por ?/ok_or en algebra, app, snap, dispatcher y commands.",
+        "Hit-test devuelve el objeto más cercano en solapamientos.",
+        "Restricciones numéricas con Jacobiano finito en configuraciones degeneradas.",
+        "ODE valida steps=0 y dimensiones inconsistentes sin panic.",
+        "Geometría robusta: safe_sample, cardioid, epicycloid, compute_fractal sin división por cero.",
+        "Estadística ignora NaN/Inf en histogramas.",
+        "Script aborta con error claro en recursión profunda; expand_all_cas limita a 50 iteraciones.",
+        "Plot/Integral usan replace_variable de límite de palabra (exp(t) no se rompe).",
+        "Toasts para errores de save_state/load_state.",
+        "Sistema de 10 perspectivas GeoGebra (Geometría, Álgebra, Cálculo, Estadística, Complejos, Dinámica, Datos, Examen).",
+        "Tool ghost universal con marcas de eje rojas/azules para interceptos.",
+        "Herramientas de medición: Area, Circumference, Center, Length, Slope.",
+        "Construcciones geométricas: Sector, Arc, Polygon booleans.",
+        "Cálculo diferencial/integral: TangentAt, NormalAt, ArcLength, CurvatureAt, VolumeOfRevolution, SurfaceOfRevolution.",
+        "Snap a intersecciones (Línea-Línea, Línea-Círculo, Círculo-Círculo, Función-Línea).",
+        "Reorganización de la toolbar en 12 grupos lógicos con iconos vectoriales.",
+        "Protocolo de Construcción estilo GeoGebra (reordenar, deshabilitar, exportar LaTeX).",
+        "Command Palette (Ctrl+K) con búsqueda fuzzy y export SVG/PNG/TikZ.",
+        "GPU compute shader para fill de regiones implícitas (máscara RGBA8).",
+        "Cómputo GPU unificado: function, implicit, parametric, vector, fill.",
+        "WGSL bytecode interpreter de 50 opcodes con protección de pila.",
+        "Caché de relleno de curva implícita estable al hacer pan/zoom.",
+        "Fase E: dead code removal (algebra_view, properties_panel, keyboard.rs antiguo).",
+        "Hysteresis de calidad de render: Preview durante pan/zoom, High tras 150ms idle.",
+        "9 tests nuevos para la cache de relleno.",
+        "Export a PNG, PDF y LaTeX desde el menú y la paleta de comandos.",
+    ]
 }
 
 /// Run the native Grafito desktop application.
@@ -1977,7 +2250,10 @@ pub fn run_app() -> Result<(), eframe::Error> {
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Grafito v1.0.0-beta");
+                println!("Grafito v{}", env!("CARGO_PKG_VERSION"));
+                println!("Calculadora gráfica matemática interactiva");
+                println!("(Geometría, Álgebra, Cálculo, CAS, Estadística, Complejos)");
+                println!();
                 println!("Usage: grafito [OPTIONS]");
                 println!("Options:");
                 println!("  -h, --help       Print help information");

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use grafito_app::render_2d::compute_fill_cache_key;
+use grafito_app::render_2d::{compute_fill_cache_key, fill_cache_texture_size};
 use grafito_core::implicit_curve::padded_snapped_bounds;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
 use grafito_geometry::Color;
@@ -210,4 +210,24 @@ fn fill_cache_region_containment_check() {
         !(vx >= rx_min && vy >= ry_min),
         "Un pan grande debe fallar el check de contención de región"
     );
+}
+
+#[test]
+fn fill_cache_texture_size_covers_padded_region_at_view_density() {
+    let view_bounds = (-5.0, 5.0, -4.0, 4.0);
+    let cached_region = (-10.0, 10.0, -8.0, 8.0);
+
+    let size = fill_cache_texture_size(view_bounds, cached_region, (800, 600));
+
+    assert_eq!(size, (1600, 1200));
+}
+
+#[test]
+fn fill_cache_texture_size_is_capped_for_extreme_padding() {
+    let view_bounds = (-1.0, 1.0, -1.0, 1.0);
+    let cached_region = (-1000.0, 1000.0, -1000.0, 1000.0);
+
+    let size = fill_cache_texture_size(view_bounds, cached_region, (800, 600));
+
+    assert_eq!(size, (4096, 4096));
 }

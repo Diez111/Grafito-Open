@@ -113,7 +113,7 @@ impl Perspective {
             Perspective::Probability => "P",
             Perspective::Statistics => "S",
             Perspective::Complex => "i",
-            Perspective::Dynamics => "@dynamic",
+            Perspective::Dynamics => "Dn",
             Perspective::DataAnalysis => "D",
             Perspective::Exam => "E",
         }
@@ -324,16 +324,20 @@ pub enum LeftPanelContent {
 }
 
 impl LeftPanelContent {
-    /// Mapea el contenido declarado al índice del tab del sidebar existente:
-    /// 0=Álgebra, 1=Herram., 2=CAS, 3=Tabla, 4=Hoja, 5=Vista.
+    /// Mapea el contenido declarado al índice del tab del sidebar (6 tabs
+    /// armonizados: 0=Álgebra, 1=Herram., 2=CAS, 3=Tabla, 4=Hoja, 5=Vista).
+    /// El tab activo elige el drawer genérico; la perspectiva activa decide
+    /// si el drawer muestra contenido específico (Stats en Tabla, Complejos
+    /// en Álgebra, Atractores en Herram.).
     pub const fn default_sidebar_tab(self) -> usize {
         match self {
-            LeftPanelContent::Algebra | LeftPanelContent::AlgebraAndCas => 0,
+            LeftPanelContent::Algebra
+            | LeftPanelContent::AlgebraAndCas
+            | LeftPanelContent::Complex => 0,
             LeftPanelContent::Tools | LeftPanelContent::Attractor => 1,
             LeftPanelContent::Cas => 2,
             LeftPanelContent::Stats => 3,
             LeftPanelContent::Spreadsheet => 4,
-            LeftPanelContent::Complex => 0,
         }
     }
 }

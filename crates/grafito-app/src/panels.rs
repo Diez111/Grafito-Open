@@ -1,8 +1,8 @@
 //! Removable side panels: CAS, view settings, spreadsheet, and value table.
 
-use crate::{commands, GrafitoApp, ViewMode};
+use crate::{commands, GrafitoApp};
 use egui::Color32;
-use grafito_core::{GeoObject, PointObj};
+use grafito_core::{GeoObject, ObjectId, PointObj};
 use grafito_geometry::Point2;
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 
@@ -26,6 +26,43 @@ fn panel_theme_local(
         t.text_tertiary,
         t.text_secondary,
     )
+}
+
+fn draw_object_cards_where(
+    ui: &mut egui::Ui,
+    app: &mut GrafitoApp,
+    title: &str,
+    empty_text: &str,
+    predicate: impl Fn(&GeoObject) -> bool,
+) {
+    let theme = current_theme(ui.ctx());
+    ui.add_space(10.0);
+    ui.label(
+        egui::RichText::new(title)
+            .color(theme.text_secondary)
+            .size(12.0)
+            .strong(),
+    );
+    ui.add_space(4.0);
+
+    let ids: Vec<ObjectId> = app
+        .document
+        .objects_iter()
+        .filter_map(|(id, obj)| predicate(obj).then_some(*id))
+        .collect();
+
+    if ids.is_empty() {
+        ui.label(
+            egui::RichText::new(empty_text)
+                .color(theme.text_tertiary)
+                .size(11.0),
+        );
+        return;
+    }
+
+    for id in ids {
+        crate::algebra::draw_object_card(ui, app, id);
+    }
 }
 
 pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
@@ -79,11 +116,8 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 if execute_cas && !app.input_text.is_empty() {
-                    app.save_state();
-                    let input_was = app.input_text.clone();
                     let time = ui.ctx().input(|i| i.time);
-                    app.execute_command_and_record(&input_was, time);
-                    app.input_text.clear();
+                    app.submit_input_text(time);
                 }
             });
 
@@ -160,10 +194,9 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     });
                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
                 ui.checkbox(&mut app.exam_mode, "Modo examen");
-                let mut is_3d = app.current_view == ViewMode::D3;
-                if ui.checkbox(&mut is_3d, "Vista 3D").changed() {
-                    app.current_view = if is_3d { ViewMode::D3 } else { ViewMode::D2 };
-                }
+                // El toggle 2D/3D vive en el selector de perspectivas del sidebar
+                // (Geometría 2D / Geometría 3D). No duplicar aquí, era fuente de
+                // estado Frankenstein (canvas 3D + toolbar 2D).
 
                 ui.add_space(12.0);
                 ui.label(
@@ -540,6 +573,888 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.add_space(30.0);
                 ui.label(egui::RichText::new("En construcción...").color(Color32::from_gray(150)));
             });
+        });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Paneles izquierdos específicos por perspectiva (Fase 2)
+// ══════════════════════════════════════════════════════════════════════════
+
+/// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
+pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::left("stats_panel")
+        .default_width(240.0)
+        .min_width(180.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Estadística")
+                    .color(accent)
+                    .size(15.0)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+
+            draw_object_cards_where(
+                ui,
+                app,
+                "Objetos estadísticos",
+                "Sin gráficos estadísticos.\nProbá Histogram[...] o ScatterPlot[...].",
+                |obj| {
+                    matches!(
+                        obj,
+                        GeoObject::Histogram(_)
+                            | GeoObject::ScatterPlot(_)
+                            | GeoObject::BoxPlot(_)
+                            | GeoObject::RegressionLine(_)
+                            | GeoObject::Function(_)
+                    )
+                },
+            );
+            ui.add_space(8.0);
+
+            // ── Datos: TextEdit vinculado al buffer persistente ──
+            // El buffer sólo se parsea al perder foco o al apretar "Aplicar"
+            // — antes, el editor reconstruí el string cada frame desde los
+            // valores parseados y destruía la entrada del usuario por cada
+            // coma en blanco o no-número temporal.
+            ui.label(
+                egui::RichText::new("Datos (uno por línea o coma):")
+                    .color(hdr_col)
+                    .size(12.0),
+            );
+            let te_resp = ui.add_sized(
+                [ui.available_width(), 80.0],
+                egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
+            );
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let apply_clicked = ui.button("Aplicar").clicked();
+                let lost_focus =
+                    te_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if apply_clicked || lost_focus {
+                    let parsed: Vec<f64> = app
+                        .statistics_input_buf
+                        .split([',', '\n'])
+                        .filter_map(|s| s.trim().parse::<f64>().ok())
+                        .collect();
+                    if parsed != app.statistics_data {
+                        app.statistics_data = parsed;
+                        app.document.bump_version();
+                    }
+                }
+                if ui.button("Limpiar").clicked() {
+                    app.statistics_input_buf.clear();
+                    app.statistics_data.clear();
+                    app.document.bump_version();
+                }
+            });
+
+            ui.add_space(8.0);
+            if app.statistics_data.is_empty() {
+                // Empty-state
+                ui.label(
+                    egui::RichText::new(
+                        "Ingresá datos arriba (uno por línea o comas)\n\
+                         y pulsá «Aplicar» para ver el resumen y el\n\
+                         histograma.\n\
+                         Ejemplo: 1, 2, 3, 5, 4, 6",
+                    )
+                    .color(txt_dim)
+                    .size(11.0),
+                );
+            } else {
+                let data = &app.statistics_data;
+                let n = data.len() as f64;
+                let sum: f64 = data.iter().sum();
+                let mean = sum / n;
+                let var = data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+                let std = var.sqrt();
+                let mut sorted = data.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median = if sorted.len() % 2 == 0 {
+                    let m = sorted.len() / 2;
+                    (sorted[m - 1] + sorted[m]) / 2.0
+                } else {
+                    sorted[sorted.len() / 2]
+                };
+                let mn = data.iter().cloned().fold(f64::INFINITY, f64::min);
+                let mx = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let range = mx - mn;
+                // Cuartiles por interpolación lineal.
+                let q = |p: f64| -> f64 {
+                    let pos = p * (sorted.len() as f64 - 1.0);
+                    let lo = pos.floor() as usize;
+                    let hi = (lo + 1).min(sorted.len() - 1);
+                    let frac = pos - lo as f64;
+                    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+                };
+                let q1 = q(0.25);
+                let q3 = q(0.75);
+                let iqr = q3 - q1;
+
+                ui.label(
+                    egui::RichText::new("Resumen")
+                        .color(hdr_col)
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                egui::Grid::new("stats_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        let mut row = |k: &str, v: String| {
+                            ui.label(egui::RichText::new(k).color(txt_dim).size(12.0));
+                            ui.label(egui::RichText::new(v).color(txt_col).size(12.0).strong());
+                            ui.end_row();
+                        };
+                        row("N", format!("{}", data.len()));
+                        row("Suma", format!("{:.3}", sum));
+                        row("Media", format!("{:.3}", mean));
+                        row("Mediana", format!("{:.3}", median));
+                        row("Desvío", format!("{:.3}", std));
+                        row("Varianza", format!("{:.3}", var));
+                        row("Mín", format!("{:.3}", mn));
+                        row("Máx", format!("{:.3}", mx));
+                        row("Rango", format!("{:.3}", range));
+                        row("Q1", format!("{:.3}", q1));
+                        row("Q3", format!("{:.3}", q3));
+                        row("IQR", format!("{:.3}", iqr));
+                    });
+
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new("Histograma")
+                        .color(hdr_col)
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add_space(2.0);
+                let bins = 10usize;
+                let bw = range.max(1e-9) / bins as f64;
+                let mut counts = vec![0u32; bins];
+                for v in data {
+                    let idx = (((v - mn) / bw).floor() as usize).min(bins - 1);
+                    counts[idx] += 1;
+                }
+                let max_c = (*counts.iter().max().unwrap_or(&1)).max(1) as f32;
+                let hist_h = 90.0;
+                let (hist_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), hist_h + 14.0),
+                    egui::Sense::hover(),
+                );
+                if ui.is_rect_visible(hist_rect) {
+                    let painter = ui.painter();
+                    let plot = hist_rect.shrink2(egui::vec2(2.0, 2.0));
+                    // Plot area interna
+                    let plot_top = plot.min.y;
+                    let plot_bot = plot.max.y - 14.0;
+                    let plot_h = plot_bot - plot_top;
+                    let plot_w = plot.width();
+                    // Ejes: línea base
+                    painter.line_segment(
+                        [
+                            egui::pos2(plot.min.x, plot_bot),
+                            egui::pos2(plot.max.x, plot_bot),
+                        ],
+                        egui::Stroke::new(1.0, sep_col),
+                    );
+                    // Barras
+                    let bar_w = plot_w / bins as f32;
+                    for (i, c) in counts.iter().enumerate() {
+                        let h = (*c as f32 / max_c) * plot_h;
+                        let bar = egui::Rect::from_min_size(
+                            egui::pos2(plot.min.x + i as f32 * bar_w + 2.0, plot_bot - h),
+                            egui::vec2(bar_w - 4.0, h),
+                        );
+                        painter.rect_filled(bar, 2.0, accent);
+                        // count label encima si > 0
+                        if *c > 0 {
+                            painter.text(
+                                egui::pos2(bar.center().x, bar.min.y - 6.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                c.to_string(),
+                                egui::FontId::proportional(9.0),
+                                txt_dim,
+                            );
+                        }
+                    }
+                    // Etiquetas min/max en el eje
+                    painter.text(
+                        egui::pos2(plot.min.x, plot_bot + 2.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{:.2}", mn),
+                        egui::FontId::proportional(9.0),
+                        txt_dim,
+                    );
+                    painter.text(
+                        egui::pos2(plot.max.x, plot_bot + 2.0),
+                        egui::Align2::RIGHT_TOP,
+                        format!("{:.2}", mx),
+                        egui::FontId::proportional(9.0),
+                        txt_dim,
+                    );
+                }
+            }
+        });
+}
+
+/// Panel izquierdo de Complejos. Lista objetos complejos y permite cambiar
+/// el símbolo base.
+pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::{GeoObject, ObjectId};
+    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::left("complex_panel")
+        .default_width(260.0)
+        .min_width(180.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Números Complejos")
+                    .color(accent)
+                    .size(15.0)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+
+            // ── Barra de entrada in-panel (igual que Álgebra) ──
+            egui::Frame::none()
+                .fill(current_theme(ctx).input_bg)
+                .inner_margin(egui::Margin {
+                    left: 8.0,
+                    right: 8.0,
+                    top: 6.0,
+                    bottom: 6.0,
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
+                        ui.add_space(3.0);
+                        let r = ui.add_sized(
+                            [ui.available_width(), 22.0],
+                            egui::TextEdit::singleline(&mut app.input_text)
+                                .hint_text("ComplexGrid[1/z]...")
+                                .frame(false)
+                                .text_color(txt_col),
+                        );
+                        if r.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !app.input_text.is_empty()
+                        {
+                            let time = ui.ctx().input(|i| i.time);
+                            app.submit_input_text(time);
+                        }
+                    });
+                });
+            ui.add(egui::Separator::default().spacing(0.0));
+            ui.add_space(8.0);
+
+            // ── Símbolo base ──
+            ui.label(
+                egui::RichText::new("Símbolo base")
+                    .color(hdr_col)
+                    .size(12.0),
+            );
+            let mut sym = app.document.complex_base_symbol.clone();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut sym)
+                    .desired_width(ui.available_width())
+                    .hint_text("z"),
+            );
+            if resp.lost_focus() && sym.trim() != app.document.complex_base_symbol {
+                let new_sym = sym.trim().to_string();
+                if !new_sym.is_empty() {
+                    app.document.migrate_complex_symbol(&new_sym);
+                    app.document.bump_version();
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Objetos")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            let ids: Vec<ObjectId> = app.document.objects_iter().map(|(id, _)| *id).collect();
+            let mut any_object = false;
+            for id in &ids {
+                let Some(obj) = app.document.get_object(*id) else {
+                    continue;
+                };
+                if !matches!(
+                    obj,
+                    GeoObject::Function(_)
+                        | GeoObject::ImplicitCurve(_)
+                        | GeoObject::ParametricCurve2D(_)
+                        | GeoObject::PolarCurve(_)
+                        | GeoObject::VectorField2D(_)
+                        | GeoObject::ComplexGrid(_)
+                        | GeoObject::ComplexMapping(_)
+                        | GeoObject::Point(_)
+                        | GeoObject::Line(_)
+                        | GeoObject::Circle(_)
+                        | GeoObject::Polygon(_)
+                        | GeoObject::Ellipse(_)
+                        | GeoObject::Parabola(_)
+                        | GeoObject::Hyperbola(_)
+                ) {
+                    continue;
+                }
+                any_object = true;
+                crate::algebra::draw_object_card(ui, app, *id);
+            }
+            if !any_object {
+                ui.label(
+                    egui::RichText::new("Sin objetos.\nProbá: x^2 + y^2 < 1\no: ComplexGrid[1/z]")
+                        .color(txt_dim)
+                        .size(11.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Comandos rápidos")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(2.0);
+            // Hints clickeables que rellenan la barra de entrada del panel.
+            let hints: &[(&str, &str)] = &[
+                ("ComplexGrid[1/z]", "ComplexGrid[1/z]"),
+                ("ComplexMapping[1/z, I]", "ComplexMapping[1/z, I]"),
+                ("ComplexGrid[exp(z)]", "ComplexGrid[exp(z)]"),
+                ("ComplexSymbol[w]", "ComplexSymbol[w]"),
+            ];
+            for (label, payload) in hints {
+                let b = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(*label)
+                            .monospace()
+                            .size(11.0)
+                            .color(txt_col),
+                    )
+                    .frame(false),
+                );
+                if b.clicked() {
+                    app.input_text = payload.to_string();
+                }
+                b.on_hover_text(format!("Click para cargar: {}", payload));
+            }
+        });
+}
+
+/// Panel izquierdo de Atractores y Dinámica.
+pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::left("attractor_panel")
+        .default_width(260.0)
+        .min_width(180.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Dinámica y Atractores")
+                    .color(accent)
+                    .size(15.0)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+
+            draw_object_cards_where(
+                ui,
+                app,
+                "Objetos dinámicos",
+                "Sin objetos dinámicos.\nProbá Attractor[10, 28, 8/3].",
+                |obj| {
+                    matches!(
+                        obj,
+                        GeoObject::Attractor3D(_)
+                            | GeoObject::PhasePortrait(_)
+                            | GeoObject::VectorField2D(_)
+                            | GeoObject::VectorField3D(_)
+                    )
+                },
+            );
+            ui.add_space(8.0);
+
+            let ids: Vec<_> = app.document.objects_iter().map(|(id, _)| *id).collect();
+            let mut attractor_id = None;
+            for id in &ids {
+                if let Some(GeoObject::Attractor3D(_)) = app.document.get_object(*id) {
+                    attractor_id = Some(*id);
+                    break;
+                }
+            }
+
+            if let Some(id) = attractor_id {
+                ui.label(egui::RichText::new("Attractor activo").color(hdr_col).size(12.0).strong());
+                if let Some(GeoObject::Attractor3D(a)) = app.document.get_object(id) {
+                    let sigma = a.params.first().copied().unwrap_or(0.0);
+                    let rho = a.params.get(1).copied().unwrap_or(0.0);
+                    let beta = a.params.get(2).copied().unwrap_or(0.0);
+                    ui.label(format!("σ = {:.3}", sigma));
+                    ui.label(format!("ρ = {:.3}", rho));
+                    ui.label(format!("β = {:.3}", beta));
+                    ui.label(format!("dt = {:.4}", a.dt));
+                    ui.label(format!("pasos = {}", a.steps));
+                }
+            } else {
+                ui.label(
+                    egui::RichText::new(
+                        "Sin attractor activo.\nCreá uno con:\n  Attractor[σ, ρ, β]\n(Lorenz por defecto)",
+                    )
+                    .color(txt_dim)
+                    .size(11.0),
+                );
+                ui.add_space(6.0);
+                if ui
+                    .button(egui::RichText::new("Crear Lorenz por defecto").color(accent).strong())
+                    .clicked()
+                {
+                    let cmd = "Attractor[10, 28, 8/3]";
+                    let _ = crate::commands::process_input(&mut app.document, &mut cmd.to_string());
+                }
+            }
+
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("Comandos").color(hdr_col).size(12.0).strong());
+            ui.label(egui::RichText::new("• Lorenz: Attractor[σ, ρ, β]").color(txt_dim).size(11.0).monospace());
+            let _ = txt_col;
+        });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Paneles derechos (Fase 3)
+// ══════════════════════════════════════════════════════════════════════════
+
+/// Panel derecho: Propiedades del objeto seleccionado (Geometry3D).
+pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let (is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::right("right_properties")
+        .default_width(280.0)
+        .min_width(200.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Propiedades")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let Some(id) = app.selected_object else {
+                ui.label(
+                    egui::RichText::new(
+                        "Seleccioná un objeto del canvas para ver/editar sus propiedades.",
+                    )
+                    .color(txt_dim)
+                    .size(11.0),
+                );
+                return;
+            };
+            let Some(obj) = app.document.get_object_mut(id) else {
+                ui.label(egui::RichText::new("Objeto inexistente.").color(txt_dim));
+                return;
+            };
+
+            let label_col = if is_dark {
+                Color32::from_gray(180)
+            } else {
+                Color32::from_gray(60)
+            };
+            match obj {
+                GeoObject::Cube3D(c) => {
+                    ui.label(egui::RichText::new("Cubo 3D").color(label_col).strong());
+                    ui.label(egui::RichText::new(format!("Etiqueta: {}", c.label)).color(txt_col));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Centro").color(txt_dim));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut c.center.x)
+                                .speed(0.1)
+                                .prefix("x="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut c.center.y)
+                                .speed(0.1)
+                                .prefix("y="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut c.center.z)
+                                .speed(0.1)
+                                .prefix("z="),
+                        );
+                    });
+                    ui.add(egui::Slider::new(&mut c.size, 0.1..=10.0).text("tamaño"));
+                }
+                GeoObject::Sphere3D(s) => {
+                    ui.label(egui::RichText::new("Esfera 3D").color(label_col).strong());
+                    ui.label(egui::RichText::new(format!("Etiqueta: {}", s.label)).color(txt_col));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Centro").color(txt_dim));
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut s.center.x)
+                                .speed(0.1)
+                                .prefix("x="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut s.center.y)
+                                .speed(0.1)
+                                .prefix("y="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut s.center.z)
+                                .speed(0.1)
+                                .prefix("z="),
+                        );
+                    });
+                    ui.add(egui::Slider::new(&mut s.radius, 0.1..=10.0).text("radio"));
+                }
+                GeoObject::Point3D(p) => {
+                    ui.label(egui::RichText::new("Punto 3D").color(label_col).strong());
+                    ui.label(egui::RichText::new(format!("Etiqueta: {}", p.label)).color(txt_col));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut p.position.x)
+                                .speed(0.1)
+                                .prefix("x="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut p.position.y)
+                                .speed(0.1)
+                                .prefix("y="),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut p.position.z)
+                                .speed(0.1)
+                                .prefix("z="),
+                        );
+                    });
+                    ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).text("tamaño"));
+                }
+                other => {
+                    ui.label(format!("Tipo: {}", other.name()));
+                    ui.label(
+                        egui::RichText::new("Propiedades dedicadas en panel de Álgebra.")
+                            .color(txt_dim)
+                            .size(11.0),
+                    );
+                }
+            }
+            app.document.bump_version();
+        });
+}
+
+/// Panel derecho: Tabla de valores x|f(x) (AlgebraCas, Calculus).
+pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::right("right_table")
+        .default_width(260.0)
+        .min_width(180.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Tabla de valores")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let funcs: Vec<_> = app
+                .document
+                .objects_iter()
+                .filter_map(|(_, o)| {
+                    if let grafito_core::GeoObject::Function(f) = o {
+                        Some((f.label.clone(), f.expr.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if funcs.is_empty() {
+                ui.label(egui::RichText::new("Sin funciones en el documento.").color(txt_dim));
+                return;
+            }
+
+            // Selector de función
+            ui.horizontal(|ui| {
+                ui.label("Función:");
+                let max_idx = funcs.len().saturating_sub(1);
+                app.table_func_idx = app.table_func_idx.min(max_idx);
+                ui.add(
+                    egui::Slider::new(&mut app.table_func_idx, 0..=max_idx)
+                        .text("")
+                        .max_decimals(0),
+                );
+                ui.label(&funcs[app.table_func_idx].0);
+            });
+            ui.add_space(6.0);
+
+            egui::Grid::new("right_table_params").show(ui, |ui| {
+                ui.label("x min");
+                ui.text_edit_singleline(&mut app.table_x_min);
+                ui.end_row();
+                ui.label("x max");
+                ui.text_edit_singleline(&mut app.table_x_max);
+                ui.end_row();
+                ui.label("step");
+                ui.text_edit_singleline(&mut app.table_step);
+                ui.end_row();
+            });
+            ui.add_space(6.0);
+
+            let x_min: f64 = app.table_x_min.trim().parse().unwrap_or(-5.0);
+            let x_max: f64 = app.table_x_max.trim().parse().unwrap_or(5.0);
+            let step: f64 = app.table_step.trim().parse().unwrap_or(0.5);
+
+            if x_max <= x_min || step <= 0.0 {
+                ui.label(egui::RichText::new("Rango/step inválidos.").color(txt_dim));
+                return;
+            }
+
+            let expr = funcs[app.table_func_idx].1.clone();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("right_table_values")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("x").strong().color(txt_col));
+                        ui.label(egui::RichText::new("f(x)").strong().color(txt_col));
+                        ui.end_row();
+                        let mut x = x_min;
+                        while x <= x_max + 1e-9 {
+                            let y =
+                                grafito_geometry::expr::evaluate(&expr, &[("x".to_string(), x)])
+                                    .ok();
+                            ui.label(format!("{:.3}", x));
+                            ui.label(match y {
+                                Some(v) => format!("{:.3}", v),
+                                None => "—".to_string(),
+                            });
+                            ui.end_row();
+                            x += step;
+                        }
+                    });
+            });
+        });
+}
+
+/// Panel derecho: Coloración de dominio (Complejos).
+pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::right("right_domain_coloring")
+        .default_width(280.0)
+        .min_width(200.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Coloración de dominio")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let mut has_grid = false;
+            for (_, obj) in app.document.objects_iter() {
+                if matches!(obj, GeoObject::ComplexGrid(_)) {
+                    has_grid = true;
+                    break;
+                }
+            }
+
+            if !has_grid {
+                ui.label(
+                    egui::RichText::new(
+                        "Sin ComplexGrid. Creá uno con:\n  ComplexGrid[1/z]\nColoración por fase de f(z).",
+                    )
+                    .color(txt_dim)
+                    .size(11.0),
+                );
+            } else {
+                ui.label(egui::RichText::new("Coloración por fase habilitada").color(hdr_col).strong());
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Tono = arg(f(z)).").color(txt_dim).size(11.0));
+            }
+
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Símbolo base").color(hdr_col).size(12.0).strong());
+            let mut sym = app.document.complex_base_symbol.clone();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut sym)
+                    .desired_width(ui.available_width())
+                    .hint_text("z"),
+            );
+            if r.lost_focus() && sym.trim() != app.document.complex_base_symbol {
+                let new_sym = sym.trim().to_string();
+                if !new_sym.is_empty() {
+                    app.document.migrate_complex_symbol(&new_sym);
+                    app.document.bump_version();
+                }
+            }
+        });
+}
+
+/// Panel derecho: Parámetros del attractor activo (Dynamics).
+pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::{GeoObject, ObjectId};
+    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+
+    egui::SidePanel::right("right_parameters")
+        .default_width(260.0)
+        .min_width(180.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(alg_fill)
+                .stroke(egui::Stroke::new(1.0, sep_col)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Parámetros dinámicos")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let mut attractor_id: Option<ObjectId> = None;
+            for (id, obj) in app.document.objects_iter() {
+                if matches!(obj, GeoObject::Attractor3D(_)) {
+                    attractor_id = Some(*id);
+                    break;
+                }
+            }
+
+            let Some(id) = attractor_id else {
+                ui.label(
+                    egui::RichText::new(
+                        "Sin attractor activo. Creá uno con:\n  Attractor[10, 28, 8/3]",
+                    )
+                    .color(txt_dim)
+                    .size(11.0),
+                );
+                return;
+            };
+
+            let Some(obj) = app.document.get_object_mut(id) else {
+                return;
+            };
+            if let GeoObject::Attractor3D(a) = obj {
+                // params: [sigma, rho, beta] para Lorenz. Lo dejamos genérico.
+                while a.params.len() < 3 {
+                    a.params.push(0.0);
+                }
+                let mut sigma = a.params[0];
+                let mut rho = a.params[1];
+                let mut beta = a.params[2];
+                ui.label(
+                    egui::RichText::new("Lorenz σ, ρ, β")
+                        .color(hdr_col)
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Slider::new(&mut sigma, 0.1..=30.0)
+                        .text("σ")
+                        .trailing_fill(true),
+                );
+                ui.add(
+                    egui::Slider::new(&mut rho, 0.1..=60.0)
+                        .text("ρ")
+                        .trailing_fill(true),
+                );
+                ui.add(
+                    egui::Slider::new(&mut beta, 0.1..=10.0)
+                        .text("β")
+                        .trailing_fill(true),
+                );
+                a.params[0] = sigma;
+                a.params[1] = rho;
+                a.params[2] = beta;
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Integración")
+                        .color(hdr_col)
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add(
+                    egui::Slider::new(&mut a.dt, 0.001..=0.05)
+                        .text("dt")
+                        .trailing_fill(true),
+                );
+                ui.add(
+                    egui::Slider::new(&mut a.steps, 100..=20000)
+                        .text("pasos")
+                        .trailing_fill(true)
+                        .integer(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("El canvas se regenera cada cambio.")
+                        .color(txt_dim)
+                        .size(11.0),
+                );
+                app.document.bump_version();
+            }
         });
 }
 

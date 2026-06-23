@@ -102,8 +102,10 @@ impl ConformalMap {
                 }
             }
             Self::Sqrt => {
+                // sqrt(0) = 0 está bien definido (no es singularidad). Sólo
+                // devolvemos 0 explícito para evitar cualquier NaN numérico.
                 if z.norm() < SINGULARITY_THRESHOLD {
-                    None
+                    Some(Complex64::new(0.0, 0.0))
                 } else {
                     Some(z.sqrt())
                 }
@@ -297,11 +299,38 @@ fn parse_complex_literal(s: &str) -> Option<Complex64> {
 fn parse_mobius(s: &str) -> Option<ConformalMap> {
     // Formato esperado: "(<num>*z+<num>)/(<num>*z+<num>)" o variantes con espacios
     // removidos. Sin negaciones compuestas (el caller ya normalizó espacios).
-    let s = s.strip_prefix('(')?.strip_suffix(')')?;
-    // Dividir numerador y denominador por el "/"
-    let (num_str, den_str) = s.split_once('/')?;
-    let num_str = num_str.strip_prefix('(')?.strip_suffix(')')?;
-    let den_str = den_str.strip_prefix('(')?.strip_suffix(')')?;
+    //
+    // No podemos strip_prefix('(')/strip_suffix(')') sobre el string entero:
+    // una Möbius canónica tiene paréntesis anidados. En su lugar, dividimos
+    // por el primer '/' que esté a profundidad 0 de paréntesis.
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut split_at = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'/' if depth == 0 => {
+                split_at = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let split_at = split_at?;
+    let num_str = s[..split_at].trim();
+    let den_str = s[split_at + 1..].trim();
+    // Strip outer parens from num/den si los hay (case "(...)/(...)").
+    let num_str = num_str
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .map(|s| s.trim())
+        .unwrap_or(num_str);
+    let den_str = den_str
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .map(|s| s.trim())
+        .unwrap_or(den_str);
 
     let (a, b) = parse_linear_in_z(num_str)?;
     let (c, d) = parse_linear_in_z(den_str)?;

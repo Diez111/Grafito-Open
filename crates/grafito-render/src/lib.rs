@@ -22,6 +22,7 @@
 )]
 
 use grafito_core::{Document, GeoObject};
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use wgpu::util::DeviceExt;
 
@@ -33,6 +34,36 @@ pub mod vector_compute;
 
 #[cfg(test)]
 mod tests;
+
+/// Transforma segmentos independientes por un mapa conforme sin crear líneas
+/// puente entre segmentos consecutivos del marching squares.
+pub fn transform_complex_mapping_segments(
+    map: ConformalMap,
+    segments: &[(Point2, Point2)],
+    subdivisions: usize,
+) -> Vec<(Point2, Point2)> {
+    let subdivisions = subdivisions.max(1);
+    let mut strokes = Vec::new();
+    for (a, b) in segments {
+        let mut prev: Option<Point2> = None;
+        for i in 0..=subdivisions {
+            let t = i as f64 / subdivisions as f64;
+            let z = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+            let current = map.apply(z).and_then(|w| {
+                if w.re.is_finite() && w.im.is_finite() {
+                    Some(Point2::new(w.re, w.im))
+                } else {
+                    None
+                }
+            });
+            if let (Some(prev), Some(current)) = (prev, current) {
+                strokes.push((prev, current));
+            }
+            prev = current;
+        }
+    }
+    strokes
+}
 
 /// Cálculo simple de iluminación para objetos 3D
 pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam::Vec3) -> Color {
@@ -1263,6 +1294,41 @@ impl Renderer {
                 }
                 GeoObject::ComplexMapping(cm) => {
                     if let Some(target_obj) = document.get_object(cm.target) {
+                        if let (GeoObject::ImplicitCurve(ic), Some(map)) =
+                            (target_obj, cm.conformal_cache)
+                        {
+                            let cached =
+                                ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                            let mut source_segments = Vec::new();
+                            for (_level, segments) in cached.iter() {
+                                for (a, b) in segments {
+                                    let len = (a.x - b.x).hypot(a.y - b.y);
+                                    if len >= 1e-3 {
+                                        source_segments.push((*a, *b));
+                                    }
+                                }
+                            }
+                            drop(cached);
+
+                            for (a, b) in
+                                transform_complex_mapping_segments(map, &source_segments, 16)
+                            {
+                                let p1 = view_transform.world_to_screen(a);
+                                let p2 = view_transform.world_to_screen(b);
+                                if (p2.x - p1.x).abs() < 300.0 && (p2.y - p1.y).abs() < 300.0 {
+                                    Self::add_line_segment(
+                                        &mut vertices,
+                                        &mut indices,
+                                        p1,
+                                        p2,
+                                        1.5,
+                                        cm.color,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+
                         let capacity = match target_obj {
                             GeoObject::Polygon(poly) => poly.vertices.len(),
                             GeoObject::Point(_) => 1,

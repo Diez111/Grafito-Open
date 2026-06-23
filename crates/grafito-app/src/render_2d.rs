@@ -21,10 +21,11 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
-/// Cuenta el número de nodos en un AST. Se usa para decidir el stride
-/// del scanline fill: ASTs grandes (expresiones complejas) usan stride
-/// mayor para mantener el frame rate. Delega al método `node_count`
-/// definido en `ast.rs` para garantizar exhaustividad.
+/// Cuenta el número de nodos en un AST. Históricamente se usaba para
+/// decidir el stride del scanline fill; hoy el fill cacheado siempre
+/// rasteriza a stride 1, pero se preserva el helper por si futuras
+/// optimizaciones vuelven a necesitarlo.
+#[allow(dead_code)]
 fn node_count(expr: &grafito_geometry::ast::Expr) -> usize {
     expr.node_count()
 }
@@ -41,7 +42,7 @@ pub struct FillTextureCache {
     /// Hash de (expr_lhs, expr_rhs, operator, padded_bounds, canvas_w,
     /// canvas_h, variables, fill_color).
     pub cache_key: u64,
-    /// Tamaño del canvas en píxeles cuando se rasterizó.
+    /// Tamaño de la textura en píxeles cuando se rasterizó.
     pub canvas_size: (u32, u32),
     /// Región world-space padded/snapped que cubre la textura. Si los
     /// `view_bounds` actuales caen dentro de esta región, se puede reusar.
@@ -82,6 +83,140 @@ pub fn compute_fill_cache_key(
     fill_color.b.to_bits().hash(&mut hasher);
     fill_color.a.to_bits().hash(&mut hasher);
     hasher.finish()
+}
+
+/// Cache key para el fill de un `ComplexMapping`. Extiende la key del
+/// ImplicitCurve con la identidad del `ConformalMap` (su representación
+/// `Debug`), para que cambiar la expresión (p.ej. `1/z` → `z^2`) invalide
+/// el caché aunque el target sea la misma ImplicitCurve.
+pub fn compute_complex_fill_cache_key(
+    ic: &ImplicitCurveObj,
+    map: &ConformalMap,
+    padded_bounds: (f64, f64, f64, f64),
+    canvas_size: (u32, u32),
+    variables: &std::collections::HashMap<String, f64>,
+    fill_color: Color,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    // Reusar la key base del ImplicitCurve (todavía aplica por los ASTs
+    // lhs/rhs, operator, bounds, canvas, variables, fill_color).
+    let base = compute_fill_cache_key(ic, padded_bounds, canvas_size, variables, fill_color);
+    base.hash(&mut hasher);
+    // Sumar la identidad del mapeo conforme.
+    format!("{:?}", map).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Evalúa si un punto del plano de salida `w=(output_x, output_y)` cae dentro
+/// de la región transformada por un `ComplexMapping` de una curva implícita.
+///
+/// La prueba se hace en el plano original: `z = map.inverse_apply(w)`, y luego
+/// se evalúa la desigualdad original sobre `(x,y)=(Re z, Im z)`.
+pub fn complex_mapping_region_contains(
+    ic: &ImplicitCurveObj,
+    map: ConformalMap,
+    variables: &std::collections::HashMap<String, f64>,
+    output_x: f64,
+    output_y: f64,
+) -> Option<bool> {
+    use num_complex::Complex64;
+
+    if matches!(ic.operator, RelationOperator::Eq) {
+        return None;
+    }
+    let z = map.inverse_apply(Complex64::new(output_x, output_y))?;
+    let (eval_lhs, eval_rhs) = ic.get_cached_asts(variables, &["x", "y"])?;
+    let lhs = eval_lhs.eval_2d("x", z.re, "y", z.im);
+    let rhs = eval_rhs.eval_2d("x", z.re, "y", z.im);
+    if !lhs.is_finite() || !rhs.is_finite() {
+        return None;
+    }
+    Some(match ic.operator {
+        RelationOperator::Less | RelationOperator::LessEq => lhs - rhs <= 0.0,
+        RelationOperator::Greater | RelationOperator::GreaterEq => rhs - lhs <= 0.0,
+        RelationOperator::Eq => return None,
+    })
+}
+
+/// Calcula el sub-rect UV que corresponde a `view_bounds` dentro de una textura
+/// que representa `cached_region` completa.
+pub fn fill_cache_view_uv(
+    cached_region: (f64, f64, f64, f64),
+    view_bounds: (f64, f64, f64, f64),
+) -> Option<(f32, f32, f32, f32)> {
+    let (rx_min, rx_max, ry_min, ry_max) = cached_region;
+    let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
+    if !(vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max) {
+        return None;
+    }
+    let rw = rx_max - rx_min;
+    let rh = ry_max - ry_min;
+    if rw <= 0.0 || rh <= 0.0 {
+        return None;
+    }
+    let u_min = ((vx_min - rx_min) / rw) as f32;
+    let u_max = ((vx_max - rx_min) / rw) as f32;
+    // Texture coordinates grow downward; world y grows upward.
+    let v_min = ((ry_max - vy_max) / rh) as f32;
+    let v_max = ((ry_max - vy_min) / rh) as f32;
+    Some((u_min, u_max, v_min, v_max))
+}
+
+/// Tamaño de textura necesario para rasterizar `cached_region` a la misma
+/// densidad aproximada que el viewport actual. Para `pad_factor=2`, suele ser
+/// ~2x el canvas en cada eje; se limita para evitar texturas enormes.
+pub fn fill_cache_texture_size(
+    view_bounds: (f64, f64, f64, f64),
+    cached_region: (f64, f64, f64, f64),
+    canvas_size: (u32, u32),
+) -> (u32, u32) {
+    let view_width = (view_bounds.1 - view_bounds.0).max(f64::EPSILON);
+    let view_height = (view_bounds.3 - view_bounds.2).max(f64::EPSILON);
+    let region_width = (cached_region.1 - cached_region.0).max(f64::EPSILON);
+    let region_height = (cached_region.3 - cached_region.2).max(f64::EPSILON);
+    let scale_cap = 4096.0;
+    let texture_w = ((canvas_size.0 as f64 * region_width / view_width)
+        .ceil()
+        .clamp(1.0, scale_cap)) as u32;
+    let texture_h = ((canvas_size.1 as f64 * region_height / view_height)
+        .ceil()
+        .clamp(1.0, scale_cap)) as u32;
+    (texture_w, texture_h)
+}
+
+/// Transforma segmentos independientes por un mapa conforme y devuelve strokes
+/// finitos sin conectar un segmento de marching-squares con el siguiente.
+pub fn complex_mapping_segment_strokes(
+    map: ConformalMap,
+    segments: &[(Point2, Point2)],
+    subdivisions: usize,
+) -> Vec<(Point2, Point2)> {
+    use num_complex::Complex64;
+
+    let subdivisions = subdivisions.max(1);
+    let mut strokes = Vec::new();
+    for (a, b) in segments {
+        let mut prev: Option<Point2> = None;
+        for i in 0..=subdivisions {
+            let t = i as f64 / subdivisions as f64;
+            let z = Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+            let current = map.apply(z).and_then(|w| {
+                if w.re.is_finite() && w.im.is_finite() {
+                    Some(Point2::new(w.re, w.im))
+                } else {
+                    None
+                }
+            });
+            if let (Some(p), Some(c)) = (prev, current) {
+                strokes.push((p, c));
+            }
+            prev = current;
+        }
+    }
+    strokes
 }
 
 #[derive(Clone, Copy, Default)]
@@ -740,6 +875,35 @@ impl GrafitoApp {
         }
     }
 
+    /// Dibuja sólo los rellenos de regiones implícitas en el pase base.
+    ///
+    /// En modo GPU `grafito-render` omite `ImplicitCurve` para evitar doble
+    /// contorno; por eso los fills CPU deben pintarse antes del callback GPU.
+    /// Los contornos y etiquetas se dibujan después con `draw_objects(..., true)`.
+    pub(crate) fn draw_implicit_curve_fills(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        let view = self.document.view();
+        for (_, obj) in self.document.objects_iter() {
+            let GeoObject::ImplicitCurve(ic) = obj else {
+                continue;
+            };
+            if !ic.visible {
+                continue;
+            }
+            let Some(fill_color) = ic.fill_color else {
+                continue;
+            };
+            if matches!(
+                ic.operator,
+                RelationOperator::Less
+                    | RelationOperator::LessEq
+                    | RelationOperator::Greater
+                    | RelationOperator::GreaterEq
+            ) {
+                self.draw_implicit_curve_fill(painter, canvas_rect, view, ic, fill_color);
+            }
+        }
+    }
+
     pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
         // Disabled
     }
@@ -844,141 +1008,159 @@ impl GrafitoApp {
     ///    cruce de cero y rellenando entre pares de cruces con la regla
     ///    par-impar. Esto garantiza que el relleno no excede el contorno
     ///    (al contrario del cell-fill anterior).
+    #[allow(clippy::too_many_arguments)]
     fn draw_complex_mapping_fill(
         &self,
         painter: &egui::Painter,
         canvas_rect: Rect,
         view: &ViewTransform,
         ic: &ImplicitCurveObj,
+        cm_id: grafito_core::ObjectId,
         map: ConformalMap,
         fill_color: Color,
     ) {
-        use num_complex::Complex64;
-
-        // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj (combinado).
+        // 1) Operador: Eq no tiene región rellenable.
+        if matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
         let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
             Some(t) => t,
             None => return,
         };
-
-        // 2) Operador -> convención "interior es f <= 0".
         let swap = matches!(
             ic.operator,
             RelationOperator::Greater | RelationOperator::GreaterEq
         );
-        if matches!(ic.operator, RelationOperator::Eq) {
-            return;
-        }
 
         let fill_32 = to_color32(fill_color);
 
-        // 3) Dimensiones del canvas en píxeles.
-        let w = canvas_rect.width().max(1.0) as i32;
-        let h = canvas_rect.height().max(1.0) as i32;
+        // 2) Dimensiones del canvas en píxeles.
+        let w = canvas_rect.width().max(1.0) as u32;
+        let h = canvas_rect.height().max(1.0) as u32;
 
-        // 4) **Stride adaptativo** (ver `draw_implicit_curve_fill`).
-        let ast_node_count = node_count(&eval_lhs) + node_count(&eval_rhs);
-        let stride: i32 = if ast_node_count > 30 { 4 } else { 2 };
+        // 3) Calcular view_bounds y padded/snapped bounds para el caché.
+        //    El cache SOLO es válido si los view_bounds actuales caen dentro
+        //    de la región padded cacheada → pan/zoom chico no recalcula.
+        let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+        let world_br =
+            view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+        let view_bounds = (
+            world_tl.x.min(world_br.x),
+            world_tl.x.max(world_br.x),
+            world_br.y.min(world_tl.y),
+            world_br.y.max(world_tl.y),
+        );
+        let padded_bounds =
+            grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
 
-        // 5) Buffers reusables.
-        let nsamples = (w as usize / stride as usize).max(8) + 4;
-        let mut world_xs: Vec<f64> = vec![0.0; nsamples];
-        let mut fs: Vec<f64> = vec![0.0; nsamples];
-        let mut insides: Vec<bool> = vec![false; nsamples];
+        let (texture_w, texture_h) = fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
 
-        for y_pixel in 0..=h {
-            let wy = view
-                .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
-                .y;
+        // 4) Cache key: (expr lhs/rhs, operator, padded_bounds, texture_size,
+        //    variables, fill_color, conformal_map). El conformal_map se hashea
+        //    via Debug para que cambiar `1/z` → `z^2` invalide aunque el
+        //    ImplicitCurve target quede igual.
+        let cache_key = compute_complex_fill_cache_key(
+            ic,
+            &map,
+            padded_bounds,
+            (texture_w, texture_h),
+            &self.document.variables,
+            fill_color,
+        );
 
-            let n = (w / stride) + 1;
-            for k in 0..n {
-                let x_pixel = (k * stride).min(w);
-                let wx = view
-                    .screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
-                    .x;
-                world_xs[k as usize] = wx;
-
-                // Aplicar inversa del conformal map.
-                let w_pt = Complex64::new(wx, wy);
-                let z = match map.inverse_apply(w_pt) {
-                    Some(z) => z,
-                    None => {
-                        fs[k as usize] = f64::NAN;
-                        insides[k as usize] = false;
-                        continue;
+        // 5) Verificar caché por el ObjectId del ComplexMapping (no del
+        //    ImplicitCurve, para no pisarlo con su propia cache de fill).
+        {
+            let cache = self.fill_textures.read().unwrap();
+            if let Some(entry) = cache.get(&cm_id) {
+                if entry.cache_key == cache_key
+                    && entry.canvas_size == (texture_w, texture_h)
+                    && entry.texture.is_some()
+                {
+                    if let Some((u_min, u_max, v_min, v_max)) =
+                        fill_cache_view_uv(entry.cached_region, view_bounds)
+                    {
+                        if let Some(ref texture) = entry.texture {
+                            let texture_id = texture.id();
+                            let uv = Rect::from_min_max(
+                                Pos2::new(u_min, v_min),
+                                Pos2::new(u_max, v_max),
+                            );
+                            painter.image(texture_id, canvas_rect, uv, Color32::WHITE);
+                            return;
+                        }
                     }
-                };
-
-                let lhs = eval_lhs.eval_2d("x", z.re, "y", z.im);
-                let rhs = eval_rhs.eval_2d("x", z.re, "y", z.im);
-                let f = if !lhs.is_finite() || !rhs.is_finite() {
-                    f64::NAN
-                } else if swap {
-                    rhs - lhs
-                } else {
-                    lhs - rhs
-                };
-                fs[k as usize] = f;
-                insides[k as usize] = f.is_finite() && f <= 0.0;
-            }
-
-            // 4b) Scanline fill par-impar.
-            let mut filling = false;
-            let mut seg_start: Option<f64> = None;
-            let y_top = canvas_rect.min.y + y_pixel as f32;
-            let y_bot = y_top + 1.0;
-            for k in 0..n {
-                let i = k as usize;
-                let inside = insides[i];
-                if filling && !inside {
-                    if let Some(start_world) = seg_start.take() {
-                        let f_prev = fs[i - 1];
-                        let f_curr = fs[i];
-                        let x_world_curr = world_xs[i];
-                        let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
-                        let end_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
-                            let dx_world = x_world_curr - x_world_prev;
-                            x_world_prev + dx_world * f_prev / (f_prev - f_curr)
-                        } else {
-                            x_world_curr
-                        };
-                        let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
-                        let end_screen = view.world_to_screen(Point2::new(end_x_world, wy)).x;
-                        let min_x = canvas_rect.min.x + start_screen.min(end_screen);
-                        let max_x = canvas_rect.min.x + start_screen.max(end_screen);
-                        let rect =
-                            Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
-                        painter.rect_filled(rect, 0.0, fill_32);
-                    }
-                    filling = false;
-                } else if !filling && inside {
-                    let f_prev = if i > 0 { fs[i - 1] } else { f64::NAN };
-                    let f_curr = fs[i];
-                    let x_world_curr = world_xs[i];
-                    let x_world_prev = if i > 0 { world_xs[i - 1] } else { x_world_curr };
-                    let start_x_world = if f_prev.is_finite() && f_curr.is_finite() && i > 0 {
-                        let dx_world = x_world_curr - x_world_prev;
-                        x_world_prev + dx_world * f_prev / (f_prev - f_curr)
-                    } else {
-                        x_world_curr
-                    };
-                    seg_start = Some(start_x_world);
-                    filling = true;
-                }
-            }
-            if filling {
-                if let Some(start_world) = seg_start.take() {
-                    let end_world = world_xs[(n - 1) as usize];
-                    let start_screen = view.world_to_screen(Point2::new(start_world, wy)).x;
-                    let end_screen = view.world_to_screen(Point2::new(end_world, wy)).x;
-                    let min_x = canvas_rect.min.x + start_screen.min(end_screen);
-                    let max_x = canvas_rect.min.x + start_screen.max(end_screen);
-                    let rect = Rect::from_min_max(Pos2::new(min_x, y_top), Pos2::new(max_x, y_bot));
-                    painter.rect_filled(rect, 0.0, fill_32);
                 }
             }
         }
+
+        // 6) Cache miss: rasterizar la región padded COMPLETA, no el viewport
+        //    actual. En cache hit se dibuja el sub-rect UV correspondiente al
+        //    viewport; esto evita estirar una textura del viewport antiguo.
+        //
+        //    Precomputar world_xs (evita screen_to_world redundante en filas).
+        let (rx_min, rx_max, ry_min, ry_max) = padded_bounds;
+        let world_xs: Vec<f64> = (0..texture_w)
+            .map(|x_pixel| rx_min + (x_pixel as f64 + 0.5) / texture_w as f64 * (rx_max - rx_min))
+            .collect();
+
+        let rows: Vec<Vec<Color32>> = (0..texture_h)
+            .into_par_iter()
+            .map(|y_pixel| {
+                let wy = ry_max - (y_pixel as f64 + 0.5) / texture_h as f64 * (ry_max - ry_min);
+                let mut row = vec![Color32::TRANSPARENT; texture_w as usize];
+                for x_pixel in 0..texture_w {
+                    let wx = world_xs[x_pixel as usize];
+                    let Some(z) = map.inverse_apply(num_complex::Complex64::new(wx, wy)) else {
+                        continue;
+                    };
+                    let lhs = eval_lhs.eval_2d("x", z.re, "y", z.im);
+                    let rhs = eval_rhs.eval_2d("x", z.re, "y", z.im);
+                    let f = if !lhs.is_finite() || !rhs.is_finite() {
+                        f64::NAN
+                    } else if swap {
+                        rhs - lhs
+                    } else {
+                        lhs - rhs
+                    };
+                    if f.is_finite() && f <= 0.0 {
+                        row[x_pixel as usize] = fill_32;
+                    }
+                }
+                row
+            })
+            .collect();
+
+        // 8) Subir textura a GPU.
+        let image = egui::ColorImage {
+            size: [texture_w as usize, texture_h as usize],
+            pixels: rows.into_iter().flatten().collect(),
+        };
+        let texture =
+            painter
+                .ctx()
+                .load_texture("complex_mapping_fill", image, egui::TextureOptions::LINEAR);
+
+        // 9) Almacenar en cache y blit.
+        {
+            let mut cache = self.fill_textures.write().unwrap();
+            cache.insert(
+                cm_id,
+                FillTextureCache {
+                    texture: Some(texture.clone()),
+                    cache_key,
+                    canvas_size: (texture_w, texture_h),
+                    cached_region: padded_bounds,
+                },
+            );
+        }
+        let texture_id = texture.id();
+        let Some((u_min, u_max, v_min, v_max)) = fill_cache_view_uv(padded_bounds, view_bounds)
+        else {
+            return;
+        };
+        let uv = Rect::from_min_max(Pos2::new(u_min, v_min), Pos2::new(u_max, v_max));
+        painter.image(texture_id, canvas_rect, uv, Color32::WHITE);
     }
 
     /// Rellena el **interior** de una región `ImplicitCurve` (operator
@@ -1039,13 +1221,14 @@ impl GrafitoApp {
         );
         let padded_bounds =
             grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
+        let (texture_w, texture_h) = fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
 
         // 5) Calcular hash de la cache key: (expr_lhs, expr_rhs, operator,
-        //    padded_bounds, canvas_w, canvas_h, variables, fill_color).
+        //    padded_bounds, texture_w, texture_h, variables, fill_color).
         let cache_key = compute_fill_cache_key(
             ic,
             padded_bounds,
-            (w, h),
+            (texture_w, texture_h),
             &self.document.variables,
             fill_color,
         );
@@ -1057,16 +1240,18 @@ impl GrafitoApp {
             let cache = self.fill_textures.read().unwrap();
             if let Some(entry) = cache.get(&object_id) {
                 if entry.cache_key == cache_key
-                    && entry.canvas_size == (w, h)
+                    && entry.canvas_size == (texture_w, texture_h)
                     && entry.texture.is_some()
                 {
-                    let (rx_min, rx_max, ry_min, ry_max) = entry.cached_region;
-                    let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
-                    if vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max
+                    if let Some((u_min, u_max, v_min, v_max)) =
+                        fill_cache_view_uv(entry.cached_region, view_bounds)
                     {
                         if let Some(ref texture) = entry.texture {
                             let texture_id = texture.id();
-                            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+                            let uv = Rect::from_min_max(
+                                Pos2::new(u_min, v_min),
+                                Pos2::new(u_max, v_max),
+                            );
                             painter.image(texture_id, canvas_rect, uv, Color32::WHITE);
                             return;
                         }
@@ -1075,29 +1260,24 @@ impl GrafitoApp {
             }
         }
 
-        // 7) Cache miss: rasterizar el fill a una textura.
-        //    Stride = 1 (resolución full de pantalla) porque solo se
-        //    calcula una vez, no por frame.
+        // 7) Cache miss: rasterizar la región padded completa a una textura.
+        //    En frames siguientes se dibuja el sub-rect UV del viewport actual.
 
         // Precomputar world_x por columna (evita llamadas redundantes a
         // screen_to_world dentro del loop paralelo de filas).
-        let world_xs: Vec<f64> = (0..w)
-            .map(|x_pixel| {
-                view.screen_to_world(GlamVec2::new(x_pixel as f32 + 0.5, 0.0))
-                    .x
-            })
+        let (rx_min, rx_max, ry_min, ry_max) = padded_bounds;
+        let world_xs: Vec<f64> = (0..texture_w)
+            .map(|x_pixel| rx_min + (x_pixel as f64 + 0.5) / texture_w as f64 * (rx_max - rx_min))
             .collect();
 
         // Rasterizar filas en paralelo con rayon.
         // Cada fila produce un Vec<Color32> de w píxeles.
-        let rows: Vec<Vec<Color32>> = (0..h)
+        let rows: Vec<Vec<Color32>> = (0..texture_h)
             .into_par_iter()
             .map(|y_pixel| {
-                let wy = view
-                    .screen_to_world(GlamVec2::new(0.0, y_pixel as f32 + 0.5))
-                    .y;
-                let mut row = vec![Color32::TRANSPARENT; w as usize];
-                for x_pixel in 0..w {
+                let wy = ry_max - (y_pixel as f64 + 0.5) / texture_h as f64 * (ry_max - ry_min);
+                let mut row = vec![Color32::TRANSPARENT; texture_w as usize];
+                for x_pixel in 0..texture_w {
                     let wx = world_xs[x_pixel as usize];
                     let lhs = eval_lhs.eval_2d("x", wx, "y", wy);
                     let rhs = eval_rhs.eval_2d("x", wx, "y", wy);
@@ -1119,7 +1299,7 @@ impl GrafitoApp {
         // Construir ColorImage directamente desde los Color32 (sin
         // conversión a bytes intermedia) y subir como TextureHandle.
         let image = egui::ColorImage {
-            size: [w as usize, h as usize],
+            size: [texture_w as usize, texture_h as usize],
             pixels: rows.into_iter().flatten().collect(),
         };
         let texture =
@@ -1135,7 +1315,7 @@ impl GrafitoApp {
                 FillTextureCache {
                     texture: Some(texture.clone()),
                     cache_key,
-                    canvas_size: (w, h),
+                    canvas_size: (texture_w, texture_h),
                     cached_region: padded_bounds,
                 },
             );
@@ -1143,7 +1323,11 @@ impl GrafitoApp {
 
         // Dibujar la textura (BLIT, ~0.5ms).
         let texture_id = texture.id();
-        let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+        let Some((u_min, u_max, v_min, v_max)) = fill_cache_view_uv(padded_bounds, view_bounds)
+        else {
+            return;
+        };
+        let uv = Rect::from_min_max(Pos2::new(u_min, v_min), Pos2::new(u_max, v_max));
         painter.image(texture_id, canvas_rect, uv, Color32::WHITE);
     }
 
@@ -2158,8 +2342,9 @@ impl GrafitoApp {
             GeoObject::ImplicitCurve(ic) => {
                 // 0) Relleno del interior (solo para regiones con `<=`, `>=`, `<`, `>`).
                 //    Para curvas con `=`, no hay interior que rellenar.
-                //    Se omite cuando `overlay_only`: el relleno scanline es costoso
-                //    y la GPU ya lo renderizó en el pase principal.
+                //    En modo GPU se dibuja antes del callback con
+                //    `draw_implicit_curve_fills`; aquí se omite en overlay para
+                //    no cubrir la geometría GPU que ya fue pintada.
                 if !overlay_only {
                     if let Some(fill_color) = ic.fill_color {
                         if matches!(
@@ -2274,7 +2459,10 @@ impl GrafitoApp {
                             let y = cg.y_min + (res - 1 - j) as f64 * dy;
                             for i in 0..res {
                                 let x = cg.x_min + i as f64 * dx;
-                                vars.insert("z".to_string(), Complex64::new(x, y));
+                                vars.insert(
+                                    self.document.complex_base_symbol.clone(),
+                                    Complex64::new(x, y),
+                                );
                                 if let Ok(fz) = expr.eval(&vars) {
                                     if fz.re.is_finite() && fz.im.is_finite() {
                                         let arg = fz.arg();
@@ -2332,7 +2520,10 @@ impl GrafitoApp {
                     let mut prev: Option<Pos2> = None;
                     for i in 0..=grid_lines * 4 {
                         let x = cg.x_min + i as f64 * dx / 4.0;
-                        vars.insert("z".to_string(), Complex64::new(x, y));
+                        vars.insert(
+                            self.document.complex_base_symbol.clone(),
+                            Complex64::new(x, y),
+                        );
 
                         if let Ok(result) = expr.eval(&vars) {
                             if result.re.is_finite()
@@ -2365,7 +2556,10 @@ impl GrafitoApp {
                     let mut prev: Option<Pos2> = None;
                     for j in 0..=grid_lines * 4 {
                         let y = cg.y_min + j as f64 * dy / 4.0;
-                        vars.insert("z".to_string(), Complex64::new(x, y));
+                        vars.insert(
+                            self.document.complex_base_symbol.clone(),
+                            Complex64::new(x, y),
+                        );
 
                         if let Ok(result) = expr.eval(&vars) {
                             if result.re.is_finite()
@@ -2418,6 +2612,43 @@ impl GrafitoApp {
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                 let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
+
+                if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, cm.conformal_cache) {
+                    if let Some(fill_color) = ic.fill_color {
+                        self.draw_complex_mapping_fill(
+                            painter,
+                            canvas_rect,
+                            view,
+                            ic,
+                            cm.id,
+                            map,
+                            fill_color,
+                        );
+                    }
+
+                    let mut source_segments = Vec::new();
+                    for (_level, segments) in self.document.implicit_curve_segments(cm.target) {
+                        for (a, b) in segments {
+                            let len = (a.x - b.x).hypot(a.y - b.y);
+                            if len >= 1e-3 {
+                                source_segments.push((a, b));
+                            }
+                        }
+                    }
+
+                    let stroke = Stroke::new(2.0, to_color32(cm.color));
+                    for (a, b) in complex_mapping_segment_strokes(map, &source_segments, 16) {
+                        let p1 = view.world_to_screen(a);
+                        let p2 = view.world_to_screen(b);
+                        if (p2.x - p1.x).abs() > 300.0 || (p2.y - p1.y).abs() > 300.0 {
+                            continue;
+                        }
+                        let pos1 = canvas_rect.min + Vec2::new(p1.x, p1.y);
+                        let pos2 = canvas_rect.min + Vec2::new(p2.x, p2.y);
+                        painter.line_segment([pos1, pos2], stroke);
+                    }
+                    return;
+                }
 
                 // 4) Generar la lista de puntos complejos z que vamos a
                 //    transformar. Cada target emite un Vec<Complex64> en
@@ -2570,7 +2801,7 @@ impl GrafitoApp {
                     let real_vars: HashMap<String, f64> = self.document.variables.clone();
                     match grafito_geometry::complex_expr::eval_complex_batch(
                         &cm.expr,
-                        "z",
+                        self.document.complex_base_symbol.as_str(),
                         z_samples.iter().copied(),
                         &real_vars,
                     ) {
@@ -2592,6 +2823,7 @@ impl GrafitoApp {
                             canvas_rect,
                             view,
                             ic,
+                            cm.id,
                             map,
                             fill_color,
                         );

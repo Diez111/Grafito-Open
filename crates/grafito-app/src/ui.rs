@@ -70,10 +70,6 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula")
                         .changed();
                     ui.separator();
-                    let mut is_3d = app.current_view == ViewMode::D3;
-                    if ui.checkbox(&mut is_3d, "Vista 3D").changed() {
-                        app.current_view = if is_3d { ViewMode::D3 } else { ViewMode::D2 };
-                    }
                     ui.checkbox(&mut app.exam_mode, "Modo examen");
                     ui.checkbox(&mut app.document.view_mut().x_log, "Eje X log");
                     ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y log");
@@ -97,16 +93,27 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                 });
                 ui.menu_button("Ayuda", |ui| {
-                    if ui.button("Acerca de Grafito v1.0.0-beta").clicked() {}
+                    let version = env!("CARGO_PKG_VERSION");
+                    if ui
+                        .button(format!("Acerca de Grafito v{}", version))
+                        .clicked()
+                    {
+                        app.show_about = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("Grafito")
-                            .color(accent)
-                            .strong()
-                            .size(14.0),
-                    );
-                    ui.add_space(4.0);
+                    // El switch 2D/3D ahora vive en el selector de perspectivas del
+                    // sidebar. El menú top bar sólo muestra marca + toggle de tema.
+                    if ui.available_width() > 700.0 {
+                        ui.label(
+                            egui::RichText::new("Grafito")
+                                .color(accent)
+                                .strong()
+                                .size(14.0),
+                        );
+                        ui.add_space(4.0);
+                    }
                     if ui
                         .add(
                             egui::Button::new(if app.dark_mode {
@@ -124,28 +131,6 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                         } else {
                             LIGHT.apply(ui.ctx());
                         }
-                    }
-
-                    ui.add_space(8.0);
-                    let is_3d = app.current_view == ViewMode::D3;
-                    let toggle_text = if is_3d { "2D Vista" } else { "3D Vista" };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new(toggle_text)
-                                    .color(if is_3d {
-                                        Color32::from_rgb(16, 185, 129)
-                                    } else {
-                                        accent
-                                    })
-                                    .strong(),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text("Cambiar entre vista 2D y 3D")
-                        .clicked()
-                    {
-                        app.current_view = if is_3d { ViewMode::D2 } else { ViewMode::D3 };
                     }
                 });
             });
@@ -171,20 +156,23 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
+    // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
+    // legible. Las perspectivas se cambian con el dropdown arriba, no más
+    // array vertical de 10 elementos que saturaba el sidebar.
     let tabs: &[(&str, Icon, &str)] = &[
-        ("Álgebra", Icon::Menu, "Objetos, variables, comandos"),
+        ("Álgebra", Icon::Function, "Objetos, variables y comandos"),
         (
             "Herram.",
             Icon::Settings,
             "Herramientas de construcción y análisis",
         ),
         ("CAS", Icon::Analyze, "Cálculo simbólico paso a paso"),
-        ("Tabla", Icon::Function, "Valores numéricos x|f(x)"),
-        ("Hoja", Icon::Grid, "Hoja de cálculo"),
-        ("Vista", Icon::Eye, "Cuadrícula, ejes, etiquetas"),
+        ("Tabla", Icon::Grid, "Tabla de valores x|f(x), estadística"),
+        ("Hoja", Icon::Histogram, "Hoja de cálculo y datos"),
+        ("Vista", Icon::Eye, "Cuadrícula, ejes y estilo"),
     ];
     egui::SidePanel::left("icon_bar")
-        .exact_width(52.0)
+        .exact_width(56.0)
         .resizable(false)
         .frame(
             egui::Frame::none()
@@ -194,93 +182,131 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("ui_sidebar");
-            ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
-                // ── Selector de Perspectivas (fila superior del sidebar) ──
-                for p in Perspective::ALL {
-                    let active = app.perspective == p;
-                    let bg = if active {
-                        theme.sidebar_tab_active_bg
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let ic_color = if active {
-                        theme.sidebar_tab_active
-                    } else {
-                        theme.sidebar_tab_inactive
-                    };
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(46.0, 22.0), egui::Sense::click());
-                    if ui.is_rect_visible(rect) {
-                        ui.painter().rect_filled(rect, 5.0, bg);
-                        ui.painter().text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            p.short_label(),
-                            egui::FontId::proportional(11.0),
-                            ic_color,
-                        );
-                    }
-                    if resp.clicked() {
-                        app.set_perspective(p);
-                    }
-                    resp.on_hover_text(p.title());
-                    ui.add_space(1.0);
-                }
-                // Separador entre perspectivas y tabs.
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(ui.min_rect().min.x + 8.0, ui.min_rect().min.y),
-                        egui::pos2(ui.min_rect().max.x - 8.0, ui.min_rect().min.y),
-                    ],
-                    egui::Stroke::new(1.0, sep_col),
-                );
-                ui.add_space(4.0);
-                // ── Tabs existentes del sidebar ──
-                for (i, (label, icon, tip)) in tabs.iter().enumerate() {
-                    let active = app.sidebar_tab == i;
-                    let bg = if active {
-                        theme.sidebar_tab_active_bg
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let ic_color = if active {
-                        theme.sidebar_tab_active
-                    } else {
-                        theme.sidebar_tab_inactive
-                    };
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
 
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(46.0, 48.0), egui::Sense::click());
-                    if ui.is_rect_visible(rect) {
-                        ui.painter().rect_filled(rect, 6.0, bg);
-                        // Icono vectorial (sin emojis, sin letras sueltas)
-                        let icon_rect = egui::Rect::from_center_size(
-                            rect.center() - egui::vec2(0.0, 7.0),
-                            egui::vec2(20.0, 20.0),
+                        // ── Botón Perspectiva (dropdown compacto) ──
+                        // Reemplaza las 10 lineas verticales de short_labels.
+                        // Una sola celda arriba anuncia la perspectiva activa y
+                        // al click abre el popup con las 10 opciones.
+                        let cur_p = app.perspective;
+                        let active_pbg = theme.sidebar_tab_active_bg;
+                        let active_txt = theme.sidebar_tab_active;
+                        let dropdown_rect_w = 46.0;
+                        let dropdown_rect_h = 38.0;
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(dropdown_rect_w, dropdown_rect_h),
+                            egui::Sense::click(),
                         );
-                        draw_icon(ui.painter(), icon_rect, *icon, ic_color);
-                        // Texto debajo
-                        ui.painter().text(
-                            rect.center() + egui::vec2(0.0, 14.0),
-                            Align2::CENTER_CENTER,
-                            *label,
-                            egui::FontId::proportional(9.0),
-                            ic_color,
-                        );
-                    }
-
-                    if resp.clicked() {
-                        app.sidebar_tab = i;
-                        if i == 4 {
-                            // index 4 is now Hoja
-                            app.show_spreadsheet = true;
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(rect, 6.0, active_pbg);
+                            // Icono del menú Hamburguesa arriba
+                            let icon_rect = egui::Rect::from_center_size(
+                                rect.center() - egui::vec2(0.0, 8.0),
+                                egui::vec2(18.0, 14.0),
+                            );
+                            draw_icon(ui.painter(), icon_rect, Icon::Menu, active_txt);
+                            // short_label abajo (G2, AL, etc.) en proporcional 9
+                            ui.painter().text(
+                                rect.center() + egui::vec2(0.0, 11.0),
+                                Align2::CENTER_CENTER,
+                                cur_p.short_label(),
+                                egui::FontId::proportional(9.0),
+                                active_txt,
+                            );
                         }
-                    }
-                    resp.on_hover_text(*tip);
-                    ui.add_space(2.0);
-                }
-            });
+                        // Popup con las 10 perspectivas: open en click izquierdo.
+                        let popup_id = ui.make_persistent_id("sidebar_perspective_popup");
+                        if resp.clicked() {
+                            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                        }
+                        egui::popup::popup_below_widget(
+                            ui,
+                            popup_id,
+                            &resp,
+                            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                ui.set_min_width(220.0);
+                                let mut selected = app.perspective;
+                                for p in Perspective::ALL {
+                                    ui.radio_value(
+                                        &mut selected,
+                                        p,
+                                        format!(
+                                            "{}  (Ctrl+Shift+{})",
+                                            p.title(),
+                                            p.shortcut_number()
+                                        ),
+                                    );
+                                }
+                                if selected != app.perspective {
+                                    app.set_perspective(selected);
+                                    ui.memory_mut(|mem| mem.close_popup());
+                                }
+                            },
+                        );
+                        resp.on_hover_text(format!(
+                            "Perspectiva actual: {}  (Ctrl+Shift+{}) — click para cambiar",
+                            cur_p.title(),
+                            cur_p.shortcut_number()
+                        ));
+
+                        // Separador entre el botón perspectiva y los tabs.
+                        ui.add_space(6.0);
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(ui.min_rect().min.x + 10.0, ui.min_rect().min.y),
+                                egui::pos2(ui.min_rect().max.x - 10.0, ui.min_rect().min.y),
+                            ],
+                            egui::Stroke::new(1.0, sep_col),
+                        );
+                        ui.add_space(6.0);
+
+                        // ── Tabs del sidebar (6, uno por panel izquierdo) ──
+                        for (i, (label, icon, tip)) in tabs.iter().enumerate() {
+                            let active = app.sidebar_tab == i;
+                            let bg = if active {
+                                theme.sidebar_tab_active_bg
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            let ic_color = if active {
+                                theme.sidebar_tab_active
+                            } else {
+                                theme.sidebar_tab_inactive
+                            };
+
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(46.0, 48.0), egui::Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                ui.painter().rect_filled(rect, 6.0, bg);
+                                let icon_rect = egui::Rect::from_center_size(
+                                    rect.center() - egui::vec2(0.0, 7.0),
+                                    egui::vec2(20.0, 20.0),
+                                );
+                                draw_icon(ui.painter(), icon_rect, *icon, ic_color);
+                                ui.painter().text(
+                                    rect.center() + egui::vec2(0.0, 14.0),
+                                    Align2::CENTER_CENTER,
+                                    *label,
+                                    egui::FontId::proportional(9.5),
+                                    ic_color,
+                                );
+                            }
+
+                            if resp.clicked() {
+                                app.sidebar_tab = i;
+                            }
+                            resp.on_hover_text(*tip);
+                            ui.add_space(3.0);
+                        }
+
+                        ui.add_space(8.0);
+                    });
+                });
         });
 }
 
@@ -406,13 +432,8 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 });
             });
         if should_exec && !app.input_text.is_empty() {
-            app.save_state();
-            let input_was = app.input_text.clone();
             let time = ctx.input(|i| i.time);
-            app.execute_command_and_record(&input_was, time);
-            app.input_text.clear();
-            app.autocomplete.open = false;
-            app.autocomplete.selected = 0;
+            app.submit_input_text(time);
         }
     }
 
@@ -518,11 +539,11 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         let mut keep_open = true;
 
         // Adjust the window design to be centered and not ugly
-        egui::Window::new("🎨 Selector de Color")
+        egui::Window::new("Selector de Color")
             .collapsible(false)
-            .resizable(false)
-            .default_width(330.0)
-            .fixed_size([330.0, 280.0])
+            .resizable(true)
+            .default_size([330.0, 280.0])
+            .min_size([260.0, 240.0])
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .open(&mut keep_open)
             .show(ctx, |ui| {

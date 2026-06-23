@@ -74,3 +74,45 @@ fn test_user_scenario_x_squared_y_squared() {
     println!("IC: {:?}", ic.is_some());
     println!("Function: {:?}", f.is_some());
 }
+
+#[test]
+fn test_user_scenario_piecewise_function_command() {
+    let mut doc = Document::new();
+    let outcome = process_input(
+        &mut doc,
+        &mut "Piecewise[x<0, x^2, x>=0, sqrt(x)]".to_string(),
+    );
+    println!("outcome: {:?}", outcome);
+
+    let function = doc.objects_iter().find_map(|(_, o)| {
+        if let GeoObject::Function(f) = o {
+            Some(f)
+        } else {
+            None
+        }
+    });
+
+    let function = function.expect("Piecewise command should create a FunctionObj");
+    assert_eq!(function.expr, "piecewise(x<0, x^2, x>=0, sqrt(x))");
+}
+
+#[test]
+fn test_user_scenario_piecewise_function_alias() {
+    let mut doc = Document::new();
+    let outcome = process_input(
+        &mut doc,
+        &mut "Function[piecewise(x<0, x^2, x>=0, sqrt(x))]".to_string(),
+    );
+    println!("outcome: {:?}", outcome);
+
+    let function = doc.objects_iter().find_map(|(_, o)| {
+        if let GeoObject::Function(f) = o {
+            Some(f)
+        } else {
+            None
+        }
+    });
+
+    let function = function.expect("Function[piecewise(...)] should create a FunctionObj");
+    assert_eq!(function.expr, "piecewise(x<0, x^2, x>=0, sqrt(x))");
+}

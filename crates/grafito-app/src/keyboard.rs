@@ -5,15 +5,14 @@
 
 use crate::GrafitoApp;
 use egui::Color32;
+use grafito_ui::theme::current_theme;
 
 pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let theme = current_theme(ctx);
     let is_dark = app.dark_mode;
-    let accent = Color32::from_rgb(53, 132, 228);
-    let sep_col = if is_dark {
-        Color32::from_rgb(55, 55, 60)
-    } else {
-        Color32::from_rgb(175, 175, 180)
-    };
+    let accent = theme.accent;
+    let sep_col = theme.separator;
+    let panel_bg = theme.panel_bg;
 
     // ─── 4. MATH KEYBOARD — docked bottom panel (central area only) ──────────────
     if app.keyboard_visible {
@@ -21,11 +20,7 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
             .min_height(180.0)
             .frame(
                 egui::Frame::none()
-                    .fill(if is_dark {
-                        Color32::from_rgb(28, 28, 36)
-                    } else {
-                        Color32::from_rgb(244, 245, 250)
-                    })
+                    .fill(panel_bg)
                     .stroke(egui::Stroke::new(1.0, sep_col)),
             )
             .show(ctx, |ui| {
@@ -42,7 +37,7 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     Color32::from_gray(110)
                                 };
                                 let fbg = if active {
-                                    Color32::from_rgba_unmultiplied(100, 80, 200, 30)
+                                    theme.accent_muted
                                 } else {
                                     Color32::TRANSPARENT
                                 };
@@ -69,7 +64,10 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                         let avail_w = ui.available_width();
                         let sp = 4.0_f32;
-                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(24.0, 65.0);
+                        // Bajamos el mínimo de btn_w de 24 a 18 para ventanas
+                        // angostas; envolveremos toda la fila en ScrollArea
+                        // abajo para que no se corte.
+                        let btn_w = ((avail_w - (7.0 * sp) - 10.0) / 8.0).clamp(18.0, 65.0);
                         let total_w = (btn_w * 8.0) + (sp * 7.0);
                         let pad = ((avail_w - total_w) / 2.0).max(0.0);
 
@@ -281,7 +279,7 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::Sense::click(),
                                 );
                                 let bg = if resp.hovered() {
-                                    Color32::from_rgb(220, 60, 60)
+                                    theme.danger
                                 } else {
                                     Color32::from_gray(if is_dark { 48 } else { 230 })
                                 };
@@ -317,9 +315,15 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::Sense::click(),
                                 );
                                 let bg = if resp.hovered() {
-                                    Color32::from_rgb(120, 100, 240)
+                                    theme.accent
                                 } else {
-                                    Color32::from_rgb(100, 80, 200)
+                                    // Versión más oscura del accent: gamma un 50%.
+                                    let a = theme.accent;
+                                    Color32::from_rgb(
+                                        (a.r() as f32 * 0.7) as u8,
+                                        (a.g() as f32 * 0.7) as u8,
+                                        (a.b() as f32 * 0.7) as u8,
+                                    )
                                 };
                                 ui.painter().rect(r, 4.0, bg, egui::Stroke::NONE);
                                 ui.painter().text(
@@ -330,10 +334,8 @@ pub(crate) fn draw_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     Color32::WHITE,
                                 );
                                 if resp.clicked() {
-                                    app.save_state();
-                                    let input_was = app.input_text.clone();
                                     let time = ui.ctx().input(|i| i.time);
-                                    app.execute_command_and_record(&input_was, time);
+                                    app.submit_input_text(time);
                                 }
                             }
                         });

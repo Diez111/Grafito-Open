@@ -44,6 +44,8 @@ pub enum Icon {
     Menu,
     Search,
     Settings,
+    Play,
+    Pause,
 
     // Herramientas (matching con Tool)
     Move,
@@ -149,6 +151,8 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Menu => icon_menu(painter, inner, color, stroke),
         Icon::Search => icon_search(painter, inner, color, stroke),
         Icon::Settings => icon_settings(painter, inner, color, stroke),
+        Icon::Play => icon_play(painter, inner, color, stroke_thick),
+        Icon::Pause => icon_pause(painter, inner, color, stroke_thick),
 
         Icon::Move => icon_move(painter, inner, color, stroke_thick),
         Icon::Point => icon_point(painter, inner, color, stroke_thick),
@@ -233,92 +237,181 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
 // ═══════════════════════════════════════════════════════════
 
 fn icon_delete(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
-    // Papelera: tapa + caja con lineas verticales
-    let lid_y = r.min.y + r.height() * 0.25;
-    let pad = r.width() * 0.1;
-    painter.line_segment(
-        [pos2(r.min.x + pad, lid_y), pos2(r.max.x - pad, lid_y)],
-        stroke,
-    );
-    // Manija de la tapa
-    let handle_w = r.width() * 0.3;
-    let handle_x = r.center().x - handle_w / 2.0;
-    painter.line_segment(
-        [
-            pos2(handle_x, lid_y),
-            pos2(handle_x, r.min.y + r.height() * 0.1),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            pos2(handle_x + handle_w, lid_y),
-            pos2(handle_x + handle_w, r.min.y + r.height() * 0.1),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            pos2(handle_x, r.min.y + r.height() * 0.1),
-            pos2(handle_x + handle_w, r.min.y + r.height() * 0.1),
-        ],
-        stroke,
-    );
-    // Caja
-    let body_y = lid_y;
-    let body_bot = r.max.y - pad;
-    painter.line_segment(
-        [
-            pos2(r.min.x + pad * 1.5, body_y),
-            pos2(r.max.x - pad * 1.5, body_bot),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            pos2(r.max.x - pad * 1.5, body_y),
-            pos2(r.min.x + pad * 1.5, body_bot),
-        ],
-        stroke,
-    );
-    // Lineas verticales
-    let third = r.width() / 3.0;
-    let cx = r.center().x;
-    for dx in [-third * 0.5, 0.0, third * 0.5] {
-        let x = cx + dx;
-        painter.line_segment(
-            [
-                pos2(x, body_y + r.height() * 0.1),
-                pos2(x, body_bot - r.height() * 0.05),
-            ],
-            stroke,
-        );
-    }
+    // Papelera: tapa con manija + cuerpo trapezoidal con lineas verticales
     let _ = color;
+
+    // Tapa: linea horizontal arriba del cuerpo
+    let lid_y = r.min.y + r.height() * 0.25;
+    let lid_pad = r.width() * 0.12;
+    painter.line_segment(
+        [
+            pos2(r.min.x + lid_pad, lid_y),
+            pos2(r.max.x - lid_pad, lid_y),
+        ],
+        stroke,
+    );
+
+    // Manija: arco/pequeño rectangulo sobre la tapa
+    let handle_w = r.width() * 0.32;
+    let handle_x = r.center().x - handle_w / 2.0;
+    let handle_top = r.min.y + r.height() * 0.05;
+    let handle_bot = lid_y - r.height() * 0.05;
+    painter.line_segment(
+        [pos2(handle_x, handle_bot), pos2(handle_x, handle_top)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(handle_x + handle_w, handle_bot),
+            pos2(handle_x + handle_w, handle_top),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(handle_x, handle_top),
+            pos2(handle_x + handle_w, handle_top),
+        ],
+        stroke,
+    );
+
+    // Cuerpo: trapezoide (mas angosto abajo) con esquinas redondeadas
+    let body_top_y = lid_y + r.height() * 0.05;
+    let body_bot_y = r.max.y - r.height() * 0.08;
+    let top_inset = r.width() * 0.08;
+    let bot_inset = r.width() * 0.18;
+    let top_left = pos2(r.min.x + top_inset, body_top_y);
+    let top_right = pos2(r.max.x - top_inset, body_top_y);
+    let bot_left = pos2(r.min.x + bot_inset, body_bot_y);
+    let bot_right = pos2(r.max.x - bot_inset, body_bot_y);
+    painter.line_segment([top_left, bot_left], stroke);
+    painter.line_segment([bot_left, bot_right], stroke);
+    painter.line_segment([bot_right, top_right], stroke);
+    painter.line_segment([top_right, top_left], stroke);
+
+    // Lineas verticales internas (3 rayas)
+    let body_h = body_bot_y - body_top_y;
+    let y0 = body_top_y + body_h * 0.18;
+    let y1 = body_bot_y - body_h * 0.10;
+    let body_w = (r.max.x - bot_inset) - (r.min.x + bot_inset);
+    let cx = r.center().x;
+    for dx in [-body_w * 0.22, 0.0, body_w * 0.22] {
+        let x = cx + dx;
+        painter.line_segment([pos2(x, y0), pos2(x, y1)], stroke);
+    }
 }
 
 fn icon_eye(painter: &Painter, r: Rect, color: Color32, stroke: Stroke, off: bool) {
-    // Ojo: curva tipo "hoja" + círculo pupila
-    let cy = r.center().y;
-    let pts = vec![
-        pos2(r.min.x, cy),
-        pos2(r.center().x - r.width() * 0.1, r.min.y + r.height() * 0.15),
-        pos2(r.center().x, r.min.y),
-        pos2(r.center().x + r.width() * 0.1, r.min.y + r.height() * 0.15),
-        pos2(r.max.x, cy),
-        pos2(r.center().x + r.width() * 0.1, r.max.y - r.height() * 0.15),
-        pos2(r.center().x, r.max.y),
-        pos2(r.center().x - r.width() * 0.1, r.max.y - r.height() * 0.15),
-        pos2(r.min.x, cy),
-    ];
-    painter.add(Shape::line(pts, stroke));
-    // Pupila
-    let pup_r = r.width() * 0.15;
-    painter.circle_filled(r.center(), pup_r, color);
-    if off {
-        // Diagonal tachando
-        painter.line_segment([r.min, r.max], Stroke::new(2.0, color));
+    // Ojo: contorno en forma de almendra ancha + pupila circular centrada
+    let c = r.center();
+    let w = r.width();
+    let h = r.height();
+
+    // Construimos el contorno del ojo como un polígono muestreando
+    // dos arcos suaves (uno superior, otro inferior) que se cierran
+    // en los extremos izquierdo y derecho.
+    let left = pos2(r.min.x + w * 0.05, c.y);
+    let right = pos2(r.max.x - w * 0.05, c.y);
+
+    // Arco superior: parábola de left a right pasando por (c.x, top)
+    let n = 16;
+    let mut upper = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        // mezcla cuadrática: left/right a top
+        let x = left.x + (right.x - left.x) * t;
+        // altura del arco: 0 en extremos, max en el centro
+        let arch = 4.0 * t * (1.0 - t);
+        let y = c.y - arch * (h * 0.40);
+        upper.push(pos2(x, y));
     }
+    // Arco inferior: parábola espejada
+    let mut lower = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let x = right.x + (left.x - right.x) * t;
+        let arch = 4.0 * t * (1.0 - t);
+        let y = c.y + arch * (h * 0.40);
+        lower.push(pos2(x, y));
+    }
+
+    // Polígono del contorno. `upper` termina en `right`, `lower` empieza en
+    // `right` y termina en `left` (que coincide con `upper[0]`). Skip para
+    // evitar el punto duplicado.
+    let mut outline = Vec::with_capacity(upper.len() + lower.len() - 1);
+    outline.extend(upper);
+    outline.extend(lower.iter().skip(1));
+    painter.add(Shape::convex_polygon(
+        outline,
+        egui::Color32::TRANSPARENT,
+        stroke,
+    ));
+
+    // Pupila: círculo relleno en el centro. Sin stroke redundante (era del
+    // mismo color que el fill y no aportaba contraste real).
+    let pup_r = w.min(h) * 0.20;
+    painter.circle_filled(c, pup_r, color);
+
+    if off {
+        // Diagonal tachando el ojo
+        let slash = Stroke::new(2.0, color);
+        painter.line_segment(
+            [
+                pos2(r.min.x + w * 0.10, r.max.y - h * 0.10),
+                pos2(r.max.x - w * 0.10, r.min.y + h * 0.10),
+            ],
+            slash,
+        );
+    }
+}
+
+fn icon_play(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    // Triángulo apuntando a la derecha, relleno para combinar con Pause.
+    let pad_x = r.width() * 0.18;
+    let pad_y = r.height() * 0.12;
+    let p_tip = pos2(r.max.x - pad_x, r.center().y);
+    let p_top = pos2(r.min.x + pad_x, r.min.y + pad_y);
+    let p_bot = pos2(r.min.x + pad_x, r.max.y - pad_y);
+    painter.add(Shape::convex_polygon(
+        vec![p_tip, p_top, p_bot],
+        color,
+        stroke,
+    ));
+}
+
+fn icon_pause(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    // Dos barras verticales: las dibujamos rellenas para mejor contraste
+    // sobre fondos claros u oscuros.
+    let pad_x = r.width() * 0.20;
+    let pad_y = r.height() * 0.12;
+    let inner_w = r.width() - pad_x * 2.0;
+    let gap = inner_w * 0.18;
+    let bar_w = (inner_w - gap) * 0.5;
+    let top_y = r.min.y + pad_y;
+    let bot_y = r.max.y - pad_y;
+    let left = pos2(r.min.x + pad_x, top_y);
+    let right = pos2(r.min.x + pad_x + bar_w + gap, top_y);
+    let bar_h = bot_y - top_y;
+    painter.add(Shape::convex_polygon(
+        vec![
+            left,
+            pos2(left.x + bar_w, top_y),
+            pos2(left.x + bar_w, top_y + bar_h),
+            pos2(left.x, top_y + bar_h),
+        ],
+        color,
+        stroke,
+    ));
+    painter.add(Shape::convex_polygon(
+        vec![
+            right,
+            pos2(right.x + bar_w, top_y),
+            pos2(right.x + bar_w, top_y + bar_h),
+            pos2(right.x, top_y + bar_h),
+        ],
+        color,
+        stroke,
+    ));
 }
 
 fn icon_edit(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {

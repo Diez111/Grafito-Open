@@ -454,12 +454,17 @@ pub fn toolbar_filtered(
         .inner_margin(egui::Margin::symmetric(3.0, 2.0))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(1.0, 0.0);
-            ui.horizontal(|ui| {
-                for &gid in groups {
-                    let (icon_fn, tools) = gid.def();
-                    tool_group(ui, current_tool, icon_fn, tools, accent, txt, txt_dim);
-                }
-            })
+            // ScrollArea horizontal: ventanas angostas ya no ocultan grupos.
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for &gid in groups {
+                            let (icon_fn, tools) = gid.def();
+                            tool_group(ui, current_tool, icon_fn, tools, accent, txt, txt_dim);
+                        }
+                    });
+                });
         })
         .response
 }

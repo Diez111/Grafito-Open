@@ -1,10 +1,24 @@
 use grafito_core::*;
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::{Camera3D, Point2, ViewTransform};
-use grafito_render::Renderer;
+use grafito_render::{transform_complex_mapping_segments, Renderer};
 use std::collections::HashMap;
 
 fn view_800x600() -> ViewTransform {
     ViewTransform::new(800.0, 600.0)
+}
+
+#[test]
+fn test_complex_mapping_transform_does_not_bridge_segments() {
+    let segments = vec![
+        (Point2::new(1.0, 0.0), Point2::new(2.0, 0.0)),
+        (Point2::new(-1.0, 0.0), Point2::new(-2.0, 0.0)),
+    ];
+
+    let strokes = transform_complex_mapping_segments(ConformalMap::Inversion, &segments, 1);
+
+    assert_eq!(strokes.len(), 2);
+    assert!(strokes.iter().all(|(a, b)| a.x.signum() == b.x.signum()));
 }
 
 #[test]

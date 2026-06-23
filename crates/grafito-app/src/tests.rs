@@ -167,7 +167,11 @@ fn test_left_panel_default_sidebar_tab() {
     assert_eq!(LeftPanelContent::AlgebraAndCas.default_sidebar_tab(), 0);
     assert_eq!(LeftPanelContent::Tools.default_sidebar_tab(), 1);
     assert_eq!(LeftPanelContent::Cas.default_sidebar_tab(), 2);
+    // Stats ahora mapea al tab "Tabla" (3); Complejos a "Álgebra" (0);
+    // Atractores a "Herram." (1) — fusión con tabs existentes.
     assert_eq!(LeftPanelContent::Stats.default_sidebar_tab(), 3);
+    assert_eq!(LeftPanelContent::Complex.default_sidebar_tab(), 0);
+    assert_eq!(LeftPanelContent::Attractor.default_sidebar_tab(), 1);
     assert_eq!(LeftPanelContent::Spreadsheet.default_sidebar_tab(), 4);
 }
 

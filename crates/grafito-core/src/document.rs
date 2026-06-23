@@ -136,29 +136,98 @@ impl Document {
         self.complex_base_symbol = new_symbol.to_string();
         self.bump_version();
 
-        let mut updates = Vec::new();
-        for (id, obj) in &mut self.objects {
-            let label = obj.label();
+        // Helper: reemplaza `old` por `new_symbol` sólo cuando aparezca como
+        // word (boundary chars no alfanum/underscore/subscripts). Trabaja en
+        // `char` para no romper con Unicode (subíndices son multibyte).
+        let rewrite_expr = |expr: &str| -> String {
+            if expr.is_empty() || old.is_empty() {
+                return expr.to_string();
+            }
+            let chars: Vec<char> = expr.chars().collect();
+            let old_chars: Vec<char> = old.chars().collect();
+            let n = chars.len();
+            let m = old_chars.len();
+            let mut out = String::with_capacity(expr.len());
+            let mut i = 0;
+            while i < n {
+                if i + m <= n && chars[i..i + m] == old_chars[..] {
+                    let prev = if i == 0 { ' ' } else { chars[i - 1] };
+                    let next = if i + m >= n { ' ' } else { chars[i + m] };
+                    let is_boundary = |c: char| {
+                        !c.is_alphanumeric()
+                            && c != '_'
+                            && !matches!(
+                                c,
+                                '₀' | '₁' | '₂' | '₃' | '₄' | '₅' | '₆' | '₇' | '₈' | '₉'
+                            )
+                    };
+                    if is_boundary(prev) && is_boundary(next) {
+                        out.push_str(new_symbol);
+                        i += m;
+                        continue;
+                    }
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            out
+        };
+
+        let mut label_updates: Vec<(ObjectId, String)> = Vec::new();
+        let mut expr_updates: Vec<(ObjectId, String)> = Vec::new();
+        for (id, obj) in &self.objects {
+            // --- Label rename ---
+            let label = obj.label().to_string();
             if label.starts_with(&old) {
-                // Determine if it's the exact old symbol or a subscript variant
                 let rest = &label[old.len()..];
                 let is_subscript = rest.is_empty()
                     || rest.chars().all(|c| {
                         matches!(c, '₀' | '₁' | '₂' | '₃' | '₄' | '₅' | '₆' | '₇' | '₈' | '₉')
                     });
                 if is_subscript {
-                    let new_label = format!("{}{}", new_symbol, rest);
-                    updates.push((*id, new_label));
+                    label_updates.push((*id, format!("{}{}", new_symbol, rest)));
                 }
+            }
+            // --- Expr token rewrite ---
+            let new_expr_opt = match obj {
+                GeoObject::ComplexGrid(o) => {
+                    let r = rewrite_expr(&o.expr);
+                    if r != o.expr {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                }
+                GeoObject::ComplexMapping(o) => {
+                    let r = rewrite_expr(&o.expr);
+                    if r != o.expr {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(new_expr) = new_expr_opt {
+                expr_updates.push((*id, new_expr));
             }
         }
 
-        for (id, new_label) in updates {
+        for (id, new_label) in label_updates {
             if let Some(obj) = self.objects.get_mut(&id) {
                 match obj {
                     GeoObject::ComplexGrid(o) => o.label = new_label,
                     GeoObject::ComplexMapping(o) => o.label = new_label,
-                    _ => {} // We could update other objects if they were explicitly using the complex name
+                    _ => {}
+                }
+            }
+        }
+        for (id, new_expr) in expr_updates {
+            if let Some(obj) = self.objects.get_mut(&id) {
+                match obj {
+                    GeoObject::ComplexGrid(o) => o.expr = new_expr,
+                    GeoObject::ComplexMapping(o) => o.expr = new_expr,
+                    _ => {}
                 }
             }
         }
