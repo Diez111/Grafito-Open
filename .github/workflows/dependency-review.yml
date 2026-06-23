@@ -27,4 +27,3 @@ jobs:
           fail-on-severity: moderate
           deny-licenses: GPL-3.0, AGPL-3.0
           comment-summary-in-pr: always
-          allow-ghsas: []
