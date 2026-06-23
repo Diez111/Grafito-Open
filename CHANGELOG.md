@@ -5,11 +5,32 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
-## [1.1.3-open.0] - 2026-06-20
+## [1.1.4-beta] - 2026-06-22
 
 #### Añadido
-- **Fork open-source `Grafito-Open`**: nuevo repositorio público en `github.com/Diez111/Grafito-Open` con el código completo de Grafito bajo GPL-3.0-or-later, incluyendo todas las mejoras de v1.1.x (mapeos conformes, módulo `conformal/`, sistema de iconos vectoriales, design tokens).
-- **Readme bilingüe profesional** (español + inglés) con icono, badges, tabla de contenidos, ejemplos de comandos, y descripción completa de los 6 crates del workspace.
+- **Ventana modal "Acerca de Grafito"**: el botón del menú Ayuda ahora abre una
+  ventana modal con la versión actual, una descripción en español de qué es
+  Grafito y un resumen de los cambios principales de la release 1.1.4.
+- **Etiqueta dinámica de versión en el menú**: el texto "Acerca de Grafito
+  vX.Y.Z" se construye desde `env!("CARGO_PKG_VERSION")`, así que siempre
+  refleja la versión publicada sin tener que editarlo a mano.
+- **Bump de workspace**: la versión en `Cargo.toml` (`[workspace.package]`)
+  pasa de `1.0.0-beta` a `1.1.4-beta`. El `.deb` ahora se llama
+  `grafito_1.1.4-beta_amd64.deb`.
+- **Descripción de paquete `.deb` en español**: el campo `Description` de
+  `packaging/debian/control` ahora describe Grafito en español y menciona
+  las 10 perspectivas y los mapeos conformes.
+- **Hogar nuevo del repositorio**: el `Homepage` del `.deb` apunta a
+  `https://github.com/Diez111/Grafito-Open`.
+
+#### Cambiado
+- **`--help` y la barra de splash**: muestran `v1.1.4-beta` y un tagline
+  en español. La etiqueta "v1.0.0-beta" hardcodeada se eliminó.
+
+#### Corregido
+- **Botón "Acerca de" sin acción**: el handler de `Acerca de Grafito v...`
+  en el menú Ayuda era un `if ui.button(...).clicked() {}` vacío. Ahora
+  abre la ventana modal "Acerca de Grafito".
 
 ## [1.1.3-beta] - 2026-XX-XX
 
@@ -280,6 +301,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
+[1.1.4-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.4-beta
 [1.0.0-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.0.0-beta
 [0.9.0-beta.1]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0-beta.1
 [v0.9.16-alpha]: https://github.com/Diez111/Grafito/releases/tag/v0.9.16-alpha

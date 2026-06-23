@@ -7,6 +7,266 @@ use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{draw_icon, Icon};
 use grafito_ui::theme::current_theme;
 
+fn color32_from_object_color(color: grafito_geometry::Color, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(
+        (color.r * 255.0).clamp(0.0, 255.0) as u8,
+        (color.g * 255.0).clamp(0.0, 255.0) as u8,
+        (color.b * 255.0).clamp(0.0, 255.0) as u8,
+        alpha,
+    )
+}
+
+pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
+    match obj {
+        GeoObject::Function(f) => f.expr.clone(),
+        GeoObject::Point(p) => format!("({:.2}, {:.2})", p.position.x, p.position.y),
+        GeoObject::Line(l) => {
+            let dx = l.end.x - l.start.x;
+            let dy = l.end.y - l.start.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            format!(
+                "({:.2}, {:.2}) ↔ ({:.2}, {:.2})  L={:.3}",
+                l.start.x, l.start.y, l.end.x, l.end.y, len
+            )
+        }
+        GeoObject::Circle(c) => {
+            let area = std::f64::consts::PI * c.radius * c.radius;
+            let perim = 2.0 * std::f64::consts::PI * c.radius;
+            format!("r={:.2}  A={:.3}  P={:.3}", c.radius, area, perim)
+        }
+        GeoObject::Ellipse(e) => {
+            let area = std::f64::consts::PI * e.rx * e.ry;
+            format!("rx={:.2} ry={:.2}  A={:.3}", e.rx, e.ry, area)
+        }
+        GeoObject::Polygon(p) => {
+            let n = p.vertices.len();
+            let perim = if n >= 2 {
+                let mut sum = 0.0;
+                for i in 0..n {
+                    let a = p.vertices[i];
+                    let b = p.vertices[(i + 1) % n];
+                    let dx = b.x - a.x;
+                    let dy = b.y - a.y;
+                    sum += (dx * dx + dy * dy).sqrt();
+                }
+                sum
+            } else {
+                0.0
+            };
+            let area = if n >= 3 {
+                let mut s = 0.0;
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    s += p.vertices[i].x * p.vertices[j].y - p.vertices[j].x * p.vertices[i].y;
+                }
+                s.abs() * 0.5
+            } else {
+                0.0
+            };
+            format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
+        }
+        GeoObject::Pencil(p) => format!("{} puntos", p.points.len()),
+        GeoObject::Point3D(p) => format!(
+            "({:.2}, {:.2}, {:.2})",
+            p.position.x, p.position.y, p.position.z
+        ),
+        GeoObject::Sphere3D(s) => {
+            let area = 4.0 * std::f64::consts::PI * s.radius * s.radius;
+            let vol = 4.0 / 3.0 * std::f64::consts::PI * s.radius * s.radius * s.radius;
+            format!("r={:.2}  A={:.3}  V={:.3}", s.radius, area, vol)
+        }
+        GeoObject::Cube3D(c) => {
+            let vol = c.size * c.size * c.size;
+            format!("size={:.2}  V={:.3}", c.size, vol)
+        }
+        GeoObject::Cylinder3D(cy) => {
+            let dx = cy.top_center.x - cy.base_center.x;
+            let dy = cy.top_center.y - cy.base_center.y;
+            let dz = cy.top_center.z - cy.base_center.z;
+            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+            let vol = std::f64::consts::PI * cy.radius * cy.radius * h;
+            format!("r={:.2} h={:.2}  V={:.3}", cy.radius, h, vol)
+        }
+        GeoObject::Cone3D(co) => {
+            let dx = co.apex.x - co.base_center.x;
+            let dy = co.apex.y - co.base_center.y;
+            let dz = co.apex.z - co.base_center.z;
+            let h = (dx * dx + dy * dy + dz * dz).sqrt();
+            let vol = 1.0 / 3.0 * std::f64::consts::PI * co.radius * co.radius * h;
+            format!("r={:.2} h={:.2}  V={:.3}", co.radius, h, vol)
+        }
+        GeoObject::Torus3D(t) => format!("R={:.2} r={:.2}", t.r_major, t.r_minor),
+        GeoObject::Segment3D(s) => {
+            let dx = s.b.x - s.a.x;
+            let dy = s.b.y - s.a.y;
+            let dz = s.b.z - s.a.z;
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            format!("L={:.3}", len)
+        }
+        GeoObject::ParametricCurve2D(p) => format!("({}, {})", p.expr_x, p.expr_y),
+        GeoObject::PolarCurve(p) => format!("r = {}", p.expr_r),
+        GeoObject::VectorField2D(v) => format!("({}, {})", v.expr_u, v.expr_v),
+        GeoObject::ComplexGrid(c) => c.expr.clone(),
+        GeoObject::ComplexMapping(c) => c.expr.clone(),
+        GeoObject::ImplicitCurve(ic) => {
+            let op = match ic.operator {
+                grafito_core::RelationOperator::Eq => "=",
+                grafito_core::RelationOperator::Less => "<",
+                grafito_core::RelationOperator::LessEq => "<=",
+                grafito_core::RelationOperator::Greater => ">",
+                grafito_core::RelationOperator::GreaterEq => ">=",
+            };
+            format!("{} {} {}", ic.expr_lhs, op, ic.expr_rhs)
+        }
+        GeoObject::Histogram(h) => format!("{} datos · {} bins", h.data.len(), h.bins),
+        GeoObject::ScatterPlot(s) => format!("{} puntos", s.xs.len().min(s.ys.len())),
+        GeoObject::BoxPlot(b) => format!("{} datos", b.data.len()),
+        GeoObject::RegressionLine(r) => format!("y = {:.3}x + {:.3}", r.slope, r.intercept),
+        GeoObject::PhasePortrait(p) => format!("({}, {})", p.expr_dx, p.expr_dy),
+        _ => String::new(),
+    }
+}
+
+pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: ObjectId) {
+    let theme = current_theme(ui.ctx());
+    let Some(obj) = app.document.get_object(oid) else {
+        return;
+    };
+    let obj_label = obj.label().to_string();
+    let obj_name = obj.name().to_string();
+    let obj_vis = obj.is_visible();
+    let obj_col = color32_from_object_color(obj.color(), 255);
+    let obj_expr = object_expression_summary(obj);
+
+    let is_sel = app.selected_object == Some(oid);
+    let frame_fill = if is_sel {
+        theme.accent_muted
+    } else {
+        theme.panel_bg
+    };
+    let border = if is_sel {
+        egui::Stroke::new(1.0, theme.accent)
+    } else {
+        egui::Stroke::new(1.0, theme.separator)
+    };
+
+    let mut row_clicked = false;
+    let mut delete = false;
+    ui.add_space(4.0);
+    egui::Frame::none()
+        .fill(frame_fill)
+        .rounding(8.0)
+        .stroke(border)
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (del_rect, del_resp) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                    if ui.is_rect_visible(del_rect) {
+                        draw_icon(
+                            ui.painter(),
+                            del_rect.shrink(4.0),
+                            Icon::Delete,
+                            theme.text_secondary,
+                        );
+                    }
+                    if del_resp.on_hover_text("Eliminar").clicked() {
+                        delete = true;
+                    }
+
+                    let (eye_rect, eye_resp) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                    if ui.is_rect_visible(eye_rect) {
+                        draw_icon(
+                            ui.painter(),
+                            eye_rect.shrink(4.0),
+                            if obj_vis { Icon::Eye } else { Icon::EyeOff },
+                            theme.text_secondary,
+                        );
+                    }
+                    if eye_resp.on_hover_text("Visibilidad").clicked() {
+                        if let Some(o) = app.document.get_object_mut(oid) {
+                            o.set_visible(!obj_vis);
+                            app.document.bump_version();
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let dot_alpha = if obj_vis { 255u8 } else { 80u8 };
+                        let dot_col = Color32::from_rgba_unmultiplied(
+                            obj_col.r(),
+                            obj_col.g(),
+                            obj_col.b(),
+                            dot_alpha,
+                        );
+                        let (dot_r, dot_resp) =
+                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
+                        ui.painter().circle_filled(dot_r.center(), 6.0, dot_col);
+                        if dot_resp.hovered() {
+                            ui.painter().circle_stroke(
+                                dot_r.center(),
+                                6.0,
+                                egui::Stroke::new(1.0, Color32::WHITE),
+                            );
+                        }
+                        if dot_resp.on_hover_text("Cambiar color").clicked() {
+                            let obj_color = app
+                                .document
+                                .get_object(oid)
+                                .map(|o| o.color())
+                                .unwrap_or_else(|| {
+                                    grafito_geometry::Color::new(1.0, 1.0, 1.0, 1.0)
+                                });
+                            app.active_color_picker = Some((
+                                oid,
+                                grafito_ui::color_picker::HsvColorPicker::new(obj_color),
+                            ));
+                            row_clicked = true;
+                        }
+                        ui.add_space(5.0);
+
+                        let txt = if !obj_expr.is_empty() {
+                            format!("{}: {}", obj_label, obj_expr)
+                        } else {
+                            format!("{}: {}", obj_label, obj_name)
+                        };
+                        let lbl_resp = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(txt)
+                                    .size(13.0)
+                                    .color(theme.text_primary),
+                            )
+                            .sense(egui::Sense::click())
+                            .truncate(),
+                        );
+                        if lbl_resp.clicked() {
+                            row_clicked = true;
+                        }
+                        if lbl_resp.double_clicked()
+                            && !obj_expr.is_empty()
+                            && (obj_name == "Function" || obj_name == "Point")
+                        {
+                            app.input_text = format!("{}={}", obj_label, obj_expr);
+                        }
+                    });
+                });
+            });
+        });
+
+    if row_clicked {
+        app.selected_object = if is_sel { None } else { Some(oid) };
+    }
+    if delete {
+        app.document.remove_object(oid);
+        if app.selected_object == Some(oid) {
+            app.selected_object = None;
+        }
+    }
+    ui.add_space(2.0);
+}
+
 pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
@@ -21,10 +281,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     .resizable(true)
     .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
     .show(ctx, |ui| {
-        // Input row
+        // Input row in-panel: es la affordance principal para "agregar cosas"
+        // en el panel de Álgebra. Editar aquí equivale a la barra inferior
+        // (ambas usan `app.input_text`); lo dejamos visible acá porque es
+        // donde el usuario espera tipear.
         egui::Frame::none()
             .fill(theme.input_bg)
-            .inner_margin(egui::Margin { left:8.0, right:8.0, top:6.0, bottom:6.0 })
+            .inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 6.0, bottom: 6.0 })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
@@ -40,11 +303,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }
                     if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        app.save_state();
-                        let input_was = app.input_text.clone();
-                        let outcome = commands::process_input(&mut app.document, &mut app.input_text);
                         let time = ui.ctx().input(|i| i.time);
-                        app.handle_command_outcome(outcome, time, &input_was);
+                        app.submit_input_text(time);
                     }
                 });
             });
@@ -271,12 +531,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             if let Some(obj) = app.document.get_object_mut(oid) {
                                 ui.add_space(2.0);
                                 ui.scope(|ui| {
-                                    if !ui.visuals().dark_mode {
-                                        ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(100);
-                                        ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(80);
-                                        ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_gray(60);
-                                        ui.style_mut().visuals.selection.bg_fill = egui::Color32::BLACK;
-                                    }
+                                    // Sin overrides de light mode: confiamos en
+                                    // los tokens del theme LIGHT definidos en
+                                    // grafito-ui/src/theme.rs.
                                     match obj {
                                         GeoObject::Line(l) => {
                                             ui.horizontal(|ui| {
@@ -414,19 +671,17 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                                     let mut sl_resp = None;
                                     ui.scope(|ui| {
-                                        if !ui.visuals().dark_mode {
-                                            ui.style_mut().visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(100);
-                                            ui.style_mut().visuals.widgets.hovered.bg_fill = egui::Color32::from_gray(80);
-                                            ui.style_mut().visuals.widgets.active.bg_fill = egui::Color32::from_gray(60);
-                                            ui.style_mut().visuals.selection.bg_fill = egui::Color32::BLACK;
-                                        }
+                                        // Sin overrides de light mode: tokens del theme.
 
                                         let slider = egui::Slider::new(&mut v, min..=max)
                                             .step_by(step)
                                             .show_value(false)
                                             .trailing_fill(true);
 
-                                        sl_resp = Some(ui.add_sized([ui.available_width() - 50.0, 16.0], slider));
+                                        // Clamp para que el slider no se degenerate
+                                        // en pantallas angostas con labels largos.
+                                        let slider_w = (ui.available_width() - 50.0).max(40.0);
+                                        sl_resp = Some(ui.add_sized([slider_w, 16.0], slider));
                                     });
 
                                     if let Some(sl_resp) = sl_resp {
@@ -438,8 +693,22 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                                     ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
 
-                                    let play_icon = if animating { "⏸" } else { "▶" };
-                                    if ui.add_sized([20.0, 20.0], egui::Button::new(play_icon).frame(false)).clicked() {
+                                    let (play_rect, play_resp) = ui.allocate_exact_size(
+                                        egui::vec2(20.0, 20.0),
+                                        egui::Sense::click(),
+                                    );
+                                    if ui.is_rect_visible(play_rect) {
+                                        draw_icon(
+                                            ui.painter(),
+                                            play_rect.shrink(2.0),
+                                            if animating { Icon::Pause } else { Icon::Play },
+                                            if animating { theme.accent } else { theme.text_secondary },
+                                        );
+                                    }
+                                    if play_resp
+                                        .on_hover_text(if animating { "Detener animación" } else { "Animar variable" })
+                                        .clicked()
+                                    {
                                         animating = !animating;
                                     }
                                 });

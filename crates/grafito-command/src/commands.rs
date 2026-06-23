@@ -3100,6 +3100,18 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 input_text.clear();
                 return CommandOutcome::Message(format!("Heat map ({}x{}) created", res, res));
             }
+            "ComplexSymbol" if !cmd.args.is_empty() => {
+                // Cambia el símbolo base de los números complejos (default "z")
+                // a otro (p.ej. "w"). Migra labels y reescribe exprs de
+                // ComplexGrid/ComplexMapping existentes.
+                let new_sym = cmd.args[0].trim();
+                if new_sym.is_empty() {
+                    return CommandOutcome::Error("Símbolo vacío".into());
+                }
+                document.migrate_complex_symbol(new_sym);
+                input_text.clear();
+                return CommandOutcome::Message(format!("Símbolo base cambiado a '{}'", new_sym));
+            }
             "PolarCurve" if cmd.args.len() >= 3 => {
                 let expr = cmd.args[0].trim();
                 let t_min = cmd.args[1].trim().parse().unwrap_or(0.0);
@@ -3820,6 +3832,7 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             | "mapeocomplejo"
             | "mapeo_complejo"
             | "transformadacompleja" => "ComplexMapping",
+            "complexsymbol" | "complex_symbol" | "simbolocomplejo" => "ComplexSymbol",
             "domaincoloring" | "domain_coloring" | "dcolor" => "DomainColoring",
             "heatmap" | "heat_map" | "hmap" => "HeatMap",
             "polarcurve" | "polar_curve" | "polar" => "PolarCurve",

@@ -83,3 +83,102 @@ fn test_export_svg() {
     assert!(svg.contains("<circle"));
     assert!(svg.contains("<line"));
 }
+
+// ── Tests del sistema de Perspectivas ────────────────────────────────────
+
+#[test]
+fn test_perspective_all_has_ten_variants() {
+    assert_eq!(crate::Perspective::ALL.len(), 10);
+}
+
+#[test]
+fn test_perspective_view_mode_derivation() {
+    use crate::Perspective;
+    use crate::ViewMode;
+    // Perspectivas 3D → D3, el resto → D2.
+    assert_eq!(Perspective::Geometry3D.view_mode(), ViewMode::D3);
+    assert_eq!(Perspective::Dynamics.view_mode(), ViewMode::D3);
+    assert_eq!(Perspective::Geometry2D.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::AlgebraCas.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Calculus.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Probability.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Statistics.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Complex.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::DataAnalysis.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Exam.view_mode(), ViewMode::D2);
+}
+
+#[test]
+fn test_perspective_shortcut_numbers_unique() {
+    use crate::Perspective;
+    let mut nums: Vec<u8> = Perspective::ALL
+        .iter()
+        .map(|p| p.shortcut_number())
+        .collect();
+    nums.sort_unstable();
+    // Cada atajo es único y cubre 0..=9 (1..9 para las nueve primeras, 0 para Exam).
+    assert_eq!(nums, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+
+#[test]
+fn test_perspective_layout_canvas_modes() {
+    use crate::CanvasMode;
+    use crate::Perspective;
+    assert_eq!(Perspective::Geometry2D.layout().canvas_mode, CanvasMode::D2);
+    assert_eq!(Perspective::Geometry3D.layout().canvas_mode, CanvasMode::D3);
+    assert_eq!(
+        Perspective::AlgebraCas.layout().canvas_mode,
+        CanvasMode::SmallD2
+    );
+    assert_eq!(
+        Perspective::Probability.layout().canvas_mode,
+        CanvasMode::SmallD2
+    );
+    assert_eq!(Perspective::Dynamics.layout().canvas_mode, CanvasMode::D3);
+}
+
+#[test]
+fn test_perspective_layout_tool_groups_nonempty() {
+    use crate::Perspective;
+    for p in Perspective::ALL {
+        let layout = p.layout();
+        assert!(
+            !layout.visible_tool_groups.is_empty(),
+            "perspectiva {:?} no define grupos de herramientas",
+            p
+        );
+    }
+}
+
+#[test]
+fn test_perspective_layout_exam_restricted() {
+    use crate::Perspective;
+    let layout = Perspective::Exam.layout();
+    assert!(layout.right_panel.is_none());
+    assert!(!layout.show_math_keyboard);
+    // Modo examen: sólo herramientas básicas (Move, Point, Line, Circle, Polygon).
+    assert_eq!(layout.visible_tool_groups.len(), 5);
+}
+
+#[test]
+fn test_left_panel_default_sidebar_tab() {
+    use crate::LeftPanelContent;
+    assert_eq!(LeftPanelContent::Algebra.default_sidebar_tab(), 0);
+    assert_eq!(LeftPanelContent::AlgebraAndCas.default_sidebar_tab(), 0);
+    assert_eq!(LeftPanelContent::Tools.default_sidebar_tab(), 1);
+    assert_eq!(LeftPanelContent::Cas.default_sidebar_tab(), 2);
+    // Stats ahora mapea al tab "Tabla" (3); Complejos a "Álgebra" (0);
+    // Atractores a "Herram." (1) — fusión con tabs existentes.
+    assert_eq!(LeftPanelContent::Stats.default_sidebar_tab(), 3);
+    assert_eq!(LeftPanelContent::Complex.default_sidebar_tab(), 0);
+    assert_eq!(LeftPanelContent::Attractor.default_sidebar_tab(), 1);
+    assert_eq!(LeftPanelContent::Spreadsheet.default_sidebar_tab(), 4);
+}
+
+#[test]
+fn test_tool_group_id_def_nonempty() {
+    for &gid in grafito_ui::toolbar::ALL_GROUPS {
+        let (_icon, tools) = gid.def();
+        assert!(!tools.is_empty(), "grupo {:?} vacío", gid);
+    }
+}

@@ -216,7 +216,7 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 
     // Acentos y estados
     accent: Color32::from_rgb(94, 139, 255),
-    accent_muted: Color32::from_rgba_premultiplied(94, 139, 255, 40),
+    accent_muted: Color32::from_rgba_premultiplied(94, 139, 255, 90),
     accent_strong: Color32::from_rgb(120, 165, 255),
     success: Color32::from_rgb(46, 212, 122),
     warning: Color32::from_rgb(255, 184, 0),
@@ -285,7 +285,7 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
 
     // Acentos y estados
     accent: Color32::from_rgb(38, 99, 255),
-    accent_muted: Color32::from_rgba_premultiplied(38, 99, 255, 30),
+    accent_muted: Color32::from_rgba_premultiplied(38, 99, 255, 70),
     accent_strong: Color32::from_rgb(20, 70, 220),
     success: Color32::from_rgb(20, 175, 90),
     warning: Color32::from_rgb(220, 150, 0),

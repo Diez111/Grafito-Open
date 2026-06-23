@@ -1,20 +1,23 @@
 Package: grafito
-Version: 1.0.0-beta
+Version: 1.1.4-beta
 Section: graphics
 Priority: optional
 Architecture: amd64
 Depends: libgtk-3-0, libwebkit2gtk-4.1-0
 Maintainer: Grafito Team <grafito@example.com>
-Description: Mathematical function graphing calculator
- Grafito is a modern, high-performance mathematical graphing calculator
- built with Rust. It supports 2D and 3D function plotting, parametric
- curves, implicit curves, ODE solving, and much more.
+Description: Calculadora gráfica matemática interactiva
+ Grafito es una calculadora gráfica matemática moderna y de alto
+ rendimiento escrita en Rust. Soporta graficación 2D y 3D, curvas
+ paramétricas e implícitas, mapeos conformes algebraicos, resolución
+ de ecuaciones diferenciales, análisis simbólico (raíces, extremos,
+ integrales, tangentes, curvatura) y mucho más.
  .
- Features:
-  - 2D and 3D function plotting
-  - Parametric curves and surfaces
-  - Implicit curves (contour plots)
-  - ODE system solving
-  - Piecewise functions
-  - Modern GTK interface
-Homepage: https://github.com/Diez111/Grafito
+ Características:
+  - Graficación 2D y 3D de funciones
+  - Curvas paramétricas, polares e implícitas
+  - Mapeos conformes algebraicos (1/z, z^n, exp, log, Möbius, etc.)
+  - 10 perspectivas: Geometría, Álgebra, Cálculo, Estadística, Complejos,
+    Dinámica, Datos, Examen
+  - CAS simbólico, restricciones numéricas, construcción geométrica
+  - Cómputo GPU (wgpu) con fallback CPU
+Homepage: https://github.com/Diez111/Grafito-Open

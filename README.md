@@ -2,316 +2,429 @@
   <img src="assets/grafito-icon-256x256.png" alt="Grafito" width="128" />
 </p>
 
-<h1 align="center">Grafito Open</h1>
+<h1 align="center">Grafito</h1>
 
 <p align="center">
-  <a href="https://github.com/Diez111/Grafito-Open/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito-Open?include_prereleases&label=versi%C3%B3n&color=blue" /></a>
+  <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?include_prereleases&label=versi%C3%B3n&color=blue" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-GPLv3%2B-blue" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.78%2B-orange" /></a>
-  <a href="https://github.com/Diez111/Grafito-Open/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito-Open?style=social" /></a>
-  <a href="https://github.com/Diez111/Grafito-Open/actions"><img src="https://img.shields.io/github/actions/workflow/status/Diez111/Grafito-Open/ci.yml?label=CI" /></a>
+  <a href="https://github.com/Diez111/Grafito/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito?style=social" /></a>
 </p>
 
 <p align="center">
   <b>Geometría interactiva, álgebra computacional, estadística y cálculo &mdash; acelerados por GPU.</b><br />
-  Construido en Rust con WebGPU (wgpu). Más de 50 comandos CAS, CAS simbólico nativo, 11 operaciones de álgebra lineal, 4 compute shaders WGSL, exportación a PNG/PDF/LaTeX.
+  Construido en Rust con WebGPU. Inspirado en GeoGebra.
 </p>
 
 ---
 
-> :uk: This document is also available in [English](README.en.md).
-
-## Tabla de contenidos
-
-- [¿Por qué Grafito Open?](#por-qu%C3%A9-grafito-open)
-- [Características](#caracter%C3%ADsticas)
-  - [Canvas 2D interactivo](#canvas-2d-interactivo)
-  - [Motor matemático (grafito-geometry)](#motor-matem%C3%A1tico-grafito-geometry)
-  - [Geometría 3D](#geometr%C3%ADa-3d)
-  - [Estadística y probabilidad](#estad%C3%ADstica-y-probabilidad)
-  - [Compute shaders GPU (WGSL)](#compute-shaders-gpu-wgsl)
-  - [UI / UX](#ui--ux)
-  - [Exportación](#exportaci%C3%B3n)
-- [Instalación](#instalaci%C3%B3n)
+- [Instalación](#instalación)
 - [Primeros pasos](#primeros-pasos)
-- [Arquitectura](#arquitectura)
+- [Interactuar con Grafito](#interactuar-con-grafito)
 - [Referencia de comandos](#referencia-de-comandos)
+- [Canvas 2D](#canvas-2d)
+- [Canvas 3D](#canvas-3d)
+- [Arquitectura](#arquitectura)
+- [Controles](#controles)
 - [Desarrollo](#desarrollo)
-- [Tests y calidad](#tests-y-calidad)
 - [Contribuir](#contribuir)
 - [Licencia](#licencia)
 
 ---
-
-## ¿Por qué Grafito Open?
-
-Grafito es un graficador matemático interactivo escrito desde cero en Rust. A diferencia de alternativas de escritorio, expone un CAS simbólico nativo (sin dependencias de `evalexpr` ni SymPy), álgebra lineal avanzada (autovalores, SVD, Cholesky), y un motor de compute shaders WGSL que evalúa **50 opcodes** en paralelo en GPU. El proyecto apunta a superar a GeoGebra en cobertura matemática, rendimiento y transparencia de código.
-
-- **~61.000 líneas de Rust** en 6 crates
-- **587 tests** (unit + integration)
-- **0 bloques `unsafe`** en código de producción
-- **CI completo** con fmt, clippy `-D warnings`, tests, docs
-
-## Características
-
-### Canvas 2D interactivo
-
-- **36 tipos de objetos geométricos**: puntos, líneas (segmento/rayo/vector/infinita), círculos, polígonos, elipses, parábolas, hipérbolas rotadas, funciones, cónicas avanzadas, texto
-- **Restricciones constructivas** (midpoint, perpendicular, parallel, point-on-object) y **numéricas** (Levenberg-Marquardt con Jacobianos analíticos: distance, angle, tangent, coincident, horizontal, vertical, equal-length, symmetry)
-- **Operaciones booleanas 2D** sobre polígonos (unión, intersección, diferencia, XOR)
-- **Snap-to-grid** y **snap-to-features** (curvas, intersecciones)
-- **5 niveles de undo/redo** con persistencia del documento
-
-### Motor matemático (`grafito-geometry`)
-
-314 funciones públicas organizadas en módulos:
-
-| Módulo | Cobertura |
-|--------|-----------|
-| `ast` | Parser con ~50 variantes (Const, Var, Add/Mul/Div/Pow, trig directa e inversa, hiperbólicas, comparaciones, piecewise, Re/Im/Arg/Conj, Bessel J/Y/I, Gamma, Erf, Erfc, Digamma, sec/csc/cot, atan2, mod, sign, heaviside, cbrt, clamp, sum, product) |
-| `symbolic` | **CAS nativo** (sin evalexpr): derivación simbólica con regla de cadena, integración polinómica/trig/exp/ln, simplificación algebraica, solve (lineal, cuadrática, **Cardano** para cúbica, **Ferrari** para cuártica, Newton numérico para grado >4), Taylor, limit, factor, expand, substitute |
-| `matrices` | add/sub/mul/det/inverse/trace + **eigenvalues, eigenvectors, SVD, LU, QR, Cholesky, rank, null_space, condition_number, Frobenius/spectral norm** (sobre nalgebra) |
-| `statistics` | media, mediana, moda, varianza, std-dev, min, max, range, quantiles, IQR, covarianza, correlación, regresión lineal/polinomial/exponencial/logarítmica/potencia, histogram, boxplot, frequency table |
-| `distributions` | normal PDF/CDF/quantile, binomial PMF/CDF, Poisson PMF/CDF, Student-t PDF, Chi², ANOVA, Beta, Gamma, IC, ChiSqTest |
-| `analysis` | Root, Extremum, Inflection, YIntercept, XIntercept, ArcLength, CurvatureAt, TangentAt, NormalAt, VolumeOfRevolution, SurfaceOfRevolution, Analyze |
-| `ode` | Euler, RK4, **RK45 adaptativo** (RKF45 con control de paso), sistemas, **backward Euler** con Newton-Jacobian para stiff |
-| `boolean` | Operaciones booleanas 2D sobre polígonos via `geo` crate |
-| `fractals` | Mandelbrot, Julia (dendrite/siegel/galaxy), BurningShip, Tricorn, Newton |
-| `attractors` | Lorenz, Rössler, Thomas, Aizawa, Chen, Halvorsen, Dadras, Chua, Sprott, Three-scroll (RK4 integration) |
-| `special_functions` | gamma, ln_gamma, beta, bessel_j/y/i, erf, erfc, digamma |
-| `special_curves` | cardioid, rose, espirales (Archimedean, logarithmic), Lissajous, epi/hipocicloide, **astroide, deltoide, tractriz, braquistocrona** |
-| `conformal` | 13 mapeos algebraicos (Inversion, Power, Exp, Log, trig, Joukowski, Möbius), complex_expr parser, domain coloring |
-| `dd` | **Aritmética double-double** (precisión extendida) — ventaja única vs GeoGebra |
-| `precision` | Constantes y utilidades numéricas |
-
-### Geometría 3D
-
-- Punto 3D, segmento 3D
-- Sólidos: esfera, cubo, pirámide, cono, cilindro, toro
-- **MoebiusStrip**, **Superficie paramétrica 3D** `z = f(x,y)`, **Curva paramétrica 3D**
-- **Attractor3D** con proyección 2D del orbit integrado
-- **HyperSurface4D** (rebanada de 4D)
-- Cámara con orbit/pan/zoom
-
-### Estadística y probabilidad
-
-Regresión lineal/polinomial/exponencial/log/potencia con R², distribuciones normal/binomial/Poisson/Student-t, histogram interactivo, boxplot, frequency table, ANOVA, test Chi², intervalos de confianza. Todo accesible desde comandos CAS.
-
-### Compute shaders GPU (WGSL)
-
-Cuatro pipelines de cómputo en `crates/grafito-render/src/`:
-
-| Pipeline | Uso | Opcodes |
-|----------|-----|---------|
-| `function_compute.wgsl` | Evaluar `y = f(x)` en grilla 1D | 50 |
-| `implicit_compute.wgsl` | Evaluar `f(x,y) = c` para marching squares | 50 |
-| `parametric_compute.wgsl` | Curvas 2D/3D y superficies paramétricas | 50 |
-| `vector_compute.wgsl` | Campo vectorial 2D `(P(x,y), Q(x,y))` | 50 |
-
-**50 opcodes soportados** en GPU (vs 22 antes de v1.0.0): aritmética completa, trig directa/inversa, hiperbólicas directas/inversas, sec/csc/cot, atan2, mod, sign, heaviside, cbrt, round, log2, log10, exp2, clamp, **6 comparaciones (Lt/Gt/Le/Ge/Eq/Ne → 0/1)**. Esto permite graficar en GPU expresiones como `sin(x)*mod(x,2)`, `atan2(y,x)`, `heaviside(sin(x))`, comparaciones como `piecewise(x<0, -1, 1)`, etc.
-
-Patrón de cada pipeline:
-1. Compilación AST→bytecode (RPN) en CPU
-2. Dispatch `pass.dispatch_workgroups(...)` con workgroup_size óptimo (64 para 1D, 16×16 para 2D)
-3. Readback asíncrono
-4. CPU-side marching squares o evaluación de streamlines
-5. Caché con claves `(expresión, dominio, variables, calidad)` y padded/snapped view region para invalidar menos en pan/zoom
-
-### UI / UX
-
-- **50 herramientas** en toolbar agrupadas (Select, Point, Line, Circle, Polygon, Function, 3D, Attractor, Fractal, Histogram, Root, Extremum, etc.)
-- **Paleta de comandos** con fuzzy match (Ctrl+K)
-- **Panel de álgebra** interactivo
-- **Undo/redo** con snapshot del documento
-- **Tooltips** y **ghost preview** antes de commit
-- **Toast** para feedback de errores/mensajes CAS
-- **Tema dark/light** con design tokens centralizados
-- **Multi-idioma** (español por defecto, comandos aceptan aliases `Function/func`)
-
-### Exportación
-
-- **JSON** (round-trip completo del documento)
-- **SVG** (todos los objetos 2D)
-- **PNG** (raster CPU con Bresenham + midpoint circles)
-- **PDF** (PDF 1.4 válido, content stream con primitivas)
-- **LaTeX** (standalone `tikz`/`pgfplots` con points, lines, circles, polygons, functions, ellipses, text)
 
 ## Instalación
 
 <p><details><summary><b>Linux &mdash; Debian / Ubuntu (.deb)</b></summary>
 
 ```bash
-wget https://github.com/Diez111/Grafito-Open/releases/latest/download/grafito_amd64.deb
+wget https://github.com/Diez111/Grafito/releases/latest/download/grafito_amd64.deb
 sudo dpkg -i grafito_amd64.deb
 ```
 </details></p>
 
 <p><details><summary><b>Windows &mdash; .exe portátil</b></summary>
 
-1. Descargá el `.exe` desde [Releases](https://github.com/Diez111/Grafito-Open/releases)
+1. Descargá el `.exe` desde [Releases](https://github.com/Diez111/Grafito/releases)
 2. Ejecutalo directamente. No requiere instalación.
 </details></p>
 
-<p><details><summary><b>Desde el código fuente</b></summary>
-
-Requisito: [Rust 1.78+](https://rustlang.org), drivers GPU con soporte Vulkan/Metal/DX12.
+<p><details><summary><b>Compilar desde el código fuente</b></summary>
 
 ```bash
-git clone https://github.com/Diez111/Grafito-Open.git
-cd Grafito-Open
-cargo build --release -p grafito-app
-./target/release/grafito      # Linux/macOS
-./target/release/grafito.exe  # Windows
+sudo apt install libgmp-dev libmpfr-dev libmpc-dev m4
+git clone https://github.com/Diez111/Grafito.git
+cd grafito
+cargo run -p grafito-app --release
 ```
-
-Para soporte GPU completa, en Linux asegurate de tener `libvulkan1`, `mesa-vulkan-drivers` y drivers de tu GPU instalados.
+> Requiere Rust &ge; 1.78. Los compute shaders GPU necesitan Vulkan, Metal o DX12.
 </details></p>
+
+---
 
 ## Primeros pasos
 
-1. Abrí Grafito
-2. En la barra de entrada (parte inferior) escribí:
+Al abrir Grafito ves un canvas con ejes cartesianos y una barra de entrada en el panel izquierdo. Tenés **dos formas** de crear cosas:
 
-```
-A = (1, 2)
-B = (4, 6)
-Line[A, B]
-```
+### Por comandos (escribiendo)
 
-Verás el punto A, el punto B y la recta que los une. Ahora intentá:
+Escribí en la barra de entrada y presioná Enter. Grafito interpreta notación matemática natural:
 
-```
-Circle[(0, 0), 2]
-Function[sin(x)]
-Function[x^2 - 2*x + 1]
-Parabola[(0, 0), 3]                  // vértice en (0,0), parámetro p=3
-Ellipse[(0, 0), 3, 2]                // centro, semi-eje a, semi-eje b
-PolarCurve[1 + cos(t), 0, 2*pi]      // cardioide
-ImplicitCurve[x^2 + y^2, 4]          // círculo implícito
-Mandelbrot[-2.5, 1.5, -1.5, 1.5]     // fractal
-Lorenz[0.1, 0, 0]                    // atractor de Lorenz
+```text
+(x - 2)^2 + (y - 3)^2 = 25          # círculo centrado en (2,3) radio 5
+y = sin(x)                           # función seno
+r = 2*cos(3*theta)                   # curva polar (rosa de 3 pétalos)
+(x(t), y(t)) = (cos(t), sin(t))      # curva paramétrica (círculo)
+(2, 5)                               # punto en (2, 5)
+Derivative[sin(x)]                   # derivada simbólica: cos(x)
+Root[sin(x)]                         # raíces de la función
+Taylor[exp(x), x, 0, 4]              # serie de Taylor: 1 + x + x²/2 + ...
 ```
 
-Para análisis:
+### Por herramientas (haciendo clic)
+
+La barra de herramientas (abajo) tiene íconos para dibujar directamente sobre el canvas:
+- **F1** Seleccionar &bull; **F2** Punto &bull; **F3** Recta &bull; **F4** Círculo &bull; **F5** Polígono
+- Cada grupo se despliega con &blacktriangledown; y muestra herramientas relacionadas
+
+Probá: seleccioná **Círculo**, hacé clic en el canvas para el centro, después clic en otro punto cualquiera. El círculo se crea con radio igual a la distancia entre los dos puntos.
+
+---
+
+## Interactuar con Grafito
+
+### La barra de entrada
+
+Es el campo de texto en el panel izquierdo. Escribí cualquier comando o expresión y presioná **Enter**. Grafito evalúa la expresión y crea el objeto correspondiente. Si la expresión contiene un error, el campo se pone rojo y muestra un mensaje.
+
+**Atajos útiles:**
+- `Ctrl+K` abre la paleta de comandos con todos los comandos disponibles, navegables con flechas
+- `Ctrl+Z` deshace la última acción, `Ctrl+Y` rehace
+- `Escape` cancela el objeto en construcción
+
+### Variables y sliders
+
+Escribí un número o una expresión con una variable nueva y Grafito crea un **slider** automáticamente:
+
+```text
+k = 3                         # crea un slider "k" que va de 0 a 10
+a*sin(x)                      # crea la variable "a" ligada a un slider
 ```
-Analyze[sin(x), -5, 5]               // raíces, extremos, inflexiones
-Derivative[x^3, x]                   // "3*x^2" (CAS nativo)
-Solve[x^2 - 4, x]                    // ["2", "-2"]
-Eigenvalues[[2,0],[0,3]]             // "[(2, 0), (3, 0)]"
-SVD[[1,2],[3,4]]                     // descomposición
-TangentAt[sin(x), 1]                 // línea tangente
-ArcLength[sin(x), 0, pi]             // longitud de arco
-VolumeOfRevolution[x^2, 0, 1]        // volumen π/3
-```
 
-## Arquitectura
+Arrastrá el slider en el panel izquierdo y la función `a*sin(x)` se actualiza en tiempo real. También podés animarlos (&blacktriangleright;).
 
-Workspace con 6 crates, dependencias acíclicas y mínimas:
+### Enlace de expresiones
 
-```
-grafito-geometry  (sin dependencias internas) → AST, CAS, matrices, stats, ODE, fractals, conformal
-        ↑               ↑
-grafito-core      grafito-command          → Document, GeoObject (36 variants), constraints, sampling
-        ↑               ↑                       GPU sampling cache, numeric solver
-grafito-render    grafito-ui               → WGSL compute pipelines, GPU canvas
-        ↑               ↑                       egui toolbar, theme, command palette
-        └──── grafito-app ────┘              → run_app() entry point
-```
+Casi cualquier parámetro de un objeto puede ligarse a una expresión. Escribí `PointExpr[...]`, `CircleExpr[...]`, etc., usando variables globales o sliders. El objeto se recalcula automáticamente cada vez que las variables cambian.
 
-| Crate | Líneas | Responsabilidad |
-|-------|--------|-----------------|
-| `grafito-geometry` | ~14.000 | Motor matemático puro (AST, CAS, matrices, estadística, ODE, fractales, complejos) |
-| `grafito-core` | ~6.000 | Modelo de documento, restricciones, índice espacial, sampling cache |
-| `grafito-render` | ~4.000 | Pipelines WGSL compute + render GPU |
-| `grafito-command` | ~5.000 | Procesador compartido de comandos de texto (process_input) |
-| `grafito-ui` | ~5.000 | Componentes egui (toolbar, command palette, theme, tokens) |
-| `grafito-app` | ~8.000 | Punto de entrada desktop, ensambla UI + render + eventos |
+### Panel de análisis
 
-Detalles en [`docs/commands.md`](docs/commands.md) y [`CHANGELOG.md`](CHANGELOG.md).
+Seleccioná una función desde el panel de Álgebra (pestaña **A**) y hacé clic en **Analizar** en la barra de herramientas o escribí `Analyze[f]`. Grafito calcula raíces, extremos, inflexiones, asíntotas e interceptos, y marca los puntos sobre el canvas.
+
+---
 
 ## Referencia de comandos
 
-Más de **395 comandos** CAS reconocidos, incluyendo aliases español/inglés. Ejemplos por categoría:
+Todos los comandos usan la sintaxis `Comando[arg1, arg2, ...]`. Casi todos tienen alias en español (ej: `Derivada`, `Integral`). Escribí `Ctrl+K` para ver la lista completa.
 
-- **Geometría**: `Point[]`, `Line[]`, `Segment[]`, `Ray[]`, `Vector[]`, `Circle[]`, `Polygon[]`, `Ellipse[]`, `Parabola[]`, `Hyperbola[]`, `Arc[]`
-- **Funciones**: `Function[]`, `Function[piecewise(x<0, x^2, x>=0, sqrt(x))]`
-- **Paramétricas/Polares/Implícitas**: `ParametricCurve[]`, `PolarCurve[]`, `ImplicitCurve[]`
-- **Avanzado**: `Fractal[]`, `Mandelbrot[]`, `Julia[]`, `Lorenz[]`, `Rossler[]`, `Aizawa[]`, `Chen[]`, `Halvorsen[]`, `Dadras[]`, `Chua[]`, `Sprott[]`
-- **3D**: `Point3D[]`, `Sphere[]`, `Cube[]`, `Pyramid[]`, `Cone[]`, `Cylinder[]`, `Torus[]`, `Moebius[]`, `Surface3D[]`, `Curve3D[]`
-- **Estadística**: `Histogram[]`, `ScatterPlot[]`, `BoxPlot[]`, `Regression[]`, `Mean[]`, `Median[]`, `StdDev[]`, `ANOVA[]`, `ChiSqTest[]`, `Correlation[]`
-- **Cálculo**: `Derivative[]`, `Integral[]`, `Limit[]`, `Sum[]`, `Product[]`, `Taylor[]`, `Expand[]`, `Factor[]`, `Simplify[]`, `Substitute[]`
-- **Álgebra lineal**: `Determinant[]`, `Inverse[]`, `Eigenvalues[]`, `Eigenvectors[]`, `SVD[]`, `LU[]`, `QR[]`, `Cholesky[]`
-- **Restricciones**: `Distance[]`, `Angle[]`, `TangentConstraint[]`, `Coincident[]`, `Horizontal[]`, `Vertical[]`, `EqualLength[]`, `Symmetry[]`
-- **Cónicas**: `EllipseByFoci[]`, `ParabolaByFocusDirectrix[]`, `HyperbolaByFoci[]`, `ConicByFivePoints[]`
-- **Booleanos**: `PolygonUnion[]`, `PolygonIntersection[]`, `PolygonDifference[]`, `PolygonXor[]`
-- **Mapeos conformes**: `ComplexMapping[1/z, I]`, `ComplexMapping[z^2]`, `Joukowski[1+0.1*cos(t)]`
-- **Análisis**: `Root[]`, `Extremum[]`, `Inflection[]`, `XIntercept[]`, `YIntercept[]`, `Analyze[]`, `TangentAt[]`, `NormalAt[]`, `ArcLength[]`, `CurvatureAt[]`, `VolumeOfRevolution[]`, `SurfaceOfRevolution[]`
+### Creación de objetos
 
-Lista completa y sintaxis en [`docs/commands.md`](docs/commands.md).
+| Sintaxis | Resultado |
+|----------|-----------|
+| `(x, y)` | Punto 2D |
+| `(x, y, z)` | Punto 3D |
+| `y = expr` o `f(x) = expr` | Función y = f(x) |
+| `r = expr` o `r(theta) = expr` | Curva polar |
+| `(x(t), y(t)) = (fx, fy)` | Curva paramétrica 2D |
+| `lhs = rhs` o `lhs >= rhs` | Curva implícita |
+| `expr` con `x` libre | Función (variable implícita) |
+| `expr` numérica | Crea un slider con ese valor |
+| `k = valor` | Crea un slider nombrado |
 
-## Desarrollo
+### Álgebra computacional (CAS)
 
-```bash
-# Build release
-cargo build --release -p grafito-app
+| Comando | Ejemplo | Resultado |
+|---------|---------|-----------|
+| `Derivative` / `Derivada` | `Derivative[x^3]` | `3*x^2` |
+| `Integral` / `Integrar` | `Integral[sin(x), x, 0, pi]` | `2` (definida) |
+| `Solve` / `Resolver` | `Solve[x^2 - 4]` | `{-2, 2}` |
+| `Limit` / `Limite` | `Limit[sin(x)/x, x, 0]` | `1` |
+| `Factor` / `Factorizar` | `Factor[x^2 + 5x + 6]` | `(x+2)*(x+3)` |
+| `Expand` / `Expandir` | `Expand[(x+1)^2]` | `x^2 + 2*x + 1` |
+| `Simplify` / `Simplificar` | `Simplify[2x + x]` | `3*x` |
+| `Taylor` | `Taylor[cos(x), x, 0, 5]` | `1 - x^2/2 + x^4/24` |
 
-# Verificación completa (CI local)
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo build --workspace --release
+### Análisis de funciones
 
-# Benchmarks (criterion)
-cargo bench -p grafito-core
-cargo bench -p grafito-render
-cargo bench -p grafito-geometry
+| Comando | Resultado |
+|---------|-----------|
+| `Root[f]` | Raíces (f(x) = 0), marca puntos en el canvas |
+| `Extremum[f]` | Máximos y mínimos locales |
+| `Inflection[f]` | Puntos de inflexión |
+| `YIntercept[f]` | Intersección con el eje Y |
+| `XIntercept[f]` | Intersecciones con el eje X |
+| `Analyze[f]` | Análisis completo (todo lo anterior + asíntotas) |
+| `Intersect[a, b]` | Intersección entre dos objetos |
 
-# Profiling con puffin
-cargo run -p grafito-app --features profile -- --profile
-# Conectar puffin_viewer a 127.0.0.1:8585
+### Cálculo avanzado
+
+| Comando | Ejemplo |
+|---------|---------|
+| `TangentAt` / `TangenteEn` | `TangentAt[sin(x), 0]` &rarr; recta tangente en x=0 |
+| `NormalAt` / `NormalEn` | `NormalAt[sin(x), pi/2]` &rarr; recta normal |
+| `ArcLength` / `LongitudArco` | `ArcLength[x^2, 0, 1]` |
+| `CurvatureAt` / `CurvaturaEn` | `CurvatureAt[x^3, 0]` &rarr; curvatura y radio |
+| `VolumeOfRevolution` / `VolumenRevolucion` | `VolumeOfRevolution[sin(x), 0, pi]` |
+| `SurfaceOfRevolution` / `SuperficieRevolucion` | `SurfaceOfRevolution[x^2, 0, 1]` |
+
+### Construcciones geométricas
+
+| Comando | Descripción |
+|---------|-------------|
+| `Segment[a, b]` | Segmento entre dos puntos |
+| `Ray[origen, direccion]` | Semirrecta |
+| `Vector[origen, destino]` | Vector |
+| `Perpendicular[punto, recta]` | Recta perpendicular |
+| `Midpoint[a, b]` | Punto medio entre dos puntos |
+| `Intersect[a, b]` | Intersección(es) entre dos objetos |
+| `RegularPolygon[centro, lados, radio]` | Polígono regular (3 a 64 lados) |
+| `Reflect[objeto, p1, p2]` | Reflejar objeto respecto a una recta |
+| `Translate[objeto, vector]` | Trasladar objeto |
+| `Rotate[objeto, centro, angulo]` | Rotar objeto (grados) |
+| `Dilate[objeto, centro, factor]` | Dilatar objeto |
+
+### Restricciones numéricas
+
+| Comando | Descripción |
+|---------|-------------|
+| `DistanceConstraint[a, b, valor]` | Fija la distancia entre a y b |
+| `AngleConstraint[l1, l2, grados]` | Fija el ángulo entre dos rectas |
+| `TangentConstraint[c1, c2]` | Fuerza tangencia entre círculos |
+| `Coincident[a, b]` | Fuerza coincidencia de dos puntos |
+| `Horizontal[segmento]` | Fuerza horizontalidad |
+| `Vertical[segmento]` | Fuerza verticalidad |
+| `EqualLength[s1, s2]` | Fuerza igualdad de longitud |
+| `Symmetry[p, q, eje]` | Fuerza simetría de p y q |
+
+### Estadística
+
+Escribí listas de datos con `{ }` o usá variables:
+
+```text
+datos = {1.2, 3.5, 2.1, 4.8, 2.9}
+Mean[{1.2, 3.5, 2.1, 4.8, 2.9}]        # media
+StdDev[datos]                             # desviación estándar
+Histogram[datos, 5]                       # histograma con 5 bins, dibuja barras
+ScatterPlot[{xs}, {ys}]                   # diagrama de dispersión
+BoxPlot[datos]                            # diagrama de caja con outliers
+LinearRegression[{xs}, {ys}]              # recta de regresión + R²
+Correlation[{xs}, {ys}]                   # correlación de Pearson
 ```
 
-## Tests y calidad
+| Comando adicional | Resultado |
+|-------------------|-----------|
+| `Median[datos]` | Mediana |
+| `Mode[datos]` | Moda |
+| `Variance[datos]` | Varianza muestral |
+| `Quantile[datos, q]` | Cuantil (0 a 1) |
+| `IQR[datos]` | Rango intercuartílico |
+| `Covariance[{xs}, {ys}]` | Covarianza |
 
-- **587 tests** en el workspace (unit + integration)
-- `cargo fmt --check` (CI)
-- `cargo clippy --workspace -- -D warnings` (CI)
-- `cargo test --workspace` (CI)
-- `cargo doc --workspace --no-deps` con `-D warnings` (CI)
-- **0 bloques `unsafe`** en código de producción
-- 2 TODO conocidos (ninguno crítico)
-- Build matrix: x86_64 Linux, x86_64 Windows, x86_64 macOS, aarch64 macOS
+### Fractales y atractores
 
-## Contribuir
+```text
+Mandelbrot[256]                     # fractal de Mandelbrot
+Julia[-0.70176, -0.3842, 128]       # conjunto de Julia
+BurningShip[128]                    # fractal Burning Ship
+Lorenz[10, 28, 2.666]              # atractor de Lorenz
+Rossler[0.2, 0.2, 5.7]            # atractor de Rössler
+Thomas[0.208186]                    # mariposa de Thomas
+```
 
-¡Las contribuciones son bienvenidas! Por favor:
+### Otros comandos
 
-1. Fork el proyecto
-2. Creá una branch (`git checkout -b feature/mi-feature`)
-3. Hacé tus cambios siguiendo las convenciones (Rust 2021, `cargo fmt`, `cargo clippy`)
-4. Añadí tests para código nuevo
-5. Asegurate que `cargo test --workspace && cargo clippy --workspace -- -D warnings` pase
-6. Commit con Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
-7. Push y abrí un Pull Request
+| Comando | Descripción |
+|---------|-------------|
+| `ComplexMapping[1/z, obj]` | Mapeo complejo sobre cualquier objeto 2D |
+| `VectorField2D[u, v]` | Campo vectorial (x,y) &rarr; (u,v) con flechas |
+| `Piecewise[{expr1, cond1}, {expr2, cond2}]` | Función por partes |
+| `DomainColoring[1/z]` | Coloración de dominio complejo |
+| `HeatMap[exp(-(x^2 + y^2))]` | Mapa de calor |
+| `Erase[label]` / `EraseAll` | Borrar objetos |
+| `Script[comando1; comando2; ...]` | Ejecutar varios comandos a la vez |
 
-Ver [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) para más detalles y [`CODE_OF_CONDUCT.md`](.github/CODE_OF_CONDUCT.md).
+---
 
-## Licencia
+## Canvas 2D
 
-**GPL-3.0-or-later**. Ver [`LICENSE`](LICENSE) para el texto completo.
+Grafito renderiza más de 30 tipos de objetos geométricos sobre un canvas interactivo. Podés crear objetos escribiendo comandos o usando las herramientas de la barra inferior.
+
+### Objetos disponibles
+
+Puntos, rectas, segmentos, semirrectas, vectores, círculos, elipses, parábolas, hipérbolas, polígonos, polígonos regulares, funciones explícitas, curvas paramétricas 2D, curvas polares, curvas implícitas, campos vectoriales 2D, lugares geométricos, dibujos a mano alzada (lápiz y borrador).
+
+### Operaciones booleanas entre polígonos
+
+```text
+PolygonUnion[p1, p2]           # unión
+PolygonIntersection[p1, p2]    # intersección
+PolygonDifference[p1, p2]      # diferencia (p1 menos p2)
+PolygonXor[p1, p2]             # diferencia simétrica (XOR)
+```
+
+### Cónicas por construcción geométrica
+
+```text
+EllipseByFoci[F1, F2, P]                 # elipse dados focos y punto
+ParabolaByFocusDirectrix[F, directriz]   # parábola por foco y directriz
+HyperbolaByFoci[F1, F2, P]               # hipérbola por focos y punto
+ConicByFivePoints[A, B, C, D, E]         # cónica por 5 puntos
+```
+
+### Curvas especiales
+
+```text
+Cardioid[1.5]                           # cardioide r=a(1+cos θ)
+Rose[2, 3, 1]                           # rosa r = a*cos(n/d*θ)
+Lissajous[3, 4, 1, 1, 90]              # curva de Lissajous
+ArchimedeanSpiral[0.5, 0.2, 10]        # espiral de Arquímedes
+LogarithmicSpiral[1, 0.2, 10]          # espiral logarítmica
+Epicycloid[2, 3]                        # epicicloide
+```
+
+### Mapeos complejos
+
+Aplicá cualquier función de variable compleja a un objeto 2D:
+
+```text
+Circle[c, 3]
+ComplexMapping[1/z, c]                   # invierte el círculo
+ComplexMapping[exp(z), c]                # exponencial compleja
+ComplexMapping[z^2, c]                   # transformación cuadrática
+```
+
+Las singularidades generan automáticamente asíntotas punteadas.
+
+### Solver de restricciones
+
+Grafito resuelve sistemas de restricciones geométricas con el método de Newton usando Jacobianos analíticos. Las restricciones se pueden combinar: por ejemplo, un triángulo con distancias fijas y un ángulo recto.
+
+---
+
+## Canvas 3D
+
+El visor 3D se activa automáticamente cuando creás objetos 3D. Podés orbitar la cámara arrastrando con el botón derecho, hacer zoom con la rueda del ratón, y paneo arrastrando con la herramienta Seleccionar.
+
+### Objetos 3D
+
+Puntos, segmentos, esferas, cubos, pirámides, conos, cilindros, toros, cintas de Moebius, superficies paramétricas, curvas 3D, atractores extraños, hipercubos 4D (proyectados), hiperesferas 4D (proyectadas), campos vectoriales 3D.
+
+### Ejemplos
+
+```text
+Sphere[r]                           # esfera de radio r
+Cube[l]                             # cubo de lado l
+ParametricCurve3D[cos(t), sin(t), t/5, 0, 20]    # hélice
+Lorenz[]                            # atractor de Lorenz en 3D
+Hypercube[angle1, angle2, angle3]   # teseracto proyectado
+```
+
+### Renderizado GPU
+
+El canvas 2D y 3D se renderizan con `wgpu` (WebGPU) usando compute shaders que compilan las expresiones del usuario a bytecode WGSL en tiempo de ejecución. Si la GPU no está disponible, Grafito usa automáticamente el camino de CPU. Esto acelera la evaluación de funciones, curvas implícitas y superficies paramétricas en órdenes de magnitud comparado con la CPU.
+
+---
+
+## Arquitectura
 
 ```
-Grafito Open - GPU-accelerated mathematical graphing calculator
-Copyright (C) 2026 Grafito Contributors
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+grafito/
+├── crates/
+│   ├── grafito-app/         Aplicación de escritorio (eframe/egui) — UI, entrada, orquestación
+│   ├── grafito-core/        Modelo de documento, objetos geométricos, índice espacial, restricciones
+│   ├── grafito-geometry/    Motor matemático — CAS, estadística, EDOs, fractales, booleanas
+│   ├── grafito-render/      Pipeline gráfico wgpu — render 2D/3D, compute shaders, iluminación
+│   ├── grafito-ui/          Componentes egui — barra de herramientas, paleta de comandos, temas
+│   └── grafito-command/     Procesador de comandos de texto (compartido con FFI)
+└── assets/                  Iconos, shaders WGSL
 ```
 
 ---
 
-<p align="center">
-  Hecho con Rust en Argentina · <a href="https://github.com/Diez111/Grafito-Open">Diez111/Grafito-Open</a>
-</p>
+## Controles
+
+| Acción | Entrada |
+|--------|--------|
+| Pan 2D | Arrastrar en vacío / Espacio+arrastrar / clic medio |
+| Zoom 2D/3D | Rueda del ratón |
+| Crear objeto | Clic (Punto: clic simple) |
+| Cerrar polígono | Clic derecho (3+ vértices) |
+| Cancelar | Clic derecho (1 punto pendiente) / Escape |
+| Seleccionar | Clic con herramienta Seleccionar |
+| Deseleccionar | Clic en vacío |
+| Orbitar 3D | Botón derecho + arrastrar |
+| Deshacer / Rehacer | Ctrl+Z / Ctrl+Y |
+| Eliminar objeto | Suprimir (con objeto seleccionado) |
+| Paleta de comandos | Ctrl+K |
+| Herramientas 2D | F1 Seleccionar / F2 Punto / F3 Recta / F4 Círculo / F5 Polígono / F6 Función |
+| Herramientas 3D | F7 Punto 3D / F8 Esfera 3D / F9 Cubo 3D |
+| Análisis | R Raíz / E Extremo / N Inflexión / Ctrl+Y Intersección Y / Ctrl+A Analizar |
+| Grilla y ejes | Shift+L (log), Shift+K (lineal), Shift+J (cuadrícula), G (snap a grilla) |
+| Tema claro/oscuro | Ctrl+T |
+| Abrir / Guardar | Ctrl+O / Ctrl+S |
+
+---
+
+## Desarrollo
+
+### Verificar todo
+
+```bash
+cargo fmt --all
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+cargo build --workspace --release
+```
+
+### Perfilar frames
+
+```bash
+cargo run -p grafito-app --features profile -- --profile
+# Conectar puffin_viewer a 127.0.0.1:8585
+```
+
+### Compilar para Windows desde Linux
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo apt install mingw-w64
+# Las dependencias C (GMP/MPFR) requieren compilación cruzada:
+# Usá el GitHub Actions workflow 'build-windows.yml' como alternativa
+```
+
+---
+
+## Contribuir
+
+1. Hacé un fork
+2. Creá tu rama (`git checkout -b feature/nueva-funcionalidad`)
+3. Escribí tests, ejecutá `cargo fmt --all && cargo clippy --workspace -- -D warnings && cargo test --workspace`
+4. Commiteá con [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`)
+5. Abrí un Pull Request
+
+Ver [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](.github/CONTRIBUTING.md) y [SECURITY.md](.github/SECURITY.md) para más detalles.
+
+---
+
+## Licencia
+
+GNU General Public License v3.0 o posterior. Ver [LICENSE](LICENSE).
+
+```
+Grafito — Geometría interactiva, álgebra y cálculo acelerados por GPU
+Copyright (C) 2025-2026  Diez111
+
+Este programa es software libre: puede redistribuirlo y/o modificarlo
+bajo los términos de la GNU General Public License publicada por
+la Free Software Foundation, versión 3 o (a su elección) cualquier
+versión posterior.
+```

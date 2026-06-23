@@ -1,14 +1,12 @@
 use crate::GrafitoApp;
 use egui::{Color32, Ui};
+use grafito_ui::theme::current_theme;
 use grafito_ui::Tool;
 
 pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let theme = current_theme(ctx);
     let is_dark = app.dark_mode;
-    let panel_fill = if is_dark {
-        Color32::from_rgb(30, 30, 38)
-    } else {
-        Color32::from_rgb(250, 250, 252)
-    };
+    let panel_fill = theme.panel_bg;
 
     egui::SidePanel::left("tools_panel")
         .default_width(320.0)
@@ -173,6 +171,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Tool, &str, &str)]) {
+    let theme = current_theme(ui.ctx());
     ui.label(
         egui::RichText::new(title)
             .strong()
@@ -191,7 +190,7 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                 let is_selected = app.current_tool == *tool;
 
                 let btn_fill = if is_selected {
-                    Color32::from_rgba_unmultiplied(53, 132, 228, 40)
+                    theme.accent_muted
                 } else if app.dark_mode {
                     Color32::from_gray(38)
                 } else {
@@ -199,7 +198,7 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                 };
 
                 let border = if is_selected {
-                    egui::Stroke::new(1.0, Color32::from_rgb(53, 132, 228))
+                    egui::Stroke::new(1.0, theme.accent)
                 } else {
                     egui::Stroke::NONE
                 };
