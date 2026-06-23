@@ -5,7 +5,7 @@
 //! screen pixel (not on a coarse grid). The sign of `f` determines whether the
 //! pixel is inside the filled region, and the shader writes a premultiplied
 //! RGBA8 white mask into a `u32` output buffer. The resulting `Vec<u8>` can be
-//! uploaded directly as an [`egui::ColorImage`] and tinted with the fill color
+//! uploaded directly as an `egui::ColorImage` and tinted with the fill color
 //! at draw time.
 //!
 //! If an expression uses operations not supported by the bytecode machine,

@@ -297,14 +297,14 @@ where
 /// Solve a system of ODEs using the adaptive Runge-Kutta-Fehlberg (RKF45) method.
 ///
 /// # Arguments
-/// * `f` - Derivative function f(t, &[y]) -> Vec<dy/dt>
+/// * `f` - Derivative function `f(t, &[y]) -> Vec<dy/dt>`
 /// * `t0` - Initial time
 /// * `y0` - Initial values slice
 /// * `t_end` - Final time
 /// * `tol` - Desired tolerance for error control
 ///
 /// # Returns
-/// Vector of (t, Vec<y>) points representing the solution
+/// Vector of `(t, Vec<y>)` points representing the solution
 pub fn runge_kutta_45_system<F>(
     f: F,
     t0: f64,

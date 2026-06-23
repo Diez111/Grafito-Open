@@ -643,10 +643,10 @@ mod tests {
         let mut doc = Document::new();
         let p = PointObj::new(grafito_geometry::Point2::new(1.0, 1.0));
         doc.add_object(GeoObject::Point(p));
-        let path = "/tmp/opencode/grafito_test_export.png";
-        let result = export_png(&doc, 200, 200, path);
-        assert!(result.is_ok());
-        assert!(std::path::Path::new(path).exists());
+        let path = std::env::temp_dir().join("grafito_test_export.png");
+        let result = export_png(&doc, 200, 200, path.to_str().unwrap());
+        assert!(result.is_ok(), "export_png failed: {result:?}");
+        assert!(path.exists());
     }
 
     #[test]
@@ -654,9 +654,9 @@ mod tests {
         let mut doc = Document::new();
         let p = PointObj::new(grafito_geometry::Point2::new(1.0, 1.0));
         doc.add_object(GeoObject::Point(p));
-        let path = "/tmp/opencode/grafito_test_export.pdf";
-        let result = export_pdf(&doc, 400.0, 300.0, path);
-        assert!(result.is_ok());
+        let path = std::env::temp_dir().join("grafito_test_export.pdf");
+        let result = export_pdf(&doc, 400.0, 300.0, path.to_str().unwrap());
+        assert!(result.is_ok(), "export_pdf failed: {result:?}");
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.starts_with("%PDF-1.4"));
         assert!(content.contains("%%EOF"));

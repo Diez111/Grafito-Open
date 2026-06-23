@@ -1,6 +1,6 @@
 //! Grafito Toast Notifications — Non-intrusive feedback messages.
 //!
-//! Los colores se resuelven dinámicamente desde el [`Theme`] activo usando
+//! Los colores se resuelven dinámicamente desde el [`crate::theme::Theme`] activo usando
 //! [`current_theme`]. Esto garantiza que los toasts respeten el modo
 //! claro/oscuro sin hardcodear valores.
 
