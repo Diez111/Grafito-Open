@@ -1,9 +1,9 @@
 #[test]
 fn test_app_help_cli() {
-    let output = std::process::Command::new("cargo")
-        .args(["run", "--package", "grafito-app", "--", "--help"])
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_grafito"))
+        .arg("--help")
         .output()
-        .expect("cargo run failed");
+        .expect("grafito --help failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -13,6 +13,6 @@ fn test_app_help_cli() {
     );
     assert!(
         output.status.success(),
-        "cargo run -- --help should exit successfully"
+        "grafito --help should exit successfully"
     );
 }

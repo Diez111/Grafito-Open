@@ -1,19 +1,29 @@
 use std::process::Command;
 
+fn grafito_binary_path() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().expect("current test executable path");
+
+    while path.file_name().is_some_and(|name| name != "target") {
+        path.pop();
+    }
+
+    path.push("debug");
+    path.push(if cfg!(windows) {
+        "grafito.exe"
+    } else {
+        "grafito"
+    });
+    path
+}
+
 #[test]
 fn test_release_binary_help() {
-    // Run the binary with --help and verify it prints usage.
-    let output = Command::new("cargo")
-        .args([
-            "run",
-            "--package",
-            "grafito-app",
-            "--release",
-            "--",
-            "--help",
-        ])
+    // The release build is covered separately; this smoke test must not run nested Cargo.
+    let binary = grafito_binary_path();
+    let output = Command::new(&binary)
+        .arg("--help")
         .output()
-        .expect("cargo run failed");
+        .unwrap_or_else(|err| panic!("{} --help failed: {err}", binary.display()));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -23,6 +33,7 @@ fn test_release_binary_help() {
     );
     assert!(
         output.status.success(),
-        "cargo run --release -- --help should exit successfully"
+        "{} --help should exit successfully",
+        binary.display()
     );
 }
