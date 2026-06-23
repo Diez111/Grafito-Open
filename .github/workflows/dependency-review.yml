@@ -3,6 +3,8 @@
 name: 'Dependency Review'
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -13,6 +15,7 @@ permissions:
 jobs:
   dependency-review:
     name: Check Dependencies
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
