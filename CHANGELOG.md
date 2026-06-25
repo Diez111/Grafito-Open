@@ -301,6 +301,54 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
+## [1.1.17-beta] - 2026-06-24
+
+#### Añadido
+- **Sistema de 10 perspectivas estilo GeoGebra** (Geometría 2D/3D, Álgebra-CAS, Cálculo, Probabilidad, Estadística, Complejos, Dinámica, Análisis de datos, Examen) con atajos `Ctrl+Shift+1..9`, `set_perspective` no destructivo y selector dedicado en la topbar.
+- **Panel guiado de Datos y CAS** con `Histogram`, `ScatterPlot`, `LinearRegression`, `BoxPlot`, `Function` accesibles desde la UI sin escribir comandos.
+- **Panel de Protocolo de Construcción** estilo GeoGebra (lista numerada de pasos, reordenar ↑/↓, deshabilitar, exportar a LaTeX).
+- **Cómputo GPU wgpu como ruta por defecto** con pipelines para funciones, implícitas, paramétricas y campos vectoriales, más `fill_compute` para regiones implícitas.
+- **20 nuevas herramientas y comandos** (grupos `ANALYSIS`, `CONSTRAINT`, `BOOLEAN`, `DRAWING`), incluyendo `CircleByThreePoints`, `EllipseByFoci`, `ParabolaByFocusDirectrix`, `HyperbolaByFoci`, `ConicByFivePoints`, `Sector`, `Arc`, `Area`, `Circumference`, `Center`, `Length`, `Slope`, `TangentAt`, `NormalAt`, `ArcLength`, `CurvatureAt`, `VolumeOfRevolution`, `SurfaceOfRevolution`.
+- **Soporte para 9 tipos de polígono booleano** (Union, Intersection, Difference, XOR) con multipolígonos.
+- **Atractores 3D** (Lorenz, Rössler, Thomas, Aizawa, Chen, Halvorsen, Dadras, Chua) con panel de parámetros en el sidebar.
+- **Búsqueda fuzzy en la paleta de comandos** (`Ctrl+K`) con 6 categorías.
+- **Resaltado de autocompletado en la barra de entrada** con sugerencias de funciones, comandos y objetos.
+- **Indicador visual de snap** con detecciones a cuadrícula, eje, objeto y feature (raíces, intersecciones).
+- **Exportación a SVG, PNG, PDF y LaTeX** con tests de no-panic.
+- **Splash screen al inicio** con logo, versión y tagline; fade-out de 500 ms.
+- **Modal "Acerca de Grafito"** en español con descripción y resumen de la release.
+- **Expresiones de texto Unicode superscript** (`x²`, `y²`, `z³`...) soportadas tanto en la barra de entrada como al cargar `.json`.
+- **Operadores de comparación** (`<`, `>`, `<=`, `>=`, `==`, `!=`) en `Expr` con diff simbólico.
+- **Restricciones numéricas con jacobianos analíticos** y solver de Newton regularizado.
+- **Cache de evaluación de expresiones** thread-local con compilación AST→bytecode.
+- **Parámetros de objetos bindeables a variables** del documento (puntos, círculos, líneas, polígonos, funciones, curvas paramétricas, superficies, vectores).
+
+#### Cambiado
+- **Renderer GPU por defecto** con fallback CPU automático; toggle `Renderizado GPU` en el menú Vista.
+- **Bump del workspace** a `1.1.17-beta`.
+- **Tema `DARK`/`LIGHT` ahora `Lazy<Theme>`** con `once_cell`, permitiendo alphas en tokens (`accent_muted`, `selection_bg`, etc.).
+- **Reorganización del render implícito** con cache padded/snapped y `RenderQuality` (Preview/Normal/High) que se promueve a High tras 150 ms de inactividad.
+- **Sampleo paramétrico en CPU con cache** y dispatch GPU compartido para 2D/3D/polar/superficies.
+- **Reescritura del `ComplexMapping` para GPU** con `transform_complex_mapping_segments` que evita líneas puente entre segmentos independientes del marching squares.
+- **Sidebar y toolbar** ahora usan iconos vectoriales y la misma paleta semántica central en `Theme`.
+
+#### Corregido
+- **`ComplexGrid[1/z]` se renderizaba como coloración de dominio sólida** en GPU, ignorando `render_mode` y la base `z`. Ahora respeta `render_mode` (grilla deformada, domain coloring, heat map) y usa `document.complex_base_symbol` para soportar `ComplexSymbol[w]`.
+- **Texto del ítem activo en el menú de modos ilegible en modo claro** (azul sobre azul claro). El activo ahora lleva borde accent y texto `text_primary` sobre el `panel_bg` del menú.
+- **Fills espurios en `ImplicitCurve`** con stride grande: scanline ahora usa stride adaptativo 2/4 según tamaño del AST.
+- **Crash con `x²`/`y²` Unicode** por índice de byte no-caracter-boundary en el preprocesador.
+- **Stack-overflow en `simplify`** con expresiones anidadas profundamente: límite de recursión explícito.
+- **Cache del AST mezclaba lhs y rhs** en `ImplicitCurveObj`: ahora un solo slot indexado por hash combinado.
+- **GPU compute interpretaba bytecode residual** entre evaluaciones distintas: añadido `code_len` uniform, buffers zero-init en `Renderer::new`, `OP_DIV` con NaN en denom≈0.
+- **Cache del `ImplicitCurve` reutilizaba segmentos al cambiar la expresión**: la key ahora incluye `expr_lhs`/`expr_rhs`/`operator`.
+- **`ComplexMapping[1/z, I]` fallaba cuando `I` no existía**: ahora crea el disco unitario etiquetado `I` automáticamente.
+- **`ComplexMapping` no aceptaba expresión como target** (p.ej. `1/z, x^2+y^2<1`): ahora parsea el AST, crea el objeto implícito y mapea sobre él.
+- **Grosor de línea no finito o enorme** generaba franjas negras: clamp defensivo `[0.5, 8.0]` en CPU y GPU.
+- **Franjas negras** entre paneles y canvas en Cálculo/Probabilidad/Estadística/CAS: `right_panel=None` en esas perspectivas; el `CentralPanel` pinta `canvas_bg` antes del GPU callback.
+
+---
+
+[1.1.17-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.17-beta
 [1.1.4-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.4-beta
 [1.0.0-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.0.0-beta
 [0.9.0-beta.1]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0-beta.1

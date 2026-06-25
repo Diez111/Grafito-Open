@@ -467,9 +467,16 @@ impl LineObj {
             start_y_expr: None,
             end_x_expr: None,
             end_y_expr: None,
-            color: Color::BLACK,
+            // Las rectas infinitas (kind=Line) usan un gris medio-azulado
+            // más suave que el negro puro, para que no dominen el canvas
+            // cuando cruzan de borde a borde. Los segmentos y rayos
+            // mantienen el negro técnico.
+            color: match kind {
+                LineKind::Line => Color::new(0.35, 0.35, 0.45, 1.0),
+                LineKind::Ray | LineKind::Segment => Color::BLACK,
+            },
             visible: true,
-            width: 2.0,
+            width: 1.5,
         }
     }
 
@@ -1676,7 +1683,11 @@ pub struct ComplexMappingObj {
 }
 impl ComplexMappingObj {
     pub fn new(expr: &str, target: ObjectId) -> Self {
-        let conformal_cache = ConformalMap::from_expr_string(expr);
+        Self::new_with_symbol(expr, target, "z")
+    }
+
+    pub fn new_with_symbol(expr: &str, target: ObjectId, symbol: &str) -> Self {
+        let conformal_cache = ConformalMap::from_expr_string_with_symbol(expr, symbol);
         Self {
             id: ObjectId::new(),
             label: String::new(),
@@ -1693,6 +1704,10 @@ impl ComplexMappingObj {
     }
     pub fn refresh_cache(&mut self) {
         self.conformal_cache = ConformalMap::from_expr_string(&self.expr);
+    }
+
+    pub fn refresh_cache_with_symbol(&mut self, symbol: &str) {
+        self.conformal_cache = ConformalMap::from_expr_string_with_symbol(&self.expr, symbol);
     }
 }
 

@@ -17,7 +17,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
     let accent = theme.accent;
     let bar_fill = theme.toolbar_bg;
     let side_fill = theme.sidebar_bg;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
     let _txt_col = theme.text_primary;
 
     // ── MENU BAR + QUICK CONTROLS ──
@@ -70,28 +70,15 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula")
                         .changed();
                     ui.separator();
-                    ui.checkbox(&mut app.exam_mode, "Modo examen");
                     ui.checkbox(&mut app.document.view_mut().x_log, "Eje X log");
                     ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y log");
                     ui.separator();
                     ui.checkbox(&mut app.use_gpu, "Renderizado GPU");
                 });
-                ui.menu_button("Perspectivas", |ui| {
-                    let mut selected = app.perspective;
-                    for p in Perspective::ALL {
-                        ui.radio_value(
-                            &mut selected,
-                            p,
-                            format!("{}  (Ctrl+Shift+{})", p.title(), p.shortcut_number()),
-                        );
-                    }
-                    if selected != app.perspective {
-                        app.set_perspective(selected);
-                    }
-                });
                 ui.menu_button("Herramientas", |ui| {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                 });
+                draw_mode_selector(ui, app);
                 ui.menu_button("Ayuda", |ui| {
                     let version = env!("CARGO_PKG_VERSION");
                     if ui
@@ -103,8 +90,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // El switch 2D/3D ahora vive en el selector de perspectivas del
-                    // sidebar. El menú top bar sólo muestra marca + toggle de tema.
+                    // El cambio de modo vive en la barra superior, junto a Ayuda.
                     if ui.available_width() > 700.0 {
                         ui.label(
                             egui::RichText::new("Grafito")
@@ -177,7 +163,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(side_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             #[cfg(feature = "profile")]
@@ -187,83 +173,6 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(8.0);
-
-                        // ── Botón Perspectiva (dropdown compacto) ──
-                        // Reemplaza las 10 lineas verticales de short_labels.
-                        // Una sola celda arriba anuncia la perspectiva activa y
-                        // al click abre el popup con las 10 opciones.
-                        let cur_p = app.perspective;
-                        let active_pbg = theme.sidebar_tab_active_bg;
-                        let active_txt = theme.sidebar_tab_active;
-                        let dropdown_rect_w = 46.0;
-                        let dropdown_rect_h = 38.0;
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(dropdown_rect_w, dropdown_rect_h),
-                            egui::Sense::click(),
-                        );
-                        if ui.is_rect_visible(rect) {
-                            ui.painter().rect_filled(rect, 6.0, active_pbg);
-                            // Icono del menú Hamburguesa arriba
-                            let icon_rect = egui::Rect::from_center_size(
-                                rect.center() - egui::vec2(0.0, 8.0),
-                                egui::vec2(18.0, 14.0),
-                            );
-                            draw_icon(ui.painter(), icon_rect, Icon::Menu, active_txt);
-                            // short_label abajo (G2, AL, etc.) en proporcional 9
-                            ui.painter().text(
-                                rect.center() + egui::vec2(0.0, 11.0),
-                                Align2::CENTER_CENTER,
-                                cur_p.short_label(),
-                                egui::FontId::proportional(9.0),
-                                active_txt,
-                            );
-                        }
-                        // Popup con las 10 perspectivas: open en click izquierdo.
-                        let popup_id = ui.make_persistent_id("sidebar_perspective_popup");
-                        if resp.clicked() {
-                            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
-                        }
-                        egui::popup::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &resp,
-                            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| {
-                                ui.set_min_width(220.0);
-                                let mut selected = app.perspective;
-                                for p in Perspective::ALL {
-                                    ui.radio_value(
-                                        &mut selected,
-                                        p,
-                                        format!(
-                                            "{}  (Ctrl+Shift+{})",
-                                            p.title(),
-                                            p.shortcut_number()
-                                        ),
-                                    );
-                                }
-                                if selected != app.perspective {
-                                    app.set_perspective(selected);
-                                    ui.memory_mut(|mem| mem.close_popup());
-                                }
-                            },
-                        );
-                        resp.on_hover_text(format!(
-                            "Perspectiva actual: {}  (Ctrl+Shift+{}) — click para cambiar",
-                            cur_p.title(),
-                            cur_p.shortcut_number()
-                        ));
-
-                        // Separador entre el botón perspectiva y los tabs.
-                        ui.add_space(6.0);
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(ui.min_rect().min.x + 10.0, ui.min_rect().min.y),
-                                egui::pos2(ui.min_rect().max.x - 10.0, ui.min_rect().min.y),
-                            ],
-                            egui::Stroke::new(1.0, sep_col),
-                        );
-                        ui.add_space(6.0);
 
                         // ── Tabs del sidebar (6, uno por panel izquierdo) ──
                         for (i, (label, icon, tip)) in tabs.iter().enumerate() {
@@ -308,6 +217,134 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     });
                 });
         });
+}
+
+fn draw_mode_selector(ui: &mut egui::Ui, app: &mut GrafitoApp) {
+    let theme = current_theme(ui.ctx());
+    ui.menu_button(
+        egui::RichText::new(format!("Modo: {}", app.perspective.title()))
+            .color(theme.accent)
+            .strong(),
+        |ui| {
+            // Ancho responsivo con piso y techo. Sin max_width rígido
+            // global: cada item usa vertical para que el menú no desborde
+            // horizontalmente cuando los nombres de modo son largos.
+            ui.set_min_width(260.0);
+            ui.set_max_width(420.0);
+            ui.label(
+                egui::RichText::new("Elegí el espacio de trabajo")
+                    .color(theme.text_secondary)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new(
+                    "No borra tu documento; sólo cambia paneles, herramientas y vista.",
+                )
+                .color(theme.text_tertiary)
+                .size(11.0),
+            );
+            ui.separator();
+
+            let mut clicked: Option<Perspective> = None;
+            // Perspectivas ocultas en el selector: siguen existiendo como
+            // variantes (los shortcuts y el dispatch interno las siguen
+            // manejando), pero no se muestran en el menú para mantener la
+            // UI limpia. Para volver a mostrarlas, quitar el filtro.
+            const HIDDEN_PERSPECTIVES: &[Perspective] = &[
+                Perspective::Calculus,
+                Perspective::Probability,
+                Perspective::Statistics,
+            ];
+            for p in Perspective::ALL {
+                if HIDDEN_PERSPECTIVES.contains(&p) {
+                    continue;
+                }
+                let is_active = app.perspective == p;
+                // El ítem activo se distingue con una banda accent a la
+                // izquierda y texto `text_primary` sobre el mismo
+                // `panel_bg` que los items inactivos. Esto evita el bug
+                // de "azul sobre azul" que aparecía al teñir toda la
+                // caja con `accent_muted` y pintar el texto en `accent`.
+                let bg = theme.panel_bg;
+                let frame_response = egui::Frame::none()
+                    .fill(bg)
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                    .stroke(if is_active {
+                        egui::Stroke::new(2.0, theme.accent)
+                    } else {
+                        egui::Stroke::NONE
+                    })
+                    .show(ui, |ui| {
+                        // Layout vertical por item: nombre + atajo en una
+                        // línea, descripción corta en otra. Cada item usa
+                        // el ancho disponible del menú y el label se
+                        // trunca si excede.
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                let label_text =
+                                    format!("{}   Ctrl+Shift+{}", p.title(), p.shortcut_number());
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(label_text)
+                                            .color(theme.text_primary)
+                                            .strong()
+                                            .size(13.0),
+                                    )
+                                    .sense(egui::Sense::click())
+                                    .truncate(),
+                                );
+                                resp.clone().on_hover_text(p.description());
+                                if resp.clicked() {
+                                    clicked = Some(p);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            egui::RichText::new(p.short_label())
+                                                .color(theme.text_tertiary)
+                                                .monospace()
+                                                .size(11.0),
+                                        );
+                                    },
+                                );
+                            });
+                            // Descripción en una sola línea, truncada
+                            // al ancho disponible del frame. El
+                            // `truncate()` ya respeta el ancho del layout
+                            // padre (vertical dentro del frame).
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(p.description())
+                                        .color(theme.text_tertiary)
+                                        .size(11.0),
+                                )
+                                .truncate(),
+                            );
+                        });
+                    });
+                if frame_response
+                    .response
+                    .interact(egui::Sense::click())
+                    .clicked()
+                {
+                    clicked = Some(p);
+                }
+                frame_response.response.on_hover_text(p.description());
+            }
+            // Aceptar tanto el click en el radio label como el click en
+            // el frame completo (área más grande y más fácil de clickear).
+            if let Some(p) = clicked {
+                if p != app.perspective {
+                    app.set_perspective(p);
+                }
+                ui.close_menu();
+            }
+        },
+    )
+    .response
+    .on_hover_text("Cambiar entre Geometría, Álgebra/CAS, Datos, Complejos, Dinámica y Examen");
 }
 
 pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {

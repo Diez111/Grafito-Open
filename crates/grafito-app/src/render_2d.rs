@@ -260,7 +260,11 @@ fn get_width(base: f32, style: Option<StyleOverride>) -> f32 {
             w *= scale;
         }
     }
-    w
+    if w.is_finite() {
+        w.clamp(0.5, 8.0)
+    } else {
+        1.5
+    }
 }
 
 fn get_size(base: f32, style: Option<StyleOverride>) -> f32 {
@@ -349,7 +353,6 @@ fn superscript(exp: i32) -> String {
     result
 }
 
-#[allow(dead_code)]
 impl GrafitoApp {
     pub(crate) fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
         if !self.show_grid {
@@ -904,10 +907,6 @@ impl GrafitoApp {
         }
     }
 
-    pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
-        // Disabled
-    }
-
     fn hovered_analysis_color(
         is_snap: bool,
         feature: Option<grafito_geometry::analysis::AnalysisFeature>,
@@ -1071,7 +1070,7 @@ impl GrafitoApp {
         // 5) Verificar caché por el ObjectId del ComplexMapping (no del
         //    ImplicitCurve, para no pisarlo con su propia cache de fill).
         {
-            let cache = self.fill_textures.read().unwrap();
+            let cache = self.fill_textures.read().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = cache.get(&cm_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
@@ -1143,8 +1142,11 @@ impl GrafitoApp {
 
         // 9) Almacenar en cache y blit.
         {
-            let mut cache = self.fill_textures.write().unwrap();
-            cache.insert(
+            let mut cache = self
+                .fill_textures
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            let old = cache.insert(
                 cm_id,
                 FillTextureCache {
                     texture: Some(texture.clone()),
@@ -1153,6 +1155,11 @@ impl GrafitoApp {
                     cached_region: padded_bounds,
                 },
             );
+            if let Some(old) = old {
+                if let Ok(mut dead) = self.dead_textures.write() {
+                    dead.push(old);
+                }
+            }
         }
         let texture_id = texture.id();
         let Some((u_min, u_max, v_min, v_max)) = fill_cache_view_uv(padded_bounds, view_bounds)
@@ -1237,7 +1244,7 @@ impl GrafitoApp {
         //    dentro de la región cacheada, blitear la textura y retornar.
         let object_id = ic.id;
         {
-            let cache = self.fill_textures.read().unwrap();
+            let cache = self.fill_textures.read().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = cache.get(&object_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
@@ -1309,8 +1316,11 @@ impl GrafitoApp {
 
         // Almacenar en caché.
         {
-            let mut cache = self.fill_textures.write().unwrap();
-            cache.insert(
+            let mut cache = self
+                .fill_textures
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            let old = cache.insert(
                 object_id,
                 FillTextureCache {
                     texture: Some(texture.clone()),
@@ -1319,6 +1329,11 @@ impl GrafitoApp {
                     cached_region: padded_bounds,
                 },
             );
+            if let Some(old) = old {
+                if let Ok(mut dead) = self.dead_textures.write() {
+                    dead.push(old);
+                }
+            }
         }
 
         // Dibujar la textura (BLIT, ~0.5ms).
@@ -1514,20 +1529,49 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
-                // Polilínea: dibuja cada par consecutivo como segmento.
+                // Polilínea: dibuja cada par consecutivo como segmento,
+                // recortado al viewport del canvas. Sin recorte, un PencilObj
+                // con puntos extremos (por ejemplo, capturados con un
+                // drag accidental o coordenadas enormes) puede generar
+                // trazos que desbordan el canvas hacia arriba/abajo o a
+                // izquierda/derecha ("línea negra gigante que se va al
+                // infinito"). Aplicamos Cohen-Sutherland sobre cada
+                // segmento, descartamos no finitos y no dibujamos segmentos
+                // completamente fuera del viewport.
+                //
                 let width = get_width(pencil.width, style);
                 let color = to_color32(get_color(pencil.color, style));
                 let stroke = Stroke::new(width, color);
+                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+                let world_br =
+                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+                let view_bounds = grafito_geometry::AABB::new(
+                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                );
                 for w in pencil.points.windows(2) {
-                    let a = view.world_to_screen(w[0]);
-                    let b = view.world_to_screen(w[1]);
-                    painter.line_segment(
-                        [
-                            canvas_rect.min + Vec2::new(a.x, a.y),
-                            canvas_rect.min + Vec2::new(b.x, b.y),
-                        ],
-                        stroke,
-                    );
+                    let p0 = w[0];
+                    let p1 = w[1];
+                    if !p0.x.is_finite()
+                        || !p0.y.is_finite()
+                        || !p1.x.is_finite()
+                        || !p1.y.is_finite()
+                    {
+                        continue;
+                    }
+                    if let Some((cs, ce)) =
+                        grafito_geometry::clip_segment_to_rect(p0, p1, view_bounds)
+                    {
+                        let a = view.world_to_screen(cs);
+                        let b = view.world_to_screen(ce);
+                        painter.line_segment(
+                            [
+                                canvas_rect.min + Vec2::new(a.x, a.y),
+                                canvas_rect.min + Vec2::new(b.x, b.y),
+                            ],
+                            stroke,
+                        );
+                    }
                 }
             }
             GeoObject::Function(fun) => {
@@ -1648,33 +1692,24 @@ impl GrafitoApp {
 
                 // Fill area under curve if fill_color is set
                 if let Some(fill) = fill_color {
-                    let mut fill_pts: Vec<Pos2> = Vec::new();
-                    // Top edge: left to right along the curve
-                    for &(x, y_opt) in &samples {
-                        if let Some(y) = y_opt {
-                            if y.is_finite() {
-                                let s = view.world_to_screen(Point2::new(x, y));
-                                fill_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                    let fill_rgba = to_color32(fill);
+                    for w in samples.windows(2) {
+                        let (x0, y0_opt) = w[0];
+                        let (x1, y1_opt) = w[1];
+                        if let (Some(y0), Some(y1)) = (y0_opt, y1_opt) {
+                            if y0.is_finite() && y1.is_finite() {
+                                let p0 = view.world_to_screen(Point2::new(x0, y0));
+                                let p1 = view.world_to_screen(Point2::new(x1, y1));
+                                let b0 = view.world_to_screen(Point2::new(x0, 0.0));
+                                let b1 = view.world_to_screen(Point2::new(x1, 0.0));
+                                let pts = vec![
+                                    canvas_rect.min + Vec2::new(b0.x, b0.y),
+                                    canvas_rect.min + Vec2::new(p0.x, p0.y),
+                                    canvas_rect.min + Vec2::new(p1.x, p1.y),
+                                    canvas_rect.min + Vec2::new(b1.x, b1.y),
+                                ];
+                                painter.add(Shape::convex_polygon(pts, fill_rgba, Stroke::NONE));
                             }
-                        }
-                    }
-                    // Bottom edge: right to left along y=0 (or min_y)
-                    if !fill_pts.is_empty() {
-                        let mut bottom_pts: Vec<Pos2> = Vec::new();
-                        for &(x, _) in samples.iter().rev() {
-                            let s = view.world_to_screen(Point2::new(x, 0.0));
-                            bottom_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
-                        }
-                        fill_pts.append(&mut bottom_pts);
-                        // Close polygon on the left
-                        if let Some(first) = fill_pts.first() {
-                            fill_pts.push(*first);
-                        }
-                        if fill_pts.len() >= 3 {
-                            let fill_rgba = to_color32(fill);
-                            let fill_stroke = Stroke::new(0.5, fill_rgba);
-                            painter.add(Shape::line(fill_pts.clone(), fill_stroke));
-                            painter.add(Shape::convex_polygon(fill_pts, fill_rgba, Stroke::NONE));
                         }
                     }
                 }
@@ -2140,16 +2175,11 @@ impl GrafitoApp {
                     if all_pts.len() >= 3 {
                         let origin = view.world_to_screen(Point2::new(0.0, 0.0));
                         let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
-                        let mut fill_pts = all_pts.clone();
-                        fill_pts.push(origin_pos);
-                        if let Some(&first) = all_pts.first() {
-                            fill_pts.push(first);
+                        let fill_rgba = to_color32(fill);
+                        for w in all_pts.windows(2) {
+                            let pts = vec![origin_pos, w[0], w[1]];
+                            painter.add(Shape::convex_polygon(pts, fill_rgba, Stroke::NONE));
                         }
-                        painter.add(Shape::convex_polygon(
-                            fill_pts,
-                            to_color32(fill),
-                            Stroke::NONE,
-                        ));
                     }
                 }
             }
@@ -2605,6 +2635,12 @@ impl GrafitoApp {
                     Some(t) => t,
                     None => return,
                 };
+                let conformal_map = cm.conformal_cache.or_else(|| {
+                    ConformalMap::from_expr_string_with_symbol(
+                        &cm.expr,
+                        self.document.complex_base_symbol.as_str(),
+                    )
+                });
 
                 // 3) Extraer el dominio visible para sampling de Function y
                 //    cotas de muestreo para ParametricCurve2D / PolarCurve.
@@ -2613,7 +2649,7 @@ impl GrafitoApp {
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                 let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
 
-                if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, cm.conformal_cache) {
+                if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, conformal_map) {
                     if let Some(fill_color) = ic.fill_color {
                         self.draw_complex_mapping_fill(
                             painter,
@@ -2778,6 +2814,49 @@ impl GrafitoApp {
                             })
                             .collect()
                     }
+                    GeoObject::Circle(c) => {
+                        let n = 200;
+                        (0..=n)
+                            .map(|i| {
+                                let theta = i as f64 / n as f64 * std::f64::consts::TAU;
+                                let x = c.center.x + c.radius * theta.cos();
+                                let y = c.center.y + c.radius * theta.sin();
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::Ellipse(el) => {
+                        let n = 200;
+                        let cos_a = el.angle.cos();
+                        let sin_a = el.angle.sin();
+                        (0..=n)
+                            .map(|i| {
+                                let theta = i as f64 / n as f64 * std::f64::consts::TAU;
+                                let lx = el.rx * theta.cos();
+                                let ly = el.ry * theta.sin();
+                                let x = el.center.x + lx * cos_a - ly * sin_a;
+                                let y = el.center.y + lx * sin_a + ly * cos_a;
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
+                    GeoObject::Parabola(pb) => {
+                        let n = 200;
+                        let range = 10.0;
+                        let p_safe = pb.p.max(0.001);
+                        let cos_a = pb.angle.cos();
+                        let sin_a = pb.angle.sin();
+                        (0..=n)
+                            .map(|i| {
+                                let t = -range + 2.0 * range * i as f64 / n as f64;
+                                let lx = t;
+                                let ly = t * t / (4.0 * p_safe);
+                                let x = pb.vertex.x + lx * cos_a - ly * sin_a;
+                                let y = pb.vertex.y + lx * sin_a + ly * cos_a;
+                                Complex64::new(x, y)
+                            })
+                            .collect()
+                    }
                     _ => return,
                 };
 
@@ -2795,7 +2874,7 @@ impl GrafitoApp {
                 //
                 //    Camino lento: `eval_complex_batch` parsea el AST
                 //    una vez y evalúa cada punto.
-                let results: Vec<Option<Complex64>> = if let Some(map) = cm.conformal_cache {
+                let results: Vec<Option<Complex64>> = if let Some(map) = conformal_map {
                     z_samples.iter().map(|z| map.apply(*z)).collect()
                 } else {
                     let real_vars: HashMap<String, f64> = self.document.variables.clone();
@@ -2810,25 +2889,6 @@ impl GrafitoApp {
                     }
                 };
 
-                // 5b) **Relleno de área** para el caso del `ImplicitCurve` como
-                //     target. El render de líneas arriba solo dibuja el
-                //     contorno; para que el usuario vea un área rellena
-                //     cuando hace `ComplexMapping[1/z, I]`, escaneamos
-                //     el plano de output con el conformal map inverso y
-                //     evaluamos la curva original en cada celda.
-                if let GeoObject::ImplicitCurve(ic) = target {
-                    if let (Some(fill_color), Some(map)) = (ic.fill_color, cm.conformal_cache) {
-                        self.draw_complex_mapping_fill(
-                            painter,
-                            canvas_rect,
-                            view,
-                            ic,
-                            cm.id,
-                            map,
-                            fill_color,
-                        );
-                    }
-                }
                 // Re-construimos un vec paralelo para evitar manejar Option<Point2>:
                 // usamos Point2 con NaN para representar "no-finito".
                 let mut transformed: Vec<(Point2, bool)> = Vec::with_capacity(results.len());

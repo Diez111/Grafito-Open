@@ -11,7 +11,7 @@ use grafito_core::{
     PointObj, PolygonObj, RenderQuality, Sphere3DObj,
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
-use grafito_ui::theme::{DARK, LIGHT};
+use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::Tool;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -168,6 +168,8 @@ pub struct GrafitoApp {
     pub table_step: String,
     pub cas_history: Vec<String>,
     pub sidebar_tab: usize,
+    pub left_panel_width: f32,
+    pub right_panel_width: f32,
     pub recent_files: Vec<String>,
     /// Timestamp de inicio de la app (splash screen). None = ya pasó.
     pub splash_start: Option<Instant>,
@@ -179,6 +181,7 @@ pub struct GrafitoApp {
     /// `&self`). La clave es el `ObjectId` de la `ImplicitCurveObj`.
     pub fill_textures:
         std::sync::RwLock<std::collections::HashMap<ObjectId, crate::render_2d::FillTextureCache>>,
+    pub dead_textures: std::sync::RwLock<Vec<crate::render_2d::FillTextureCache>>,
     pub active_color_picker: Option<(ObjectId, grafito_ui::color_picker::HsvColorPicker)>,
     pub color_favorites: [grafito_geometry::Color; 5],
     pub tool_ghost: Option<GeoObject>,
@@ -387,12 +390,15 @@ impl GrafitoApp {
             table_step: "1.0".to_string(),
             cas_history: Vec::new(),
             sidebar_tab: 0,
+            left_panel_width: 240.0,
+            right_panel_width: 280.0,
             splash_start: Some(Instant::now()),
             recent_files: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(std::collections::HashMap::new()),
+            dead_textures: std::sync::RwLock::new(Vec::new()),
             active_color_picker: None,
             tool_ghost: None,
             tool_state: crate::tool_dispatcher::ToolState::default(),
@@ -879,8 +885,6 @@ impl GrafitoApp {
         self.show_spreadsheet = matches!(
             layout.right_panel,
             Some(crate::RightPanelContent::Spreadsheet)
-                | Some(crate::RightPanelContent::Data)
-                | Some(crate::RightPanelContent::Regression)
         );
         // Panel derecho: Protocolo de Construcción se muestra sólo cuando la
         // perspectiva lo solicita explícitamente.
@@ -888,11 +892,7 @@ impl GrafitoApp {
             layout.right_panel,
             Some(crate::RightPanelContent::ConstructionProtocol)
         );
-        // Exam mode: la perspectiva Examen es la única que fuerza exam_mode=true,
-        // las demás lo apagan (a menos que el usuario lo haya activado desde el
-        // menú Vista — en ese caso se respeta el flag manual via set_exam_mode
-        // externo). Aquí sólo sincronizamos el default de la perspective.
-        self.exam_mode = matches!(p, Perspective::Exam);
+        self.exam_mode = false;
         // Cargar ejemplos SIEMPRE al cambiar de perspectiva. El usuario puede
         // deshacer con Ctrl+Z si quería mantener su trabajo. Esto hace que el
         // switch sea visualmente obvio (la queja "no veo que cambie nada").
@@ -976,9 +976,6 @@ impl GrafitoApp {
                 run(self, "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]");
                 self.statistics_data = vec![2.0, 3.0, 5.0, 4.0, 6.0];
                 self.statistics_input_buf = "2, 3, 5, 4, 6".to_string();
-            }
-            Perspective::Exam => {
-                // Modo examen: documento vacío intencionalmente.
             }
         }
     }
@@ -1478,10 +1475,15 @@ impl eframe::App for GrafitoApp {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("app_update");
 
+        if let Ok(mut dead) = self.dead_textures.write() {
+            dead.clear();
+        }
+
         if self.style_applied != Some(self.dark_mode) {
             configure_modern_style(ctx);
             self.style_applied = Some(self.dark_mode);
         }
+        crate::panels::clamp_panels_to_viewport(self, ctx);
         if self.is_view_changing {
             if self.last_interaction_time.elapsed() > Duration::from_millis(150) {
                 self.is_view_changing = false;
@@ -1664,9 +1666,9 @@ impl eframe::App for GrafitoApp {
                 snap: self.snap_config.clone(),
             });
         }
-        // Ctrl+Shift+1..9,0: cambiar de perspectiva (1=Geometry2D … 9=DataAnalysis, 0=Exam).
+        // Ctrl+Shift+1..9: cambiar de perspectiva (1=Geometry2D … 9=DataAnalysis).
         {
-            const NUM_KEYS: [(Key, Perspective); 10] = [
+            const NUM_KEYS: [(Key, Perspective); 9] = [
                 (Key::Num1, Perspective::Geometry2D),
                 (Key::Num2, Perspective::Geometry3D),
                 (Key::Num3, Perspective::AlgebraCas),
@@ -1676,7 +1678,6 @@ impl eframe::App for GrafitoApp {
                 (Key::Num7, Perspective::Complex),
                 (Key::Num8, Perspective::Dynamics),
                 (Key::Num9, Perspective::DataAnalysis),
-                (Key::Num0, Perspective::Exam),
             ];
             for (key, p) in NUM_KEYS {
                 if ctx.input(|i| i.key_pressed(key) && i.modifiers.ctrl && i.modifiers.shift) {
@@ -1743,10 +1744,12 @@ impl eframe::App for GrafitoApp {
                 Some(RightPanelContent::ConstructionProtocol) => {
                     crate::panels::draw_construction_protocol(self, ctx);
                 }
-                Some(RightPanelContent::Spreadsheet)
-                | Some(RightPanelContent::Data)
-                | Some(RightPanelContent::Regression) => {
+                Some(RightPanelContent::Spreadsheet) => {
                     crate::panels::draw_right_spreadsheet(self, ctx);
+                }
+                Some(RightPanelContent::Data) => crate::panels::draw_right_data_panel(self, ctx),
+                Some(RightPanelContent::Regression) => {
+                    crate::panels::draw_right_regression_panel(self, ctx);
                 }
                 Some(RightPanelContent::Properties) => {
                     crate::panels::draw_right_properties_panel(self, ctx);
@@ -1775,6 +1778,8 @@ impl eframe::App for GrafitoApp {
                         Color32::WHITE
                     }))
                     .show(ctx, |ui| {
+                        ui.painter()
+                            .rect_filled(ui.max_rect(), 0.0, current_theme(ctx).canvas_bg);
                         if self.exam_mode {
                             egui::TopBottomPanel::top("exam_banner")
                                 .frame(
@@ -1896,6 +1901,8 @@ impl eframe::App for GrafitoApp {
             }
             ViewMode::D3 => {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.painter()
+                        .rect_filled(ui.max_rect(), 0.0, current_theme(ctx).canvas_bg);
                     let canvas_rect = ui.available_rect_before_wrap();
                     let w = canvas_rect.width();
                     let h = canvas_rect.height();

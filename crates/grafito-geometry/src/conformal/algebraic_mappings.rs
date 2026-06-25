@@ -233,7 +233,13 @@ impl ConformalMap {
     /// - `1/(z-a)` con `a` numérico (inversión desplazada)
     /// - `(a*z+b)/(c*z+d)` con coeficientes numéricos (Möbius)
     pub fn from_expr_string(s: &str) -> Option<Self> {
-        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        Self::from_expr_string_with_symbol(s, "z")
+    }
+
+    /// Variante de [`Self::from_expr_string`] que acepta un símbolo complejo
+    /// personalizado, por ejemplo `w` después de `ComplexSymbol[w]`.
+    pub fn from_expr_string_with_symbol(s: &str, symbol: &str) -> Option<Self> {
+        let s = normalize_mapping_symbol(s, symbol);
         if s.is_empty() {
             return None;
         }
@@ -287,6 +293,36 @@ impl ConformalMap {
         }
         None
     }
+}
+
+fn normalize_mapping_symbol(s: &str, symbol: &str) -> String {
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if symbol.is_empty() || symbol == "z" {
+        return compact;
+    }
+
+    let chars: Vec<char> = compact.chars().collect();
+    let sym: Vec<char> = symbol.chars().collect();
+    let mut out = String::with_capacity(compact.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if i + sym.len() <= chars.len() && chars[i..i + sym.len()] == sym[..] {
+            let prev = if i == 0 { ' ' } else { chars[i - 1] };
+            let next = if i + sym.len() >= chars.len() {
+                ' '
+            } else {
+                chars[i + sym.len()]
+            };
+            if !prev.is_alphanumeric() && prev != '_' && !next.is_alphanumeric() && next != '_' {
+                out.push('z');
+                i += sym.len();
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Parsea un literal numérico (entero o decimal) como `Complex64`.
@@ -399,6 +435,18 @@ mod tests {
         let m = ConformalMap::from_expr_string("1/z").unwrap();
         let w = m.apply(Complex64::new(2.0, 0.0)).unwrap();
         assert_close(w, Complex64::new(0.5, 0.0), 1e-12, "1/2");
+    }
+
+    #[test]
+    fn inversion_accepts_custom_symbol() {
+        assert_eq!(
+            ConformalMap::from_expr_string_with_symbol("1/w", "w"),
+            Some(ConformalMap::Inversion)
+        );
+        assert_eq!(
+            ConformalMap::from_expr_string_with_symbol("exp(w)", "w"),
+            Some(ConformalMap::Exponential)
+        );
     }
 
     #[test]

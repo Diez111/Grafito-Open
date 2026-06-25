@@ -93,6 +93,98 @@ mod tests {
     }
 
     #[test]
+    fn test_vertical_line_infinite_does_not_overflow_viewport() {
+        // Regresión: un LineObj con kind=Line y dos puntos verticales
+        // (mismo x) no debe generar vértices fuera del AABB del viewport.
+        // Esto reproduce el bug visual donde una línea vertical
+        // "desbordaba" el canvas en la imagen del usuario.
+        use grafito_core::LineKind;
+        use grafito_core::PencilObj;
+        let mut doc = Document::new();
+        // Línea infinita vertical en x=-3 (debe recortarse a la altura
+        // del viewport visible).
+        let mut line = LineObj::new_with_kind(
+            Point2::new(-3.0, -1.0),
+            Point2::new(-3.0, 1.0),
+            LineKind::Line,
+        );
+        line = line.with_label("l");
+        doc.add_object(GeoObject::Line(line));
+
+        // PencilObj con un trazo vertical extremo.
+        let pencil = PencilObj::new(vec![Point2::new(-3.0, -1000.0), Point2::new(-3.0, 1000.0)]);
+        doc.add_object(GeoObject::Pencil(pencil));
+
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _indices) =
+            crate::Renderer::build_geometry_static(&doc, &view, false, false);
+
+        // El viewport visible es x ∈ [-8, 8], y ∈ [-6, 6] (800/50/2, 600/50/2).
+        // Cualquier vértice de línea/Pencil debe tener coordenadas en
+        // píxeles dentro de la pantalla, ±100 px de margen para el ancho
+        // del trazo.
+        for v in &vertices {
+            let x = v.position[0];
+            let y = v.position[1];
+            // Permitimos un margen generoso de 200 px para los anchos
+            // de trazo, pero no permitimos valores absurdos.
+            assert!(
+                x > -200.0 && x < 1000.0,
+                "Vértice con x fuera del viewport: {}",
+                x
+            );
+            assert!(
+                y > -200.0 && y < 800.0,
+                "Vértice con y fuera del viewport: {}",
+                y
+            );
+        }
+    }
+    #[test]
+    fn test_vertical_line_infinite_clipped_to_viewport() {
+        // Regresión: una LineObj con kind=Line vertical NO debe
+        // generar vértices (defensa nuclear contra "líneas negras
+        // feas" que cruzan el canvas de borde a borde). La limpieza
+        // automática y el filtro del render se encargan de ignorarla.
+        // Usamos x = -3.25 (que no es múltiplo de 50) para no
+        // confundirnos con el grid.
+        use grafito_core::LineKind;
+        let mut doc = Document::new();
+        let line = LineObj::new_with_kind(
+            Point2::new(-3.25, -1.0),
+            Point2::new(-3.25, 1.0),
+            LineKind::Line,
+        )
+        .with_label("l");
+        doc.add_object(GeoObject::Line(line));
+
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _indices) =
+            crate::Renderer::build_geometry_static(&doc, &view, false, false);
+
+        // La línea vertical debe dibujarse (la defensa nuclear fue removida)
+        // y recortarse al viewport. Filtramos los vértices con x en (236, 239).
+        let line_verts: Vec<_> = vertices
+            .iter()
+            .filter(|v| v.position[0] > 236.0 && v.position[0] < 239.0)
+            .collect();
+        assert_eq!(
+            line_verts.len(),
+            4,
+            "La línea vertical debería haberse dibujado con 4 vértices, pero hay {}",
+            line_verts.len()
+        );
+        for v in &line_verts {
+            let y = v.position[1];
+            assert!(
+                y >= -50.0 && y <= 650.0,
+                "Vértice vertical desborda y: {}",
+                y
+            );
+        }
+    }
+
+    #[test]
     fn test_vertex_size() {
         assert_eq!(
             std::mem::size_of::<crate::Vertex>(),
@@ -188,6 +280,32 @@ mod tests {
                 "{} should render in 3D: got empty vertices",
                 obj.name()
             );
+        }
+    }
+
+    #[test]
+    fn test_huge_line_width_is_clamped_in_gpu_geometry() {
+        use grafito_core::LineKind;
+
+        let mut doc = Document::new();
+        let mut line = LineObj::new_with_kind(
+            Point2::new(-3.0, -1.0),
+            Point2::new(-2.0, 1.0),
+            LineKind::Segment,
+        );
+        line.width = 10_000.0;
+        doc.add_object(GeoObject::Line(line));
+
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _indices) =
+            crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(!vertices.is_empty());
+
+        for v in &vertices {
+            let x = v.position[0];
+            let y = v.position[1];
+            assert!((-20.0..=820.0).contains(&x), "x out of bounds: {x}");
+            assert!((-20.0..=620.0).contains(&y), "y out of bounds: {y}");
         }
     }
 }

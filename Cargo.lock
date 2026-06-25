@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-app"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-command"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "geo",
  "glam",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-core"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "criterion",
  "geo",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-geometry"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "criterion",
  "evalexpr",
@@ -1866,11 +1866,14 @@ dependencies = [
 
 [[package]]
 name = "grafito-release-tests"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
+dependencies = [
+ "egui-wgpu",
+]
 
 [[package]]
 name = "grafito-render"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1888,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-ui"
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 dependencies = [
  "egui",
  "grafito-core",

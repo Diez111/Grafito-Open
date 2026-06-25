@@ -9,6 +9,7 @@ use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
     Document, FunctionObj, GeoObject, ParametricCurve2DObj, PolarCurveObj, PolygonObj,
 };
+use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 
 fn point_obj_count(doc: &Document) -> usize {
     doc.objects_iter()
@@ -191,4 +192,84 @@ fn complex_mapping_does_not_create_extra_points() {
     let _ = process_input(&mut doc, &mut "ComplexMapping[1/z, f]".to_string());
     let after = point_obj_count(&doc);
     assert_eq!(before, after, "ComplexMapping should not create points");
+}
+
+#[test]
+fn complex_mapping_i_creates_unit_disk_when_missing() {
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/z, I]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexMapping[1/z, I] should create I automatically, got {:?}",
+        outcome
+    );
+
+    let implicit_i = doc.objects_iter().find_map(|(_, o)| match o {
+        GeoObject::ImplicitCurve(ic) if ic.label == "I" => Some(ic),
+        _ => None,
+    });
+    assert!(implicit_i.is_some(), "unit disk target I should exist");
+    assert!(doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))));
+}
+
+#[test]
+fn complex_mapping_accepts_implicit_expression_as_target() {
+    let mut doc = Document::new();
+    let outcome = process_input(
+        &mut doc,
+        &mut "ComplexMapping[1/z, x^2 + y^2 < 1]".to_string(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexMapping should parse expression target, got {:?}",
+        outcome
+    );
+    assert!(doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ImplicitCurve(_))));
+    assert!(doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))));
+}
+
+#[test]
+fn complex_mapping_uses_current_complex_symbol_for_conformal_cache() {
+    let mut doc = Document::new();
+    doc.add_object(GeoObject::Function(FunctionObj::new("x").with_label("f")));
+
+    let outcome = process_input(&mut doc, &mut "ComplexSymbol[w]".to_string());
+    assert!(matches!(outcome, CommandOutcome::Message(_)));
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/w, f]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexMapping[1/w, f] should succeed, got {:?}",
+        outcome
+    );
+
+    let cm = doc.objects_iter().find_map(|(_, o)| match o {
+        GeoObject::ComplexMapping(cm) => Some(cm),
+        _ => None,
+    });
+    assert_eq!(
+        cm.and_then(|cm| cm.conformal_cache),
+        Some(ConformalMap::Inversion)
+    );
+}
+
+#[test]
+fn complex_symbol_migration_refreshes_existing_mapping_cache() {
+    let mut doc = Document::new();
+    doc.add_object(GeoObject::Function(FunctionObj::new("x").with_label("f")));
+    let _ = process_input(&mut doc, &mut "ComplexMapping[1/z, f]".to_string());
+    let _ = process_input(&mut doc, &mut "ComplexSymbol[w]".to_string());
+
+    let cm = doc.objects_iter().find_map(|(_, o)| match o {
+        GeoObject::ComplexMapping(cm) => Some(cm),
+        _ => None,
+    });
+    let cm = cm.expect("ComplexMapping should exist");
+    assert_eq!(cm.expr, "1/w");
+    assert_eq!(cm.conformal_cache, Some(ConformalMap::Inversion));
 }

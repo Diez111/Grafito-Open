@@ -68,13 +68,11 @@ pub enum Perspective {
     Dynamics,
     /// Hoja de cálculo + análisis de datos.
     DataAnalysis,
-    /// Modo examen restringido.
-    Exam,
 }
 
 impl Perspective {
     /// Devuelve todas las perspectivas en orden, útil para construir selectores.
-    pub const ALL: [Perspective; 10] = [
+    pub const ALL: [Perspective; 9] = [
         Perspective::Geometry2D,
         Perspective::Geometry3D,
         Perspective::AlgebraCas,
@@ -84,7 +82,6 @@ impl Perspective {
         Perspective::Complex,
         Perspective::Dynamics,
         Perspective::DataAnalysis,
-        Perspective::Exam,
     ];
 
     /// Nombre largo, legible para el usuario.
@@ -99,7 +96,6 @@ impl Perspective {
             Perspective::Complex => "Complejos",
             Perspective::Dynamics => "Dinámica",
             Perspective::DataAnalysis => "Análisis de datos",
-            Perspective::Exam => "Examen",
         }
     }
 
@@ -115,7 +111,37 @@ impl Perspective {
             Perspective::Complex => "i",
             Perspective::Dynamics => "Dn",
             Perspective::DataAnalysis => "D",
-            Perspective::Exam => "E",
+        }
+    }
+
+    /// Descripción breve para tooltips y selector de modos.
+    pub const fn description(&self) -> &'static str {
+        match self {
+            Perspective::Geometry2D => {
+                "Construcciones 2D: puntos, rectas, círculos, cónicas y restricciones."
+            }
+            Perspective::Geometry3D => {
+                "Objetos y superficies 3D con herramientas de órbita y render 3D."
+            }
+            Perspective::AlgebraCas => {
+                "Entrada algebraica, funciones, objetos y cálculo simbólico en un flujo integrado."
+            }
+            Perspective::Calculus => {
+                "Derivadas, integrales, límites, tangentes, áreas y tablas de valores."
+            }
+            Perspective::Probability => {
+                "Distribuciones, probabilidades y comandos estadísticos rápidos."
+            }
+            Perspective::Statistics => {
+                "Datos, histogramas, dispersión, regresión y resúmenes descriptivos."
+            }
+            Perspective::Complex => "Números complejos, grillas complejas y mapeos conformes.",
+            Perspective::Dynamics => {
+                "Atractores, campos vectoriales, retratos de fase y sistemas dinámicos."
+            }
+            Perspective::DataAnalysis => {
+                "Hoja de cálculo, gráficos estadísticos, regresión y ecuaciones desde la entrada."
+            }
         }
     }
 
@@ -131,7 +157,6 @@ impl Perspective {
             Perspective::Complex => 7,
             Perspective::Dynamics => 8,
             Perspective::DataAnalysis => 9,
-            Perspective::Exam => 0,
         }
     }
 
@@ -147,7 +172,6 @@ impl Perspective {
             Perspective::Complex => CanvasMode::D2,
             Perspective::Dynamics => CanvasMode::D3,
             Perspective::DataAnalysis => CanvasMode::D2,
-            Perspective::Exam => CanvasMode::D2,
         }
     }
 
@@ -204,7 +228,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::SmallD2,
                 left_panel: LeftPanelContent::AlgebraAndCas,
-                right_panel: Some(RightPanelContent::Table),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Curve, G::Analysis],
                 show_math_keyboard: true,
                 show_input_bar: true,
@@ -215,7 +239,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
                 left_panel: LeftPanelContent::Cas,
-                right_panel: Some(RightPanelContent::Table),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Curve, G::Analysis, G::Circle],
                 show_math_keyboard: true,
                 show_input_bar: true,
@@ -226,7 +250,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::SmallD2,
                 left_panel: LeftPanelContent::Stats,
-                right_panel: Some(RightPanelContent::Data),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: false,
                 show_input_bar: true,
@@ -237,7 +261,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
                 left_panel: LeftPanelContent::Stats,
-                right_panel: Some(RightPanelContent::Regression),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Advanced, G::Measure],
                 show_math_keyboard: false,
                 show_input_bar: true,
@@ -269,20 +293,9 @@ impl Perspective {
                 title: Self::title(self),
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
-                left_panel: LeftPanelContent::Spreadsheet,
-                right_panel: Some(RightPanelContent::Regression),
-                visible_tool_groups: &[G::Move, G::Advanced],
-                show_math_keyboard: false,
-                show_input_bar: true,
-                default_tool: Tool::Select,
-            },
-            Perspective::Exam => PerspectiveLayout {
-                title: Self::title(self),
-                icon: Self::short_label(self),
-                canvas_mode: CanvasMode::D2,
-                left_panel: LeftPanelContent::Algebra,
+                left_panel: LeftPanelContent::Stats,
                 right_panel: None,
-                visible_tool_groups: &[G::Move, G::Point, G::Line, G::Circle, G::Polygon],
+                visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: false,
                 show_input_bar: true,
                 default_tool: Tool::Select,

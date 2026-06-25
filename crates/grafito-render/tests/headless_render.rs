@@ -1,6 +1,6 @@
 use grafito_core::*;
 use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
-use grafito_geometry::{Camera3D, Point2, ViewTransform};
+use grafito_geometry::{Camera3D, Color, Point2, ViewTransform};
 use grafito_render::{transform_complex_mapping_segments, Renderer};
 use std::collections::HashMap;
 
@@ -222,4 +222,40 @@ fn test_renderer_builds_geometry_for_piecewise_function() {
         !indices.is_empty(),
         "piecewise function should produce indices"
     );
+}
+
+#[test]
+fn test_complex_grid_renders_grid_lines_not_domain_coloring() {
+    let mut doc = Document::new();
+    doc.set_view(view_800x600());
+    doc.add_object(GeoObject::ComplexGrid(ComplexGridObj::new(
+        "z", -1.0, 1.0, -1.0, 1.0,
+    )));
+
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, false);
+
+    assert!(!vertices.is_empty(), "complex grid should produce lines");
+    assert!(!indices.is_empty(), "complex grid should produce indices");
+    assert!(
+        vertices.iter().all(|v| v.color == Color::BLUE.to_array()),
+        "plain ComplexGrid should use the object's line color, not domain-coloring colors"
+    );
+}
+
+#[test]
+fn test_complex_grid_uses_current_complex_symbol_in_gpu_geometry() {
+    let mut doc = Document::new();
+    doc.set_view(view_800x600());
+    doc.migrate_complex_symbol("w");
+    doc.add_object(GeoObject::ComplexGrid(ComplexGridObj::new(
+        "1/w", -1.0, 1.0, -1.0, 1.0,
+    )));
+
+    let (vertices, indices) = Renderer::build_geometry_static(&doc, &view_800x600(), false, false);
+
+    assert!(
+        !vertices.is_empty(),
+        "ComplexGrid should evaluate with document.complex_base_symbol"
+    );
+    assert!(!indices.is_empty());
 }

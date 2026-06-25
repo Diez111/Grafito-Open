@@ -308,7 +308,7 @@ impl CallbackTrait for CanvasCallback {
 
     fn paint(
         &self,
-        _info: PaintCallbackInfo,
+        info: PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
@@ -329,6 +329,14 @@ impl CallbackTrait for CanvasCallback {
         if let Ok(renderer_lock) = resources.renderer.read() {
             if let Some(renderer) = renderer_lock.as_ref() {
                 log::debug!("CanvasCallback paint: index_count={}", buffers.index_count);
+                render_pass.set_viewport(
+                    info.clip_rect.min.x,
+                    info.clip_rect.min.y,
+                    info.clip_rect.width(),
+                    info.clip_rect.height(),
+                    0.0,
+                    1.0,
+                );
                 render_pass.set_pipeline(&renderer.pipeline);
                 render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
@@ -524,7 +532,7 @@ impl CallbackTrait for Canvas3DCallback {
 
     fn paint(
         &self,
-        _info: PaintCallbackInfo,
+        info: PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
         callback_resources: &egui_wgpu::CallbackResources,
     ) {
@@ -551,6 +559,16 @@ impl CallbackTrait for Canvas3DCallback {
 
         // egui-wgpu already sets the viewport/scissor to the PaintCallback rect
         // before invoking this callback, so we render directly into that region.
+        // Wait, egui-wgpu sets the viewport to the FULL SCREEN, and scissor to the rect!
+        // We must set the viewport to the rect so clip space maps correctly!
+        render_pass.set_viewport(
+            info.clip_rect.min.x,
+            info.clip_rect.min.y,
+            info.clip_rect.width(),
+            info.clip_rect.height(),
+            0.0,
+            1.0,
+        );
         log::debug!(
             "Canvas3DCallback paint: index_count={}",
             buffers.index_count

@@ -1,0 +1,2 @@
+96ccf6429a41b08f1b80657312a00ec8de9714ccb485e5bbacf8f22c84187bf5  grafito_1.1.17-beta_amd64.deb
+2972a43ba1ffefe11acfbf4abf9d6f8d4d3c0f4465b5c8f11b2837708d36e725  grafito_1.1.17-beta_x86_64-pc-windows-gnu.exe

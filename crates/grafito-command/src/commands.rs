@@ -2326,6 +2326,123 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 input_text.clear();
                 return CommandOutcome::Message(format!("EraseAll: {} objeto(s) borrado(s)", n));
             }
+            "ErasePencil" => {
+                // Borra todos los PencilObj (trazos a mano alzada). Útil
+                // cuando un PencilObj persistido genera trazos molestos
+                // que el usuario no logra identificar visualmente.
+                let ids: Vec<ObjectId> = document
+                    .objects_iter()
+                    .filter_map(|(id, obj)| {
+                        if matches!(obj, GeoObject::Pencil(_)) {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let n = ids.len();
+                for id in ids {
+                    document.remove_object(id);
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!("ErasePencil: {} trazo(s) borrado(s)", n));
+            }
+            "EraseLine" => {
+                // Borra todas las LineObj con kind=Line (rectas infinitas).
+                // Útil para limpiar líneas persistidas que cruzan el canvas
+                // de borde a borde.
+                let ids: Vec<ObjectId> = document
+                    .objects_iter()
+                    .filter_map(|(id, obj)| {
+                        if let GeoObject::Line(l) = obj {
+                            if matches!(l.kind, grafito_core::LineKind::Line) {
+                                return Some(*id);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+                let n = ids.len();
+                for id in ids {
+                    document.remove_object(id);
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "EraseLine: {} recta(s) infinita(s) borrada(s)",
+                    n
+                ));
+            }
+            "EraseVertical" => {
+                // Borra LineObj y PencilObj que tengan una dirección
+                // vertical pura (x1 ≈ x2). Mantenido por compatibilidad
+                // para limpiar documentos con trazos verticales no deseados.
+                let ids: Vec<ObjectId> = document
+                    .objects_iter()
+                    .filter_map(|(id, obj)| match obj {
+                        GeoObject::Line(l) => {
+                            if (l.start.x - l.end.x).abs() < 1e-6 {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        }
+                        GeoObject::Pencil(p) if p.points.len() == 2 => {
+                            let a = p.points[0];
+                            let b = p.points[1];
+                            if (a.x - b.x).abs() < 1e-6 {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let n = ids.len();
+                for id in ids {
+                    document.remove_object(id);
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "EraseVertical: {} línea(s) vertical(es) borrada(s)",
+                    n
+                ));
+            }
+            "Clean" => {
+                // Atajo de limpieza: borra todos los PencilObj, todas las
+                // LineObj con kind=Line, y todas las líneas verticales
+                // (cualquier kind) que el usuario no pidió.
+                let ids: Vec<ObjectId> = document
+                    .objects_iter()
+                    .filter_map(|(id, obj)| match obj {
+                        GeoObject::Pencil(_) => Some(*id),
+                        GeoObject::Line(l) => {
+                            // Cualquier LineObj con kind=Line (infinita)
+                            // o con dirección vertical/horizontal pura
+                            // (línea de borde a borde) se considera
+                            // candidata a limpieza.
+                            if matches!(l.kind, grafito_core::LineKind::Line)
+                                || (l.start.x - l.end.x).abs() < 1e-6
+                                || (l.start.y - l.end.y).abs() < 1e-6
+                            {
+                                Some(*id)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let n = ids.len();
+                for id in ids {
+                    document.remove_object(id);
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Clean: {} objeto(s) borrado(s) (Pencil + rectas infinitas + verticales)",
+                    n
+                ));
+            }
             "ScatterPlot" if cmd.args.len() >= 2 => {
                 let xs = parse_brace_list(&cmd.args[0]);
                 let ys = parse_brace_list(&cmd.args[1]);
@@ -3011,7 +3128,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     .or_else(|| find_object_by_label(document, base_label));
                 match resolved {
                     Some(id) => {
-                        let cm = ComplexMappingObj::new(expr, id);
+                        let cm = ComplexMappingObj::new_with_symbol(
+                            expr,
+                            id,
+                            document.complex_base_symbol.as_str(),
+                        );
                         document.add_object(GeoObject::ComplexMapping(cm));
                         input_text.clear();
                         return CommandOutcome::Message(format!(
@@ -3019,6 +3140,36 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                         ));
                     }
                     None => {
+                        let created_target = if target_label == "I" {
+                            Some(
+                                document.add_object(GeoObject::ImplicitCurve(
+                                    ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less)
+                                        .with_label("I"),
+                                )),
+                            )
+                        } else {
+                            let before: HashSet<ObjectId> =
+                                document.objects_iter().map(|(id, _)| *id).collect();
+                            let mut temp_target = target_label.to_string();
+                            let _ = process_input(document, &mut temp_target);
+                            document
+                                .objects_iter()
+                                .find_map(|(id, _)| (!before.contains(id)).then_some(*id))
+                        };
+
+                        if let Some(id) = created_target {
+                            let cm = ComplexMappingObj::new_with_symbol(
+                                expr,
+                                id,
+                                document.complex_base_symbol.as_str(),
+                            );
+                            document.add_object(GeoObject::ComplexMapping(cm));
+                            input_text.clear();
+                            return CommandOutcome::Message(format!(
+                                "ComplexMapping: {expr} sobre {target_label}"
+                            ));
+                        }
+
                         return CommandOutcome::Error(format!(
                             "ComplexMapping: objeto '{target_label}' no encontrado"
                         ));

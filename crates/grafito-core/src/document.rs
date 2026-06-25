@@ -176,7 +176,6 @@ impl Document {
         let mut label_updates: Vec<(ObjectId, String)> = Vec::new();
         let mut expr_updates: Vec<(ObjectId, String)> = Vec::new();
         for (id, obj) in &self.objects {
-            // --- Label rename ---
             let label = obj.label().to_string();
             if label.starts_with(&old) {
                 let rest = &label[old.len()..];
@@ -188,23 +187,15 @@ impl Document {
                     label_updates.push((*id, format!("{}{}", new_symbol, rest)));
                 }
             }
-            // --- Expr token rewrite ---
+
             let new_expr_opt = match obj {
                 GeoObject::ComplexGrid(o) => {
                     let r = rewrite_expr(&o.expr);
-                    if r != o.expr {
-                        Some(r)
-                    } else {
-                        None
-                    }
+                    (r != o.expr).then_some(r)
                 }
                 GeoObject::ComplexMapping(o) => {
                     let r = rewrite_expr(&o.expr);
-                    if r != o.expr {
-                        Some(r)
-                    } else {
-                        None
-                    }
+                    (r != o.expr).then_some(r)
                 }
                 _ => None,
             };
@@ -229,6 +220,11 @@ impl Document {
                     GeoObject::ComplexMapping(o) => o.expr = new_expr,
                     _ => {}
                 }
+            }
+        }
+        for obj in self.objects.values_mut() {
+            if let GeoObject::ComplexMapping(o) = obj {
+                o.refresh_cache_with_symbol(new_symbol);
             }
         }
     }

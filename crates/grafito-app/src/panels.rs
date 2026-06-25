@@ -28,6 +28,113 @@ fn panel_theme_local(
     )
 }
 
+fn draw_panel_command_input(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str, hint: &str) {
+    let theme = current_theme(ui.ctx());
+    let mut execute = false;
+
+    ui.label(
+        egui::RichText::new(title)
+            .color(theme.text_secondary)
+            .size(12.0)
+            .strong(),
+    );
+    // IMPORTANTE: este frame debe crecer/encoger CON el panel padre.
+    // Antes se usaba `ui.horizontal` con un TextEdit de tamaño fijo, lo
+    // que provocaba realimentación positiva: el TextEdit pedía
+    // `available_width - 34`, el `horizontal` reportaba la suma al
+    // panel, el panel crecía, y vuelta. Resultado: el panel lateral se
+    // expandía a todo el viewport.
+    //
+    // Fix: layout left_to_right con el TextEdit anclado a
+    // `available_width - 34` y el botón ▶ a la derecha con tamaño fijo,
+    // sin que el layout pida más ancho del disponible.
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .rounding(8.0)
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            let total_w = ui.available_width();
+            let edit_w = (total_w - 34.0).max(60.0);
+            let button_w = 26.0;
+            // El "+" como label y el TextEdit en el espacio restante;
+            // el botón ▶ a la derecha con tamaño fijo.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("+")
+                        .color(theme.accent)
+                        .size(17.0)
+                        .strong(),
+                );
+                let r = ui.add_sized(
+                    [edit_w, 22.0],
+                    egui::TextEdit::singleline(&mut app.input_text)
+                        .hint_text(hint)
+                        .frame(false)
+                        .text_color(theme.text_primary),
+                );
+                app.preview_object = None;
+                if !app.input_text.is_empty() {
+                    app.preview_object = commands::parse_preview(&app.input_text);
+                }
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    execute = true;
+                }
+                if ui
+                    .add_sized(
+                        [button_w, 22.0],
+                        egui::Button::new(egui::RichText::new("▶").color(theme.accent)),
+                    )
+                    .clicked()
+                {
+                    execute = true;
+                }
+            });
+        });
+
+    if execute && !app.input_text.trim().is_empty() {
+        let time = ui.ctx().input(|i| i.time);
+        app.submit_input_text(time);
+    }
+}
+
+fn draw_quick_commands(
+    ui: &mut egui::Ui,
+    app: &mut GrafitoApp,
+    title: &str,
+    items: &[(&str, &str)],
+) {
+    let theme = current_theme(ui.ctx());
+    ui.label(
+        egui::RichText::new(title)
+            .color(theme.text_secondary)
+            .size(12.0)
+            .strong(),
+    );
+    // `horizontal_wrapped` puede pedir al padre un ancho mínimo igual al
+    // botón más ancho, lo que en paneles estrechos provoca overflow.
+    // Usamos `horizontal` con un `set_max_width` y un fallback a wrap
+    // para que los botones quepan en el ancho disponible.
+    let avail = ui.available_width();
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(avail);
+        for (label, command) in items {
+            let response = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(*label)
+                        .color(theme.text_primary)
+                        .size(11.0),
+                )
+                .rounding(8.0),
+            );
+            if response.clicked() {
+                app.input_text = (*command).to_string();
+                app.preview_object = commands::parse_preview(&app.input_text);
+            }
+            response.on_hover_text(format!("Carga: {}", command));
+        }
+    });
+}
+
 fn draw_object_cards_where(
     ui: &mut egui::Ui,
     app: &mut GrafitoApp,
@@ -77,7 +184,8 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── CAS PANEL (tab 1) ──
     egui::SidePanel::left("cas_panel")
-        .default_width(260.0).min_width(180.0).resizable(true)
+        .exact_width(280.0)
+        .resizable(false)
         .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -89,36 +197,19 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.separator();
 
             egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, 4.0)).show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Derivar").clicked() { app.input_text = "Derivative[".to_string(); }
-                    if ui.button("Integrar").clicked() { app.input_text = "Integral[".to_string(); }
-                    if ui.button("Resolver").clicked() { app.input_text = "Solve[".to_string(); }
-                    if ui.button("Límite").clicked() { app.input_text = "Limit[".to_string(); }
-                });
-            });
-            ui.separator();
-            // CAS Input
-            ui.label(egui::RichText::new("Entrada CAS:").strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut execute_cas = false;
-                if ui.add_sized([28.0, 24.0], egui::Button::new("▶")).clicked() {
-                    execute_cas = true;
-                }
-
-                let r = ui.add_sized(
-                    [ui.available_width(), 24.0],
-                    egui::TextEdit::singleline(&mut app.input_text)
-                        .hint_text("Comando CAS...")
+                draw_quick_commands(
+                    ui,
+                    app,
+                    "Comandos rápidos",
+                    &[
+                        ("Derivar", "Derivative[x^2, x]"),
+                        ("Integrar", "Integral[sin(x), x]"),
+                        ("Resolver", "Solve[x^2-4, x]"),
+                        ("Límite", "Limit[sin(x)/x, x, 0]"),
+                    ],
                 );
-
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    execute_cas = true;
-                }
-
-                if execute_cas && !app.input_text.is_empty() {
-                    let time = ui.ctx().input(|i| i.time);
-                    app.submit_input_text(time);
-                }
+                ui.add_space(6.0);
+                draw_panel_command_input(ui, app, "Entrada CAS", "Derivative[x^2, x] o Solve[x^2-4, x]");
             });
 
             // Show CAS history
@@ -193,7 +284,6 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         }
                     });
                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
-                ui.checkbox(&mut app.exam_mode, "Modo examen");
                 // El toggle 2D/3D vive en el selector de perspectivas del sidebar
                 // (Geometría 2D / Geometría 3D). No duplicar aquí, era fuente de
                 // estado Frankenstein (canvas 3D + toolbar 2D).
@@ -231,9 +321,8 @@ pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("spreadsheet_panel")
-        .default_width(260.0)
-        .min_width(180.0)
-        .resizable(true)
+        .exact_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
@@ -252,6 +341,45 @@ pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
             });
             ui.add_space(4.0);
             ui.separator();
+
+            if matches!(app.perspective, crate::Perspective::DataAnalysis) {
+                egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Análisis de datos")
+                            .color(accent)
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Usá celdas para variables, o escribí comandos/ecuaciones igual que en Álgebra.",
+                        )
+                        .color(txt_dim)
+                        .size(11.0),
+                    );
+                    ui.add_space(6.0);
+                    draw_panel_command_input(
+                        ui,
+                        app,
+                        "Entrada de análisis",
+                        "ScatterPlot[{1,2,3}, {2,4,5}] o Function[sin(x)]",
+                    );
+                    ui.add_space(6.0);
+                    draw_quick_commands(
+                        ui,
+                        app,
+                        "Ejemplos",
+                        &[
+                            ("Dispersión", "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]"),
+                            ("Histograma", "Histogram[{2,3,5,4,6,8,9}, 5]"),
+                            ("Regresión", "LinearRegression[{1,2,3,4,5}, {2,3,5,4,6}]"),
+                            ("Función", "Function[sin(x)]"),
+                        ],
+                    );
+                    ui.add_space(8.0);
+                    ui.separator();
+                });
+            }
 
             let (mut rows, mut cols) = app.document.spreadsheet_dim();
             // Assure at least 15 rows and 6 columns for nice UI, but expand infinitely if needed
@@ -585,13 +713,12 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("stats_panel")
-        .default_width(240.0)
-        .min_width(180.0)
-        .resizable(true)
+        .exact_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -600,6 +727,34 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .color(accent)
                     .size(15.0)
                     .strong(),
+            );
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new(
+                    "Cargá datos manualmente o escribí comandos para crear gráficos y regresiones.",
+                )
+                .color(txt_dim)
+                .size(11.0),
+            );
+            ui.add_space(6.0);
+            draw_panel_command_input(
+                ui,
+                app,
+                "Entrada estadística / ecuaciones",
+                "Histogram[{1,2,3}, 5], LinearRegression[...] o Function[x^2]",
+            );
+            ui.add_space(6.0);
+            draw_quick_commands(
+                ui,
+                app,
+                "Qué podés hacer",
+                &[
+                    ("Histograma", "Histogram[{2,3,5,4,6,8,9}, 5]"),
+                    ("Dispersión", "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]"),
+                    ("Regresión", "LinearRegression[{1,2,3,4,5}, {2,3,5,4,6}]"),
+                    ("BoxPlot", "BoxPlot[{2,3,5,4,6,8,9}]"),
+                ],
             );
             ui.add_space(8.0);
 
@@ -631,9 +786,10 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .color(hdr_col)
                     .size(12.0),
             );
-            let te_resp = ui.add_sized(
-                [ui.available_width(), 80.0],
-                egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
+            let te_resp = ui.add(
+                egui::TextEdit::multiline(&mut app.statistics_input_buf)
+                    .desired_width(ui.available_width())
+                    .desired_rows(3),
             );
 
             ui.add_space(4.0);
@@ -848,10 +1004,12 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
                         ui.add_space(3.0);
-                        let r = ui.add_sized(
-                            [ui.available_width(), 22.0],
+                        // desired_width en vez de add_sized con
+                        // available_width para no realimentar el panel.
+                        let r = ui.add(
                             egui::TextEdit::singleline(&mut app.input_text)
                                 .hint_text("ComplexGrid[1/z]...")
+                                .desired_width(ui.available_width())
                                 .frame(false)
                                 .text_color(txt_col),
                         );
@@ -1040,7 +1198,8 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .clicked()
                 {
                     let cmd = "Attractor[10, 28, 8/3]";
-                    let _ = crate::commands::process_input(&mut app.document, &mut cmd.to_string());
+                    let time = ui.ctx().input(|i| i.time);
+                    app.execute_command_and_record(cmd, time);
                 }
             }
 
@@ -1058,16 +1217,18 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 /// Panel derecho: Propiedades del objeto seleccionado (Geometry3D).
 pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::GeoObject;
-    let (is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let (is_dark, accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     egui::SidePanel::right("right_properties")
         .default_width(280.0)
-        .min_width(200.0)
-        .resizable(true)
+        .min_width(280.0)
+        .max_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1186,16 +1347,19 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
 
 /// Panel derecho: Tabla de valores x|f(x) (AlgebraCas, Calculus).
 pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     egui::SidePanel::right("right_table")
-        .default_width(260.0)
-        .min_width(180.0)
-        .resizable(true)
+        .default_width(280.0)
+        .min_width(280.0)
+        .max_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1289,16 +1453,19 @@ pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
 /// Panel derecho: Coloración de dominio (Complejos).
 pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::GeoObject;
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, _alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     egui::SidePanel::right("right_domain_coloring")
         .default_width(280.0)
-        .min_width(200.0)
-        .resizable(true)
+        .min_width(280.0)
+        .max_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1353,16 +1520,19 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
 /// Panel derecho: Parámetros del attractor activo (Dynamics).
 pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, _alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     egui::SidePanel::right("right_parameters")
-        .default_width(260.0)
-        .min_width(180.0)
-        .resizable(true)
+        .default_width(280.0)
+        .min_width(280.0)
+        .max_width(280.0)
+        .resizable(false)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1459,18 +1629,21 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
 }
 
 pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
+    let (is_dark, _accent, _alg_fill, _sep_col, _txt_col, _txt_dim, _hdr_col) =
         panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
     if app.show_spreadsheet {
         egui::SidePanel::right("spreadsheet")
-            .resizable(true)
+            .resizable(false)
             .default_width(280.0)
+            .min_width(280.0)
+            .max_width(280.0)
             .frame(
                 egui::Frame::none()
-                    .fill(alg_fill)
-                    .stroke(egui::Stroke::new(1.0, sep_col)),
+                    .fill(side_bg)
+                    .inner_margin(egui::Margin::same(0.0)),
             )
             .show(ctx, |ui| {
                 ui.heading("Hoja de Cálculo");
@@ -1487,45 +1660,72 @@ pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) 
                     Color32::from_gray(80)
                 };
 
+                // Ancho responsivo: la grilla se adapta al ancho disponible
+                // del panel. min_col_width se calcula en función del panel y
+                // del número de columnas, evitando que el panel se estire
+                // "hasta el infinito" cuando hay muchas columnas o la ventana
+                // es estrecha. auto_shrink=[false, true] permite que el scroll
+                // horizontal aparezca sin que el panel se expanda.
+                let row_label_w = 36.0;
+                let grid_w = (ui.available_width() - row_label_w).max(120.0);
+                let min_col_w = if cols > 0 {
+                    (grid_w / cols as f32).clamp(36.0, 96.0)
+                } else {
+                    52.0
+                };
+                let cell_h = 18.0;
+
                 egui::ScrollArea::both()
-                    .auto_shrink([false; 2])
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
                         egui::Grid::new("sp_grid")
-                            .min_col_width(52.0)
+                            .min_col_width(min_col_w)
                             .spacing(egui::vec2(1.0, 1.0))
                             .striped(true)
                             .show(ui, |ui| {
                                 // Header row
-                                ui.label(""); // corner
+                                ui.add_sized(
+                                    [row_label_w, cell_h],
+                                    egui::Label::new(
+                                        egui::RichText::new(" ")
+                                            .monospace()
+                                            .strong()
+                                            .color(hdr_col),
+                                    ),
+                                );
                                 for c in 0..cols {
                                     let letter = if c < 26 {
                                         format!("{}", (b'A' + c as u8) as char)
                                     } else {
                                         format!("{}", c + 1)
                                     };
-                                    ui.centered_and_justified(|ui| {
-                                        ui.label(
+                                    ui.add_sized(
+                                        [min_col_w, cell_h],
+                                        egui::Label::new(
                                             egui::RichText::new(letter)
                                                 .monospace()
                                                 .strong()
                                                 .color(hdr_col),
-                                        );
-                                    });
+                                        ),
+                                    );
                                 }
                                 ui.end_row();
 
                                 // Data rows
                                 for r in 0..rows {
-                                    ui.label(
-                                        egui::RichText::new(format!("{}", r + 1))
-                                            .monospace()
-                                            .strong()
-                                            .color(hdr_col),
+                                    ui.add_sized(
+                                        [row_label_w, cell_h],
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{}", r + 1))
+                                                .monospace()
+                                                .strong()
+                                                .color(hdr_col),
+                                        ),
                                     );
                                     for c in 0..cols {
                                         let mut val = app.document.get_spreadsheet_cell(r, c);
                                         let resp = ui.add_sized(
-                                            [52.0, 18.0],
+                                            [min_col_w, cell_h],
                                             egui::TextEdit::singleline(&mut val)
                                                 .font(egui::TextStyle::Monospace)
                                                 .text_color(text_col)
@@ -1556,6 +1756,255 @@ pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) 
                             });
                     });
             });
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Panel derecho: Datos (perspectiva Probabilidad)
+// Muestra distribuciones activas y sus parámetros. Sin grilla, responsivo
+// (crece/libera con resize, pero no puede desbordar el viewport).
+// ─────────────────────────────────────────────────────────────────────────
+
+pub(crate) fn draw_right_data_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let (_is_dark, accent, _alg_fill, _sep_col, txt_col, _txt_dim, hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
+
+    egui::SidePanel::right("right_data")
+        .resizable(false)
+        .default_width(260.0)
+        .min_width(260.0)
+        .max_width(260.0)
+        .frame(
+            egui::Frame::none()
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Distribución activa")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let mut found = false;
+            for (_, obj) in app.document.objects_iter() {
+                match obj {
+                    GeoObject::Histogram(h) => {
+                        found = true;
+                        ui.label(
+                            egui::RichText::new(format!("Histograma · {} datos · {} bins", h.data.len(), h.bins))
+                                .color(txt_col)
+                                .strong()
+                                .size(12.0),
+                        );
+                        if let (Some(&mn), Some(&mx)) = (h.data.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
+                                                          h.data.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))) {
+                            ui.label(format!("Rango: {:.3} → {:.3}", mn, mx));
+                        }
+                    }
+                    GeoObject::ScatterPlot(s) => {
+                        found = true;
+                        ui.label(
+                            egui::RichText::new(format!("Dispersión · {} puntos", s.xs.len().min(s.ys.len())))
+                                .color(txt_col)
+                                .strong()
+                                .size(12.0),
+                        );
+                    }
+                    GeoObject::BoxPlot(b) => {
+                        found = true;
+                        ui.label(
+                            egui::RichText::new(format!("BoxPlot · {} datos", b.data.len()))
+                                .color(txt_col)
+                                .strong()
+                                .size(12.0),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if !found {
+                ui.label(
+                    egui::RichText::new(
+                        "Sin datos. Probá:\n  Normal[0, 1]\n  Histogram[{1,2,3}, 5]\n  ScatterPlot[{1,2,3},{2,3,5}]",
+                    )
+                    .color(_txt_dim)
+                    .size(11.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Atajos")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            for (label, cmd) in &[
+                ("Normal estándar", "Normal[0, 1]"),
+                ("Binomial", "Binomial[10, 0.5, 3]"),
+                ("Poisson", "Poisson[2, 1]"),
+                ("Histograma", "Histogram[{2,3,5,4,6,8,9}, 5]"),
+            ] {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(*label).color(txt_col).size(11.0),
+                        )
+                        .rounding(6.0),
+                    )
+                    .clicked()
+                {
+                    app.input_text = (*cmd).to_string();
+                }
+            }
+        });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Panel derecho: Regresión (perspectivas Statistics, DataAnalysis)
+// Lista regresiones activas con coeficientes y R². Sin grilla.
+// ─────────────────────────────────────────────────────────────────────────
+
+pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    use grafito_core::GeoObject;
+    let (_is_dark, accent, _alg_fill, _sep_col, txt_col, _txt_dim, hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
+
+    egui::SidePanel::right("right_regression")
+        .resizable(false)
+        .default_width(280.0)
+        .min_width(280.0)
+        .max_width(280.0)
+        .frame(
+            egui::Frame::none()
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Regresión")
+                    .color(accent)
+                    .size(14.0)
+                    .strong(),
+            );
+            ui.add_space(6.0);
+
+            let mut any = false;
+            for (_, obj) in app.document.objects_iter() {
+                if let GeoObject::RegressionLine(r) = obj {
+                    any = true;
+                    egui::Frame::none()
+                        .fill(if _is_dark {
+                            Color32::from_rgb(40, 40, 46)
+                        } else {
+                            Color32::from_rgb(245, 245, 248)
+                        })
+                        .rounding(6.0)
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .stroke(egui::Stroke::new(1.0, current_theme(ctx).separator))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(r.label.clone()).color(txt_col).strong());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "y = {:.4}x + {:.4}",
+                                    r.slope, r.intercept
+                                ))
+                                .color(txt_col)
+                                .size(12.0)
+                                .monospace(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!("R² = {:.4}", r.r_squared))
+                                    .color(accent)
+                                    .size(12.0)
+                                    .strong(),
+                            );
+                        });
+                    ui.add_space(4.0);
+                }
+            }
+            if !any {
+                ui.label(
+                    egui::RichText::new(
+                        "Sin regresión. Probá:\n  LinearRegression[{1,2,3,4,5}, {2,3,5,4,6}]",
+                    )
+                    .color(_txt_dim)
+                    .size(11.0),
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("Atajos")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            for (label, cmd) in &[
+                (
+                    "Regresión lineal",
+                    "LinearRegression[{1,2,3,4,5}, {2,3,5,4,6}]",
+                ),
+                ("Dispersión", "ScatterPlot[{1,2,3,4,5}, {2,3,5,4,6}]"),
+                ("BoxPlot", "BoxPlot[{2,3,5,4,6,8,9}]"),
+            ] {
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new(*label).color(txt_col).size(11.0))
+                            .rounding(6.0),
+                    )
+                    .clicked()
+                {
+                    app.input_text = (*cmd).to_string();
+                }
+            }
+        });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Clamp responsivo: defensa de último recurso para que los paneles nunca
+// puedan empujar el contenido fuera del viewport. Si la suma de anchos
+// izquierda + derecha excede el ancho de pantalla, reduce proporcionalmente
+// los anchos actuales de los paneles hasta que entren, dejando al menos
+// 64 px de canvas. No usa max_width rígido en los SidePanel: deja que el
+// usuario los arrastre libremente, pero los recorta antes de pintar si
+// desbordan.
+// ─────────────────────────────────────────────────────────────────────────
+
+pub(crate) fn clamp_panels_to_viewport(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let screen_w = ctx.screen_rect().width();
+    let min_canvas = 64.0;
+    let icon_bar = 56.0_f32;
+    let sidebar_left = app.left_panel_width.max(160.0);
+    let sidebar_right = app.right_panel_width.max(180.0);
+    let total = icon_bar + sidebar_left + sidebar_right + min_canvas;
+    if total <= screen_w {
+        return;
+    }
+    let overflow = total - screen_w;
+    // Repartimos el recorte priorizando mantener al usuario con al menos
+    // un mínimo viable de cada panel. Tomamos primero del derecho (el que
+    // se infla por la grilla), luego del izquierdo.
+    let take_right = (sidebar_right - 200.0).max(0.0).min(overflow);
+    app.right_panel_width -= take_right;
+    let remaining = overflow - take_right;
+    if remaining > 0.0 {
+        let take_left = (sidebar_left - 160.0).max(0.0).min(remaining);
+        app.left_panel_width -= take_left;
     }
 }
 
@@ -1612,16 +2061,19 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
     if !app.show_construction_protocol {
         return;
     }
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
+    let side_bg = current_theme(ctx).sidebar_bg;
 
     egui::SidePanel::right("construction_protocol")
-        .resizable(true)
+        .resizable(false)
         .default_width(300.0)
-        .min_width(200.0)
+        .min_width(300.0)
+        .max_width(300.0)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(side_bg)
+                .inner_margin(egui::Margin::same(0.0)),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);

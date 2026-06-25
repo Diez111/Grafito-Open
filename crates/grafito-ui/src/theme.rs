@@ -216,7 +216,7 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 
     // Acentos y estados
     accent: Color32::from_rgb(94, 139, 255),
-    accent_muted: Color32::from_rgba_premultiplied(94, 139, 255, 90),
+    accent_muted: Color32::from_rgba_premultiplied(94, 139, 255, 50),
     accent_strong: Color32::from_rgb(120, 165, 255),
     success: Color32::from_rgb(46, 212, 122),
     warning: Color32::from_rgb(255, 184, 0),
@@ -267,7 +267,7 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     toolbar_bg: Color32::from_rgb(255, 255, 255),
     input_bar_bg: Color32::from_rgb(245, 246, 250),
     sidebar_bg: Color32::from_rgb(250, 250, 252),
-    sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
+    sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 20),
     sidebar_tab_inactive: Color32::from_gray(110),
     sidebar_tab_active: Color32::from_rgb(38, 99, 255),
     status_bar_bg: Color32::from_rgb(244, 244, 248),
@@ -285,12 +285,12 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
 
     // Acentos y estados
     accent: Color32::from_rgb(38, 99, 255),
-    accent_muted: Color32::from_rgba_premultiplied(38, 99, 255, 70),
+    accent_muted: Color32::from_rgba_premultiplied(38, 99, 255, 32),
     accent_strong: Color32::from_rgb(20, 70, 220),
     success: Color32::from_rgb(20, 175, 90),
     warning: Color32::from_rgb(220, 150, 0),
     danger: Color32::from_rgb(235, 50, 65),
-    selection_bg: Color32::from_rgba_premultiplied(38, 99, 255, 30),
+    selection_bg: Color32::from_rgba_premultiplied(38, 99, 255, 20),
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
@@ -338,8 +338,62 @@ mod tests {
     }
 
     #[test]
-    fn light_canvas_is_light() {
+    fn light_theme_is_actually_light() {
         assert!(LIGHT.canvas_bg.r() > 200);
+    }
+
+    /// Compone `overlay` sobre `base` (alpha straight-over) y devuelve
+    /// la luminancia relativa Rec. 709. Sirve para validar contrastes
+    /// del menú de modos, donde el item activo se pinta sobre el
+    /// `panel_bg` con un tinte `accent_muted`.
+    fn composite_luminance(overlay: egui::Color32, base: egui::Color32) -> f64 {
+        let a = overlay.a() as f64 / 255.0;
+        let r = (overlay.r() as f64 / 255.0) * a + (base.r() as f64 / 255.0) * (1.0 - a);
+        let g = (overlay.g() as f64 / 255.0) * a + (base.g() as f64 / 255.0) * (1.0 - a);
+        let b = (overlay.b() as f64 / 255.0) * a + (base.b() as f64 / 255.0) * (1.0 - a);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    fn assert_legible_composite(
+        text: egui::Color32,
+        bg: egui::Color32,
+        panel: egui::Color32,
+        theme_name: &str,
+    ) {
+        let lt = composite_luminance(text, panel);
+        let lb = composite_luminance(bg, panel);
+        let diff = (lt - lb).abs();
+        assert!(
+            diff >= 0.18,
+            "{}: contraste texto/fondo {:.3} < 0.18 (text {:?} sobre panel {:?} vs bg {:?})",
+            theme_name,
+            diff,
+            text,
+            panel,
+            bg
+        );
+    }
+
+    /// El ítem activo del menú de modos pinta `text_primary` sobre
+    /// `accent_muted` (que se compone con el `panel_bg` del menú).
+    /// Esto evita el bug que en modo claro dejaba el texto del ítem
+    /// "Complejos" en azul sobre fondo azul claro. Garantiza que la
+    /// diferencia de luminancia sea suficiente para texto en negrita
+    /// tamaño 13.
+    #[test]
+    fn light_menu_active_text_legible_on_muted_background() {
+        let bg = LIGHT.accent_muted;
+        let text = LIGHT.text_primary;
+        assert_legible_composite(text, bg, LIGHT.panel_bg, "LIGHT");
+        assert_ne!(text, LIGHT.accent);
+    }
+
+    #[test]
+    fn dark_menu_active_text_legible_on_muted_background() {
+        let bg = DARK.accent_muted;
+        let text = DARK.text_primary;
+        assert_legible_composite(text, bg, DARK.panel_bg, "DARK");
+        assert_ne!(text, DARK.accent);
     }
 
     #[test]

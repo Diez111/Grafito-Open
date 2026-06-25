@@ -132,7 +132,17 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     let Some(obj) = app.document.get_object(oid) else {
         return;
     };
-    let obj_label = obj.label().to_string();
+    // Si el label está vacío (típico de PencilObj y algunos LineObj sin
+    // asignación), usamos el nombre del tipo para que el usuario pueda
+    // identificar el objeto en el panel y borrarlo si quiere.
+    let display_label = {
+        let raw = obj.label().to_string();
+        if raw.is_empty() {
+            format!("({})", obj.name())
+        } else {
+            raw
+        }
+    };
     let obj_name = obj.name().to_string();
     let obj_vis = obj.is_visible();
     let obj_col = color32_from_object_color(obj.color(), 255);
@@ -159,7 +169,12 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
         .stroke(border)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            // Las cards de objetos se acotan al ancho disponible del sidebar
+            // con un tope superior: si el sidebar es muy ancho, la card no
+            // se estira más allá de 360px para no romper la jerarquía
+            // visual ni entrar en ciclos con SidePanel resizable.
+            let card_max_w = ui.available_width().min(360.0);
+            ui.set_min_width(card_max_w);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (del_rect, del_resp) =
@@ -228,9 +243,9 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                         ui.add_space(5.0);
 
                         let txt = if !obj_expr.is_empty() {
-                            format!("{}: {}", obj_label, obj_expr)
+                            format!("{}: {}", display_label, obj_expr)
                         } else {
-                            format!("{}: {}", obj_label, obj_name)
+                            format!("{}: {}", display_label, obj_name)
                         };
                         let lbl_resp = ui.add(
                             egui::Label::new(
@@ -248,7 +263,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                             && !obj_expr.is_empty()
                             && (obj_name == "Function" || obj_name == "Point")
                         {
-                            app.input_text = format!("{}={}", obj_label, obj_expr);
+                            app.input_text = format!("{}={}", display_label, obj_expr);
                         }
                     });
                 });
@@ -271,15 +286,14 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
     let alg_fill = theme.panel_bg;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
     let txt_col = theme.text_primary;
     let _txt_dim = theme.text_tertiary;
 
     egui::SidePanel::left("algebra_panel")
-    .default_width(220.0)
-    .min_width(160.0)
-    .resizable(true)
-    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+    .exact_width(260.0)
+    .resizable(false)
+    .frame(egui::Frame::none().fill(alg_fill).inner_margin(egui::Margin::same(0.0)))
     .show(ctx, |ui| {
         // Input row in-panel: es la affordance principal para "agregar cosas"
         // en el panel de Álgebra. Editar aquí equivale a la barra inferior
@@ -292,12 +306,16 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
                     ui.add_space(3.0);
-                    let r = ui.add_sized(
-                        [ui.available_width(), 22.0],
+                    // Usamos `desired_width` en vez de `add_sized` con
+                    // `available_width` para evitar la realimentación que
+                    // hacía crecer el panel lateral sin límite.
+                    let r = ui.add(
                         egui::TextEdit::singleline(&mut app.input_text)
                             .hint_text("Entrada...")
+                            .desired_width(ui.available_width())
                             .frame(false)
-                            .text_color(txt_col));
+                            .text_color(txt_col),
+                    );
                     app.preview_object = None;
                     if !app.input_text.is_empty() {
                         app.preview_object = commands::parse_preview(&app.input_text);
@@ -315,8 +333,18 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             let mut delete_id: Option<ObjectId> = None;
             let ids: Vec<ObjectId> = app.document.objects_iter().map(|(id,_)| *id).collect();
             for oid in ids {
-                let (obj_label, obj_name, obj_vis, obj_col, obj_expr) = {
+                let (display_label, obj_name, obj_vis, obj_col, obj_expr) = {
                     let Some(obj) = app.document.get_object(oid) else { continue; };
+                    // Si el label está vacío (típico de PencilObj y
+                    // algunos LineObj sin asignación), usamos el nombre
+                    // del tipo para que el usuario pueda identificar el
+                    // objeto en el panel y borrarlo si quiere.
+                    let raw_label = obj.label();
+                    let computed_display = if raw_label.is_empty() {
+                        format!("({})", obj.name())
+                    } else {
+                        raw_label.to_string()
+                    };
 
                     // Filter objects by current view mode
                     let is_3d_object = matches!(obj.name(),
@@ -330,11 +358,10 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         continue;
                     }
 
-                    // El Pencil es una herramienta de dibujo libre, no un
-                    // objeto analizable: no debe aparecer en el panel de álgebra.
-                    if matches!(obj, grafito_core::GeoObject::Pencil(_)) {
-                        continue;
-                    }
+                    // Pencil es una herramienta de dibujo libre. Permitimos
+                    // que aparezca en el panel de Álgebra para que el usuario
+                    // pueda borrarlo/ocultarlo; antes se filtraba, pero eso
+                    // dejaba PencilObj persistidos sin forma de gestionarlos.
 
                     let o_col = obj.color();
                     let col = Color32::from_rgba_unmultiplied(
@@ -437,7 +464,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         }
                         _ => String::new(),
                     };
-                    (obj.label().to_string(), obj.name().to_string(), obj.is_visible(), col, expr)
+                    (computed_display, obj.name().to_string(), obj.is_visible(), col, expr)
                 };
 
                 let is_sel = app.selected_object == Some(oid);
@@ -460,7 +487,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .stroke(border)
                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
+                        let card_max_w = ui.available_width().min(360.0);
+                        ui.set_min_width(card_max_w);
                         ui.horizontal(|ui| {
                             // Right-side controls drawn first
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -511,15 +539,15 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     ui.add_space(5.0);
 
                                     let txt = if !obj_expr.is_empty() {
-                                        format!("{}: {}", obj_label, obj_expr)
+                                        format!("{}: {}", display_label, obj_expr)
                                     } else {
-                                        format!("{}: {}", obj_label, obj_name)
+                                        format!("{}: {}", display_label, obj_name)
                                     };
                                     let lbl_resp = ui.add(egui::Label::new(
                                         egui::RichText::new(txt).size(13.0).color(txt_col)).sense(egui::Sense::click()).truncate());
                                     if lbl_resp.clicked() { row_clicked = true; }
                                     if lbl_resp.double_clicked() && !obj_expr.is_empty() && (obj_name == "Function" || obj_name == "Point") {
-                                        app.input_text = format!("{}={}", obj_label, obj_expr);
+                                        app.input_text = format!("{}={}", display_label, obj_expr);
                                     }
                                 });
                             });

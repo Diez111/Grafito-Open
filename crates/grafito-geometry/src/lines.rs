@@ -69,6 +69,10 @@ fn liang_barsky(
     let dx = b.x - a.x;
     let dy = b.y - a.y;
 
+    if dx.abs() < 1e-12 && dy.abs() < 1e-12 {
+        return None;
+    }
+
     let p = [-dx, dx, -dy, dy];
     let q = [
         a.x - rect.min.x,
@@ -150,6 +154,30 @@ mod tests {
             clip_segment_to_rect(Point2::new(-1.0, 1.0), Point2::new(3.0, 1.0), rect).unwrap();
         assert!((clipped.0.x - 0.0).abs() < 1e-10);
         assert!((clipped.1.x - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_clip_segment_to_rect_vertical_extreme() {
+        // Regresión: un PencilObj con un trazo vertical de y=-1000 a y=1000
+        // debe recortarse al AABB visible, no desbordar.
+        let rect = AABB::new(Point2::new(-6.0, -6.0), Point2::new(6.0, 6.0));
+        let clipped =
+            clip_segment_to_rect(Point2::new(-3.0, -1000.0), Point2::new(-3.0, 1000.0), rect)
+                .unwrap();
+        // El segmento vertical debe terminar exactamente en los bordes
+        // superior e inferior del rect, no fuera.
+        assert!((clipped.0.y - (-6.0)).abs() < 1e-9);
+        assert!((clipped.1.y - 6.0).abs() < 1e-9);
+        assert!((clipped.0.x - (-3.0)).abs() < 1e-9);
+        assert!((clipped.1.x - (-3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_segment_to_rect_outside() {
+        // Segmento completamente fuera: retorna None.
+        let rect = AABB::new(Point2::new(0.0, 0.0), Point2::new(2.0, 2.0));
+        let clipped = clip_segment_to_rect(Point2::new(10.0, 10.0), Point2::new(20.0, 20.0), rect);
+        assert!(clipped.is_none());
     }
 
     #[test]

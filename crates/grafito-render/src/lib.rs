@@ -344,6 +344,9 @@ impl Renderer {
                         document.resolve_expr(&l.end_x_expr, l.end.x),
                         document.resolve_expr(&l.end_y_expr, l.end.y),
                     );
+                    // Defensa nuclear: no dibujar líneas verticales/
+                    // horizontales puras (cruzan el canvas de borde a
+                    // borde y son visualmente molestas).
                     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
                     let world_br = view.screen_to_world(view.screen_size);
                     let view_bounds = grafito_geometry::AABB::new(
@@ -401,39 +404,172 @@ impl Renderer {
                     );
                 }
                 GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
-                    // Polilínea: cada par consecutivo de puntos genera un
-                    // segmento con `add_line_segment`. Aplicamos clipping
-                    // 2D por segmento para no dibujar fuera del viewport.
-                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                    let world_br = view.screen_to_world(view.screen_size);
-                    let view_bounds = grafito_geometry::AABB::new(
-                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    Self::draw_pencil_in_view_static(&mut vertices, &mut indices, view, pencil);
+                }
+                GeoObject::ComplexGrid(cg) => {
+                    Self::add_complex_grid_geometry(
+                        &mut vertices,
+                        &mut indices,
+                        document,
+                        view,
+                        cg,
                     );
-                    for w in pencil.points.windows(2) {
-                        let a = w[0];
-                        let b = w[1];
-                        if let Some((clip_a, clip_b)) =
-                            grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
-                        {
-                            let sa = view.world_to_screen(clip_a);
-                            let sb = view.world_to_screen(clip_b);
-                            Self::add_line_segment(
-                                &mut vertices,
-                                &mut indices,
-                                sa,
-                                sb,
-                                pencil.width,
-                                pencil.color,
-                            );
-                        }
-                    }
                 }
                 _ => {}
             }
         }
 
         (vertices, indices)
+    }
+
+    fn add_complex_grid_geometry(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        document: &Document,
+        view_transform: &ViewTransform,
+        cg: &grafito_core::ComplexGridObj,
+    ) {
+        let base_symbol = document.complex_base_symbol.as_str();
+        match cg.render_mode {
+            1 => {
+                let res = cg.density.clamp(50, 500);
+                let dx = (cg.x_max - cg.x_min) / res as f64;
+                let dy = (cg.y_max - cg.y_min) / res as f64;
+                if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
+                    let mut vars = std::collections::HashMap::new();
+                    for (k, v) in &document.variables {
+                        vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+                    }
+                    for i in 0..res {
+                        let x = cg.x_min + i as f64 * dx;
+                        for j in 0..res {
+                            let y = cg.y_min + j as f64 * dy;
+                            vars.insert(base_symbol.to_string(), num_complex::Complex64::new(x, y));
+                            if let Ok(fz) = parsed.eval(&vars) {
+                                if fz.re.is_finite() && fz.im.is_finite() {
+                                    let hue = (fz.arg() / std::f64::consts::TAU + 0.5) % 1.0;
+                                    let val = (fz.norm() / (fz.norm() + 1.0)).max(0.2);
+                                    let color = hsv_to_rgb(hue as f32, 0.8, val as f32);
+                                    let sx = view_transform.world_to_screen(Point2::new(x, y));
+                                    Self::add_rect(
+                                        vertices,
+                                        indices,
+                                        sx,
+                                        (dx * view_transform.scale).max(1.0) as f32,
+                                        (dy * view_transform.scale).max(1.0) as f32,
+                                        color,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            2 => {
+                let res = cg.density.clamp(50, 500);
+                let dx = (cg.x_max - cg.x_min) / res as f64;
+                let dy = (cg.y_max - cg.y_min) / res as f64;
+                if let Ok(ast) = grafito_geometry::expr::prepare_function_ast(
+                    &cg.expr,
+                    &document.variables,
+                    &["x", "y"],
+                ) {
+                    for i in 0..res {
+                        let x = cg.x_min + i as f64 * dx;
+                        for j in 0..res {
+                            let y = cg.y_min + j as f64 * dy;
+                            let val = ast.eval_2d("x", x, "y", y);
+                            if val.is_finite() {
+                                let t = (val.atan() / std::f64::consts::FRAC_PI_2).clamp(-1.0, 1.0);
+                                let hue = 0.66 * (1.0 - (t + 1.0) * 0.5);
+                                let color = hsv_to_rgb(hue as f32, 0.85, 0.95);
+                                let sx = view_transform.world_to_screen(Point2::new(x, y));
+                                Self::add_rect(
+                                    vertices,
+                                    indices,
+                                    sx,
+                                    (dx * view_transform.scale).max(1.0) as f32,
+                                    (dy * view_transform.scale).max(1.0) as f32,
+                                    color,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                let grid_lines = cg.density.max(1);
+                let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
+                let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
+                if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
+                    let mut vars = std::collections::HashMap::new();
+                    for (k, v) in &document.variables {
+                        vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+                    }
+                    for j in 0..=grid_lines {
+                        let y = cg.y_min + j as f64 * dy;
+                        let mut prev: Option<glam::Vec2> = None;
+                        for i in 0..=grid_lines * 4 {
+                            let x = cg.x_min + i as f64 * dx / 4.0;
+                            vars.insert(base_symbol.to_string(), num_complex::Complex64::new(x, y));
+                            prev = Self::add_complex_grid_sample(
+                                vertices,
+                                indices,
+                                view_transform,
+                                cg,
+                                &parsed,
+                                &vars,
+                                prev,
+                            );
+                        }
+                    }
+                    for i in 0..=grid_lines {
+                        let x = cg.x_min + i as f64 * dx;
+                        let mut prev: Option<glam::Vec2> = None;
+                        for j in 0..=grid_lines * 4 {
+                            let y = cg.y_min + j as f64 * dy / 4.0;
+                            vars.insert(base_symbol.to_string(), num_complex::Complex64::new(x, y));
+                            prev = Self::add_complex_grid_sample(
+                                vertices,
+                                indices,
+                                view_transform,
+                                cg,
+                                &parsed,
+                                &vars,
+                                prev,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_complex_grid_sample(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        view_transform: &ViewTransform,
+        cg: &grafito_core::ComplexGridObj,
+        parsed: &grafito_geometry::complex_expr::ComplexExpr,
+        vars: &std::collections::HashMap<String, num_complex::Complex64>,
+        prev: Option<glam::Vec2>,
+    ) -> Option<glam::Vec2> {
+        let Ok(result) = parsed.eval(vars) else {
+            return None;
+        };
+        if !result.re.is_finite()
+            || !result.im.is_finite()
+            || result.re.abs() >= 1e6
+            || result.im.abs() >= 1e6
+        {
+            return None;
+        }
+
+        let screen = view_transform.world_to_screen(Point2::new(result.re, result.im));
+        if let Some(prev_screen) = prev {
+            Self::add_line_segment(vertices, indices, prev_screen, screen, 1.0, cg.color);
+        }
+        Some(screen)
     }
 
     fn build_grid_static(
@@ -831,30 +967,12 @@ impl Renderer {
                     );
                 }
                 GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
-                    let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                    let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                    let view_bounds = grafito_geometry::AABB::new(
-                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                    Self::draw_pencil_in_view_transform(
+                        &mut vertices,
+                        &mut indices,
+                        &view_transform,
+                        pencil,
                     );
-                    for w in pencil.points.windows(2) {
-                        let a = w[0];
-                        let b = w[1];
-                        if let Some((clip_a, clip_b)) =
-                            grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
-                        {
-                            let sa = view_transform.world_to_screen(clip_a);
-                            let sb = view_transform.world_to_screen(clip_b);
-                            Self::add_line_segment(
-                                &mut vertices,
-                                &mut indices,
-                                sa,
-                                sb,
-                                pencil.width,
-                                pencil.color,
-                            );
-                        }
-                    }
                 }
                 GeoObject::Function(fun) => {
                     let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
@@ -1253,39 +1371,164 @@ impl Renderer {
                     }
                 }
                 GeoObject::ComplexGrid(cg) => {
-                    let res = cg.density.max(20).min(200);
-                    let dx = (cg.x_max - cg.x_min) / res as f64;
-                    let dy = (cg.y_max - cg.y_min) / res as f64;
-                    if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
-                        let mut vars = std::collections::HashMap::new();
-                        for (k, v) in &document.variables {
-                            vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
-                        }
-                        vars.insert("z".to_string(), num_complex::Complex64::default());
-                        for i in 0..res {
-                            let x = cg.x_min + i as f64 * dx;
-                            for j in 0..res {
-                                let y = cg.y_min + j as f64 * dy;
-                                if let Some(z_val) = vars.get_mut("z") {
-                                    *z_val = num_complex::Complex64::new(x, y);
+                    let base_symbol = document.complex_base_symbol.as_str();
+                    match cg.render_mode {
+                        1 => {
+                            let res = cg.density.clamp(50, 500);
+                            let dx = (cg.x_max - cg.x_min) / res as f64;
+                            let dy = (cg.y_max - cg.y_min) / res as f64;
+                            if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
+                                let mut vars = std::collections::HashMap::new();
+                                for (k, v) in &document.variables {
+                                    vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
                                 }
-                                if let Ok(fz) = parsed.eval(&vars) {
-                                    if fz.re.is_finite() && fz.im.is_finite() {
-                                        let mag = (fz.re * fz.re + fz.im * fz.im).sqrt();
-                                        let ang = fz.im.atan2(fz.re);
-                                        let hue = (ang / std::f64::consts::TAU + 0.5) % 1.0;
-                                        let sat = 0.8;
-                                        let val = (mag / (mag + 1.0)).max(0.2);
-                                        let color = hsv_to_rgb(hue as f32, sat, val as f32);
-                                        let sx = view_transform.world_to_screen(Point2::new(x, y));
-                                        Self::add_rect(
-                                            &mut vertices,
-                                            &mut indices,
-                                            sx,
-                                            (dx * view_transform.scale).max(1.0) as f32,
-                                            (dy * view_transform.scale).max(1.0) as f32,
-                                            color,
+                                for i in 0..res {
+                                    let x = cg.x_min + i as f64 * dx;
+                                    for j in 0..res {
+                                        let y = cg.y_min + j as f64 * dy;
+                                        vars.insert(
+                                            base_symbol.to_string(),
+                                            num_complex::Complex64::new(x, y),
                                         );
+                                        if let Ok(fz) = parsed.eval(&vars) {
+                                            if fz.re.is_finite() && fz.im.is_finite() {
+                                                let mag = fz.norm();
+                                                let ang = fz.arg();
+                                                let hue = (ang / std::f64::consts::TAU + 0.5) % 1.0;
+                                                let sat = 0.8;
+                                                let val = (mag / (mag + 1.0)).max(0.2);
+                                                let color = hsv_to_rgb(hue as f32, sat, val as f32);
+                                                let sx = view_transform
+                                                    .world_to_screen(Point2::new(x, y));
+                                                Self::add_rect(
+                                                    &mut vertices,
+                                                    &mut indices,
+                                                    sx,
+                                                    (dx * view_transform.scale).max(1.0) as f32,
+                                                    (dy * view_transform.scale).max(1.0) as f32,
+                                                    color,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        2 => {
+                            let res = cg.density.clamp(50, 500);
+                            let dx = (cg.x_max - cg.x_min) / res as f64;
+                            let dy = (cg.y_max - cg.y_min) / res as f64;
+                            if let Ok(ast) = grafito_geometry::expr::prepare_function_ast(
+                                &cg.expr,
+                                &document.variables,
+                                &["x", "y"],
+                            ) {
+                                for i in 0..res {
+                                    let x = cg.x_min + i as f64 * dx;
+                                    for j in 0..res {
+                                        let y = cg.y_min + j as f64 * dy;
+                                        let val = ast.eval_2d("x", x, "y", y);
+                                        if val.is_finite() {
+                                            let t = (val.atan() / std::f64::consts::FRAC_PI_2)
+                                                .clamp(-1.0, 1.0);
+                                            let hue = 0.66 * (1.0 - (t + 1.0) * 0.5);
+                                            let color = hsv_to_rgb(hue as f32, 0.85, 0.95);
+                                            let sx =
+                                                view_transform.world_to_screen(Point2::new(x, y));
+                                            Self::add_rect(
+                                                &mut vertices,
+                                                &mut indices,
+                                                sx,
+                                                (dx * view_transform.scale).max(1.0) as f32,
+                                                (dy * view_transform.scale).max(1.0) as f32,
+                                                color,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            let grid_lines = cg.density.max(1);
+                            let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
+                            let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
+                            if let Ok(parsed) = grafito_geometry::complex_expr::parse(&cg.expr) {
+                                let mut vars = std::collections::HashMap::new();
+                                for (k, v) in &document.variables {
+                                    vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+                                }
+                                for j in 0..=grid_lines {
+                                    let y = cg.y_min + j as f64 * dy;
+                                    let mut prev: Option<glam::Vec2> = None;
+                                    for i in 0..=grid_lines * 4 {
+                                        let x = cg.x_min + i as f64 * dx / 4.0;
+                                        vars.insert(
+                                            base_symbol.to_string(),
+                                            num_complex::Complex64::new(x, y),
+                                        );
+                                        if let Ok(result) = parsed.eval(&vars) {
+                                            if result.re.is_finite()
+                                                && result.im.is_finite()
+                                                && result.re.abs() < 1e6
+                                                && result.im.abs() < 1e6
+                                            {
+                                                let screen = view_transform.world_to_screen(
+                                                    Point2::new(result.re, result.im),
+                                                );
+                                                if let Some(prev_screen) = prev {
+                                                    Self::add_line_segment(
+                                                        &mut vertices,
+                                                        &mut indices,
+                                                        prev_screen,
+                                                        screen,
+                                                        1.0,
+                                                        cg.color,
+                                                    );
+                                                }
+                                                prev = Some(screen);
+                                            } else {
+                                                prev = None;
+                                            }
+                                        } else {
+                                            prev = None;
+                                        }
+                                    }
+                                }
+                                for i in 0..=grid_lines {
+                                    let x = cg.x_min + i as f64 * dx;
+                                    let mut prev: Option<glam::Vec2> = None;
+                                    for j in 0..=grid_lines * 4 {
+                                        let y = cg.y_min + j as f64 * dy / 4.0;
+                                        vars.insert(
+                                            base_symbol.to_string(),
+                                            num_complex::Complex64::new(x, y),
+                                        );
+                                        if let Ok(result) = parsed.eval(&vars) {
+                                            if result.re.is_finite()
+                                                && result.im.is_finite()
+                                                && result.re.abs() < 1e6
+                                                && result.im.abs() < 1e6
+                                            {
+                                                let screen = view_transform.world_to_screen(
+                                                    Point2::new(result.re, result.im),
+                                                );
+                                                if let Some(prev_screen) = prev {
+                                                    Self::add_line_segment(
+                                                        &mut vertices,
+                                                        &mut indices,
+                                                        prev_screen,
+                                                        screen,
+                                                        1.0,
+                                                        cg.color,
+                                                    );
+                                                }
+                                                prev = Some(screen);
+                                            } else {
+                                                prev = None;
+                                            }
+                                        } else {
+                                            prev = None;
+                                        }
                                     }
                                 }
                             }
@@ -1294,8 +1537,14 @@ impl Renderer {
                 }
                 GeoObject::ComplexMapping(cm) => {
                     if let Some(target_obj) = document.get_object(cm.target) {
+                        let conformal_map = cm.conformal_cache.or_else(|| {
+                            grafito_geometry::conformal::algebraic_mappings::ConformalMap::from_expr_string_with_symbol(
+                                &cm.expr,
+                                document.complex_base_symbol.as_str(),
+                            )
+                        });
                         if let (GeoObject::ImplicitCurve(ic), Some(map)) =
-                            (target_obj, cm.conformal_cache)
+                            (target_obj, conformal_map)
                         {
                             let cached =
                                 ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
@@ -1397,7 +1646,7 @@ impl Renderer {
                             _ => {}
                         }
                         if sample_pts.len() >= 2 {
-                            if let Some(map) = cm.conformal_cache {
+                            if let Some(map) = conformal_map {
                                 let mut prev: Option<glam::Vec2> = None;
                                 for pt in &sample_pts {
                                     let z = num_complex::Complex64::new(pt.x, pt.y);
@@ -1430,7 +1679,7 @@ impl Renderer {
                                 let mut vars = std::collections::HashMap::new();
                                 for pt in &sample_pts {
                                     let z = num_complex::Complex64::new(pt.x, pt.y);
-                                    vars.insert("z".to_string(), z);
+                                    vars.insert(document.complex_base_symbol.clone(), z);
                                     if let Ok(fz) = parsed.eval(&vars) {
                                         if fz.re.is_finite() && fz.im.is_finite() {
                                             let tw = Point2::new(fz.re, fz.im);
@@ -1668,6 +1917,46 @@ impl Renderer {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
+    /// Dibuja un PencilObj en el view estático, aplicando clipping
+    /// 2D por segmento. Helper compartido por build_geometry y
+    /// build_geometry_static para evitar duplicación.
+    fn draw_pencil_in_view_static(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        view: &grafito_geometry::ViewTransform,
+        pencil: &grafito_core::PencilObj,
+    ) {
+        let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+        let world_br = view.screen_to_world(view.screen_size);
+        let view_bounds = grafito_geometry::AABB::new(
+            Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+            Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+        );
+        for w in pencil.points.windows(2) {
+            let a = w[0];
+            let b = w[1];
+            if let Some((clip_a, clip_b)) =
+                grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
+            {
+                let sa = view.world_to_screen(clip_a);
+                let sb = view.world_to_screen(clip_b);
+                Self::add_line_segment(vertices, indices, sa, sb, pencil.width, pencil.color);
+            }
+        }
+    }
+
+    /// Dibuja un PencilObj usando view_transform (alias de
+    /// draw_pencil_in_view_static para mantener compatibilidad con
+    /// el path que ya recibía view_transform por nombre).
+    fn draw_pencil_in_view_transform(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        view: &grafito_geometry::ViewTransform,
+        pencil: &grafito_core::PencilObj,
+    ) {
+        Self::draw_pencil_in_view_static(vertices, indices, view, pencil);
+    }
+
     fn add_line_segment(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
@@ -1680,6 +1969,11 @@ impl Renderer {
         if dir.length_squared() < 0.0001 {
             return;
         }
+        let width = if width.is_finite() {
+            width.clamp(0.5, 8.0)
+        } else {
+            1.5
+        };
         let dir = dir.normalize();
         let perp = glam::Vec2::new(-dir.y, dir.x) * (width * 0.5).max(0.5);
 

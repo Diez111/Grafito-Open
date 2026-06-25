@@ -29,14 +29,19 @@ pub struct PencilObj {
 impl PencilObj {
     /// Crea un `PencilObj` vacío. El usuario añade los puntos durante el
     /// arrastre; el grosor y color por defecto se pueden cambiar después.
+    ///
+    /// Por defecto usamos un azul oscuro semitransparente y un grosor
+    /// moderado, para que el trazo se distinga claramente de una
+    /// `LineObj` técnica y no parezca una "línea negra gigante" cuando el
+    /// PencilObj persiste.
     pub fn new(points: Vec<Point2>) -> Self {
         Self {
             id: ObjectId::new(),
             label: String::new(),
             points,
-            color: Color::new(0.1, 0.1, 0.1, 1.0),
+            color: Color::new(0.2, 0.3, 0.6, 0.85),
             visible: true,
-            width: 2.0,
+            width: 1.5,
         }
     }
 

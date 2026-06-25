@@ -13,7 +13,7 @@ members = ["crates/grafito-app", "crates/grafito-command", "crates/grafito-core"
 resolver = "2"
 
 [workspace.package]
-version = "1.1.4-beta"
+version = "1.1.17-beta"
 edition = "2021"
 authors = ["Grafito Contributors"]
 license = "GPL-3.0-or-later"
@@ -79,3 +79,6 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 1
+
+[dependencies]
+egui-wgpu = "0.29.1"

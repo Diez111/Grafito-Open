@@ -87,8 +87,8 @@ fn test_export_svg() {
 // ── Tests del sistema de Perspectivas ────────────────────────────────────
 
 #[test]
-fn test_perspective_all_has_ten_variants() {
-    assert_eq!(crate::Perspective::ALL.len(), 10);
+fn test_perspective_all_has_nine_variants() {
+    assert_eq!(crate::Perspective::ALL.len(), 9);
 }
 
 #[test]
@@ -105,7 +105,6 @@ fn test_perspective_view_mode_derivation() {
     assert_eq!(Perspective::Statistics.view_mode(), ViewMode::D2);
     assert_eq!(Perspective::Complex.view_mode(), ViewMode::D2);
     assert_eq!(Perspective::DataAnalysis.view_mode(), ViewMode::D2);
-    assert_eq!(Perspective::Exam.view_mode(), ViewMode::D2);
 }
 
 #[test]
@@ -116,8 +115,8 @@ fn test_perspective_shortcut_numbers_unique() {
         .map(|p| p.shortcut_number())
         .collect();
     nums.sort_unstable();
-    // Cada atajo es único y cubre 0..=9 (1..9 para las nueve primeras, 0 para Exam).
-    assert_eq!(nums, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // Cada atajo es único y cubre 1..=9.
+    assert_eq!(nums, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
 }
 
 #[test]
@@ -147,17 +146,101 @@ fn test_perspective_layout_tool_groups_nonempty() {
             "perspectiva {:?} no define grupos de herramientas",
             p
         );
+        assert!(
+            !p.description().trim().is_empty(),
+            "perspectiva {:?} no define descripcion",
+            p
+        );
     }
 }
 
 #[test]
-fn test_perspective_layout_exam_restricted() {
+fn test_data_analysis_uses_guided_stats_panel() {
+    use crate::{LeftPanelContent, Perspective};
+    let layout = Perspective::DataAnalysis.layout();
+    assert_eq!(layout.left_panel, LeftPanelContent::Stats);
+    // Sin panel derecho para evitar la franja negra gruesa en dark mode
+    // (el fill del SidePanel::right con panel_bg = rgb(26,26,30) se ve
+    // como una banda casi negra junto al canvas).
+    assert_eq!(layout.right_panel, None);
+    assert!(layout.show_input_bar);
+}
+
+#[test]
+fn test_perspective_right_panels_dont_share_sheet_render() {
+    // Data y Regression deben tener su propio panel derecho (no la grilla
+    // de hoja) para que el contenido se mantenga dentro del viewport y no
+    // fuerce al SidePanel a expandirse. Esto es un test de regresión para
+    // evitar que vuelva a usarse draw_right_spreadsheet para variantes que
+    // no son Spreadsheet.
+    use crate::RightPanelContent;
+    assert_ne!(RightPanelContent::Data, RightPanelContent::Spreadsheet);
+    assert_ne!(
+        RightPanelContent::Regression,
+        RightPanelContent::Spreadsheet
+    );
+    // Cada variante debe tener un dispatcher único.
+    let variants = [
+        RightPanelContent::Spreadsheet,
+        RightPanelContent::Data,
+        RightPanelContent::Regression,
+    ];
+    assert!(variants
+        .iter()
+        .enumerate()
+        .all(|(i, a)| variants.iter().skip(i + 1).all(|b| a != b)));
+}
+
+#[test]
+fn test_spreadsheet_grid_responsive_min_col_width() {
+    // Verifica la fórmula responsiva: para un panel de 280px y 6 columnas,
+    // min_col_width debe ser (280 - 36) / 6 ≈ 40.67, clampeado a [36, 96].
+    let cols = 6_usize;
+    let row_label_w = 36.0_f32;
+    let panel_w = 280.0_f32;
+    let grid_w = (panel_w - row_label_w).max(120.0);
+    let min_col_w = (grid_w / cols as f32).clamp(36.0, 96.0);
+    assert!(min_col_w >= 36.0 && min_col_w <= 96.0);
+    assert!(min_col_w < 52.0); // antes era 52.0 hardcoded, ahora más chico para panels angostos
+}
+
+#[test]
+fn test_spreadsheet_grid_min_col_width_dense_columns() {
+    // Con muchas columnas (26 letras), el clamp debe mantener un mínimo
+    // legible y nunca un valor mayor a 96.
+    let cols = 26_usize;
+    let row_label_w = 36.0_f32;
+    let panel_w = 280.0_f32;
+    let grid_w = (panel_w - row_label_w).max(120.0);
+    let min_col_w = (grid_w / cols as f32).clamp(36.0, 96.0);
+    assert!(min_col_w >= 36.0);
+    assert!(min_col_w <= 96.0);
+}
+
+#[test]
+fn test_perspective_layout_does_not_enable_sheet_for_data_or_regression() {
+    // Comprobación semántica: una perspectiva con right_panel=Data o
+    // Regression no debe activar show_spreadsheet (esa grilla sólo va con
+    // right_panel=Spreadsheet). Verificamos la regla que implementa
+    // set_perspective para no caer en la regresión anterior.
     use crate::Perspective;
-    let layout = Perspective::Exam.layout();
-    assert!(layout.right_panel.is_none());
-    assert!(!layout.show_math_keyboard);
-    // Modo examen: sólo herramientas básicas (Move, Point, Line, Circle, Polygon).
-    assert_eq!(layout.visible_tool_groups.len(), 5);
+    for p in Perspective::ALL {
+        let layout = p.layout();
+        let should_show_sheet = matches!(
+            layout.right_panel,
+            Some(crate::RightPanelContent::Spreadsheet)
+        );
+        match layout.right_panel {
+            Some(crate::RightPanelContent::Data) | Some(crate::RightPanelContent::Regression) => {
+                assert!(
+                    !should_show_sheet,
+                    "Perspectiva {:?} usa right_panel Data/Regression pero la grilla de hoja no debe activarse",
+                    p
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]

@@ -42,7 +42,7 @@ struct FillParamsUniform {
     width: u32,
     height: u32,
     code_len: u32,
-    operator: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
+    rel_op: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
     fill_alpha: f32,
     _pad0: u32,
     _pad1: u32,
@@ -229,7 +229,7 @@ impl FillComputePipeline {
             width,
             height,
             code_len: prog.code.len() as u32,
-            operator: op_code,
+            rel_op: op_code,
             fill_alpha: 1.0,
             _pad0: 0,
             _pad1: 0,
