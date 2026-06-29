@@ -1,7 +1,7 @@
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
- Copyright (C) 2024 Grafito Contributors
+ Copyright (C) 2026 Grafito Contributors
 
  Everyone is permitted to copy and distribute verbatim copies of this
  license document, but changing it is not allowed.
@@ -607,7 +607,7 @@ state the exclusion of warranty; and each file should have at least the
   If the program does terminal interaction, make it output a short
 notice like this when it starts in an interactive mode:
 
-    <program>  Copyright (C) 2024 Grafito Contributors
+    <program>  Copyright (C) 2026 Grafito Contributors
     This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
     This is free software, and you are welcome to redistribute it
     under certain conditions; type `show c' for details.
