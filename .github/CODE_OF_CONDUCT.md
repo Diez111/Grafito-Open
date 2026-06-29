@@ -24,7 +24,6 @@ Nuestro compromiso se extiende a todos los espacios del proyecto: repositorios d
 
 Ejemplos de comportamiento que contribuyen a crear un ambiente positivo:
 
-- **Usar lenguaje acogedor e inclusivo**
 - **Respetar los puntos de vista y experiencias diferentes**
 - **Aceptar con gracia las críticas constructivas**
 - **Enfocarse en lo que es mejor para la comunidad**
@@ -58,7 +57,6 @@ Este Código de Conducta aplica tanto dentro de los espacios del proyecto como e
 
 - Usar una dirección de email oficial del proyecto
 - Publicar desde una cuenta oficial de redes sociales
-- Actuar como representante designado en un evento (presencial o virtual)
 - Publicar en nombre del proyecto en issues, PRs, discussions o foros
 
 ## Aplicación
