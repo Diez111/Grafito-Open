@@ -3,7 +3,7 @@ Version: 1.1.4-beta
 Section: graphics
 Priority: optional
 Architecture: amd64
-Depends: libgtk-3-0, libwebkit2gtk-4.1-0
+Depends: libc6, libgcc-s1
 Maintainer: Grafito Team <grafito@example.com>
 Description: Calculadora gráfica matemática interactiva
  Grafito es una calculadora gráfica matemática moderna y de alto

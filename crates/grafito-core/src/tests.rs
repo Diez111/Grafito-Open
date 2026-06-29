@@ -954,6 +954,25 @@ mod tests {
     }
 
     #[test]
+    fn test_parametric_surface_3d_sampling() {
+        let surf = Surface3DObj::new_parametric(
+            "u*cos(v)",
+            "u*sin(v)",
+            "v",
+            (0.0, 1.0),
+            (0.0, std::f64::consts::FRAC_PI_2),
+        );
+        let vars = std::collections::HashMap::new();
+        let grid = parametric_sampling::evaluate_surface_3d(&surf, 8, &vars);
+
+        assert_eq!(grid.len(), 9);
+        assert_eq!(grid[0].len(), 9);
+        assert!(grid[8][8].x.abs() < 1e-9);
+        assert!((grid[8][8].z - 1.0).abs() < 1e-9);
+        assert!((grid[8][8].y - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_segment_expression_binding() {
         let mut doc = Document::new();
         let mut line = LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0));

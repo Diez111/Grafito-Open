@@ -359,6 +359,8 @@ pub enum RightPanelContent {
     DomainColoring,
     /// Parámetros de simulación dinámica.
     Parameters,
+    /// Animación trigonométrica (círculo unitario).
+    TrigAnimation,
     /// Hoja de cálculo lateral.
     Spreadsheet,
 }

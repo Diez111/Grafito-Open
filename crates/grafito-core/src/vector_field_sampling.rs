@@ -168,15 +168,24 @@ pub fn samples_or_compute<'a>(
     let key = cache_key(vf, padded_bounds, grid_size, variables);
 
     {
-        let cached_key = vf.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = vf.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
-            return vf.cached_samples.read().unwrap_or_else(|p| p.into_inner());
+            return vf.cached_samples.read().unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            });
         }
     }
 
     // Si hay una caché previa que contiene los nuevos límites, reutilizarla.
     {
-        let cached_key = vf.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = vf.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if let Some(cached) = cached_key.as_ref() {
             let (rx_min, rx_max, ry_min, ry_max) = cached.view_bounds;
             let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
@@ -189,7 +198,10 @@ pub fn samples_or_compute<'a>(
                 && vy_min >= ry_min
                 && vy_max <= ry_max
             {
-                return vf.cached_samples.read().unwrap_or_else(|p| p.into_inner());
+                return vf.cached_samples.read().unwrap_or_else(|p| {
+                    log::warn!("cache lock envenenado; recuperando estado parcial");
+                    p.into_inner()
+                });
             }
         }
     }
@@ -200,7 +212,16 @@ pub fn samples_or_compute<'a>(
         &grafito_geometry::ViewTransform::default(),
         variables,
     );
-    *vf.cached_samples.write().unwrap_or_else(|p| p.into_inner()) = samples;
-    *vf.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
-    vf.cached_samples.read().unwrap_or_else(|p| p.into_inner())
+    *vf.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *vf.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+    vf.cached_samples.read().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    })
 }

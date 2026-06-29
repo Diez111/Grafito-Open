@@ -100,7 +100,10 @@ pub fn segments_or_compute<'a>(
     };
 
     {
-        let cached_key = ic.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = ic.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if let Some(cached) = cached_key.as_ref() {
             if cached.view_bounds == padded_bounds
                 && cached.grid_size == grid_size
@@ -108,12 +111,18 @@ pub fn segments_or_compute<'a>(
                 && cached.expr_rhs == ic.expr_rhs
                 && cached.operator == ic.operator
             {
-                let cached_region = ic.cached_region.read().unwrap_or_else(|p| p.into_inner());
+                let cached_region = ic.cached_region.read().unwrap_or_else(|p| {
+                    log::warn!("cache lock envenenado; recuperando estado parcial");
+                    p.into_inner()
+                });
                 if let Some((rx_min, rx_max, ry_min, ry_max)) = *cached_region {
                     let (vx_min, vx_max, vy_min, vy_max) = view_bounds;
                     if vx_min >= rx_min && vx_max <= rx_max && vy_min >= ry_min && vy_max <= ry_max
                     {
-                        return ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                        return ic.cached_segments.read().unwrap_or_else(|p| {
+                            log::warn!("cache lock envenenado; recuperando estado parcial");
+                            p.into_inner()
+                        });
                     }
                 }
             }
@@ -122,12 +131,22 @@ pub fn segments_or_compute<'a>(
 
     let key = ic.cache_key(padded_bounds, grid_size, variables);
     let segments = evaluate_implicit_curve(ic, padded_bounds, grid_size, variables);
-    *ic.cached_segments
-        .write()
-        .unwrap_or_else(|p| p.into_inner()) = segments;
-    *ic.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
-    *ic.cached_region.write().unwrap_or_else(|p| p.into_inner()) = Some(padded_bounds);
-    ic.cached_segments.read().unwrap_or_else(|p| p.into_inner())
+    *ic.cached_segments.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = segments;
+    *ic.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+    *ic.cached_region.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(padded_bounds);
+    ic.cached_segments.read().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    })
 }
 
 /// Evaluate an implicit curve over a rectangular world-space domain.

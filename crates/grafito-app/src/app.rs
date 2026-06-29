@@ -183,6 +183,7 @@ pub struct GrafitoApp {
     pub color_favorites: [grafito_geometry::Color; 5],
     pub tool_ghost: Option<GeoObject>,
     pub tool_state: crate::tool_dispatcher::ToolState,
+    pub gpu_renderer: Option<Arc<RwLock<Option<grafito_render::Renderer>>>>,
     pub use_gpu: bool,
     pub last_interaction_time: Instant,
     pub is_view_changing: bool,
@@ -212,6 +213,16 @@ pub struct GrafitoApp {
     pub autocomplete: InputAutocomplete,
     /// Visibilidad de la ventana modal "Acerca de Grafito".
     pub show_about: bool,
+    /// Visibilidad del panel de animación trigonométrica (círculo unitario).
+    pub show_trig_animation: bool,
+    /// Ángulo actual para la animación trigonométrica (en radianes).
+    pub trig_angle: f64,
+    /// Si la animación trigonométrica está corriendo.
+    pub trig_animating: bool,
+    /// Velocidad de la animación trigonométrica (rad/seg).
+    pub trig_speed: f64,
+    /// Función a visualizar: 0=sin, 1=cos, 2=tan
+    pub trig_function: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +265,13 @@ pub struct AutocompleteItem {
 }
 
 impl GrafitoApp {
+    fn gpu_renderer_ready(&self) -> bool {
+        self.gpu_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.read().ok().map(|lock| lock.is_some()))
+            .unwrap_or(false)
+    }
+
     /// Limpia todo el estado transitorio de herramientas (puntos pendientes,
     /// objetos driver/driven, rectángulos de selección y outcome de comandos).
     pub fn reset_tool_input(&mut self) {
@@ -267,7 +285,7 @@ impl GrafitoApp {
         self.tool_state.last_outcome = None;
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        if let Some(render_state) = &cc.wgpu_render_state {
+        let gpu_renderer = if let Some(render_state) = &cc.wgpu_render_state {
             let renderer: Arc<RwLock<Option<grafito_render::Renderer>>> =
                 Arc::new(RwLock::new(None));
             let renderer_clone = Arc::clone(&renderer);
@@ -303,11 +321,15 @@ impl GrafitoApp {
                 .callback_resources
                 .insert(resources);
             register_gpu_function_evaluator(Box::new(AppGpuFunctionEvaluator {
-                renderer,
+                renderer: Arc::clone(&renderer),
                 device: Arc::clone(&render_state.device),
                 queue: Arc::clone(&render_state.queue),
             }));
-        }
+            Some(renderer)
+        } else {
+            None
+        };
+        let gpu_available = gpu_renderer.is_some();
         let mut document = Document::new();
         document.set_view(ViewTransform::new(1280.0, 720.0));
         document.view_mut().scale = 50.0; // ~13 units each side — matches GeoGebra default zoom
@@ -396,7 +418,8 @@ impl GrafitoApp {
             active_color_picker: None,
             tool_ghost: None,
             tool_state: crate::tool_dispatcher::ToolState::default(),
-            use_gpu: true,
+            gpu_renderer,
+            use_gpu: gpu_available,
             last_interaction_time: Instant::now(),
             is_view_changing: false,
             pending_action: PendingAction::None,
@@ -422,6 +445,11 @@ impl GrafitoApp {
             statistics_input_buf: String::new(),
             autocomplete: InputAutocomplete::default(),
             show_about: false,
+            show_trig_animation: false,
+            trig_angle: 0.0,
+            trig_animating: false,
+            trig_speed: 0.5,
+            trig_function: 0,
         }
     }
 
@@ -1503,12 +1531,12 @@ impl eframe::App for GrafitoApp {
                 if let Some(&current_val) = self.document.variables.get(name) {
                     let mut next_val = current_val + meta.animation_speed * dt;
                     let mut next_speed = meta.animation_speed;
-                    if next_val > meta.max {
+                    if next_val >= meta.max {
                         next_val = meta.max;
-                        next_speed = -meta.animation_speed;
-                    } else if next_val < meta.min {
+                        next_speed = -meta.animation_speed.abs();
+                    } else if next_val <= meta.min {
                         next_val = meta.min;
-                        next_speed = -meta.animation_speed;
+                        next_speed = meta.animation_speed.abs();
                     }
                     changes.push((name.clone(), next_val, next_speed));
                 }
@@ -1526,6 +1554,22 @@ impl eframe::App for GrafitoApp {
 
         if any_animating {
             // Ya hicimos bump_version() via set_variable; sólo pedimos repaint.
+            self.document.render_quality = RenderQuality::Preview;
+            self.is_view_changing = true;
+            self.last_interaction_time = Instant::now();
+            ctx.request_repaint();
+        }
+
+        // Animación trigonométrica: actualizar ángulo
+        if self.trig_animating {
+            self.trig_angle += self.trig_speed * dt;
+            // Mantener en [-2π, 2π] para evitar overflow
+            let two_pi = 2.0 * std::f64::consts::PI;
+            if self.trig_angle > two_pi {
+                self.trig_angle -= two_pi;
+            } else if self.trig_angle < -two_pi {
+                self.trig_angle += two_pi;
+            }
             ctx.request_repaint();
         }
 
@@ -1737,6 +1781,12 @@ impl eframe::App for GrafitoApp {
 
             // Panel derecho: dispatch por layout.right_panel en lugar de flags
             // booleanos separados. Sincroniza exactamente con la perspectiva.
+            // El panel de animación trigonométrica puede activarse desde cualquier
+            // perspectiva via el menú Herramientas.
+            if self.show_trig_animation {
+                crate::panels::draw_trig_animation_panel(self, ctx);
+            }
+
             use crate::RightPanelContent;
             match self.perspective.layout().right_panel {
                 None => {} // sin panel derecho
@@ -1759,6 +1809,9 @@ impl eframe::App for GrafitoApp {
                 }
                 Some(RightPanelContent::Parameters) => {
                     crate::panels::draw_right_parameters_panel(self, ctx);
+                }
+                Some(RightPanelContent::TrigAnimation) => {
+                    crate::panels::draw_trig_animation_panel(self, ctx);
                 }
             }
         }
@@ -1844,6 +1897,7 @@ impl eframe::App for GrafitoApp {
                             self.draw_grid(&painter, canvas_rect);
                             self.draw_axes(&painter, canvas_rect);
                             self.draw_implicit_curve_fills(&painter, canvas_rect);
+                            self.draw_complex_mapping_fills(&painter, canvas_rect);
 
                             let callback = egui_wgpu::Callback::new_paint_callback(
                                 canvas_rect,
@@ -1906,7 +1960,7 @@ impl eframe::App for GrafitoApp {
                         self.handle_canvas_3d_input(ui, canvas_rect);
                     }
 
-                    if self.use_gpu {
+                    if self.use_gpu && self.gpu_renderer_ready() {
                         // Draw 3D grid BEFORE the GPU callback
                         self.draw_3d_grid(ui.painter(), canvas_rect, w, h, false);
 

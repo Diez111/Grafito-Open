@@ -220,8 +220,16 @@ fn format_roots(var: &str, roots: &[f64]) -> String {
 /// Derivada de un `Expr` respecto de `var` aplicando las reglas simbólicas.
 /// Las variantes no listadas delegan al derivador nativo `Expr::diff`.
 fn diff_expr(e: &Expr, var: &str) -> Expr {
+    diff_expr_depth(e, var, 0)
+}
+
+fn diff_expr_depth(e: &Expr, var: &str, depth: u32) -> Expr {
+    const MAX_DIFF_EXPR_DEPTH: u32 = 256;
+    if depth > MAX_DIFF_EXPR_DEPTH {
+        return Expr::Const(f64::NAN);
+    }
     use Expr::*;
-    let du = |x: &Expr| Box::new(diff_expr(x, var));
+    let du = |x: &Expr| Box::new(diff_expr_depth(x, var, depth + 1));
     match e {
         Const(_) => Const(0.0),
         Var(v) => {
@@ -260,7 +268,7 @@ fn diff_expr(e: &Expr, var: &str) -> Expr {
                 du(base),
             ),
             _ => {
-                let dv = diff_expr(exp, var);
+                let dv = diff_expr_depth(exp, var, depth + 1);
                 Mul(
                     Box::new(Pow(base.clone(), exp.clone())),
                     Box::new(Add(
@@ -590,9 +598,17 @@ fn simplify_once(e: &Expr) -> Expr {
 /// Integración indefinida por reglas básicas. Devuelve `None` si la expresión
 /// no encaja en las reglas soportadas (quedando el fallback a `Expr::integrate`).
 fn integrate_expr(e: &Expr, var: &str) -> Option<Expr> {
+    integrate_expr_depth(e, var, 0)
+}
+
+fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
+    const MAX_INTEGRATE_DEPTH: u32 = 256;
+    if depth > MAX_INTEGRATE_DEPTH {
+        return None;
+    }
     use Expr::*;
     let v = var.to_string();
-    let rec = |x: &Expr| integrate_expr(x, var);
+    let rec = |x: &Expr| integrate_expr_depth(x, var, depth + 1);
     Some(match e {
         Const(c) => {
             if *c == 0.0 {
@@ -742,30 +758,56 @@ fn richardson_limit(ast: &Expr, var: &str, at: f64) -> Option<f64> {
 
 /// Distributividad de productos sobre sumas/restas.
 fn expand_expr(e: &Expr) -> Expr {
+    expand_expr_depth(e, 0)
+}
+
+fn expand_expr_depth(e: &Expr, depth: u32) -> Expr {
+    const MAX_EXPAND_DEPTH: u32 = 64;
+    if depth > MAX_EXPAND_DEPTH {
+        return e.clone();
+    }
     use Expr::*;
     match e {
-        Neg(a) => Neg(Box::new(expand_expr(a))),
-        Add(a, b) => Add(Box::new(expand_expr(a)), Box::new(expand_expr(b))),
-        Sub(a, b) => Sub(Box::new(expand_expr(a)), Box::new(expand_expr(b))),
+        Neg(a) => Neg(Box::new(expand_expr_depth(a, depth + 1))),
+        Add(a, b) => Add(
+            Box::new(expand_expr_depth(a, depth + 1)),
+            Box::new(expand_expr_depth(b, depth + 1)),
+        ),
+        Sub(a, b) => Sub(
+            Box::new(expand_expr_depth(a, depth + 1)),
+            Box::new(expand_expr_depth(b, depth + 1)),
+        ),
         Mul(a, b) => {
-            let ea = expand_expr(a);
-            let eb = expand_expr(b);
+            let ea = expand_expr_depth(a, depth + 1);
+            let eb = expand_expr_depth(b, depth + 1);
             match (&ea, &eb) {
                 (Add(x, y), _) => Add(
-                    Box::new(expand_expr(&Mul(x.clone(), Box::new(eb.clone())))),
-                    Box::new(expand_expr(&Mul(y.clone(), Box::new(eb)))),
+                    Box::new(expand_expr_depth(
+                        &Mul(x.clone(), Box::new(eb.clone())),
+                        depth + 1,
+                    )),
+                    Box::new(expand_expr_depth(&Mul(y.clone(), Box::new(eb)), depth + 1)),
                 ),
                 (_, Add(x, y)) => Add(
-                    Box::new(expand_expr(&Mul(Box::new(ea.clone()), x.clone()))),
-                    Box::new(expand_expr(&Mul(Box::new(ea), y.clone()))),
+                    Box::new(expand_expr_depth(
+                        &Mul(Box::new(ea.clone()), x.clone()),
+                        depth + 1,
+                    )),
+                    Box::new(expand_expr_depth(&Mul(Box::new(ea), y.clone()), depth + 1)),
                 ),
                 (Sub(x, y), _) => Sub(
-                    Box::new(expand_expr(&Mul(x.clone(), Box::new(eb.clone())))),
-                    Box::new(expand_expr(&Mul(y.clone(), Box::new(eb)))),
+                    Box::new(expand_expr_depth(
+                        &Mul(x.clone(), Box::new(eb.clone())),
+                        depth + 1,
+                    )),
+                    Box::new(expand_expr_depth(&Mul(y.clone(), Box::new(eb)), depth + 1)),
                 ),
                 (_, Sub(x, y)) => Sub(
-                    Box::new(expand_expr(&Mul(Box::new(ea.clone()), x.clone()))),
-                    Box::new(expand_expr(&Mul(Box::new(ea), y.clone()))),
+                    Box::new(expand_expr_depth(
+                        &Mul(Box::new(ea.clone()), x.clone()),
+                        depth + 1,
+                    )),
+                    Box::new(expand_expr_depth(&Mul(Box::new(ea), y.clone()), depth + 1)),
                 ),
                 _ => Mul(Box::new(ea), Box::new(eb)),
             }

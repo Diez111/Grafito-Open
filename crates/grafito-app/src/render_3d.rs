@@ -1428,7 +1428,7 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Attractor3D(att) => {
-                    use grafito_geometry::attractors::{integrate_attractor, AttractorType};
+                    use grafito_geometry::attractors::integrate_attractor;
                     use std::collections::hash_map::DefaultHasher;
                     use std::hash::{Hash, Hasher};
 
@@ -1453,69 +1453,7 @@ impl GrafitoApp {
                         if *cached_hash == param_hash {
                             cached_pts.clone()
                         } else {
-                            let atype = match att.attractor_type.as_str() {
-                                "lorenz" => {
-                                    let p = &att.params;
-                                    AttractorType::Lorenz {
-                                        sigma: p.first().copied().unwrap_or(10.0),
-                                        rho: p.get(1).copied().unwrap_or(28.0),
-                                        beta: p.get(2).copied().unwrap_or(8.0 / 3.0),
-                                    }
-                                }
-                                "rossler" => {
-                                    let p = &att.params;
-                                    AttractorType::Rossler {
-                                        a: p.first().copied().unwrap_or(0.2),
-                                        b: p.get(1).copied().unwrap_or(0.2),
-                                        c: p.get(2).copied().unwrap_or(5.7),
-                                    }
-                                }
-                                "thomas" => AttractorType::Thomas {
-                                    b: att.params.first().copied().unwrap_or(0.208186),
-                                },
-                                "aizawa" => {
-                                    let p = &att.params;
-                                    AttractorType::Aizawa {
-                                        a: p.first().copied().unwrap_or(0.95),
-                                        b: p.get(1).copied().unwrap_or(0.7),
-                                        c: p.get(2).copied().unwrap_or(0.6),
-                                        d: p.get(3).copied().unwrap_or(3.5),
-                                        e: p.get(4).copied().unwrap_or(0.25),
-                                        f: p.get(5).copied().unwrap_or(0.1),
-                                    }
-                                }
-                                "chen" => {
-                                    let p = &att.params;
-                                    AttractorType::Chen {
-                                        a: p.first().copied().unwrap_or(35.0),
-                                        b: p.get(1).copied().unwrap_or(3.0),
-                                        c: p.get(2).copied().unwrap_or(28.0),
-                                    }
-                                }
-                                "halvorsen" => AttractorType::Halvorsen {
-                                    a: att.params.first().copied().unwrap_or(1.89),
-                                },
-                                "dadras" => {
-                                    let p = &att.params;
-                                    AttractorType::Dadras {
-                                        p: p.first().copied().unwrap_or(3.0),
-                                        q: p.get(1).copied().unwrap_or(2.7),
-                                        r: p.get(2).copied().unwrap_or(1.7),
-                                        s: p.get(3).copied().unwrap_or(2.0),
-                                        e: p.get(4).copied().unwrap_or(9.0),
-                                    }
-                                }
-                                "chua" => {
-                                    let p = &att.params;
-                                    AttractorType::Chua {
-                                        alpha: p.first().copied().unwrap_or(15.6),
-                                        beta: p.get(1).copied().unwrap_or(28.0),
-                                        m0: p.get(2).copied().unwrap_or(-1.143),
-                                        m1: p.get(3).copied().unwrap_or(-0.714),
-                                    }
-                                }
-                                _ => AttractorType::lorenz(),
-                            };
+                            let atype = att.model();
                             let new_pts = integrate_attractor(
                                 &atype, att.x0, att.y0, att.z0, att.dt, att.steps, att.skip,
                             );
@@ -1524,69 +1462,7 @@ impl GrafitoApp {
                             new_pts
                         }
                     } else {
-                        let atype = match att.attractor_type.as_str() {
-                            "lorenz" => {
-                                let p = &att.params;
-                                AttractorType::Lorenz {
-                                    sigma: p.first().copied().unwrap_or(10.0),
-                                    rho: p.get(1).copied().unwrap_or(28.0),
-                                    beta: p.get(2).copied().unwrap_or(8.0 / 3.0),
-                                }
-                            }
-                            "rossler" => {
-                                let p = &att.params;
-                                AttractorType::Rossler {
-                                    a: p.first().copied().unwrap_or(0.2),
-                                    b: p.get(1).copied().unwrap_or(0.2),
-                                    c: p.get(2).copied().unwrap_or(5.7),
-                                }
-                            }
-                            "thomas" => AttractorType::Thomas {
-                                b: att.params.first().copied().unwrap_or(0.208186),
-                            },
-                            "aizawa" => {
-                                let p = &att.params;
-                                AttractorType::Aizawa {
-                                    a: p.first().copied().unwrap_or(0.95),
-                                    b: p.get(1).copied().unwrap_or(0.7),
-                                    c: p.get(2).copied().unwrap_or(0.6),
-                                    d: p.get(3).copied().unwrap_or(3.5),
-                                    e: p.get(4).copied().unwrap_or(0.25),
-                                    f: p.get(5).copied().unwrap_or(0.1),
-                                }
-                            }
-                            "chen" => {
-                                let p = &att.params;
-                                AttractorType::Chen {
-                                    a: p.first().copied().unwrap_or(35.0),
-                                    b: p.get(1).copied().unwrap_or(3.0),
-                                    c: p.get(2).copied().unwrap_or(28.0),
-                                }
-                            }
-                            "halvorsen" => AttractorType::Halvorsen {
-                                a: att.params.first().copied().unwrap_or(1.89),
-                            },
-                            "dadras" => {
-                                let p = &att.params;
-                                AttractorType::Dadras {
-                                    p: p.first().copied().unwrap_or(3.0),
-                                    q: p.get(1).copied().unwrap_or(2.7),
-                                    r: p.get(2).copied().unwrap_or(1.7),
-                                    s: p.get(3).copied().unwrap_or(2.0),
-                                    e: p.get(4).copied().unwrap_or(9.0),
-                                }
-                            }
-                            "chua" => {
-                                let p = &att.params;
-                                AttractorType::Chua {
-                                    alpha: p.first().copied().unwrap_or(15.6),
-                                    beta: p.get(1).copied().unwrap_or(28.0),
-                                    m0: p.get(2).copied().unwrap_or(-1.143),
-                                    m1: p.get(3).copied().unwrap_or(-0.714),
-                                }
-                            }
-                            _ => AttractorType::lorenz(),
-                        };
+                        let atype = att.model();
                         let new_pts = integrate_attractor(
                             &atype, att.x0, att.y0, att.z0, att.dt, att.steps, att.skip,
                         );

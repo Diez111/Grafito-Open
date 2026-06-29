@@ -49,6 +49,7 @@ cp "$DEBIAN_DIR/grafito.desktop" "$BUILD_DIR/usr/share/applications/"
 # Copy control files
 echo "Copying control files..."
 cp "$DEBIAN_DIR/control" "$BUILD_DIR/DEBIAN/"
+sed -i "s/^Version: .*/Version: ${PKG_VERSION}/" "$BUILD_DIR/DEBIAN/control"
 cp "$DEBIAN_DIR/postinst" "$BUILD_DIR/DEBIAN/"
 cp "$DEBIAN_DIR/prerm" "$BUILD_DIR/DEBIAN/"
 

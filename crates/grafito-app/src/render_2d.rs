@@ -1,10 +1,10 @@
 use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
+use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::parametric_sampling;
 use grafito_core::vector_field_sampling;
 use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
-use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::expr::{
     eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
 };
@@ -904,6 +904,36 @@ impl GrafitoApp {
         }
     }
 
+    /// Dibuja sólo los rellenos cacheados de `ComplexMapping` en el pase base.
+    ///
+    /// En modo GPU el contorno transformado lo dibuja `grafito-render`; el fill
+    /// sigue siendo una textura CPU cacheada porque depende de aplicar el mapa
+    /// inverso por píxel.
+    pub(crate) fn draw_complex_mapping_fills(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        let view = self.document.view();
+        for (_, obj) in self.document.objects_iter() {
+            let GeoObject::ComplexMapping(cm) = obj else {
+                continue;
+            };
+            if !cm.visible {
+                continue;
+            }
+            let Some(map) = cm.conformal_map(self.document.complex_base_symbol.as_str()) else {
+                continue;
+            };
+            let Some(GeoObject::ImplicitCurve(ic)) = self.document.get_object(cm.target) else {
+                continue;
+            };
+            let Some(fill_color) = ic.fill_color else {
+                continue;
+            };
+            if matches!(ic.operator, RelationOperator::Eq) {
+                continue;
+            }
+            self.draw_complex_mapping_fill(painter, canvas_rect, view, ic, cm.id, map, fill_color);
+        }
+    }
+
     pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
         // Disabled
     }
@@ -1053,7 +1083,15 @@ impl GrafitoApp {
         let padded_bounds =
             grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
 
-        let (texture_w, texture_h) = fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
+        let (mut texture_w, mut texture_h) =
+            fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
+
+        if self.document.render_quality == grafito_core::RenderQuality::Preview {
+            texture_w = (texture_w as f64 * 0.25).ceil() as u32;
+            texture_h = (texture_h as f64 * 0.25).ceil() as u32;
+            texture_w = texture_w.max(1);
+            texture_h = texture_h.max(1);
+        }
 
         // 4) Cache key: (expr lhs/rhs, operator, padded_bounds, texture_size,
         //    variables, fill_color, conformal_map). El conformal_map se hashea
@@ -1221,7 +1259,15 @@ impl GrafitoApp {
         );
         let padded_bounds =
             grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
-        let (texture_w, texture_h) = fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
+        let (mut texture_w, mut texture_h) =
+            fill_cache_texture_size(view_bounds, padded_bounds, (w, h));
+
+        if self.document.render_quality == grafito_core::RenderQuality::Preview {
+            texture_w = (texture_w as f64 * 0.25).ceil() as u32;
+            texture_h = (texture_h as f64 * 0.25).ceil() as u32;
+            texture_w = texture_w.max(1);
+            texture_h = texture_h.max(1);
+        }
 
         // 5) Calcular hash de la cache key: (expr_lhs, expr_rhs, operator,
         //    padded_bounds, texture_w, texture_h, variables, fill_color).
@@ -1339,6 +1385,15 @@ impl GrafitoApp {
         style: Option<StyleOverride>,
         overlay_only: bool,
     ) {
+        if overlay_only
+            && matches!(
+                obj,
+                GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_)
+            )
+        {
+            return;
+        }
+
         let view = self.document.view();
         let label_color = current_theme(painter.ctx()).object_label;
         match obj {
@@ -2366,7 +2421,10 @@ impl GrafitoApp {
                 }
 
                 // 1) Contorno: dibujar los segmentos del marching squares.
-                let levels = ic.cached_segments.read().unwrap_or_else(|p| p.into_inner());
+                let levels = ic.cached_segments.read().unwrap_or_else(|p| {
+                    log::warn!("cache lock envenenado; recuperando estado parcial");
+                    p.into_inner()
+                });
                 if !levels.is_empty() {
                     let use_contour_colors = ic.contour_levels.is_some();
                     let contour_count = levels.len();
@@ -2447,7 +2505,7 @@ impl GrafitoApp {
                         }
                     } else {
                         // Domain coloring: evaluate complex f(z)
-                        let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
+                        let expr = match grafito_complex::complex_expr::parse(&cg.expr) {
                             Ok(e) => e,
                             Err(_) => return,
                         };
@@ -2504,7 +2562,7 @@ impl GrafitoApp {
                 let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
                 let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
 
-                let expr = match grafito_geometry::complex_expr::parse(&cg.expr) {
+                let expr = match grafito_complex::complex_expr::parse(&cg.expr) {
                     Ok(e) => e,
                     Err(_) => return,
                 };
@@ -2595,7 +2653,7 @@ impl GrafitoApp {
                 //    no se dibuja hasta que la expresión sea válida).
                 //    La validación la hace `eval_complex_batch` más abajo
                 //    (parsea internamente y devuelve Err si no parsea).
-                if grafito_geometry::complex_expr::parse(&cm.expr).is_err() {
+                if grafito_complex::complex_expr::parse(&cm.expr).is_err() {
                     return;
                 }
 
@@ -2613,7 +2671,9 @@ impl GrafitoApp {
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                 let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
 
-                if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, cm.conformal_cache) {
+                let conformal_map = cm.conformal_map(self.document.complex_base_symbol.as_str());
+
+                if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, conformal_map) {
                     if let Some(fill_color) = ic.fill_color {
                         self.draw_complex_mapping_fill(
                             painter,
@@ -2795,11 +2855,11 @@ impl GrafitoApp {
                 //
                 //    Camino lento: `eval_complex_batch` parsea el AST
                 //    una vez y evalúa cada punto.
-                let results: Vec<Option<Complex64>> = if let Some(map) = cm.conformal_cache {
+                let results: Vec<Option<Complex64>> = if let Some(map) = conformal_map {
                     z_samples.iter().map(|z| map.apply(*z)).collect()
                 } else {
                     let real_vars: HashMap<String, f64> = self.document.variables.clone();
-                    match grafito_geometry::complex_expr::eval_complex_batch(
+                    match grafito_complex::complex_expr::eval_complex_batch(
                         &cm.expr,
                         self.document.complex_base_symbol.as_str(),
                         z_samples.iter().copied(),
@@ -2817,7 +2877,7 @@ impl GrafitoApp {
                 //     el plano de output con el conformal map inverso y
                 //     evaluamos la curva original en cada celda.
                 if let GeoObject::ImplicitCurve(ic) = target {
-                    if let (Some(fill_color), Some(map)) = (ic.fill_color, cm.conformal_cache) {
+                    if let (Some(fill_color), Some(map)) = (ic.fill_color, conformal_map) {
                         self.draw_complex_mapping_fill(
                             painter,
                             canvas_rect,

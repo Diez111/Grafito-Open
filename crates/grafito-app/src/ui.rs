@@ -91,6 +91,13 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 });
                 ui.menu_button("Herramientas", |ui| {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut app.show_trig_animation, "Animación Trigonométrica")
+                        .changed()
+                    {
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Ayuda", |ui| {
                     let version = env!("CARGO_PKG_VERSION");

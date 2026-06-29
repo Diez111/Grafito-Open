@@ -14,7 +14,7 @@ fn reduce_angle(a: f64) -> f64 {
 
 /// Convierte un f64 a orden de Bessel (i32) de forma segura.
 /// Redondea al entero más cercano, y devuelve 0 para NaN/Infinito.
-fn bessel_order(f: f64) -> i32 {
+pub fn bessel_order(f: f64) -> i32 {
     if !f.is_finite() {
         return 0;
     }
@@ -166,6 +166,14 @@ impl Expr {
 
     /// Symbolic differentiation with respect to `var`.
     pub fn diff(&self, var: &str) -> Expr {
+        self.diff_depth(var, 0)
+    }
+
+    fn diff_depth(&self, var: &str, depth: u32) -> Expr {
+        const MAX_DIFF_DEPTH: u32 = 256;
+        if depth > MAX_DIFF_DEPTH {
+            return Expr::Const(f64::NAN);
+        }
         use Expr::*;
         match self {
             Const(_) => Const(0.0),
@@ -177,15 +185,21 @@ impl Expr {
                 }
             }
 
-            Neg(u) => Neg(Box::new(u.diff(var))),
+            Neg(u) => Neg(Box::new(u.diff_depth(var, depth + 1))),
 
-            Add(a, b) => Add(Box::new(a.diff(var)), Box::new(b.diff(var))),
-            Sub(a, b) => Sub(Box::new(a.diff(var)), Box::new(b.diff(var))),
+            Add(a, b) => Add(
+                Box::new(a.diff_depth(var, depth + 1)),
+                Box::new(b.diff_depth(var, depth + 1)),
+            ),
+            Sub(a, b) => Sub(
+                Box::new(a.diff_depth(var, depth + 1)),
+                Box::new(b.diff_depth(var, depth + 1)),
+            ),
 
             // Product rule: (u*v)' = u'v + uv'
             Mul(u, v) => {
-                let du = u.diff(var);
-                let dv = v.diff(var);
+                let du = u.diff_depth(var, depth + 1);
+                let dv = v.diff_depth(var, depth + 1);
                 Add(
                     Box::new(Mul(Box::new(du), v.clone())),
                     Box::new(Mul(u.clone(), Box::new(dv))),
@@ -194,8 +208,8 @@ impl Expr {
 
             // Quotient rule: (u/v)' = (u'v - uv') / v²
             Div(u, v) => {
-                let du = u.diff(var);
-                let dv = v.diff(var);
+                let du = u.diff_depth(var, depth + 1);
+                let dv = v.diff_depth(var, depth + 1);
                 Div(
                     Box::new(Sub(
                         Box::new(Mul(Box::new(du), v.clone())),
@@ -208,7 +222,7 @@ impl Expr {
             // Power rule: if v is Const(n), use n*u^(n-1)*u'
             // else use general: (u^v)' = u^v * (v'*ln(u) + v*u'/u)
             Pow(u, v) => {
-                let du = u.diff(var);
+                let du = u.diff_depth(var, depth + 1);
                 match v.as_ref() {
                     Const(n) => {
                         let n = *n;
@@ -222,7 +236,7 @@ impl Expr {
                         )
                     }
                     _ => {
-                        let dv = v.diff(var);
+                        let dv = v.diff_depth(var, depth + 1);
                         // u^v * (v'*ln(u) + v*u'/u)
                         Mul(
                             Box::new(self.clone()),
@@ -236,11 +250,14 @@ impl Expr {
             }
 
             // Chain rule: sin(u)' = cos(u)*u'
-            Sin(u) => Mul(Box::new(Cos(u.clone())), Box::new(u.diff(var))),
+            Sin(u) => Mul(
+                Box::new(Cos(u.clone())),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
             // cos(u)' = -sin(u)*u'
             Cos(u) => Mul(
                 Box::new(Neg(Box::new(Sin(u.clone())))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // tan(u)' = sec²(u)*u' = u'/cos²(u)
             Tan(u) => Mul(
@@ -248,11 +265,11 @@ impl Expr {
                     Box::new(Const(1.0)),
                     Box::new(Pow(Box::new(Cos(u.clone())), Box::new(Const(2.0)))),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // asin(u)' = u'/sqrt(1 - u²)
             Asin(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Sqrt(Box::new(Sub(
                     Box::new(Const(1.0)),
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
@@ -260,7 +277,7 @@ impl Expr {
             ),
             // acos(u)' = -u'/sqrt(1 - u²)
             Acos(u) => Div(
-                Box::new(Neg(Box::new(u.diff(var)))),
+                Box::new(Neg(Box::new(u.diff_depth(var, depth + 1)))),
                 Box::new(Sqrt(Box::new(Sub(
                     Box::new(Const(1.0)),
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
@@ -268,42 +285,51 @@ impl Expr {
             ),
             // atan(u)' = u'/(1 + u²)
             Atan(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Add(
                     Box::new(Const(1.0)),
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
                 )),
             ),
             // exp(u)' = exp(u)*u'
-            Exp(u) => Mul(Box::new(self.clone()), Box::new(u.diff(var))),
+            Exp(u) => Mul(
+                Box::new(self.clone()),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
             // ln(u)' = u'/u
-            Ln(u) => Div(Box::new(u.diff(var)), u.clone()),
+            Ln(u) => Div(Box::new(u.diff_depth(var, depth + 1)), u.clone()),
             // log10(u)' = u'/(u*ln(10))
             Log(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Mul(u.clone(), Box::new(Const(std::f64::consts::LN_10)))),
             ),
             // sqrt(u)' = u'/(2*sqrt(u))
             Sqrt(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Mul(Box::new(Const(2.0)), Box::new(Sqrt(u.clone())))),
             ),
             // |u|' = sign(u)*u' (implemented as u/|u| * u')
             Abs(u) => Mul(
                 Box::new(Div(u.clone(), Box::new(Abs(u.clone())))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // sinh(u)' = cosh(u)*u'
-            Sinh(u) => Mul(Box::new(Cosh(u.clone())), Box::new(u.diff(var))),
+            Sinh(u) => Mul(
+                Box::new(Cosh(u.clone())),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
             // cosh(u)' = sinh(u)*u'
-            Cosh(u) => Mul(Box::new(Sinh(u.clone())), Box::new(u.diff(var))),
+            Cosh(u) => Mul(
+                Box::new(Sinh(u.clone())),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
             // tanh(u)' = sech²(u)*u' = u'/cosh²(u)
             Tanh(u) => Mul(
                 Box::new(Div(
                     Box::new(Const(1.0)),
                     Box::new(Pow(Box::new(Cosh(u.clone())), Box::new(Const(2.0)))),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // floor/ceil/round: zero almost everywhere
             Floor(_u) => Const(0.0),
@@ -312,7 +338,7 @@ impl Expr {
             // sec(u)' = sec(u)*tan(u)*u'
             Sec(u) => Mul(
                 Box::new(Mul(Box::new(Sec(u.clone())), Box::new(Tan(u.clone())))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // csc(u)' = -csc(u)*cot(u)*u'
             Csc(u) => Mul(
@@ -320,7 +346,7 @@ impl Expr {
                     Box::new(Csc(u.clone())),
                     Box::new(Cot(u.clone())),
                 )))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // cot(u)' = -csc²(u)*u'
             Cot(u) => Mul(
@@ -328,11 +354,11 @@ impl Expr {
                     Box::new(Csc(u.clone())),
                     Box::new(Const(2.0)),
                 )))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // asinh(u)' = u'/sqrt(u²+1)
             Asinh(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Sqrt(Box::new(Add(
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
                     Box::new(Const(1.0)),
@@ -340,7 +366,7 @@ impl Expr {
             ),
             // acosh(u)' = u'/sqrt(u²-1)
             Acosh(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Sqrt(Box::new(Sub(
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
                     Box::new(Const(1.0)),
@@ -348,7 +374,7 @@ impl Expr {
             ),
             // atanh(u)' = u'/(1-u²)
             Atanh(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Sub(
                     Box::new(Const(1.0)),
                     Box::new(Pow(u.clone(), Box::new(Const(2.0)))),
@@ -358,7 +384,7 @@ impl Expr {
             Heaviside(_) => Const(0.0),
             // cbrt(u)' = u'/(3*cbrt(u)²)
             Cbrt(u) => Div(
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
                 Box::new(Mul(
                     Box::new(Const(3.0)),
                     Box::new(Pow(Box::new(Cbrt(u.clone())), Box::new(Const(2.0)))),
@@ -367,8 +393,8 @@ impl Expr {
             // atan2(y,x) partial derivatives
             Atan2(y, x) => Div(
                 Box::new(Sub(
-                    Box::new(Mul(x.clone(), Box::new(y.diff(var)))),
-                    Box::new(Mul(y.clone(), Box::new(x.diff(var)))),
+                    Box::new(Mul(x.clone(), Box::new(y.diff_depth(var, depth + 1)))),
+                    Box::new(Mul(y.clone(), Box::new(x.diff_depth(var, depth + 1)))),
                 )),
                 Box::new(Add(
                     Box::new(Pow(x.clone(), Box::new(Const(2.0)))),
@@ -377,23 +403,23 @@ impl Expr {
             ),
             Modulo(_, _) => Const(0.0),
             Min(a, b) => {
-                let da = a.diff(var);
-                let db = b.diff(var);
+                let da = a.diff_depth(var, depth + 1);
+                let db = b.diff_depth(var, depth + 1);
                 Expr::Piecewise(
                     vec![(Box::new(Expr::Sub(a.clone(), b.clone())), Box::new(da))],
                     Box::new(db),
                 )
             }
             Max(a, b) => {
-                let da = a.diff(var);
-                let db = b.diff(var);
+                let da = a.diff_depth(var, depth + 1);
+                let db = b.diff_depth(var, depth + 1);
                 Expr::Piecewise(
                     vec![(Box::new(Expr::Sub(b.clone(), a.clone())), Box::new(db))],
                     Box::new(da),
                 )
             }
             Clamp(x, lo, hi) => {
-                let dx = x.diff(var);
+                let dx = x.diff_depth(var, depth + 1);
                 Expr::Piecewise(
                     vec![
                         (
@@ -408,10 +434,10 @@ impl Expr {
                     Box::new(dx),
                 )
             }
-            Re(u) => u.diff(var),   // re(x) = x for real x
-            Im(_) => Const(0.0),    // im(x) = 0 for real x
-            Arg(_) => Const(0.0),   // arg(x) = 0 for real x
-            Conj(u) => u.diff(var), // conj(x) = x for real x
+            Re(u) => u.diff_depth(var, depth + 1), // re(x) = x for real x
+            Im(_) => Const(0.0),                   // im(x) = 0 for real x
+            Arg(_) => Const(0.0),                  // arg(x) = 0 for real x
+            Conj(u) => u.diff_depth(var, depth + 1), // conj(x) = x for real x
             // erf'(u) = (2/sqrt(pi))*exp(-u²)*u'
             Erf(u) => Mul(
                 Box::new(Mul(
@@ -421,7 +447,7 @@ impl Expr {
                         Box::new(Const(2.0)),
                     )))))),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // erfc'(u) = -(2/sqrt(pi))*exp(-u²)*u'
             Erfc(u) => Mul(
@@ -432,7 +458,7 @@ impl Expr {
                         Box::new(Const(2.0)),
                     )))))),
                 )))),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             // gamma'(u) = gamma(u)*digamma(u)*u'
             Gamma(u) => Mul(
@@ -440,13 +466,16 @@ impl Expr {
                     Box::new(Gamma(u.clone())),
                     Box::new(Digamma(u.clone())),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
-            LnGamma(u) => Mul(Box::new(Digamma(u.clone())), Box::new(u.diff(var))),
+            LnGamma(u) => Mul(
+                Box::new(Digamma(u.clone())),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
             Digamma(_) => Const(0.0), // polygamma would be needed
             Beta(a, b) => {
-                let da = a.diff(var);
-                let db = b.diff(var);
+                let da = a.diff_depth(var, depth + 1);
+                let db = b.diff_depth(var, depth + 1);
                 // beta'(a,b) = beta(a,b)*(digamma(a)*a' - digamma(a+b)*(a'+b'))
                 Mul(
                     Box::new(Beta(a.clone(), b.clone())),
@@ -470,7 +499,7 @@ impl Expr {
                         u.clone(),
                     )),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             BesselY(n, u) => Mul(
                 Box::new(Sub(
@@ -483,7 +512,7 @@ impl Expr {
                         u.clone(),
                     )),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             BesselI(n, u) => Mul(
                 Box::new(Add(
@@ -496,12 +525,12 @@ impl Expr {
                         u.clone(),
                     )),
                 )),
-                Box::new(u.diff(var)),
+                Box::new(u.diff_depth(var, depth + 1)),
             ),
             Sum(body, v, start, end) => {
                 // derivative of sum: sum of derivatives
                 Sum(
-                    Box::new(body.diff(var)),
+                    Box::new(body.diff_depth(var, depth + 1)),
                     v.clone(),
                     start.clone(),
                     end.clone(),
@@ -518,7 +547,7 @@ impl Expr {
                         end.clone(),
                     )),
                     Box::new(Sum(
-                        Box::new(Div(Box::new(body.diff(var)), body_ref)),
+                        Box::new(Div(Box::new(body.diff_depth(var, depth + 1)), body_ref)),
                         v.clone(),
                         start.clone(),
                         end.clone(),
@@ -529,9 +558,9 @@ impl Expr {
             Piecewise(pieces, default) => Piecewise(
                 pieces
                     .iter()
-                    .map(|(cond, val)| (cond.clone(), Box::new(val.diff(var))))
+                    .map(|(cond, val)| (cond.clone(), Box::new(val.diff_depth(var, depth + 1))))
                     .collect(),
-                Box::new(default.diff(var)),
+                Box::new(default.diff_depth(var, depth + 1)),
             ),
         }
     }
@@ -705,6 +734,14 @@ impl Expr {
     }
 
     pub fn eval_2d(&self, var1: &str, val1: f64, var2: &str, val2: f64) -> f64 {
+        self.eval_2d_depth(var1, val1, var2, val2, 0)
+    }
+
+    fn eval_2d_depth(&self, var1: &str, val1: f64, var2: &str, val2: f64, depth: u32) -> f64 {
+        const MAX_EVAL_2D_DEPTH: u32 = 256;
+        if depth > MAX_EVAL_2D_DEPTH {
+            return f64::NAN;
+        }
         use Expr::*;
         match self {
             Const(c) => *c,
@@ -717,34 +754,43 @@ impl Expr {
                     f64::NAN
                 }
             }
-            Neg(u) => -u.eval_2d(var1, val1, var2, val2),
-            Add(a, b) => a.eval_2d(var1, val1, var2, val2) + b.eval_2d(var1, val1, var2, val2),
-            Sub(a, b) => a.eval_2d(var1, val1, var2, val2) - b.eval_2d(var1, val1, var2, val2),
-            Mul(a, b) => a.eval_2d(var1, val1, var2, val2) * b.eval_2d(var1, val1, var2, val2),
+            Neg(u) => -u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+            Add(a, b) => {
+                a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    + b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+            }
+            Sub(a, b) => {
+                a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    - b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+            }
+            Mul(a, b) => {
+                a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    * b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+            }
             Div(a, b) => {
-                let den = b.eval_2d(var1, val1, var2, val2);
+                let den = b.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                 if den.abs() < 1e-300 {
                     f64::NAN
                 } else {
-                    a.eval_2d(var1, val1, var2, val2) / den
+                    a.eval_2d_depth(var1, val1, var2, val2, depth + 1) / den
                 }
             }
             Pow(a, b) => a
-                .eval_2d(var1, val1, var2, val2)
-                .powf(b.eval_2d(var1, val1, var2, val2)),
-            Sin(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin(),
-            Cos(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos(),
-            Tan(u) => reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan(),
-            Asin(u) => u.eval_2d(var1, val1, var2, val2).asin(),
-            Acos(u) => u.eval_2d(var1, val1, var2, val2).acos(),
-            Atan(u) => u.eval_2d(var1, val1, var2, val2).atan(),
-            Exp(u) => u.eval_2d(var1, val1, var2, val2).exp(),
-            Ln(u) => u.eval_2d(var1, val1, var2, val2).ln(),
-            Log(u) => u.eval_2d(var1, val1, var2, val2).log10(),
-            Sqrt(u) => u.eval_2d(var1, val1, var2, val2).sqrt(),
-            Abs(u) => u.eval_2d(var1, val1, var2, val2).abs(),
+                .eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                .powf(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+            Sin(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).sin(),
+            Cos(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).cos(),
+            Tan(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).tan(),
+            Asin(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).asin(),
+            Acos(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).acos(),
+            Atan(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).atan(),
+            Exp(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).exp(),
+            Ln(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).ln(),
+            Log(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).log10(),
+            Sqrt(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).sqrt(),
+            Abs(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).abs(),
             Sinh(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
+                let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -752,7 +798,7 @@ impl Expr {
                 }
             }
             Cosh(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
+                let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -760,18 +806,18 @@ impl Expr {
                 }
             }
             Tanh(u) => {
-                let a = u.eval_2d(var1, val1, var2, val2);
+                let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
                     a.tanh()
                 }
             }
-            Floor(u) => u.eval_2d(var1, val1, var2, val2).floor(),
-            Ceil(u) => u.eval_2d(var1, val1, var2, val2).ceil(),
-            Round(u) => u.eval_2d(var1, val1, var2, val2).round(),
+            Floor(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).floor(),
+            Ceil(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).ceil(),
+            Round(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).round(),
             Sec(u) => {
-                let c = reduce_angle(u.eval_2d(var1, val1, var2, val2)).cos();
+                let c = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -779,7 +825,7 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s = reduce_angle(u.eval_2d(var1, val1, var2, val2)).sin();
+                let s = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -787,110 +833,141 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t = reduce_angle(u.eval_2d(var1, val1, var2, val2)).tan();
+                let t = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
                     1.0 / t
                 }
             }
-            Asinh(u) => u.eval_2d(var1, val1, var2, val2).asinh(),
-            Acosh(u) => u.eval_2d(var1, val1, var2, val2).acosh(),
-            Atanh(u) => u.eval_2d(var1, val1, var2, val2).atanh(),
-            Sign(u) => u.eval_2d(var1, val1, var2, val2).signum(),
+            Asinh(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).asinh(),
+            Acosh(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).acosh(),
+            Atanh(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).atanh(),
+            Sign(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).signum(),
             Heaviside(u) => {
-                if u.eval_2d(var1, val1, var2, val2) < 0.0 {
+                if u.eval_2d_depth(var1, val1, var2, val2, depth + 1) < 0.0 {
                     0.0
                 } else {
                     1.0
                 }
             }
-            Cbrt(u) => u.eval_2d(var1, val1, var2, val2).cbrt(),
+            Cbrt(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).cbrt(),
             Atan2(a, b) => a
-                .eval_2d(var1, val1, var2, val2)
-                .atan2(b.eval_2d(var1, val1, var2, val2)),
-            Modulo(a, b) => a.eval_2d(var1, val1, var2, val2) % b.eval_2d(var1, val1, var2, val2),
+                .eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                .atan2(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+            Modulo(a, b) => {
+                a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    % b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+            }
             Min(a, b) => a
-                .eval_2d(var1, val1, var2, val2)
-                .min(b.eval_2d(var1, val1, var2, val2)),
+                .eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                .min(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
             Max(a, b) => a
-                .eval_2d(var1, val1, var2, val2)
-                .max(b.eval_2d(var1, val1, var2, val2)),
-            Clamp(x, lo, hi) => x.eval_2d(var1, val1, var2, val2).clamp(
-                lo.eval_2d(var1, val1, var2, val2),
-                hi.eval_2d(var1, val1, var2, val2),
+                .eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                .max(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+            Clamp(x, lo, hi) => x.eval_2d_depth(var1, val1, var2, val2, depth + 1).clamp(
+                lo.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+                hi.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
-            Re(u) => u.eval_2d(var1, val1, var2, val2), // re(x) = x for real
-            Im(_) => 0.0,                               // im(x) = 0 for real
+            Re(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1), // re(x) = x for real
+            Im(_) => 0.0,                                                // im(x) = 0 for real
             Arg(u) => {
-                if u.eval_2d(var1, val1, var2, val2) >= 0.0 {
+                if u.eval_2d_depth(var1, val1, var2, val2, depth + 1) >= 0.0 {
                     0.0
                 } else {
                     std::f64::consts::PI
                 }
             }
-            Conj(u) => u.eval_2d(var1, val1, var2, val2), // conj(x) = x for real
-            Erf(u) => crate::special_functions::erf(u.eval_2d(var1, val1, var2, val2)),
-            Erfc(u) => crate::special_functions::erfc(u.eval_2d(var1, val1, var2, val2)),
-            Gamma(u) => crate::special_functions::gamma(u.eval_2d(var1, val1, var2, val2)),
-            LnGamma(u) => crate::special_functions::ln_gamma(u.eval_2d(var1, val1, var2, val2)),
-            Digamma(u) => crate::special_functions::digamma(u.eval_2d(var1, val1, var2, val2)),
+            Conj(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1), // conj(x) = x for real
+            Erf(u) => {
+                crate::special_functions::erf(u.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+            }
+            Erfc(u) => {
+                crate::special_functions::erfc(u.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+            }
+            Gamma(u) => {
+                crate::special_functions::gamma(u.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+            }
+            LnGamma(u) => crate::special_functions::ln_gamma(u.eval_2d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                depth + 1,
+            )),
+            Digamma(u) => crate::special_functions::digamma(u.eval_2d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                depth + 1,
+            )),
             Beta(a, b) => crate::special_functions::beta(
-                a.eval_2d(var1, val1, var2, val2),
-                b.eval_2d(var1, val1, var2, val2),
+                a.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+                b.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_2d(var1, val1, var2, val2)),
-                u.eval_2d(var1, val1, var2, val2),
+                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_2d(var1, val1, var2, val2)),
-                u.eval_2d(var1, val1, var2, val2),
+                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_2d(var1, val1, var2, val2)),
-                u.eval_2d(var1, val1, var2, val2),
+                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
             Sum(_, _, _, _) => f64::NAN, // expanded by preprocess_expr before AST eval
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
                 for (cond, val) in pieces {
-                    if cond.eval_2d(var1, val1, var2, val2) != 0.0 {
-                        return val.eval_2d(var1, val1, var2, val2);
+                    if cond.eval_2d_depth(var1, val1, var2, val2, depth + 1) != 0.0 {
+                        return val.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                     }
                 }
-                default.eval_2d(var1, val1, var2, val2)
+                default.eval_2d_depth(var1, val1, var2, val2, depth + 1)
             }
             Lt(a, b) => {
-                if a.eval_2d(var1, val1, var2, val2) < b.eval_2d(var1, val1, var2, val2) {
+                if a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    < b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Gt(a, b) => {
-                if a.eval_2d(var1, val1, var2, val2) > b.eval_2d(var1, val1, var2, val2) {
+                if a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    > b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Le(a, b) => {
-                if a.eval_2d(var1, val1, var2, val2) <= b.eval_2d(var1, val1, var2, val2) {
+                if a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    <= b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Ge(a, b) => {
-                if a.eval_2d(var1, val1, var2, val2) >= b.eval_2d(var1, val1, var2, val2) {
+                if a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    >= b.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Eq(a, b) => {
-                if (a.eval_2d(var1, val1, var2, val2) - b.eval_2d(var1, val1, var2, val2)).abs()
+                if (a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    - b.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+                .abs()
                     < 1e-12
                 {
                     1.0
@@ -899,7 +976,9 @@ impl Expr {
                 }
             }
             Ne(a, b) => {
-                if (a.eval_2d(var1, val1, var2, val2) - b.eval_2d(var1, val1, var2, val2)).abs()
+                if (a.eval_2d_depth(var1, val1, var2, val2, depth + 1)
+                    - b.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+                .abs()
                     < 1e-12
                 {
                     0.0
@@ -919,6 +998,24 @@ impl Expr {
         var3: &str,
         val3: f64,
     ) -> f64 {
+        self.eval_3d_depth(var1, val1, var2, val2, var3, val3, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_3d_depth(
+        &self,
+        var1: &str,
+        val1: f64,
+        var2: &str,
+        val2: f64,
+        var3: &str,
+        val3: f64,
+        depth: u32,
+    ) -> f64 {
+        const MAX_EVAL_3D_DEPTH: u32 = 256;
+        if depth > MAX_EVAL_3D_DEPTH {
+            return f64::NAN;
+        }
         use Expr::*;
         match self {
             Const(c) => *c,
@@ -933,43 +1030,65 @@ impl Expr {
                     f64::NAN
                 }
             }
-            Neg(u) => -u.eval_3d(var1, val1, var2, val2, var3, val3),
+            Neg(u) => -u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             Add(a, b) => {
-                a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    + b.eval_3d(var1, val1, var2, val2, var3, val3)
+                a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    + b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
             }
             Sub(a, b) => {
-                a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    - b.eval_3d(var1, val1, var2, val2, var3, val3)
+                a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    - b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
             }
             Mul(a, b) => {
-                a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    * b.eval_3d(var1, val1, var2, val2, var3, val3)
+                a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    * b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
             }
             Div(a, b) => {
-                let den = b.eval_3d(var1, val1, var2, val2, var3, val3);
+                let den = b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
                 if den.abs() < 1e-300 {
                     f64::NAN
                 } else {
-                    a.eval_3d(var1, val1, var2, val2, var3, val3) / den
+                    a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1) / den
                 }
             }
             Pow(a, b) => a
-                .eval_3d(var1, val1, var2, val2, var3, val3)
-                .powf(b.eval_3d(var1, val1, var2, val2, var3, val3)),
-            Sin(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin(),
-            Cos(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos(),
-            Tan(u) => reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan(),
-            Asin(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).asin(),
-            Acos(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).acos(),
-            Atan(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).atan(),
-            Exp(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).exp(),
-            Ln(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).ln(),
-            Log(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).log10(),
-            Sqrt(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).sqrt(),
-            Abs(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).abs(),
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .powf(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
+            Sin(u) => {
+                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).sin()
+            }
+            Cos(u) => {
+                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).cos()
+            }
+            Tan(u) => {
+                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).tan()
+            }
+            Asin(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .asin(),
+            Acos(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .acos(),
+            Atan(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .atan(),
+            Exp(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .exp(),
+            Ln(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .ln(),
+            Log(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .log10(),
+            Sqrt(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .sqrt(),
+            Abs(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .abs(),
             Sinh(u) => {
-                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -977,7 +1096,7 @@ impl Expr {
                 }
             }
             Cosh(u) => {
-                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -985,18 +1104,26 @@ impl Expr {
                 }
             }
             Tanh(u) => {
-                let a = u.eval_3d(var1, val1, var2, val2, var3, val3);
+                let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
                     a.tanh()
                 }
             }
-            Floor(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).floor(),
-            Ceil(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).ceil(),
-            Round(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).round(),
+            Floor(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .floor(),
+            Ceil(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .ceil(),
+            Round(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .round(),
             Sec(u) => {
-                let c = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).cos();
+                let c =
+                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
+                        .cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1004,7 +1131,9 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).sin();
+                let s =
+                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
+                        .sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1012,84 +1141,130 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t = reduce_angle(u.eval_3d(var1, val1, var2, val2, var3, val3)).tan();
+                let t =
+                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
+                        .tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
                     1.0 / t
                 }
             }
-            Asinh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).asinh(),
-            Acosh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).acosh(),
-            Atanh(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).atanh(),
-            Sign(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).signum(),
+            Asinh(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .asinh(),
+            Acosh(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .acosh(),
+            Atanh(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .atanh(),
+            Sign(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .signum(),
             Heaviside(u) => {
-                if u.eval_3d(var1, val1, var2, val2, var3, val3) < 0.0 {
+                if u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1) < 0.0 {
                     0.0
                 } else {
                     1.0
                 }
             }
-            Cbrt(u) => u.eval_3d(var1, val1, var2, val2, var3, val3).cbrt(),
+            Cbrt(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .cbrt(),
             Atan2(a, b) => a
-                .eval_3d(var1, val1, var2, val2, var3, val3)
-                .atan2(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .atan2(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
             Modulo(a, b) => {
-                a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    % b.eval_3d(var1, val1, var2, val2, var3, val3)
+                a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    % b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
             }
             Min(a, b) => a
-                .eval_3d(var1, val1, var2, val2, var3, val3)
-                .min(b.eval_3d(var1, val1, var2, val2, var3, val3)),
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .min(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
             Max(a, b) => a
-                .eval_3d(var1, val1, var2, val2, var3, val3)
-                .max(b.eval_3d(var1, val1, var2, val2, var3, val3)),
-            Clamp(x, lo, hi) => x.eval_3d(var1, val1, var2, val2, var3, val3).clamp(
-                lo.eval_3d(var1, val1, var2, val2, var3, val3),
-                hi.eval_3d(var1, val1, var2, val2, var3, val3),
-            ),
-            Re(u) => u.eval_3d(var1, val1, var2, val2, var3, val3), // re(x) = x for real
-            Im(_) => 0.0,                                           // im(x) = 0 for real
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .max(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
+            Clamp(x, lo, hi) => x
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .clamp(
+                    lo.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                    hi.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                ),
+            Re(u) => u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1), // re(x) = x for real
+            Im(_) => 0.0, // im(x) = 0 for real
             Arg(u) => {
-                if u.eval_3d(var1, val1, var2, val2, var3, val3) >= 0.0 {
+                if u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1) >= 0.0 {
                     0.0
                 } else {
                     std::f64::consts::PI
                 }
             }
-            Conj(u) => u.eval_3d(var1, val1, var2, val2, var3, val3), // conj(x) = x for real
-            Erf(u) => crate::special_functions::erf(u.eval_3d(var1, val1, var2, val2, var3, val3)),
-            Erfc(u) => {
-                crate::special_functions::erfc(u.eval_3d(var1, val1, var2, val2, var3, val3))
-            }
-            Gamma(u) => {
-                crate::special_functions::gamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
-            }
-            LnGamma(u) => {
-                crate::special_functions::ln_gamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
-            }
-            Digamma(u) => {
-                crate::special_functions::digamma(u.eval_3d(var1, val1, var2, val2, var3, val3))
-            }
+            Conj(u) => u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1), // conj(x) = x for real
+            Erf(u) => crate::special_functions::erf(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
+            Erfc(u) => crate::special_functions::erfc(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
+            Gamma(u) => crate::special_functions::gamma(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
+            LnGamma(u) => crate::special_functions::ln_gamma(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
+            Digamma(u) => crate::special_functions::digamma(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
             Beta(a, b) => crate::special_functions::beta(
-                a.eval_3d(var1, val1, var2, val2, var3, val3),
-                b.eval_3d(var1, val1, var2, val2, var3, val3),
+                a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             ),
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
-                u.eval_3d(var1, val1, var2, val2, var3, val3),
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
+                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
-                u.eval_3d(var1, val1, var2, val2, var3, val3),
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
+                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_3d(var1, val1, var2, val2, var3, val3)),
-                u.eval_3d(var1, val1, var2, val2, var3, val3),
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
+                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             ),
             Lt(a, b) => {
-                if a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    < b.eval_3d(var1, val1, var2, val2, var3, val3)
+                if a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    < b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 {
                     1.0
                 } else {
@@ -1097,8 +1272,8 @@ impl Expr {
                 }
             }
             Gt(a, b) => {
-                if a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    > b.eval_3d(var1, val1, var2, val2, var3, val3)
+                if a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    > b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 {
                     1.0
                 } else {
@@ -1106,8 +1281,8 @@ impl Expr {
                 }
             }
             Le(a, b) => {
-                if a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    <= b.eval_3d(var1, val1, var2, val2, var3, val3)
+                if a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    <= b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 {
                     1.0
                 } else {
@@ -1115,8 +1290,8 @@ impl Expr {
                 }
             }
             Ge(a, b) => {
-                if a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    >= b.eval_3d(var1, val1, var2, val2, var3, val3)
+                if a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    >= b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 {
                     1.0
                 } else {
@@ -1124,8 +1299,8 @@ impl Expr {
                 }
             }
             Eq(a, b) => {
-                if (a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    - b.eval_3d(var1, val1, var2, val2, var3, val3))
+                if (a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    - b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
                 .abs()
                     < 1e-12
                 {
@@ -1135,8 +1310,8 @@ impl Expr {
                 }
             }
             Ne(a, b) => {
-                if (a.eval_3d(var1, val1, var2, val2, var3, val3)
-                    - b.eval_3d(var1, val1, var2, val2, var3, val3))
+                if (a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    - b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
                 .abs()
                     < 1e-12
                 {
@@ -1149,16 +1324,24 @@ impl Expr {
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
                 for (cond, val) in pieces {
-                    if cond.eval_3d(var1, val1, var2, val2, var3, val3) != 0.0 {
-                        return val.eval_3d(var1, val1, var2, val2, var3, val3);
+                    if cond.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1) != 0.0 {
+                        return val.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
                     }
                 }
-                default.eval_3d(var1, val1, var2, val2, var3, val3)
+                default.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
             }
         }
     }
 
     pub fn eval_at(&self, var: &str, value: f64) -> f64 {
+        self.eval_at_depth(var, value, 0)
+    }
+
+    fn eval_at_depth(&self, var: &str, value: f64, depth: u32) -> f64 {
+        const MAX_EVAL_DEPTH: u32 = 256;
+        if depth > MAX_EVAL_DEPTH {
+            return f64::NAN;
+        }
         use Expr::*;
         match self {
             Const(c) => *c,
@@ -1169,32 +1352,41 @@ impl Expr {
                     f64::NAN
                 }
             }
-            Neg(u) => -u.eval_at(var, value),
-            Add(a, b) => a.eval_at(var, value) + b.eval_at(var, value),
-            Sub(a, b) => a.eval_at(var, value) - b.eval_at(var, value),
-            Mul(a, b) => a.eval_at(var, value) * b.eval_at(var, value),
+            Neg(u) => -u.eval_at_depth(var, value, depth + 1),
+            Add(a, b) => {
+                a.eval_at_depth(var, value, depth + 1) + b.eval_at_depth(var, value, depth + 1)
+            }
+            Sub(a, b) => {
+                a.eval_at_depth(var, value, depth + 1) - b.eval_at_depth(var, value, depth + 1)
+            }
+            Mul(a, b) => {
+                a.eval_at_depth(var, value, depth + 1) * b.eval_at_depth(var, value, depth + 1)
+            }
             Div(a, b) => {
-                let den = b.eval_at(var, value);
+                let den = b.eval_at_depth(var, value, depth + 1);
                 if den.abs() < 1e-300 {
                     f64::NAN
                 } else {
-                    a.eval_at(var, value) / den
+                    a.eval_at_depth(var, value, depth + 1) / den
                 }
             }
-            Pow(a, b) => a.eval_at(var, value).powf(b.eval_at(var, value)),
-            Sin(u) => reduce_angle(u.eval_at(var, value)).sin(),
-            Cos(u) => reduce_angle(u.eval_at(var, value)).cos(),
-            Tan(u) => reduce_angle(u.eval_at(var, value)).tan(),
-            Asin(u) => u.eval_at(var, value).asin(),
-            Acos(u) => u.eval_at(var, value).acos(),
-            Atan(u) => u.eval_at(var, value).atan(),
-            Exp(u) => u.eval_at(var, value).exp(),
-            Ln(u) => u.eval_at(var, value).ln(),
-            Log(u) => u.eval_at(var, value).log10(),
-            Sqrt(u) => u.eval_at(var, value).sqrt(),
-            Abs(u) => u.eval_at(var, value).abs(),
+            Pow(a, b) => {
+                a.eval_at_depth(var, value, depth + 1)
+                    .powf(b.eval_at_depth(var, value, depth + 1))
+            }
+            Sin(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).sin(),
+            Cos(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).cos(),
+            Tan(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).tan(),
+            Asin(u) => u.eval_at_depth(var, value, depth + 1).asin(),
+            Acos(u) => u.eval_at_depth(var, value, depth + 1).acos(),
+            Atan(u) => u.eval_at_depth(var, value, depth + 1).atan(),
+            Exp(u) => u.eval_at_depth(var, value, depth + 1).exp(),
+            Ln(u) => u.eval_at_depth(var, value, depth + 1).ln(),
+            Log(u) => u.eval_at_depth(var, value, depth + 1).log10(),
+            Sqrt(u) => u.eval_at_depth(var, value, depth + 1).sqrt(),
+            Abs(u) => u.eval_at_depth(var, value, depth + 1).abs(),
             Sinh(u) => {
-                let a = u.eval_at(var, value);
+                let a = u.eval_at_depth(var, value, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -1202,7 +1394,7 @@ impl Expr {
                 }
             }
             Cosh(u) => {
-                let a = u.eval_at(var, value);
+                let a = u.eval_at_depth(var, value, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
@@ -1210,18 +1402,18 @@ impl Expr {
                 }
             }
             Tanh(u) => {
-                let a = u.eval_at(var, value);
+                let a = u.eval_at_depth(var, value, depth + 1);
                 if a.abs() > 1e9 {
                     0.0
                 } else {
                     a.tanh()
                 }
             }
-            Floor(u) => u.eval_at(var, value).floor(),
-            Ceil(u) => u.eval_at(var, value).ceil(),
-            Round(u) => u.eval_at(var, value).round(),
+            Floor(u) => u.eval_at_depth(var, value, depth + 1).floor(),
+            Ceil(u) => u.eval_at_depth(var, value, depth + 1).ceil(),
+            Round(u) => u.eval_at_depth(var, value, depth + 1).round(),
             Sec(u) => {
-                let c = reduce_angle(u.eval_at(var, value)).cos();
+                let c = reduce_angle(u.eval_at_depth(var, value, depth + 1)).cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1229,7 +1421,7 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s = reduce_angle(u.eval_at(var, value)).sin();
+                let s = reduce_angle(u.eval_at_depth(var, value, depth + 1)).sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1237,99 +1429,121 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t = reduce_angle(u.eval_at(var, value)).tan();
+                let t = reduce_angle(u.eval_at_depth(var, value, depth + 1)).tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
                     1.0 / t
                 }
             }
-            Asinh(u) => u.eval_at(var, value).asinh(),
-            Acosh(u) => u.eval_at(var, value).acosh(),
-            Atanh(u) => u.eval_at(var, value).atanh(),
-            Sign(u) => u.eval_at(var, value).signum(),
+            Asinh(u) => u.eval_at_depth(var, value, depth + 1).asinh(),
+            Acosh(u) => u.eval_at_depth(var, value, depth + 1).acosh(),
+            Atanh(u) => u.eval_at_depth(var, value, depth + 1).atanh(),
+            Sign(u) => u.eval_at_depth(var, value, depth + 1).signum(),
             Heaviside(u) => {
-                if u.eval_at(var, value) < 0.0 {
+                if u.eval_at_depth(var, value, depth + 1) < 0.0 {
                     0.0
                 } else {
                     1.0
                 }
             }
-            Cbrt(u) => u.eval_at(var, value).cbrt(),
-            Atan2(a, b) => a.eval_at(var, value).atan2(b.eval_at(var, value)),
-            Modulo(a, b) => a.eval_at(var, value) % b.eval_at(var, value),
-            Min(a, b) => a.eval_at(var, value).min(b.eval_at(var, value)),
-            Max(a, b) => a.eval_at(var, value).max(b.eval_at(var, value)),
-            Clamp(x, lo, hi) => x
-                .eval_at(var, value)
-                .clamp(lo.eval_at(var, value), hi.eval_at(var, value)),
-            Re(u) => u.eval_at(var, value),
+            Cbrt(u) => u.eval_at_depth(var, value, depth + 1).cbrt(),
+            Atan2(a, b) => a
+                .eval_at_depth(var, value, depth + 1)
+                .atan2(b.eval_at_depth(var, value, depth + 1)),
+            Modulo(a, b) => {
+                a.eval_at_depth(var, value, depth + 1) % b.eval_at_depth(var, value, depth + 1)
+            }
+            Min(a, b) => {
+                a.eval_at_depth(var, value, depth + 1)
+                    .min(b.eval_at_depth(var, value, depth + 1))
+            }
+            Max(a, b) => {
+                a.eval_at_depth(var, value, depth + 1)
+                    .max(b.eval_at_depth(var, value, depth + 1))
+            }
+            Clamp(x, lo, hi) => x.eval_at_depth(var, value, depth + 1).clamp(
+                lo.eval_at_depth(var, value, depth + 1),
+                hi.eval_at_depth(var, value, depth + 1),
+            ),
+            Re(u) => u.eval_at_depth(var, value, depth + 1),
             Im(_) => 0.0,
             Arg(u) => {
-                if u.eval_at(var, value) >= 0.0 {
+                if u.eval_at_depth(var, value, depth + 1) >= 0.0 {
                     0.0
                 } else {
                     std::f64::consts::PI
                 }
             }
-            Conj(u) => u.eval_at(var, value),
-            Erf(u) => crate::special_functions::erf(u.eval_at(var, value)),
-            Erfc(u) => crate::special_functions::erfc(u.eval_at(var, value)),
-            Gamma(u) => crate::special_functions::gamma(u.eval_at(var, value)),
-            LnGamma(u) => crate::special_functions::ln_gamma(u.eval_at(var, value)),
-            Digamma(u) => crate::special_functions::digamma(u.eval_at(var, value)),
-            Beta(a, b) => {
-                crate::special_functions::beta(a.eval_at(var, value), b.eval_at(var, value))
+            Conj(u) => u.eval_at_depth(var, value, depth + 1),
+            Erf(u) => crate::special_functions::erf(u.eval_at_depth(var, value, depth + 1)),
+            Erfc(u) => crate::special_functions::erfc(u.eval_at_depth(var, value, depth + 1)),
+            Gamma(u) => crate::special_functions::gamma(u.eval_at_depth(var, value, depth + 1)),
+            LnGamma(u) => {
+                crate::special_functions::ln_gamma(u.eval_at_depth(var, value, depth + 1))
             }
+            Digamma(u) => crate::special_functions::digamma(u.eval_at_depth(var, value, depth + 1)),
+            Beta(a, b) => crate::special_functions::beta(
+                a.eval_at_depth(var, value, depth + 1),
+                b.eval_at_depth(var, value, depth + 1),
+            ),
             BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_at(var, value)),
-                u.eval_at(var, value),
+                bessel_order(n.eval_at_depth(var, value, depth + 1)),
+                u.eval_at_depth(var, value, depth + 1),
             ),
             BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_at(var, value)),
-                u.eval_at(var, value),
+                bessel_order(n.eval_at_depth(var, value, depth + 1)),
+                u.eval_at_depth(var, value, depth + 1),
             ),
             BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_at(var, value)),
-                u.eval_at(var, value),
+                bessel_order(n.eval_at_depth(var, value, depth + 1)),
+                u.eval_at_depth(var, value, depth + 1),
             ),
             Lt(a, b) => {
-                if a.eval_at(var, value) < b.eval_at(var, value) {
+                if a.eval_at_depth(var, value, depth + 1) < b.eval_at_depth(var, value, depth + 1) {
                     1.0
                 } else {
                     0.0
                 }
             }
             Gt(a, b) => {
-                if a.eval_at(var, value) > b.eval_at(var, value) {
+                if a.eval_at_depth(var, value, depth + 1) > b.eval_at_depth(var, value, depth + 1) {
                     1.0
                 } else {
                     0.0
                 }
             }
             Le(a, b) => {
-                if a.eval_at(var, value) <= b.eval_at(var, value) {
+                if a.eval_at_depth(var, value, depth + 1) <= b.eval_at_depth(var, value, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Ge(a, b) => {
-                if a.eval_at(var, value) >= b.eval_at(var, value) {
+                if a.eval_at_depth(var, value, depth + 1) >= b.eval_at_depth(var, value, depth + 1)
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Eq(a, b) => {
-                if (a.eval_at(var, value) - b.eval_at(var, value)).abs() < 1e-12 {
+                if (a.eval_at_depth(var, value, depth + 1) - b.eval_at_depth(var, value, depth + 1))
+                    .abs()
+                    < 1e-12
+                {
                     1.0
                 } else {
                     0.0
                 }
             }
             Ne(a, b) => {
-                if (a.eval_at(var, value) - b.eval_at(var, value)).abs() < 1e-12 {
+                if (a.eval_at_depth(var, value, depth + 1) - b.eval_at_depth(var, value, depth + 1))
+                    .abs()
+                    < 1e-12
+                {
                     0.0
                 } else {
                     1.0
@@ -1339,11 +1553,11 @@ impl Expr {
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
                 for (cond, val) in pieces {
-                    if cond.eval_at(var, value) != 0.0 {
-                        return val.eval_at(var, value);
+                    if cond.eval_at_depth(var, value, depth + 1) != 0.0 {
+                        return val.eval_at_depth(var, value, depth + 1);
                     }
                 }
-                default.eval_at(var, value)
+                default.eval_at_depth(var, value, depth + 1)
             }
         }
     }
@@ -2780,6 +2994,18 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
                 "sec" => Expr::Sec(Box::new(args.remove(0))),
                 "csc" | "cosec" => Expr::Csc(Box::new(args.remove(0))),
                 "cot" | "cotan" => Expr::Cot(Box::new(args.remove(0))),
+                "asec" | "arcsec" => Expr::Acos(Box::new(Expr::Div(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(args.remove(0)),
+                ))),
+                "acsc" | "arccsc" => Expr::Asin(Box::new(Expr::Div(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(args.remove(0)),
+                ))),
+                "acot" | "arccot" => Expr::Atan(Box::new(Expr::Div(
+                    Box::new(Expr::Const(1.0)),
+                    Box::new(args.remove(0)),
+                ))),
                 // Exp/Log
                 "exp" => Expr::Exp(Box::new(args.remove(0))),
                 "ln" => Expr::Ln(Box::new(args.remove(0))),

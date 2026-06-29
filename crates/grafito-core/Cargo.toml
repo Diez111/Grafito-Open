@@ -8,7 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-grafito-geometry.workspace = true
+grafito-geometry = { path = "../grafito-geometry" }
+grafito-complex = { path = "../grafito-complex" }
 
 serde.workspace = true
 serde_json.workspace = true
@@ -17,6 +18,7 @@ thiserror.workspace = true
 log.workspace = true
 rstar.workspace = true
 rayon.workspace = true
+num-complex.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

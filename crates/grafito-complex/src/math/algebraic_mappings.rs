@@ -13,7 +13,7 @@
 //! # Uso
 //!
 //! ```ignore
-//! use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
+//! use grafito_complex::algebraic_mappings::ConformalMap;
 //! use num_complex::Complex64;
 //!
 //! let map = ConformalMap::from_expr_string("1/z").unwrap();

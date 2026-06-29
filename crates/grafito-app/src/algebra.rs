@@ -626,11 +626,11 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         );
                     }
 
-                    let (mut animating, mut min, mut max, step) = {
+                    let (mut animating, mut min, mut max, step, mut speed) = {
                         let Some(meta) = app.document.variable_meta.get(name) else {
                             continue;
                         };
-                        (meta.animating, meta.min, meta.max, meta.step)
+                        (meta.animating, meta.min, meta.max, meta.step, meta.animation_speed)
                     };
 
                     egui::Frame::none()
@@ -639,10 +639,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ui.vertical(|ui| {
                                 // Top row: name = value and options
                                 ui.horizontal(|ui| {
-                                    // Make sure it looks like `a = 1.0`
-                                    // Use format to limit decimals if it's an integer
                                     let val_str = if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.2}") };
-                                    ui.label(egui::RichText::new(format!("{} = {}", name, val_str)).size(14.0).color(txt_col));
+                                    ui.label(egui::RichText::new(format!("{}    {}", name, val_str)).size(14.0).color(txt_col));
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.menu_button("⚙", |ui| {
@@ -660,57 +658,78 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 ui.close_menu();
                                             }
                                         });
+
+                                        // Selector de velocidad
+                                        let speed_abs = speed.abs();
+                                        let speed_label = if speed_abs == 1.0 { "1x" } 
+                                                          else if speed_abs == 1.5 { "1.5x" }
+                                                          else if speed_abs == 2.0 { "2x" }
+                                                          else if speed_abs == 0.5 { "0.5x" }
+                                                          else { "1x" };
+
+                                        egui::ComboBox::from_id_salt(format!("speed_{}", name))
+                                            .selected_text(egui::RichText::new(speed_label).size(12.0).color(theme.text_secondary))
+                                            .width(50.0)
+                                            .show_ui(ui, |ui| {
+                                                let mut new_speed_abs = speed_abs;
+                                                ui.selectable_value(&mut new_speed_abs, 0.5, "0.5x");
+                                                ui.selectable_value(&mut new_speed_abs, 1.0, "1x");
+                                                ui.selectable_value(&mut new_speed_abs, 1.5, "1.5x");
+                                                ui.selectable_value(&mut new_speed_abs, 2.0, "2x");
+                                                if new_speed_abs != speed_abs {
+                                                    speed = if speed < 0.0 { -new_speed_abs } else { new_speed_abs };
+                                                }
+                                            });
+
+                                        // Play/Pause button
+                                        let icon_str = if animating { "⏸" } else { "▶" };
+                                        let tooltip = if animating { "Detener animación" } else { "Animar variable" };
+                                        let btn = egui::Button::new(
+                                            egui::RichText::new(icon_str).size(16.0).color(if animating { theme.accent } else { theme.text_secondary })
+                                        ).frame(false);
+
+                                        if ui.add(btn).on_hover_text(tooltip).clicked() {
+                                            animating = !animating;
+                                            if speed == 0.0 { speed = 1.0; } // Ensure it moves when played
+                                        }
                                     });
                                 });
 
                                 ui.add_space(4.0);
 
-                                // Bottom row: min, slider, max, play button
+                                // Bottom row: min, slider, max
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(format!("{}", min)).size(12.0));
 
-                                    let mut sl_resp = None;
-                                    ui.scope(|ui| {
-                                        // Sin overrides de light mode: tokens del theme.
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
 
-                                        let slider = egui::Slider::new(&mut v, min..=max)
-                                            .step_by(step)
+                                        let mut sl_resp = None;
+                                        ui.scope(|ui| {
+                                            ui.visuals_mut().selection.bg_fill = theme.text_primary;
+
+                                        let mut slider = egui::Slider::new(&mut v, min..=max)
                                             .show_value(false)
                                             .trailing_fill(true);
 
-                                        // Clamp para que el slider no se degenerate
-                                        // en pantallas angostas con labels largos.
-                                        let slider_w = (ui.available_width() - 50.0).max(40.0);
-                                        sl_resp = Some(ui.add_sized([slider_w, 16.0], slider));
+                                        if !animating {
+                                            slider = slider.step_by(step);
+                                        }
+
+                                        let slider_width = ui.available_width().max(50.0);
+                                        sl_resp = Some(ui.add_sized([slider_width, ui.spacing().interact_size.y], slider));
                                     });
 
-                                    if let Some(sl_resp) = sl_resp {
-                                        if sl_resp.changed() {
-                                            app.document.set_variable(name.clone(), v);
-                                            app.document.recompute_bound_parameters();
+                                        if let Some(sl_resp) = sl_resp {
+                                            if sl_resp.dragged() && animating {
+                                                animating = false;
+                                            }
+                                            if sl_resp.changed() && !animating {
+                                                app.document.set_variable(name.clone(), v);
+                                                app.document.recompute_bound_parameters();
+                                            }
                                         }
-                                    }
-
-                                    ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
-
-                                    let (play_rect, play_resp) = ui.allocate_exact_size(
-                                        egui::vec2(20.0, 20.0),
-                                        egui::Sense::click(),
-                                    );
-                                    if ui.is_rect_visible(play_rect) {
-                                        draw_icon(
-                                            ui.painter(),
-                                            play_rect.shrink(2.0),
-                                            if animating { Icon::Pause } else { Icon::Play },
-                                            if animating { theme.accent } else { theme.text_secondary },
-                                        );
-                                    }
-                                    if play_resp
-                                        .on_hover_text(if animating { "Detener animación" } else { "Animar variable" })
-                                        .clicked()
-                                    {
-                                        animating = !animating;
-                                    }
+                                    });
                                 });
                             });
                         });
@@ -719,6 +738,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         meta.animating = animating;
                         meta.min = min;
                         meta.max = max;
+                        meta.animation_speed = speed;
                     }
 
                     ui.add_space(2.0);

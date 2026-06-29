@@ -5,6 +5,72 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.1.9-beta] - 2026-06-29
+
+#### Añadido
+- **Funciones complejas reales (CPU + WGSL)**: `conj(z)`, `re(z)`, `im(z)`, `arg(z)` ya
+  no devuelven NaN. Implementadas en Rust (`ComplexMatrix`/`ComplexExpr::eval`) y
+  en el shader `complex_compute.wgsl` (GPU dispatch para `ComplexMapping`).
+- **Funciones complejas especiales (CPU, fallback NaN en GPU)**:
+  - `erf(z)` — función de error compleja, series de Taylor + fórmula asintótica.
+  - `lambert_w(z)` — iteración de Newton (rama principal W₀).
+  - `zeta(z)` — zeta de Riemann, fórmula de Borwein + ecuación funcional
+    para `Re(s) < 0`.
+  - `bessel_y(z)` — Bessel de segunda clase, serie con números armónicos
+    para n=0, relación `Y_n = (J_n cos(nπ) - J_{-n}) / sin(nπ)` para n≠0.
+- **Gamma complejo (Lanczos)**: implementación de la función Gamma para
+  argumentos complejos usando la fórmula de Lanczos con g=7 y 9 coeficientes
+  (precisión ~15 dígitos). Para `Re(z) < 0.5` se aplica la fórmula de
+  reflexión Γ(z) = π / (sin(πz) · Γ(1-z)).
+- **BesselJ complejo (series + integral)**: la implementación por series
+  converge para `|z| < 20` y la representación integral (cuadratura
+  trapezoidal con 256 puntos) para `|z| ≥ 20`.
+- **GPU compute pipeline para domain coloring** (`DomainColoringComputePipeline`):
+  nuevo shader `domain_coloring_compute.wgsl` que evalúa `f(z)` sobre una
+  grilla 2D en paralelo y produce colores RGBA con la coloración HSL
+  (matiz = arg(f(z)), luminosidad = atan(ln(|f(z)|)) / (π/2) · 0.5 + 0.5).
+  Soporta hasta **250 000 celdas** (500×500) en un solo dispatch.
+  Reemplaza la evaluación CPU per-cell de `render_mode = 1` con un speedup
+  masivo durante pan/zoom.
+- **Panel "Animación Trigonométrica"** (menú Herramientas): dibuja el
+  círculo unitario con el vector radio animado en el ángulo `t`, las
+  proyecciones a los ejes (coseno verde, seno azul) y un gráfico 2D
+  sincronizado de `sin(t)`/`cos(t)`/`tan(t)`. Controles play/pause,
+  slider de velocidad (±3 rad/s) y slider manual del ángulo (±2π).
+  Usa la variable `trig_angle` y se integra con el loop de animación
+  del documento.
+- **Comando `ComplexSurface[...]`**: crea una `Surface3DObj` con la flag
+  `is_complex = true`. El sampler evalúa la expresión compleja y grafica
+  `z = |f(x + iy)|` como superficie 3D sobre el plano complejo. Alias:
+  `complexsurface`, `complex_surface`, `csurface`.
+- **Comando `Quadrants[...]`**: nuevo `render_mode = 4` para `ComplexGrid`
+  que pinta los cuatro cuadrantes del plano complejo con colores
+  distintivos (rojo/verde/azul/amarillo), etiquetas Q1-Q4 y marcas +Re/+Im.
+  Alias: `quadrants`, `cuadrantes`.
+- **Opción `Tool::TrigAnimation`**: nueva herramienta para abrir el panel
+  de animación trigonométrica directamente desde la toolbar.
+
+#### Cambiado
+- **Coloración de dominio unificada a HSL**: tanto el renderer wgpu
+  (`lib.rs:1826-1851`) como el egui CPU (`render_2d.rs:2528-2535`) ahora
+  usan `lightness = atan(ln(mag)) / (π/2) · 0.5 + 0.5` (escala logarítmica,
+  estilo cplot) en vez de la fórmula HSV anterior. La opacidad de saturación
+  se eleva a 0.85 para colores más vivos.
+- **GPU path integrado en `add_complex_grid_geometry_gpu`**: el método
+  estático `add_complex_grid_geometry` se mantiene como fallback CPU; el
+  método de instancia `add_complex_grid_geometry_gpu` delega al
+  `DomainColoringComputePipeline` si hay device/queue disponibles.
+
+#### Corregido
+- **Bug Gamma y BesselJ stubs**: ambos devolvían `NaN` literal desde
+  siempre. Reemplazados por las implementaciones reales descritas arriba.
+- **Comentario engañoso en `ComplexBytecodeProgram.constants`**: decía
+  "Wait, complex constants!" pero el código ya guardaba pares (re, im).
+  Documentado formalmente.
+- **Convención `complex_sqrt` GPU**: el shader usaba `vec2<f32>` para
+  constantes (vector 2D), no `f64` escalar. Confirmado y unificado en
+  los nuevos shaders.
+
 ## [1.1.4-beta] - 2026-06-22
 
 #### Añadido

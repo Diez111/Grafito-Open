@@ -304,6 +304,85 @@ ComplexMapping[z^2, c]                   # transformación cuadrática
 
 Las singularidades generan automáticamente asíntotas punteadas.
 
+#### Coloración de dominio (domain coloring) acelerada por GPU
+
+La coloración de dominio (estilo cplot) muestra el argumento de `f(z)` como
+matiz y `log|f(z)|` como luminosidad. En Grafito 1.1.9-beta la evaluación
+de la grilla 2D corre en un compute shader WGSL (`DomainColoringComputePipeline`),
+permitiendo hasta 500×500 = **250 000 celdas evaluadas en un solo dispatch GPU**
+con fallback automático a CPU si la GPU no está disponible.
+
+```text
+DomainColoring[1/z, -2, 2, -2, 2, 400]   # inversión con domain coloring
+DomainColoring[z^6+1, -1.5, 1.5, -1.5, 1.5, 400]
+DomainColoring[exp(z), -3, 3, -3, 3, 400]
+DomainColoring[gamma(z), -3, 3, -3, 3, 400]   # ceros y polos de Γ(z)
+```
+
+#### Funciones complejas especiales
+
+Grafito incluye un conjunto amplio de funciones complejas, disponibles tanto
+en la línea de comandos como dentro de cualquier expresión:
+
+| Función | Descripción | GPU |
+|---------|-------------|:---:|
+| `sin`, `cos`, `tan`, `sec`, `csc`, `cot` | Trigonométricas | ✓ |
+| `asin`, `acos`, `atan` | Inversas | ✓ |
+| `sinh`, `cosh`, `tanh`, `coth` | Hiperbólicas | ✓ |
+| `asinh`, `acosh`, `atanh` | Hiperbólicas inversas | ✓ |
+| `exp`, `log`/`ln`, `sqrt`, `pow` | Exponenciales | ✓ |
+| `conj(z)` | Conjugado `x − iy` | ✓ |
+| `re(z)`, `im(z)` | Parte real / imaginaria | ✓ |
+| `arg(z)` | Argumento `atan2(im, re)` | ✓ |
+| `abs(z)` | Módulo | ✓ |
+| `gamma(z)` | Función Gamma (Lanczos + reflexión) | CPU |
+| `bessel_j(z)` | Bessel de 1ª clase (series + integral) | CPU |
+| `bessel_y(z)` | Bessel de 2ª clase (serie + narmónicos) | CPU |
+| `erf(z)` | Función de error (series + asintótica) | CPU |
+| `lambert_w(z)` | Lambert W (Newton) | CPU |
+| `zeta(z)` | Zeta de Riemann (Borwein + funcional) | CPU |
+
+> **Nota:** las funciones especiales (`gamma`, `zeta`, `erf`, `lambert_w`,
+> `bessel_j`, `bessel_y`) se evalúan en CPU. Si la GPU las encuentra en el
+> bytecode, devuelve NaN en esa celda — el sampler cae al path CPU
+> automáticamente. Esto preserva la velocidad de domain coloring para
+> funciones trigonométricas y algebraicas, mientras permite usar las
+> especiales en el sampler interactivo.
+
+#### Cuadrantes del plano complejo
+
+```text
+Quadrants[-5, 5, -5, 5]
+```
+
+Pinta los cuatro cuadrantes Q1-Q4 con colores distintivos, etiquetas
+`+Re`/`+Im` y marcas en los ejes. Útil como overlay pedagógico para
+entender inversiones, conjugaciones y mapeos conformes.
+
+#### Superficie 3D de módulo complejo
+
+```text
+ComplexSurface[z^2 + 1, -3, 3, -3, 3, 50]      # |z² + 1|
+ComplexSurface[1/z, -2, 2, -2, 2, 50]          # singularidad en el origen
+ComplexSurface[gamma(z), -3, 3, -3, 3, 60]     # polos de Γ(z)
+```
+
+Genera una `Surface3DObj` cuya altura es `|f(x + iy)|`. Se renderiza con
+el pipeline GPU de superficies paramétricas existente. Alias:
+`complexsurface`, `csurface`.
+
+#### Animación trigonométrica
+
+Menú **Herramientas → Animación Trigonométrica** (o `Tool::TrigAnimation`)
+abre un panel lateral con:
+
+- **Círculo unitario** con vector radio animado y proyecciones a ejes
+  (coseno en verde, seno en azul).
+- **Gráfico 2D** sincronizado de `sin(t)`, `cos(t)` o `tan(t)` con
+  línea vertical marcando el ángulo actual.
+- **Controles** play/pause, slider de velocidad (±3 rad/s), slider
+  manual del ángulo (±2π) y etiqueta del valor numérico en tiempo real.
+
 ### Solver de restricciones
 
 Grafito resuelve sistemas de restricciones geométricas con el método de Newton usando Jacobianos analíticos. Las restricciones se pueden combinar: por ejemplo, un triángulo con distancias fijas y un ángulo recto.
@@ -331,6 +410,16 @@ Hypercube[angle1, angle2, angle3]   # teseracto proyectado
 ### Renderizado GPU
 
 El canvas 2D y 3D se renderizan con `wgpu` (WebGPU) usando compute shaders que compilan las expresiones del usuario a bytecode WGSL en tiempo de ejecución. Si la GPU no está disponible, Grafito usa automáticamente el camino de CPU. Esto acelera la evaluación de funciones, curvas implícitas y superficies paramétricas en órdenes de magnitud comparado con la CPU.
+
+Pipelines de cómputo disponibles (`crates/grafito-render/src/`):
+
+- `function_compute` — evalúa `y = f(x)` en una grilla 1D.
+- `implicit_compute` — evalúa `f(x, y) = 0` sobre una grilla 2D para marching squares.
+- `parametric_compute` — evalúa curvas 2D/3D y superficies paramétricas.
+- `vector_compute` — evalúa campos vectoriales 2D.
+- `complex_compute` — evalúa expresiones complejas sobre vértices (usado en `ComplexMapping`).
+- `domain_coloring_compute` — **nuevo en 1.1.9-beta**: evalúa `f(z)` sobre una grilla 2D y produce colores HSL por celda (hasta 250 000 celdas por dispatch, usado por `DomainColoring[...]`).
+- `fill_compute` — pinta regiones rellenas de curvas implícitas.
 
 ---
 

@@ -1,12 +1,13 @@
 use geo::BooleanOps;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
-    Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, ComplexMappingObj, Cone3DObj, Cube3DObj,
-    Cylinder3DObj, Document, EllipseObj, Fractal2DObj, FunctionObj, GeoObject, HistogramObj,
-    HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, LineKind, LineObj, MoebiusStripObj,
-    ObjectId, ParabolaObj, ParametricCurve2DObj, PhasePortraitObj, Point3DObj, PointObj,
-    PolarCurveObj, PolygonObj, RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj,
-    Sphere3DObj, Surface3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
+    Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj,
+    Cone3DObj, Cube3DObj, Cylinder3DObj, Document, EllipseObj, Fractal2DObj, FunctionObj,
+    GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, LineKind, LineObj,
+    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj,
+    PhasePortraitObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, RegressionLineObj,
+    RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj, Torus3DObj,
+    VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -196,12 +197,15 @@ pub fn parse_numeric_arg(s: &str, variables: &HashMap<String, f64>) -> Result<f6
 }
 
 /// Parse attractor parameters, supporting key=value syntax.
-fn parse_attractor_params(args: &[String]) -> Vec<f64> {
+fn parse_attractor_params(
+    args: &[String],
+    variables: &std::collections::HashMap<String, f64>,
+) -> Vec<f64> {
     args.iter()
         .filter_map(|s| {
             // Handle key=value: extract RHS
             let rhs = s.split('=').next_back().unwrap_or(s).trim();
-            rhs.parse::<f64>().ok()
+            parse_numeric_arg(rhs, variables).ok()
         })
         .collect()
 }
@@ -1270,61 +1274,6 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
-            "Intersect" if cmd.args.len() == 2 => {
-                let label_a = cmd.args[0].trim();
-                let label_b = cmd.args[1].trim();
-                let id_a = find_object_by_label(document, label_a);
-                let id_b = find_object_by_label(document, label_b);
-                if let (Some(id_a), Some(id_b)) = (id_a, id_b) {
-                    let obj_a = document.get_object(id_a).cloned();
-                    let obj_b = document.get_object(id_b).cloned();
-                    if let (Some(obj_a), Some(obj_b)) = (obj_a, obj_b) {
-                        let pts = intersect_objects(&obj_a, &obj_b);
-                        match pts.len() {
-                            0 => result = CommandOutcome::Message("No intersection".into()),
-                            1 => {
-                                let p = pts[0];
-                                document.add_constructed_object(
-                                    GeoObject::Point(PointObj::new(p).with_label("I")),
-                                    "Intersect",
-                                    &[id_a, id_b],
-                                );
-                                result = CommandOutcome::Message(format!(
-                                    "Intersection at ({:.4}, {:.4})",
-                                    p.x, p.y
-                                ));
-                            }
-                            2 => {
-                                let p1 = pts[0];
-                                let p2 = pts[1];
-                                document.add_constructed_object(
-                                    GeoObject::Point(PointObj::new(p1).with_label("I\u{2081}")),
-                                    "Intersect",
-                                    &[id_a, id_b],
-                                );
-                                document.add_constructed_object(
-                                    GeoObject::Point(PointObj::new(p2).with_label("I\u{2082}")),
-                                    "Intersect",
-                                    &[id_a, id_b],
-                                );
-                                result = CommandOutcome::Message(format!(
-                                    "Two intersections: ({:.4}, {:.4}) and ({:.4}, {:.4})",
-                                    p1.x, p1.y, p2.x, p2.y
-                                ));
-                            }
-                            _ => {
-                                result = CommandOutcome::Message(
-                                    "Infinite intersections (coincident)".into(),
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    result = CommandOutcome::Error("Usage: Intersect[obj1, obj2]".into());
-                }
-                input_text.clear();
-                return result;
-            }
             "PerpendicularBisector" if cmd.args.len() == 2 => {
                 if let (Ok((x1, y1)), Ok((x2, y2))) =
                     (parse_point_str(&cmd.args[0]), parse_point_str(&cmd.args[1]))
@@ -1932,51 +1881,40 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 return result;
             }
             "Curve3D" if cmd.args.len() >= 3 => {
-                let exprs = cmd.args[0].trim();
-                let t_min: f64 = cmd.args[1].trim().parse().unwrap_or(0.0);
-                let t_max: f64 = parse_numeric_arg(&cmd.args[2], &document.variables)
+                let inner = cmd.args[0]
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')');
+                let parts = split_args(inner);
+                if parts.len() < 3 {
+                    input_text.clear();
+                    return CommandOutcome::Error(
+                        "Curve3D: se requieren tres expresiones (x(t), y(t), z(t))".into(),
+                    );
+                }
+
+                let (t_min_idx, t_max_idx) = if cmd.args.len() >= 4
+                    && cmd.args[1]
+                        .trim()
+                        .chars()
+                        .all(|c| c.is_ascii_alphabetic() || c == '_')
+                {
+                    (2, 3)
+                } else {
+                    (1, 2)
+                };
+                let t_min =
+                    parse_numeric_arg(&cmd.args[t_min_idx], &document.variables).unwrap_or(0.0);
+                let t_max = parse_numeric_arg(&cmd.args[t_max_idx], &document.variables)
                     .unwrap_or(std::f64::consts::TAU);
-                let steps = 200;
-                let mut pts = Vec::new();
-                for i in 0..=steps {
-                    let t = t_min + (t_max - t_min) * i as f64 / steps as f64;
-                    let mut vars = document.variables.clone();
-                    vars.insert("t".to_string(), t);
-                    let inner = exprs.trim_start_matches('(').trim_end_matches(')');
-                    let parts: Vec<&str> = inner.split(',').collect();
-                    if parts.len() >= 3 {
-                        let vals: Vec<f64> = parts
-                            .iter()
-                            .filter_map(|s| {
-                                let expr = s.trim();
-                                eval_function_with_vars(expr, t, &vars).ok().or_else(|| {
-                                    evaluate(
-                                        expr,
-                                        &vars
-                                            .iter()
-                                            .map(|(k, v)| (k.clone(), *v))
-                                            .collect::<Vec<_>>(),
-                                    )
-                                    .ok()
-                                })
-                            })
-                            .collect();
-                        if vals.len() >= 3 {
-                            pts.push(Point3D::new(vals[0], vals[1], vals[2]));
-                        }
-                    }
-                }
-                if pts.len() >= 2 {
-                    let mut segs = Vec::new();
-                    for i in 1..pts.len() {
-                        segs.push((pts[i - 1], pts[i]));
-                    }
-                    for (a, b) in &segs {
-                        document.add_object(GeoObject::Segment3D(
-                            Segment3DObj::new(*a, *b).with_label("C3"),
-                        ));
-                    }
-                }
+                let obj = GeoObject::ParametricCurve3D(ParametricCurve3DObj::new(
+                    parts[0].trim(),
+                    parts[1].trim(),
+                    parts[2].trim(),
+                    t_min,
+                    t_max,
+                ));
+                document.add_object(obj);
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
@@ -2061,8 +1999,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             "Script" if !cmd.args.is_empty() => {
                 const MAX_SCRIPT_COMMANDS: usize = 100;
                 const MAX_SCRIPT_DEPTH: u32 = 5;
-                // Detectar recursión de Script anidados
-                let script_count = cmd.args[0].matches("Script[").count();
+                // Detectar recursión de Script anidados. La comparación es
+                // insensible a mayúsculas para evitar el bypass
+                // `Script[script[...]]` que escapa al conteo de mayúsculas.
+                let lower = cmd.args[0].to_lowercase();
+                let script_count = lower.matches("script[").count();
                 if script_count > MAX_SCRIPT_DEPTH as usize {
                     result =
                         CommandOutcome::Error("Script: profundidad de anidamiento excedida".into());
@@ -2123,7 +2064,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![10.0, 28.0, 8.0 / 3.0]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 if params.is_empty() {
                     input_text.clear();
@@ -2138,7 +2079,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.2, 0.2, 5.7]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("rossler", params));
                 document.add_object(obj);
@@ -2149,7 +2090,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.208186]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("thomas", params));
                 document.add_object(obj);
@@ -2160,7 +2101,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![0.95, 0.7, 0.6, 3.5, 0.25, 0.1]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("aizawa", params));
                 document.add_object(obj);
@@ -2171,7 +2112,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![35.0, 3.0, 28.0]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("chen", params));
                 document.add_object(obj);
@@ -2182,7 +2123,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![1.4, 0.0, 0.0, 0.0]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("halvorsen", params));
                 document.add_object(obj);
@@ -2193,7 +2134,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![3.0, 2.7, 1.7, 2.0, 9.0]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("dadras", params));
                 document.add_object(obj);
@@ -2204,7 +2145,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 let params = if cmd.args.is_empty() || cmd.args[0].trim().is_empty() {
                     vec![15.6, 28.0, -1.143, -0.714]
                 } else {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 };
                 let obj = GeoObject::Attractor3D(Attractor3DObj::new("chua", params));
                 document.add_object(obj);
@@ -2243,7 +2184,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
             "Hypercube" => {
                 let angles = if cmd.args.len() >= 3 {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 } else {
                     vec![0.3, 0.5, 0.7]
                 };
@@ -2255,7 +2196,7 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
             "Hypersphere" => {
                 let angles = if cmd.args.len() >= 3 {
-                    parse_attractor_params(&cmd.args)
+                    parse_attractor_params(&cmd.args, &document.variables)
                 } else {
                     vec![0.3, 0.5, 0.7]
                 };
@@ -3009,9 +2950,25 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     .unwrap_or(target_label);
                 let resolved = find_object_by_label(document, target_label)
                     .or_else(|| find_object_by_label(document, base_label));
+                let resolved = resolved.or_else(|| {
+                    if base_label == "I" {
+                        Some(
+                            document.add_object(GeoObject::ImplicitCurve(
+                                ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less)
+                                    .with_label("I"),
+                            )),
+                        )
+                    } else {
+                        None
+                    }
+                });
                 match resolved {
                     Some(id) => {
-                        let cm = ComplexMappingObj::new(expr, id);
+                        let cm = ComplexMappingObj::new_with_symbol(
+                            expr,
+                            id,
+                            document.complex_base_symbol.as_str(),
+                        );
                         document.add_object(GeoObject::ComplexMapping(cm));
                         input_text.clear();
                         return CommandOutcome::Message(format!(
@@ -3023,6 +2980,34 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                             "ComplexMapping: objeto '{target_label}' no encontrado"
                         ));
                     }
+                }
+            }
+            "ComplexIntegral" | "Gauss" if cmd.args.len() == 2 => {
+                let expr = cmd.args[0].trim();
+                let target_label = cmd.args[1].trim();
+
+                let is_gauss = cmd.command.eq_ignore_ascii_case("Gauss");
+
+                if let Some(target_id) = find_object_by_label(document, target_label) {
+                    let integral = ComplexIntegralObj::new(expr, target_id, is_gauss);
+                    document.add_object(GeoObject::ComplexIntegral(integral));
+                    input_text.clear();
+                    if is_gauss {
+                        return CommandOutcome::Message(format!(
+                            "Gauss (Residuos): {} sobre {}",
+                            expr, target_label
+                        ));
+                    } else {
+                        return CommandOutcome::Message(format!(
+                            "Integral de Contorno: {} sobre {}",
+                            expr, target_label
+                        ));
+                    }
+                } else {
+                    return CommandOutcome::Error(format!(
+                        "Integral: objeto '{}' no encontrado",
+                        target_label
+                    ));
                 }
             }
             "DomainColoring" if !cmd.args.is_empty() => {
@@ -3101,9 +3086,6 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 return CommandOutcome::Message(format!("Heat map ({}x{}) created", res, res));
             }
             "ComplexSymbol" if !cmd.args.is_empty() => {
-                // Cambia el símbolo base de los números complejos (default "z")
-                // a otro (p.ej. "w"). Migra labels y reescribe exprs de
-                // ComplexGrid/ComplexMapping existentes.
                 let new_sym = cmd.args[0].trim();
                 if new_sym.is_empty() {
                     return CommandOutcome::Error("Símbolo vacío".into());
@@ -3111,6 +3093,77 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 document.migrate_complex_symbol(new_sym);
                 input_text.clear();
                 return CommandOutcome::Message(format!("Símbolo base cambiado a '{}'", new_sym));
+            }
+            "ComplexSurface" if !cmd.args.is_empty() => {
+                let x_min = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-3.0);
+                let x_max = cmd
+                    .args
+                    .get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(3.0);
+                let y_min = cmd
+                    .args
+                    .get(3)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-3.0);
+                let y_max = cmd
+                    .args
+                    .get(4)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(3.0);
+                let mesh_res: usize = cmd
+                    .args
+                    .get(5)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(40);
+                let expr = cmd.args[0].trim();
+                let expr = expr.strip_prefix("f(z)=").unwrap_or(expr);
+                let expr = expr.strip_prefix("w=").unwrap_or(expr);
+                let mut surf = grafito_core::object::Surface3DObj::new_complex(
+                    expr,
+                    (x_min, x_max),
+                    (y_min, y_max),
+                );
+                surf.mesh_res = mesh_res.min(100);
+                surf.color = grafito_geometry::Color::new(0.4, 0.6, 1.0, 1.0);
+                document.add_object(GeoObject::Surface3D(surf));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "ComplexSurface |{}| [{}..{}]×[{}..{}], res={}",
+                    expr, x_min, x_max, y_min, y_max, mesh_res
+                ));
+            }
+            "Quadrants" => {
+                let x_min = cmd
+                    .args
+                    .first()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let x_max = cmd
+                    .args
+                    .get(1)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
+                let y_min = cmd
+                    .args
+                    .get(2)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(-5.0);
+                let y_max = cmd
+                    .args
+                    .get(3)
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(5.0);
+                let mut cg = ComplexGridObj::new("z", x_min, x_max, y_min, y_max);
+                cg.render_mode = 4;
+                cg.density = 20;
+                document.add_object(GeoObject::ComplexGrid(cg));
+                input_text.clear();
+                return CommandOutcome::Message("Cuadrantes del plano complejo creados".into());
             }
             "PolarCurve" if cmd.args.len() >= 3 => {
                 let expr = cmd.args[0].trim();
@@ -3139,14 +3192,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 return CommandOutcome::Message("Parametric curve created".into());
             }
             "Function" if !cmd.args.is_empty() => {
-                let expr = cmd.args.join(", ");
-                if expr.trim().is_empty() {
+                let expr = cmd.args[0].trim();
+                if expr.is_empty() {
                     input_text.clear();
                     return CommandOutcome::Error("Function: se requiere una expresión".into());
                 }
                 let label = next_function_label(document);
                 document.add_object(GeoObject::Function(
-                    FunctionObj::new(&expr).with_label(&label),
+                    FunctionObj::new(expr).with_label(&label),
                 ));
                 input_text.clear();
                 return CommandOutcome::Message(format!("Función {} → {}", expr, label));
@@ -3492,95 +3545,6 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
     }
 }
 
-fn intersect_objects(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
-    use grafito_geometry::intersections::{self, IntersectionResult};
-
-    match (obj_a, obj_b) {
-        (GeoObject::Line(a), GeoObject::Line(b)) => {
-            match intersections::line_line(a.start, a.end, b.start, b.end) {
-                IntersectionResult::One(p) => {
-                    let t_a = a.param_at_point(p);
-                    let t_b = b.param_at_point(p);
-                    if a.kind_contains_t(t_a) && b.kind_contains_t(t_b) {
-                        vec![p]
-                    } else {
-                        vec![]
-                    }
-                }
-                _ => vec![],
-            }
-        }
-        (GeoObject::Line(l), GeoObject::Circle(c)) | (GeoObject::Circle(c), GeoObject::Line(l)) => {
-            match intersections::line_circle(l.start, l.end, c.center, c.radius) {
-                IntersectionResult::One(p) => {
-                    if l.kind_contains_t(l.param_at_point(p)) {
-                        vec![p]
-                    } else {
-                        vec![]
-                    }
-                }
-                IntersectionResult::Two(p1, p2) => {
-                    let mut pts = Vec::new();
-                    for p in [p1, p2] {
-                        if l.kind_contains_t(l.param_at_point(p)) {
-                            pts.push(p);
-                        }
-                    }
-                    pts
-                }
-                _ => vec![],
-            }
-        }
-        (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
-            match intersections::circle_circle(c1.center, c1.radius, c2.center, c2.radius) {
-                IntersectionResult::One(p) => vec![p],
-                IntersectionResult::Two(p1, p2) => vec![p1, p2],
-                IntersectionResult::Infinite => vec![],
-                IntersectionResult::None => vec![],
-            }
-        }
-        (GeoObject::Function(f), GeoObject::Line(l))
-        | (GeoObject::Line(l), GeoObject::Function(f)) => {
-            let slope = if (l.end.x - l.start.x).abs() < 1e-12 {
-                0.0
-            } else {
-                (l.end.y - l.start.y) / (l.end.x - l.start.x)
-            };
-            let intercept = l.start.y - slope * l.start.x;
-            let x_min = f.domain_min.unwrap_or(-10.0);
-            let x_max = f.domain_max.unwrap_or(10.0);
-            intersections::function_line(&f.expr, slope, intercept, x_min, x_max)
-                .into_iter()
-                .filter(|p| l.kind_contains_t(l.param_at_point(*p)))
-                .collect()
-        }
-        (GeoObject::Function(f1), GeoObject::Function(f2)) => {
-            let x_min = f1
-                .domain_min
-                .unwrap_or(-10.0)
-                .max(f2.domain_min.unwrap_or(-10.0));
-            let x_max = f1
-                .domain_max
-                .unwrap_or(10.0)
-                .min(f2.domain_max.unwrap_or(10.0));
-            intersections::function_function(&f1.expr, &f2.expr, x_min, x_max)
-        }
-        (GeoObject::Segment3D(a), GeoObject::Segment3D(b)) => {
-            match intersections::segment_segment(
-                Point2::new(a.a.x, a.a.y),
-                Point2::new(a.b.x, a.b.y),
-                Point2::new(b.a.x, b.a.y),
-                Point2::new(b.b.x, b.b.y),
-            ) {
-                IntersectionResult::One(p) => vec![p],
-                IntersectionResult::Two(p1, p2) => vec![p1, p2],
-                _ => vec![],
-            }
-        }
-        _ => vec![],
-    }
-}
-
 #[derive(Debug)]
 pub struct CasCmd {
     pub command: String,
@@ -3827,11 +3791,15 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "inverse" | "inversa" => "Inverse",
             "taylor" => "Taylor",
             "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
+            "complexsurface" | "complex_surface" | "csurface" => "ComplexSurface",
+            "quadrants" | "cuadrantes" => "Quadrants",
             "complexmapping"
             | "complex_mapping"
             | "mapeocomplejo"
             | "mapeo_complejo"
             | "transformadacompleja" => "ComplexMapping",
+            "integralcompleja" | "contourintegral" | "complexintegral" => "ComplexIntegral",
+            "gauss" | "residuos" | "residue" => "Gauss",
             "complexsymbol" | "complex_symbol" | "simbolocomplejo" => "ComplexSymbol",
             "domaincoloring" | "domain_coloring" | "dcolor" => "DomainColoring",
             "heatmap" | "heat_map" | "hmap" => "HeatMap",

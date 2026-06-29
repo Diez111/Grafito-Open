@@ -8,6 +8,7 @@
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
     Document, FunctionObj, GeoObject, ParametricCurve2DObj, PolarCurveObj, PolygonObj,
+    RelationOperator,
 };
 
 fn point_obj_count(doc: &Document) -> usize {
@@ -59,6 +60,55 @@ fn complex_mapping_missing_target_returns_error() {
         "ComplexMapping on missing target should error, got {:?}",
         outcome
     );
+}
+
+#[test]
+fn complex_mapping_one_over_z_auto_creates_unit_disk_i() {
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/z, I]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexMapping[1/z, I] should create default I, got {:?}",
+        outcome
+    );
+
+    let unit_disk_id = doc.objects_iter().find_map(|(id, obj)| match obj {
+        GeoObject::ImplicitCurve(ic)
+            if ic.label == "I"
+                && ic.expr_lhs == "x^2 + y^2"
+                && ic.expr_rhs == "1"
+                && ic.operator == RelationOperator::Less =>
+        {
+            Some(*id)
+        }
+        _ => None,
+    });
+    let unit_disk_id = unit_disk_id.expect("default implicit disk I should exist");
+
+    let cm = doc.objects_iter().find_map(|(_, obj)| match obj {
+        GeoObject::ComplexMapping(cm) => Some(cm),
+        _ => None,
+    });
+    let cm = cm.expect("ComplexMapping object should exist");
+    assert_eq!(cm.target, unit_disk_id);
+    assert!(cm.conformal_cache.is_some());
+}
+
+#[test]
+fn complex_mapping_auto_i_uses_current_complex_symbol() {
+    let mut doc = Document::new();
+    let _ = process_input(&mut doc, &mut "ComplexSymbol[w]".to_string());
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/w, I]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexMapping[1/w, I] should work after ComplexSymbol[w], got {:?}",
+        outcome
+    );
+    let cm = doc.objects_iter().find_map(|(_, obj)| match obj {
+        GeoObject::ComplexMapping(cm) => Some(cm),
+        _ => None,
+    });
+    assert!(cm.and_then(|cm| cm.conformal_cache).is_some());
 }
 
 #[test]

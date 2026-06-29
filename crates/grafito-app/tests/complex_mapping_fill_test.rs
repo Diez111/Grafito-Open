@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use grafito_app::render_2d::{
     complex_mapping_region_contains, complex_mapping_segment_strokes, fill_cache_view_uv,
 };
+use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::{ImplicitCurveObj, RelationOperator};
-use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
 use grafito_geometry::Point2;
 
 #[test]

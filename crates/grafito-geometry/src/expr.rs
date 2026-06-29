@@ -804,7 +804,6 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
 
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
-    let expr_raw = expr;
     let expr = preprocess_expr(expr);
 
     // FAST PATH: try custom AST parser first
@@ -814,7 +813,12 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
     if let Ok(mut ast) = crate::ast::parse_ast(&expr) {
         ast = ast.substitute_vars(&vars_map, &ignore).simplify();
         // For 1-var functions, use eval_at
-        if vars.len() == 1 {
+        if vars.is_empty() {
+            let result = ast.eval_2d("__x", 0.0, "__y", 0.0);
+            if result.is_finite() {
+                return Ok(result);
+            }
+        } else if vars.len() == 1 {
             let (var, val) = &vars[0];
             let result = ast.eval_at(var, *val);
             if result.is_finite() {
@@ -838,21 +842,6 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
         }
     }
 
-    // COMPLEX PATH: try complex evaluation if expression contains standalone 'i'
-    if has_standalone_i(expr_raw) {
-        if let Ok(complex_ast) = crate::complex_expr::parse(expr_raw) {
-            let mut cmap = std::collections::HashMap::new();
-            for (name, val) in vars {
-                cmap.insert(name.clone(), num_complex::Complex64::new(*val, 0.0));
-            }
-            if let Ok(result) = complex_ast.eval(&cmap) {
-                if result.re.is_finite() {
-                    return Ok(result.re);
-                }
-            }
-        }
-    }
-
     // SLOW PATH FALLBACK: evalexpr
     let mut ctx = setup_math_context();
     for (name, val) in vars {
@@ -869,20 +858,6 @@ pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
         )),
         Err(e) => Err(format!("Evaluation error: {}", e)),
     }
-}
-
-fn has_standalone_i(expr: &str) -> bool {
-    let chars: Vec<char> = expr.chars().collect();
-    for idx in 0..chars.len() {
-        if chars[idx] == 'i' || chars[idx] == 'I' {
-            let prev_bound = idx == 0 || !chars[idx - 1].is_ascii_alphabetic();
-            let next_bound = idx + 1 >= chars.len() || !chars[idx + 1].is_ascii_alphabetic();
-            if prev_bound && next_bound {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Evaluate a function f(x) expression.
@@ -939,26 +914,6 @@ pub fn eval_batch_1d(
     }
 
     let expr_clean = preprocess_expr(expr_clean);
-    let is_complex = has_standalone_i(expr.trim());
-
-    // COMPLEX PATH: if expression contains i, use complex evaluator
-    if is_complex {
-        if let Ok(complex_ast) = crate::complex_expr::parse(expr.trim()) {
-            let mut cmap = std::collections::HashMap::new();
-            for (k, v) in vars {
-                cmap.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
-            }
-            let mut results = Vec::new();
-            for x in xs.clone() {
-                cmap.insert(var_name.to_string(), num_complex::Complex64::new(x, 0.0));
-                match complex_ast.eval(&cmap) {
-                    Ok(val) if val.re.is_finite() => results.push(Some(val.re)),
-                    _ => results.push(None),
-                }
-            }
-            return Ok(results);
-        }
-    }
 
     // FAST PATH: try to parse with our custom AST
     if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
@@ -1134,10 +1089,415 @@ pub fn prepare_function_ast(
 /// by the native AST (e.g. it uses evalexpr-only syntax), it falls back to a
 /// pre-built evalexpr operator tree. Constants supplied at compile time are
 /// substituted once.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Opcode {
+    PushConst(f64),
+    PushVar1,
+    PushVar2,
+    PushVar3,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Pow,
+    Neg,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Exp,
+    Ln,
+    Log,
+    Sqrt,
+    Abs,
+    Sinh,
+    Cosh,
+    Tanh,
+    Floor,
+    Ceil,
+    Round,
+    Sec,
+    Csc,
+    Cot,
+    Asinh,
+    Acosh,
+    Atanh,
+    Sign,
+    Heaviside,
+    Cbrt,
+    Atan2,
+    Modulo,
+    Min,
+    Max,
+    Clamp,
+    Erf,
+    Erfc,
+    Gamma,
+    LnGamma,
+    Digamma,
+    Beta,
+    BesselJ,
+    BesselY,
+    BesselI,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Eq,
+    Ne,
+}
+
+pub fn compile_ast(
+    ast: &crate::ast::Expr,
+    ops: &mut Vec<Opcode>,
+    v1: &str,
+    v2: &str,
+    v3: &str,
+) -> bool {
+    use crate::ast::Expr::*;
+    match ast {
+        Const(c) => ops.push(Opcode::PushConst(*c)),
+        Var(v) => {
+            if v == v1 {
+                ops.push(Opcode::PushVar1);
+            } else if v == v2 {
+                ops.push(Opcode::PushVar2);
+            } else if v == v3 {
+                ops.push(Opcode::PushVar3);
+            } else {
+                return false;
+            }
+        }
+        Add(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Add);
+        }
+        Sub(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sub);
+        }
+        Mul(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Mul);
+        }
+        Div(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Div);
+        }
+        Pow(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Pow);
+        }
+        Neg(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Neg);
+        }
+        Sin(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sin);
+        }
+        Cos(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Cos);
+        }
+        Tan(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Tan);
+        }
+        Asin(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Asin);
+        }
+        Acos(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Acos);
+        }
+        Atan(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Atan);
+        }
+        Exp(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Exp);
+        }
+        Ln(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Ln);
+        }
+        Log(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Log);
+        }
+        Sqrt(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sqrt);
+        }
+        Abs(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Abs);
+        }
+        Sinh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sinh);
+        }
+        Cosh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Cosh);
+        }
+        Tanh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Tanh);
+        }
+        Floor(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Floor);
+        }
+        Ceil(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Ceil);
+        }
+        Round(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Round);
+        }
+        Sec(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sec);
+        }
+        Csc(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Csc);
+        }
+        Cot(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Cot);
+        }
+        Asinh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Asinh);
+        }
+        Acosh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Acosh);
+        }
+        Atanh(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Atanh);
+        }
+        Sign(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Sign);
+        }
+        Heaviside(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Heaviside);
+        }
+        Cbrt(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Cbrt);
+        }
+        Atan2(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Atan2);
+        }
+        Modulo(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Modulo);
+        }
+        Min(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Min);
+        }
+        Max(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Max);
+        }
+        Clamp(x, lo, hi) => {
+            if !compile_ast(x, ops, v1, v2, v3)
+                || !compile_ast(lo, ops, v1, v2, v3)
+                || !compile_ast(hi, ops, v1, v2, v3)
+            {
+                return false;
+            }
+            ops.push(Opcode::Clamp);
+        }
+        Erf(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Erf);
+        }
+        Erfc(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Erfc);
+        }
+        Gamma(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Gamma);
+        }
+        LnGamma(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::LnGamma);
+        }
+        Digamma(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Digamma);
+        }
+        Beta(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Beta);
+        }
+        BesselJ(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::BesselJ);
+        }
+        BesselY(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::BesselY);
+        }
+        BesselI(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::BesselI);
+        }
+        Lt(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Lt);
+        }
+        Gt(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Gt);
+        }
+        Le(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Le);
+        }
+        Ge(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Ge);
+        }
+        Eq(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Eq);
+        }
+        Ne(a, b) => {
+            if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Ne);
+        }
+        _ => {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Clone)]
 pub struct CompiledExpr {
     ast: Option<crate::ast::Expr>,
     tree: Option<evalexpr::Node>,
+    ops: Option<Vec<Opcode>>,
+    var_names: Vec<String>,
 }
 
 impl CompiledExpr {
@@ -1151,9 +1511,29 @@ impl CompiledExpr {
 
         if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
             ast = ast.substitute_vars(constants, &ignore).simplify();
+
+            let mut ops = Vec::new();
+            let mut var_names = Vec::new();
+            let mut success = false;
+
+            let mut vars_set = std::collections::HashSet::new();
+            ast.get_variables(&mut vars_set);
+            let vars_list: Vec<String> = vars_set.into_iter().collect();
+            if vars_list.len() <= 3 {
+                let v1 = vars_list.first().map(|s| s.as_str()).unwrap_or("");
+                let v2 = vars_list.get(1).map(|s| s.as_str()).unwrap_or("");
+                let v3 = vars_list.get(2).map(|s| s.as_str()).unwrap_or("");
+                if compile_ast(&ast, &mut ops, v1, v2, v3) {
+                    success = true;
+                    var_names = vars_list.clone();
+                }
+            }
+
             return Ok(Self {
                 ast: Some(ast),
                 tree: None,
+                ops: if success { Some(ops) } else { None },
+                var_names,
             });
         }
 
@@ -1162,12 +1542,295 @@ impl CompiledExpr {
         Ok(Self {
             ast: None,
             tree: Some(tree),
+            ops: None,
+            var_names: Vec::new(),
         })
     }
 
     /// Evaluate the compiled expression with the given variable values.
     /// The variable names must match those supplied at construction time.
     pub fn eval(&self, vars: &[(String, f64)]) -> Result<f64, String> {
+        if let Some(ops) = &self.ops {
+            let mut v1 = 0.0;
+            let mut v2 = 0.0;
+            let mut v3 = 0.0;
+
+            for (name, val) in vars {
+                if !self.var_names.is_empty() && name == &self.var_names[0] {
+                    v1 = *val;
+                } else if self.var_names.len() > 1 && name == &self.var_names[1] {
+                    v2 = *val;
+                } else if self.var_names.len() > 2 && name == &self.var_names[2] {
+                    v3 = *val;
+                }
+            }
+
+            let mut stack = [0.0; 256];
+            let mut sp = 0;
+
+            for op in ops {
+                match op {
+                    Opcode::PushConst(c) => {
+                        stack[sp] = *c;
+                        sp += 1;
+                    }
+                    Opcode::PushVar1 => {
+                        stack[sp] = v1;
+                        sp += 1;
+                    }
+                    Opcode::PushVar2 => {
+                        stack[sp] = v2;
+                        sp += 1;
+                    }
+                    Opcode::PushVar3 => {
+                        stack[sp] = v3;
+                        sp += 1;
+                    }
+                    Opcode::Add => {
+                        sp -= 1;
+                        stack[sp - 1] += stack[sp];
+                    }
+                    Opcode::Sub => {
+                        sp -= 1;
+                        stack[sp - 1] -= stack[sp];
+                    }
+                    Opcode::Mul => {
+                        sp -= 1;
+                        stack[sp - 1] *= stack[sp];
+                    }
+                    Opcode::Div => {
+                        sp -= 1;
+                        stack[sp - 1] /= stack[sp];
+                    }
+                    Opcode::Pow => {
+                        sp -= 1;
+                        stack[sp - 1] = stack[sp - 1].powf(stack[sp]);
+                    }
+                    Opcode::Neg => {
+                        stack[sp - 1] = -stack[sp - 1];
+                    }
+                    Opcode::Sin => {
+                        stack[sp - 1] = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .sin();
+                    }
+                    Opcode::Cos => {
+                        stack[sp - 1] = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .cos();
+                    }
+                    Opcode::Tan => {
+                        stack[sp - 1] = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .tan();
+                    }
+                    Opcode::Asin => {
+                        stack[sp - 1] = stack[sp - 1].asin();
+                    }
+                    Opcode::Acos => {
+                        stack[sp - 1] = stack[sp - 1].acos();
+                    }
+                    Opcode::Atan => {
+                        stack[sp - 1] = stack[sp - 1].atan();
+                    }
+                    Opcode::Exp => {
+                        stack[sp - 1] = stack[sp - 1].exp();
+                    }
+                    Opcode::Ln => {
+                        stack[sp - 1] = stack[sp - 1].ln();
+                    }
+                    Opcode::Log => {
+                        stack[sp - 1] = stack[sp - 1].log10();
+                    }
+                    Opcode::Sqrt => {
+                        stack[sp - 1] = stack[sp - 1].sqrt();
+                    }
+                    Opcode::Abs => {
+                        stack[sp - 1] = stack[sp - 1].abs();
+                    }
+                    Opcode::Sinh => {
+                        stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
+                            0.0
+                        } else {
+                            stack[sp - 1].sinh()
+                        };
+                    }
+                    Opcode::Cosh => {
+                        stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
+                            0.0
+                        } else {
+                            stack[sp - 1].cosh()
+                        };
+                    }
+                    Opcode::Tanh => {
+                        stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
+                            0.0
+                        } else {
+                            stack[sp - 1].tanh()
+                        };
+                    }
+                    Opcode::Floor => {
+                        stack[sp - 1] = stack[sp - 1].floor();
+                    }
+                    Opcode::Ceil => {
+                        stack[sp - 1] = stack[sp - 1].ceil();
+                    }
+                    Opcode::Round => {
+                        stack[sp - 1] = stack[sp - 1].round();
+                    }
+                    Opcode::Sec => {
+                        let c = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .cos();
+                        stack[sp - 1] = if c.abs() < 1e-15 { f64::NAN } else { 1.0 / c };
+                    }
+                    Opcode::Csc => {
+                        let s = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .sin();
+                        stack[sp - 1] = if s.abs() < 1e-15 { f64::NAN } else { 1.0 / s };
+                    }
+                    Opcode::Cot => {
+                        let t = (if stack[sp - 1].is_finite() {
+                            stack[sp - 1].rem_euclid(std::f64::consts::TAU)
+                        } else {
+                            stack[sp - 1]
+                        })
+                        .tan();
+                        stack[sp - 1] = if t.abs() < 1e-15 { f64::NAN } else { 1.0 / t };
+                    }
+                    Opcode::Asinh => {
+                        stack[sp - 1] = stack[sp - 1].asinh();
+                    }
+                    Opcode::Acosh => {
+                        stack[sp - 1] = stack[sp - 1].acosh();
+                    }
+                    Opcode::Atanh => {
+                        stack[sp - 1] = stack[sp - 1].atanh();
+                    }
+                    Opcode::Sign => {
+                        stack[sp - 1] = stack[sp - 1].signum();
+                    }
+                    Opcode::Heaviside => {
+                        stack[sp - 1] = if stack[sp - 1] >= 0.0 { 1.0 } else { 0.0 };
+                    }
+                    Opcode::Cbrt => {
+                        stack[sp - 1] = stack[sp - 1].cbrt();
+                    }
+                    Opcode::Atan2 => {
+                        sp -= 1;
+                        stack[sp - 1] = stack[sp - 1].atan2(stack[sp]);
+                    }
+                    Opcode::Modulo => {
+                        sp -= 1;
+                        stack[sp - 1] %= stack[sp];
+                    }
+                    Opcode::Min => {
+                        sp -= 1;
+                        stack[sp - 1] = stack[sp - 1].min(stack[sp]);
+                    }
+                    Opcode::Max => {
+                        sp -= 1;
+                        stack[sp - 1] = stack[sp - 1].max(stack[sp]);
+                    }
+                    Opcode::Clamp => {
+                        sp -= 2;
+                        stack[sp - 1] = stack[sp - 1].clamp(stack[sp], stack[sp + 1]);
+                    }
+                    Opcode::Erf => {
+                        stack[sp - 1] = crate::special_functions::erf(stack[sp - 1]);
+                    }
+                    Opcode::Erfc => {
+                        stack[sp - 1] = crate::special_functions::erfc(stack[sp - 1]);
+                    }
+                    Opcode::Gamma => {
+                        stack[sp - 1] = crate::special_functions::gamma(stack[sp - 1]);
+                    }
+                    Opcode::LnGamma => {
+                        stack[sp - 1] = crate::special_functions::ln_gamma(stack[sp - 1]);
+                    }
+                    Opcode::Digamma => {
+                        stack[sp - 1] = crate::special_functions::digamma(stack[sp - 1]);
+                    }
+                    Opcode::Beta => {
+                        sp -= 1;
+                        stack[sp - 1] = crate::special_functions::beta(stack[sp - 1], stack[sp]);
+                    }
+                    Opcode::BesselJ => {
+                        sp -= 1;
+                        stack[sp - 1] = crate::special_functions::bessel_j(
+                            crate::ast::bessel_order(stack[sp - 1]),
+                            stack[sp],
+                        );
+                    }
+                    Opcode::BesselY => {
+                        sp -= 1;
+                        stack[sp - 1] = crate::special_functions::bessel_y(
+                            crate::ast::bessel_order(stack[sp - 1]),
+                            stack[sp],
+                        );
+                    }
+                    Opcode::BesselI => {
+                        sp -= 1;
+                        stack[sp - 1] = crate::special_functions::bessel_i(
+                            crate::ast::bessel_order(stack[sp - 1]),
+                            stack[sp],
+                        );
+                    }
+                    Opcode::Lt => {
+                        sp -= 1;
+                        stack[sp - 1] = if stack[sp - 1] < stack[sp] { 1.0 } else { 0.0 };
+                    }
+                    Opcode::Gt => {
+                        sp -= 1;
+                        stack[sp - 1] = if stack[sp - 1] > stack[sp] { 1.0 } else { 0.0 };
+                    }
+                    Opcode::Le => {
+                        sp -= 1;
+                        stack[sp - 1] = if stack[sp - 1] <= stack[sp] { 1.0 } else { 0.0 };
+                    }
+                    Opcode::Ge => {
+                        sp -= 1;
+                        stack[sp - 1] = if stack[sp - 1] >= stack[sp] { 1.0 } else { 0.0 };
+                    }
+                    Opcode::Eq => {
+                        sp -= 1;
+                        stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() < 1e-9 {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                    Opcode::Ne => {
+                        sp -= 1;
+                        stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() >= 1e-9 {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            }
+            if sp == 1 && stack[0].is_finite() {
+                return Ok(stack[0]);
+            }
+        }
+
         if let Some(ast) = &self.ast {
             match vars.len() {
                 1 => {
@@ -1195,8 +1858,6 @@ impl CompiledExpr {
                     }
                 }
                 _ => {
-                    // Generic path: substitute all supplied variables into the
-                    // AST, simplify, and read the resulting constant.
                     let vars_map: HashMap<String, f64> =
                         vars.iter().map(|(k, v)| (k.clone(), *v)).collect();
                     let substituted = ast.clone().substitute_vars(&vars_map, &[]).simplify();

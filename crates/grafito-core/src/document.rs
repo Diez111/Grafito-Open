@@ -297,6 +297,8 @@ impl Document {
                 GeoObject::Torus3D(o) => o.label = label,
                 GeoObject::MoebiusStrip(o) => o.label = label,
                 GeoObject::PhasePortrait(o) => o.label = label,
+                GeoObject::Transformed(o) => o.inner.set_label(label),
+                GeoObject::ComplexIntegral(o) => o.label = label,
             }
             obj
         } else {
@@ -1220,7 +1222,10 @@ impl Document {
         if let Some(GeoObject::ImplicitCurve(ic)) = self.objects.get(&id) {
             ic.cached_segments
                 .read()
-                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(|p| {
+                    log::warn!("cache lock envenenado; recuperando estado parcial");
+                    p.into_inner()
+                })
                 .clone()
         } else {
             Vec::new()
@@ -1601,8 +1606,10 @@ impl Document {
             // 3D objects and complex objects - use bounding box or return false
             GeoObject::VectorField2D(_)
             | GeoObject::PhasePortrait(_)
+            | GeoObject::Transformed(_)
             | GeoObject::ComplexGrid(_)
-            | GeoObject::ComplexMapping(_) => false,
+            | GeoObject::ComplexMapping(_)
+            | GeoObject::ComplexIntegral(_) => false,
             _ => false, // 3D objects require projection, skip for now
         }
     }
@@ -1861,6 +1868,8 @@ impl Document {
                     continue;
                 }
                 GeoObject::PhasePortrait(pp) => (pp.x_min, pp.y_min, pp.x_max, pp.y_max),
+                GeoObject::Transformed(_) => (0.0, 0.0, 0.0, 0.0),
+                GeoObject::ComplexIntegral(_) => (0.0, 0.0, 0.0, 0.0),
                 GeoObject::Pencil(p) => {
                     if p.points.is_empty() {
                         continue;
@@ -1927,10 +1936,10 @@ impl Document {
         match expr {
             Some(e) => {
                 let vars = {
-                    let mut cache = self
-                        .cached_vars_list
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
+                    let mut cache = self.cached_vars_list.lock().unwrap_or_else(|p| {
+                        log::warn!("cache lock envenenado; recuperando estado parcial");
+                        p.into_inner()
+                    });
                     if let Some((ver, cached)) = &*cache {
                         if *ver == self.version {
                             cached.clone()

@@ -231,6 +231,16 @@ pub fn all_commands() -> Vec<PaletteCommand> {
             syntax_hint: "ComplexMapping[expr_compleja, target]",
         },
         PaletteCommand {
+            name: "Gauss",
+            category: "Complejos",
+            syntax_hint: "/Gauss[target_vector_field, closed_curve]",
+        },
+        PaletteCommand {
+            name: "ComplexIntegral",
+            category: "Complejos",
+            syntax_hint: "/ComplexIntegral[expr_compleja, curve]",
+        },
+        PaletteCommand {
             name: "VectorField2D",
             category: "Crear",
             syntax_hint: "VectorField2D[u(x,y), v(x,y)]",

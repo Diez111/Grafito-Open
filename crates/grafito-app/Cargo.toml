@@ -21,6 +21,7 @@ grafito-geometry.workspace = true
 grafito-command.workspace = true
 grafito-ui.workspace = true
 grafito-render.workspace = true
+grafito-complex = { path = "../grafito-complex" }
 
 eframe = { workspace = true, features = ["wgpu"] }
 pollster.workspace = true

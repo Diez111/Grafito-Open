@@ -22,7 +22,7 @@ struct FillParams {
     width: u32,
     height: u32,
     code_len: u32,
-    operator: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
+    op_code: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
     fill_alpha: f32,
     _pad0: u32,
     _pad1: u32,
@@ -436,7 +436,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // NaN is never inside (all comparisons with NaN return false).
     var inside = false;
-    if params.operator <= 1u {
+    if params.op_code <= 1u {
         // Less (0) / LessEq (1): inside = (lhs - rhs) <= 0
         inside = f <= 0.0;
     } else {
@@ -447,8 +447,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.y * params.width + gid.x;
     if inside {
         let a = clamp(params.fill_alpha, 0.0, 1.0);
-        // Premultiplied white mask: R=G=B=A=fill_alpha.
-        output[idx] = packUnorm4x8(vec4(a, a, a, a));
+        // Premultiplied white mask: R=G=B=A=fill_alpha packed as RGBA8 in u32.
+        let v = u32(clamp(a * 255.0 + 0.5, 0.0, 255.0));
+        output[idx] = v | (v << 8u) | (v << 16u) | (v << 24u);
     } else {
         output[idx] = 0u;
     }

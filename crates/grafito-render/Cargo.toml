@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+grafito-complex = { path = "../grafito-complex" }
 
 wgpu.workspace = true
 glam.workspace = true

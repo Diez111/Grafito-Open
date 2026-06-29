@@ -151,6 +151,13 @@ impl ParametricComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Zero-initialize the constants buffer so residual constants from a
+        // previous evaluation cannot leak into the interpreter.
+        queue.write_buffer(
+            &constants_buffer,
+            0,
+            &[0u8; 256 * std::mem::size_of::<f32>()],
+        );
 
         let values_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Parametric Compute Values"),
@@ -260,6 +267,9 @@ impl ParametricComputePipeline {
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            // `unmap` is idempotent: when `map_async` reported an
+            // error the buffer was never mapped, so this is a no-op.
+            self.values_readback.unmap();
             return None;
         }
         let data = slice.get_mapped_range();
@@ -518,7 +528,10 @@ impl ParametricComputePipeline {
             for j in 0..=res {
                 let idx = j * (res + 1) + i;
                 let v = values[idx];
-                row.push(if v.is_finite() { v as f64 } else { f64::NAN });
+                let x = x_min + (i as f64 / res as f64) * (x_max - x_min);
+                let y = y_min + (j as f64 / res as f64) * (y_max - y_min);
+                let z = if v.is_finite() { v as f64 } else { f64::NAN };
+                row.push(grafito_geometry::Point3D::new(x, y, z));
             }
             grid.push(row);
         }
@@ -544,7 +557,10 @@ pub fn maybe_compute_curve_2d_on_gpu(
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
-        let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
             return true;
         }
@@ -554,8 +570,14 @@ pub fn maybe_compute_curve_2d_on_gpu(
         return false;
     };
 
-    *pc.cached_samples.write().unwrap_or_else(|p| p.into_inner()) = samples;
-    *pc.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *pc.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pc.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
     true
 }
 
@@ -577,7 +599,10 @@ pub fn maybe_compute_curve_3d_on_gpu(
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
-        let cached_key = pc.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
             return true;
         }
@@ -587,8 +612,14 @@ pub fn maybe_compute_curve_3d_on_gpu(
         return false;
     };
 
-    *pc.cached_samples.write().unwrap_or_else(|p| p.into_inner()) = samples;
-    *pc.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *pc.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pc.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
     true
 }
 
@@ -610,7 +641,10 @@ pub fn maybe_compute_polar_on_gpu(
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
-        let cached_key = pol.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = pol.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
             return true;
         }
@@ -620,10 +654,14 @@ pub fn maybe_compute_polar_on_gpu(
         return false;
     };
 
-    *pol.cached_samples
-        .write()
-        .unwrap_or_else(|p| p.into_inner()) = samples;
-    *pol.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *pol.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pol.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
     true
 }
 
@@ -645,10 +683,15 @@ pub fn maybe_compute_surface_on_gpu(
         x_domain: (x_min, x_max),
         y_domain: (y_min, y_max),
         res,
+        is_parametric: false,
+        expr_hash: parametric_sampling::surface_expr_hash(surf),
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
-        let cached_key = surf.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = surf.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
             return true;
         }
@@ -658,7 +701,13 @@ pub fn maybe_compute_surface_on_gpu(
         return false;
     };
 
-    *surf.cached_grid.write().unwrap_or_else(|p| p.into_inner()) = grid;
-    *surf.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *surf.cached_grid.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = grid;
+    *surf.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
     true
 }

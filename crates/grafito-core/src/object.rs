@@ -1,6 +1,6 @@
 use crate::id::ObjectId;
 use crate::pencil::PencilObj;
-use grafito_geometry::conformal::algebraic_mappings::ConformalMap;
+use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -42,6 +42,7 @@ pub enum GeoObject {
     VectorField2D(VectorField2DObj),
     ComplexGrid(ComplexGridObj),
     ComplexMapping(ComplexMappingObj),
+    ComplexIntegral(ComplexIntegralObj),
 
     // AM4 Advanced: Attractors, Fractals, 4D, Statistics
     Attractor3D(Attractor3DObj),
@@ -53,6 +54,9 @@ pub enum GeoObject {
     BoxPlot(BoxPlotObj),
     RegressionLine(RegressionLineObj),
     PhasePortrait(PhasePortraitObj),
+
+    // Transformed Wrapper
+    Transformed(TransformedObj),
 }
 
 impl GeoObject {
@@ -83,6 +87,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.id,
             GeoObject::ComplexGrid(o) => o.id,
             GeoObject::ComplexMapping(o) => o.id,
+            GeoObject::ComplexIntegral(o) => o.id,
             GeoObject::ImplicitCurve(o) => o.id,
             GeoObject::Attractor3D(o) => o.id,
             GeoObject::Fractal2D(o) => o.id,
@@ -94,6 +99,7 @@ impl GeoObject {
             GeoObject::RegressionLine(o) => o.id,
             GeoObject::PhasePortrait(o) => o.id,
             GeoObject::Pencil(o) => o.id,
+            GeoObject::Transformed(o) => o.inner.id(),
         }
     }
 
@@ -124,6 +130,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => &o.label,
             GeoObject::ComplexGrid(o) => &o.label,
             GeoObject::ComplexMapping(o) => &o.label,
+            GeoObject::ComplexIntegral(o) => &o.label,
             GeoObject::ImplicitCurve(o) => &o.label,
             GeoObject::Attractor3D(o) => &o.label,
             GeoObject::Fractal2D(o) => &o.label,
@@ -135,6 +142,7 @@ impl GeoObject {
             GeoObject::RegressionLine(o) => &o.label,
             GeoObject::PhasePortrait(o) => &o.label,
             GeoObject::Pencil(o) => &o.label,
+            GeoObject::Transformed(o) => o.inner.label(),
         }
     }
 
@@ -165,6 +173,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.label = label,
             GeoObject::ComplexGrid(o) => o.label = label,
             GeoObject::ComplexMapping(o) => o.label = label,
+            GeoObject::ComplexIntegral(o) => o.label = label,
             GeoObject::ImplicitCurve(o) => o.label = label,
             GeoObject::Attractor3D(o) => o.label = label,
             GeoObject::Fractal2D(o) => o.label = label,
@@ -176,6 +185,7 @@ impl GeoObject {
             GeoObject::RegressionLine(o) => o.label = label,
             GeoObject::PhasePortrait(o) => o.label = label,
             GeoObject::Pencil(o) => o.label = label,
+            GeoObject::Transformed(o) => o.inner.set_label(label),
         }
     }
 
@@ -207,6 +217,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.color,
             GeoObject::ComplexGrid(o) => o.color,
             GeoObject::ComplexMapping(o) => o.color,
+            GeoObject::ComplexIntegral(o) => o.color,
             GeoObject::ImplicitCurve(o) => o.color,
             GeoObject::Attractor3D(o) => o.color,
             GeoObject::Fractal2D(o) => o.color,
@@ -217,6 +228,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.color,
             GeoObject::RegressionLine(o) => o.color,
             GeoObject::PhasePortrait(o) => o.color,
+            GeoObject::Transformed(o) => o.inner.color(),
         }
     }
 
@@ -248,6 +260,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.color = color,
             GeoObject::ComplexGrid(o) => o.color = color,
             GeoObject::ComplexMapping(o) => o.color = color,
+            GeoObject::ComplexIntegral(o) => o.color = color,
             GeoObject::ImplicitCurve(o) => o.color = color,
             GeoObject::Attractor3D(o) => o.color = color,
             GeoObject::Fractal2D(o) => o.color = color,
@@ -258,6 +271,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.color = color,
             GeoObject::RegressionLine(o) => o.color = color,
             GeoObject::PhasePortrait(o) => o.color = color,
+            GeoObject::Transformed(o) => o.inner.set_color(color),
         }
     }
 
@@ -289,6 +303,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.visible,
             GeoObject::ComplexGrid(o) => o.visible,
             GeoObject::ComplexMapping(o) => o.visible,
+            GeoObject::ComplexIntegral(o) => o.visible,
             GeoObject::ImplicitCurve(o) => o.visible,
             GeoObject::Attractor3D(o) => o.visible,
             GeoObject::Fractal2D(o) => o.visible,
@@ -299,6 +314,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.visible,
             GeoObject::RegressionLine(o) => o.visible,
             GeoObject::PhasePortrait(o) => o.visible,
+            GeoObject::Transformed(o) => o.inner.is_visible(),
         }
     }
 
@@ -330,6 +346,7 @@ impl GeoObject {
             GeoObject::VectorField2D(o) => o.visible = visible,
             GeoObject::ComplexGrid(o) => o.visible = visible,
             GeoObject::ComplexMapping(o) => o.visible = visible,
+            GeoObject::ComplexIntegral(o) => o.visible = visible,
             GeoObject::ImplicitCurve(o) => o.visible = visible,
             GeoObject::Attractor3D(o) => o.visible = visible,
             GeoObject::Fractal2D(o) => o.visible = visible,
@@ -340,6 +357,7 @@ impl GeoObject {
             GeoObject::BoxPlot(o) => o.visible = visible,
             GeoObject::RegressionLine(o) => o.visible = visible,
             GeoObject::PhasePortrait(o) => o.visible = visible,
+            GeoObject::Transformed(o) => o.inner.set_visible(visible),
         }
     }
 
@@ -371,6 +389,7 @@ impl GeoObject {
             GeoObject::VectorField2D(_) => "VectorField2D",
             GeoObject::ComplexGrid(_) => "ComplexGrid",
             GeoObject::ComplexMapping(_) => "ComplexMapping",
+            GeoObject::ComplexIntegral(_) => "ComplexIntegral",
             GeoObject::ImplicitCurve(_) => "ImplicitCurve",
             GeoObject::Attractor3D(_) => "Attractor3D",
             GeoObject::Fractal2D(_) => "Fractal2D",
@@ -381,6 +400,7 @@ impl GeoObject {
             GeoObject::BoxPlot(_) => "BoxPlot",
             GeoObject::RegressionLine(_) => "RegressionLine",
             GeoObject::PhasePortrait(_) => "PhasePortrait",
+            GeoObject::Transformed(_) => "Transformed",
         }
     }
 }
@@ -732,10 +752,16 @@ impl FunctionObj {
 
     /// Invalidate any cached samples for this function.
     pub fn invalidate_cache(&self) {
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
         self.cached_samples
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
     }
 }
@@ -1078,6 +1104,9 @@ pub struct Surface3DObj {
     pub width: f32,
     pub solid: bool,
     pub mesh_res: usize,
+    /// Si es true, `expr` es una expresión compleja f(z) y la altura z = |f(z)|.
+    #[serde(default)]
+    pub is_complex: bool,
     #[serde(skip)]
     pub cached_grid: Arc<RwLock<SurfaceSamples>>,
     #[serde(skip)]
@@ -1111,6 +1140,7 @@ impl Clone for Surface3DObj {
             width: self.width,
             solid: self.solid,
             mesh_res: self.mesh_res,
+            is_complex: self.is_complex,
             cached_grid: self.cached_grid.clone(),
             cached_key: self.cached_key.clone(),
         }
@@ -1143,6 +1173,7 @@ impl PartialEq for Surface3DObj {
             && self.width == other.width
             && self.solid == other.solid
             && self.mesh_res == other.mesh_res
+            && self.is_complex == other.is_complex
     }
 }
 
@@ -1173,6 +1204,7 @@ impl Surface3DObj {
             width: 1.0,
             solid: false,
             mesh_res: 30,
+            is_complex: false,
             cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
         }
@@ -1210,6 +1242,7 @@ impl Surface3DObj {
             width: 1.0,
             solid: false,
             mesh_res: 30,
+            is_complex: false,
             cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
         }
@@ -1223,13 +1256,27 @@ impl Surface3DObj {
         self
     }
 
+    /// Crea una superficie 3D que visualiza |f(z)| sobre el plano complejo.
+    /// `expr` es una expresión compleja f(z), la altura z = |f(x + iy)|.
+    pub fn new_complex(expr: impl Into<String>, xr: (f64, f64), yr: (f64, f64)) -> Self {
+        let mut s = Self::new(expr, xr, yr);
+        s.is_complex = true;
+        s
+    }
+
     /// Invalidate any cached grid for this surface.
     pub fn invalidate_cache(&self) {
         self.cached_grid
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1422,9 +1469,15 @@ impl ParametricCurve2DObj {
     pub fn invalidate_cache(&self) {
         self.cached_samples
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 
@@ -1516,9 +1569,15 @@ impl ParametricCurve3DObj {
     pub fn invalidate_cache(&self) {
         self.cached_samples
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 
@@ -1610,9 +1669,15 @@ impl PolarCurveObj {
     pub fn invalidate_cache(&self) {
         self.cached_samples
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 
@@ -1687,13 +1752,91 @@ impl ComplexMappingObj {
             conformal_cache,
         }
     }
+
+    pub fn new_with_symbol(expr: &str, target: ObjectId, symbol: &str) -> Self {
+        let conformal_cache = conformal_map_from_expr(expr, symbol);
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            expr: expr.to_string(),
+            target,
+            color: Color::new(0.5, 0.0, 0.5, 1.0),
+            visible: true,
+            conformal_cache,
+        }
+    }
+
+    pub fn conformal_map(&self, symbol: &str) -> Option<ConformalMap> {
+        conformal_map_from_expr(&self.expr, symbol).or(self.conformal_cache)
+    }
+
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
     }
+
     pub fn refresh_cache(&mut self) {
         self.conformal_cache = ConformalMap::from_expr_string(&self.expr);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComplexIntegralObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub expr: String,
+    pub target: ObjectId, // the contour to integrate over
+    pub color: Color,
+    pub visible: bool,
+    pub compute_residue: bool, // If true, computes sum of residues instead of raw integral
+}
+impl ComplexIntegralObj {
+    pub fn new(expr: &str, target: ObjectId, compute_residue: bool) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            expr: expr.to_string(),
+            target,
+            color: Color::new(0.8, 0.2, 0.2, 1.0),
+            visible: true,
+            compute_residue,
+        }
+    }
+}
+
+fn conformal_map_from_expr(expr: &str, symbol: &str) -> Option<ConformalMap> {
+    let normalized = normalize_complex_symbol(expr, symbol);
+    ConformalMap::from_expr_string(&normalized)
+}
+
+fn normalize_complex_symbol(expr: &str, symbol: &str) -> String {
+    if symbol.is_empty() || symbol == "z" {
+        return expr.to_string();
+    }
+
+    let mut out = String::with_capacity(expr.len());
+    let mut rest = expr;
+    while let Some(pos) = rest.find(symbol) {
+        let before = &rest[..pos];
+        let after = &rest[pos + symbol.len()..];
+        let prev_ident = before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let next_ident = after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        out.push_str(before);
+        if prev_ident || next_ident {
+            out.push_str(symbol);
+        } else {
+            out.push('z');
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1762,9 +1905,15 @@ impl VectorField2DObj {
     pub fn invalidate_cache(&self) {
         self.cached_samples
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 
@@ -1830,8 +1979,8 @@ pub type Curve2DSamples = Vec<(f64, f64)>;
 /// Cached samples for a 3D parametric curve.
 pub type Curve3DSamples = Vec<(f64, f64, f64)>;
 
-/// Cached z-grid for a 3D parametric surface.
-pub type SurfaceSamples = Vec<Vec<f64>>;
+/// Cached world-space point grid for a 3D surface.
+pub type SurfaceSamples = Vec<Vec<Point3D>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionCacheKey {
@@ -1858,6 +2007,8 @@ pub struct SurfaceCacheKey {
     pub x_domain: (f64, f64),
     pub y_domain: (f64, f64),
     pub res: usize,
+    pub is_parametric: bool,
+    pub expr_hash: u64,
     pub variables_hash: u64,
 }
 
@@ -2037,7 +2188,10 @@ impl ImplicitCurveObj {
         if let Some(cached) = self
             .cached_asts
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clone()
         {
             if cached.hash == combined_hash {
@@ -2058,7 +2212,10 @@ impl ImplicitCurveObj {
             rhs: rhs.clone(),
             hash: combined_hash,
         };
-        *self.cached_asts.write().unwrap_or_else(|p| p.into_inner()) = Some(new_cache);
+        *self.cached_asts.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = Some(new_cache);
         Some((lhs, rhs))
     }
 }
@@ -2165,13 +2322,19 @@ impl ImplicitCurveObj {
     pub fn invalidate_cache(&self) {
         self.cached_segments
             .write()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            })
             .clear();
-        *self.cached_key.write().unwrap_or_else(|p| p.into_inner()) = None;
-        *self
-            .cached_region
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = None;
+        *self.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
+        *self.cached_region.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = None;
     }
 }
 
@@ -2222,6 +2385,56 @@ impl Attractor3DObj {
     pub fn with_dt(mut self, dt: f64) -> Self {
         self.dt = dt;
         self
+    }
+
+    pub fn model(&self) -> grafito_geometry::attractors::AttractorType {
+        use grafito_geometry::attractors::AttractorType;
+
+        match self.attractor_type.as_str() {
+            "lorenz" => AttractorType::Lorenz {
+                sigma: self.params.first().copied().unwrap_or(10.0),
+                rho: self.params.get(1).copied().unwrap_or(28.0),
+                beta: self.params.get(2).copied().unwrap_or(8.0 / 3.0),
+            },
+            "rossler" => AttractorType::Rossler {
+                a: self.params.first().copied().unwrap_or(0.2),
+                b: self.params.get(1).copied().unwrap_or(0.2),
+                c: self.params.get(2).copied().unwrap_or(5.7),
+            },
+            "thomas" => AttractorType::Thomas {
+                b: self.params.first().copied().unwrap_or(0.208186),
+            },
+            "aizawa" => AttractorType::Aizawa {
+                a: self.params.first().copied().unwrap_or(0.95),
+                b: self.params.get(1).copied().unwrap_or(0.7),
+                c: self.params.get(2).copied().unwrap_or(0.6),
+                d: self.params.get(3).copied().unwrap_or(3.5),
+                e: self.params.get(4).copied().unwrap_or(0.25),
+                f: self.params.get(5).copied().unwrap_or(0.1),
+            },
+            "chen" => AttractorType::Chen {
+                a: self.params.first().copied().unwrap_or(35.0),
+                b: self.params.get(1).copied().unwrap_or(3.0),
+                c: self.params.get(2).copied().unwrap_or(28.0),
+            },
+            "halvorsen" => AttractorType::Halvorsen {
+                a: self.params.first().copied().unwrap_or(1.89),
+            },
+            "dadras" => AttractorType::Dadras {
+                p: self.params.first().copied().unwrap_or(3.0),
+                q: self.params.get(1).copied().unwrap_or(2.7),
+                r: self.params.get(2).copied().unwrap_or(1.7),
+                s: self.params.get(3).copied().unwrap_or(2.0),
+                e: self.params.get(4).copied().unwrap_or(9.0),
+            },
+            "chua" => AttractorType::Chua {
+                alpha: self.params.first().copied().unwrap_or(15.6),
+                beta: self.params.get(1).copied().unwrap_or(28.0),
+                m0: self.params.get(2).copied().unwrap_or(-1.143),
+                m1: self.params.get(3).copied().unwrap_or(-0.714),
+            },
+            _ => AttractorType::lorenz(),
+        }
     }
     pub fn with_steps(mut self, steps: usize, skip: usize) -> Self {
         self.steps = steps;
@@ -2627,6 +2840,23 @@ impl RegressionLineObj {
         self.y_min = y.0;
         self.y_max = y.1;
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransformedObj {
+    pub inner: Box<GeoObject>,
+    pub complex_expr: String,
+    pub compiled_expr: Option<String>,
+}
+
+impl TransformedObj {
+    pub fn new(inner: GeoObject, expr: &str) -> Self {
+        Self {
+            inner: Box::new(inner),
+            complex_expr: expr.to_string(),
+            compiled_expr: None,
+        }
     }
 }
 

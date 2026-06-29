@@ -154,6 +154,13 @@ impl FunctionComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Zero-initialize the constants buffer so residual constants from a
+        // previous evaluation cannot leak into the interpreter.
+        queue.write_buffer(
+            &constants_buffer,
+            0,
+            &[0u8; 256 * std::mem::size_of::<f32>()],
+        );
 
         let values_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Function Compute Values"),
@@ -278,6 +285,9 @@ impl FunctionComputePipeline {
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            // `unmap` is idempotent: when `map_async` reported an
+            // error the buffer was never mapped, so this is a no-op.
+            self.values_readback.unmap();
             return None;
         }
         let data = slice.get_mapped_range();
@@ -353,7 +363,10 @@ pub fn maybe_compute_function_on_gpu(
     let key = function_sampling::cache_key(fun, padded_domain, grid_size, variables);
 
     {
-        let cached_key = fun.cached_key.read().unwrap_or_else(|p| p.into_inner());
+        let cached_key = fun.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
         if cached_key.as_ref() == Some(&key) {
             return true;
         }
@@ -379,9 +392,13 @@ pub fn maybe_compute_function_on_gpu(
         })
         .collect();
 
-    *fun.cached_samples
-        .write()
-        .unwrap_or_else(|p| p.into_inner()) = samples;
-    *fun.cached_key.write().unwrap_or_else(|p| p.into_inner()) = Some(key);
+    *fun.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *fun.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
     true
 }

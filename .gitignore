@@ -21,9 +21,12 @@ graphify-out/
 
 # Scratch & test files
 scratch*
-test_*
+test_*.rs
 debug_patch2
 debug_cam.rs
+# Temporary refactor/migration scripts (not part of the codebase)
+*.py
+original_*.rs
 refactor.py
 update_ast.py
 update_preprocess.py
@@ -32,3 +35,4 @@ packaging/build/
 # Release binaries (built by CI)
 grafito-*.exe
 grafito
+dist/

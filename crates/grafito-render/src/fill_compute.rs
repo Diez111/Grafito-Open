@@ -42,7 +42,7 @@ struct FillParamsUniform {
     width: u32,
     height: u32,
     code_len: u32,
-    operator: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
+    op_code: u32, // 0=Less, 1=LessEq, 2=Greater, 3=GreaterEq
     fill_alpha: f32,
     _pad0: u32,
     _pad1: u32,
@@ -145,13 +145,28 @@ impl FillComputePipeline {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Zero-initialize the constants buffer so residual values from a
+        // previous evaluation cannot leak into the interpreter.
+        queue.write_buffer(
+            &constants_buffer,
+            0,
+            &[0u8; 256 * std::mem::size_of::<f32>()],
+        );
 
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fill Compute Output"),
             size: (MAX_PIXELS * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+            // Map at creation so we can zero the buffer once. This avoids
+            // leaving uninitialized GPU memory in the tail of the buffer
+            // when the dispatch writes fewer than `MAX_PIXELS` samples.
+            mapped_at_creation: true,
         });
+        {
+            let mut view = output_buffer.slice(..).get_mapped_range_mut();
+            view.fill(0);
+        }
+        output_buffer.unmap();
 
         let output_readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fill Compute Output Readback"),
@@ -229,7 +244,7 @@ impl FillComputePipeline {
             width,
             height,
             code_len: prog.code.len() as u32,
-            operator: op_code,
+            op_code,
             fill_alpha: 1.0,
             _pad0: 0,
             _pad1: 0,
@@ -301,6 +316,9 @@ impl FillComputePipeline {
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            // `unmap` is idempotent: when `map_async` reported an error the
+            // buffer was never mapped, so this is a no-op.
+            self.output_readback.unmap();
             return None;
         }
 

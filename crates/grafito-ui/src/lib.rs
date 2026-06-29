@@ -81,6 +81,7 @@ pub enum Tool {
     DomainColoring,
     HeatMap,
     ComplexGrid,
+    TrigAnimation,
     // Numeric constraints
     DistanceConstraint,
     AngleConstraint,
@@ -147,6 +148,7 @@ impl Tool {
             Tool::DomainColoring => "DomainColoring",
             Tool::HeatMap => "HeatMap",
             Tool::ComplexGrid => "ComplexGrid",
+            Tool::TrigAnimation => "TrigAnimation",
             Tool::DistanceConstraint => "DistanceConstraint",
             Tool::AngleConstraint => "AngleConstraint",
             Tool::Coincident => "Coincident",
@@ -225,6 +227,7 @@ impl Tool {
             | Tool::PolygonDifference
             | Tool::PolygonXor => egui::CursorIcon::Crosshair,
             Tool::DistanceConstraint | Tool::AngleConstraint => egui::CursorIcon::Crosshair,
+            Tool::TrigAnimation => egui::CursorIcon::Default,
         }
     }
 }

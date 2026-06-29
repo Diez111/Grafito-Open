@@ -1641,6 +1641,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5418c17512bdf42730f9032c74e1ae39afc408745ebb2acf72fbc4691c17945"
+
+[[package]]
+name = "glam"
 version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
@@ -1792,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-app"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1800,8 +1806,9 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "env_logger",
- "glam",
+ "glam 0.29.3",
  "grafito-command",
+ "grafito-complex",
  "grafito-core",
  "grafito-geometry",
  "grafito-render",
@@ -1821,22 +1828,35 @@ dependencies = [
 
 [[package]]
 name = "grafito-command"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "geo",
- "glam",
+ "glam 0.29.3",
+ "grafito-complex",
  "grafito-core",
  "grafito-geometry",
 ]
 
 [[package]]
+name = "grafito-complex"
+version = "1.1.9-beta"
+dependencies = [
+ "glam 0.24.2",
+ "grafito-geometry",
+ "num-complex",
+ "serde",
+]
+
+[[package]]
 name = "grafito-core"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "criterion",
  "geo",
+ "grafito-complex",
  "grafito-geometry",
  "log",
+ "num-complex",
  "rayon",
  "rstar",
  "serde",
@@ -1847,13 +1867,13 @@ dependencies = [
 
 [[package]]
 name = "grafito-geometry"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "criterion",
  "evalexpr",
  "geo",
  "geo-types",
- "glam",
+ "glam 0.29.3",
  "libm",
  "log",
  "nalgebra",
@@ -1866,16 +1886,17 @@ dependencies = [
 
 [[package]]
 name = "grafito-release-tests"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 
 [[package]]
 name = "grafito-render"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "anyhow",
  "bytemuck",
  "criterion",
- "glam",
+ "glam 0.29.3",
+ "grafito-complex",
  "grafito-core",
  "grafito-geometry",
  "log",
@@ -1888,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-ui"
-version = "1.1.4-beta"
+version = "1.1.9-beta"
 dependencies = [
  "egui",
  "grafito-core",

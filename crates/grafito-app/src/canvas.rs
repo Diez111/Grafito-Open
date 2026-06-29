@@ -223,7 +223,13 @@ impl CallbackTrait for CanvasCallback {
 
             #[cfg(feature = "profile")]
             puffin::profile_scope!("geometry_build");
-            renderer.build_geometry(&self.document, self.dark_mode, false)
+            renderer.build_geometry(
+                &self.document,
+                self.dark_mode,
+                false,
+                Some(device),
+                Some(queue),
+            )
         };
 
         log::debug!(

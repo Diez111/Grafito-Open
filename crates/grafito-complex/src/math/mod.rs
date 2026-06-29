@@ -12,6 +12,8 @@
 //! siguen funcionando porque `lib.rs` re-exporta este submódulo.
 
 pub mod algebraic_mappings;
+pub mod complex_calculus;
 pub mod complex_expr;
+pub mod complex_opcode;
 
 pub use complex_expr::{eval_complex_batch, parse as parse_complex, ComplexExpr};

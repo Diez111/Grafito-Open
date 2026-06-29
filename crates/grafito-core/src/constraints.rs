@@ -57,14 +57,31 @@ impl ConstraintGraph {
     }
 
     /// Remove an object and its dependencies.
+    ///
+    /// - If `id` was created by a constraint, that constraint is removed and
+    ///   the dependents of each output are cleared (cascade removal).
+    /// - If `id` is a free object, any constraint that used it as an input
+    ///   is also removed (along with their outputs) so that no constraint
+    ///   references a deleted object.
     pub fn remove_object(&mut self, id: ObjectId) {
         self.free_objects.remove(&id);
-        self.dependents.remove(&id);
         if let Some(cons_id) = self.creator.remove(&id) {
             if let Some(cons) = self.constraints.remove(&cons_id) {
                 for out in &cons.outputs {
                     self.creator.remove(out);
                     self.dependents.remove(out);
+                }
+            }
+        }
+        // Cascade: si quedan constraints que referencian a `id` como input,
+        // eliminarlas también para que no queden referencias colgantes.
+        if let Some(cons_ids) = self.dependents.remove(&id) {
+            for cons_id in cons_ids {
+                if let Some(cons) = self.constraints.remove(&cons_id) {
+                    for out in &cons.outputs {
+                        self.creator.remove(out);
+                        self.dependents.remove(out);
+                    }
                 }
             }
         }

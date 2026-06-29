@@ -133,4 +133,27 @@ fn test_lorenz_positional_params() {
         "Lorenz with positional params should succeed, got {:?}",
         outcome
     );
+    let beta = doc.objects_iter().find_map(|(_, obj)| match obj {
+        GeoObject::Attractor3D(at) => at.params.get(2).copied(),
+        _ => None,
+    });
+    assert_eq!(beta, Some(8.0 / 3.0));
+}
+
+#[test]
+fn curve3d_command_creates_parametric_curve_object() {
+    let mut doc = Document::new();
+    let mut input = "Curve3D[(cos(t), sin(t), t), t, 0, 2*pi]".to_string();
+    let outcome = process_input(&mut doc, &mut input);
+    assert!(
+        matches!(outcome, CommandOutcome::Ok),
+        "Curve3D should succeed, got {:?}",
+        outcome
+    );
+    assert!(doc
+        .objects_iter()
+        .any(|(_, obj)| matches!(obj, GeoObject::ParametricCurve3D(_))));
+    assert!(!doc
+        .objects_iter()
+        .any(|(_, obj)| matches!(obj, GeoObject::Segment3D(_))));
 }

@@ -25,7 +25,6 @@ pub mod document;
 pub mod function_sampling;
 pub mod id;
 pub mod implicit_curve;
-pub mod macros;
 pub mod numeric_solver;
 pub mod object;
 pub mod parametric_sampling;

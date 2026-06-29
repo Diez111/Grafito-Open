@@ -22,7 +22,6 @@ pub mod ast;
 pub mod attractors;
 pub mod boolean;
 pub mod cas;
-pub mod conformal;
 pub mod dd;
 pub mod expr;
 pub mod fractals;
@@ -41,11 +40,10 @@ pub mod types;
 pub mod types3d;
 pub mod value;
 
+pub use boolean::*;
 pub use lines::*;
 pub use types::*;
 pub use types3d::*;
-
-pub use conformal::complex_expr;
 
 #[cfg(test)]
 mod tests;
