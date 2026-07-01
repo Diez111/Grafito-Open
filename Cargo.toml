@@ -50,7 +50,7 @@ lyon = "1.0"
 bytemuck = { version = "1.16", features = ["derive"] }
 
 # Parsing & Expressions
-evalexpr = "11.3"
+evalexpr = "13.1"
 num-complex = "0.4"
 
 # Parallelism
