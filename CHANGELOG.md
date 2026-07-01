@@ -5,6 +5,68 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.2.0-beta] - 2026-06-30
+
+#### Añadido
+- **Geometría analítica 3D universitaria**: nuevos objetos `Plane3D` y
+  `Line3D` para planos `ax + by + cz + d = 0` y rectas punto+dirección.
+  Nuevos comandos `Plane3D[a,b,c,d]`, `Plane3D[P1,P2,P3]`,
+  `Line3D[x0,y0,z0,dx,dy,dz]`, `Line3D[P1,P2]`, `EquidistantFrom[...]`
+  y `Solve3DGeometry[...]`. Se resuelve el caso tipo UTN de puntos sobre
+  un eje equidistantes de un plano y una recta, creando los `Point3D`
+  solución automáticamente.
+- **Módulo `planes3d` en `grafito-geometry`**: añade `Plane3D`, `Line3D`,
+  distancia punto-plano, distancia punto-recta, proyección sobre plano y
+  punto más cercano en recta, con tests del problema `x+z+4=0` y
+  `r=(1,1,2)+β(1,1,0)`.
+- **Paquete UTN de álgebra lineal y geometría analítica**: nuevos comandos
+  `Intersection3D`, `Projection3D`, `PlaneThroughLines`,
+  `PlaneThroughLinePoint`, `LineRelation3D`, `Rank`, `NullSpace`,
+  `LinearSolve`, `Eigenvalues`, `ConditionNumber`, `P2Dependence`,
+  `P2Basis`, `P2Equations`, `SubspaceDimension`, `SubspaceBasis`,
+  `SubspaceSum`, `SubspaceIntersection`, `OrthogonalComplement`,
+  `SolveLine3DParameters` y `MatrixParamSolve` para ejercicios universitarios
+  con planos, rectas, matrices, polinomios de `P2` y subespacios de `Rn`.
+- **Guards NaN en `ast.rs`** (`eval_2d`): `Sqrt(negativo)`, `Ln/Log(≤0)`,
+  `Pow(base negativa, exponente fraccionario)`, `Asin/Acos(|x|>1)`,
+  `Acosh(<1)`, `Atanh(|x|≥1)`, y clamp de `Sinh/Cosh/Tanh` a 0 para
+  `|x|>1e9` producen ahora `NaN` explícito en lugar de propagarse
+  silenciosamente.
+- **Cap de profundidad DFS en el grafo de restricciones** (`MAX_DFS_DEPTH = 512`):
+  evita desbordamiento de pila ante saves maliciosos con cadenas profundas
+  de restricciones.
+- **Validación ampliada de documentos**: límite en la cantidad total de
+  restricciones y en la longitud de etiquetas de objetos, además de los
+  tipos ya validados.
+- **Render 3D de planos y rectas**: `Plane3D` se visualiza como parche
+  translúcido con wireframe y `Line3D` como recta extendida centrada en su
+  punto de paso.
+
+#### Corregido
+- **Bug de `Extrude` con `return` prematuro** (`document.rs`): el brazo
+  `Extrude` usaba `return;` cuando `height≈0` o el polígono tenía <3
+  vértices, lo que abortaba `apply_constructive_constraints` entera y
+  saltaba todas las restricciones posteriores. Cambiado a `continue;`.
+- **`remove_object` dejaba outputs huérfanos**: al borrar un objeto libre
+  que alimentaba una restricción (p. ej. `Midpoint(A,B)→M`), el grafo se
+  limpiaba pero `M` permanecía en `Document.objects` como geometría
+  fantasma. Ahora la cascada elimina los outputs recursivamente y limpia
+  la selección.
+- **`arc_length`, `volume_of_revolution` y `surface_of_revolution`
+  silenciaban `NaN`**: el `unwrap_or(0.0)` convertía errores de evaluación
+  (incluyendo `NaN`) en `0.0`, dando resultados silenciosamente
+  incorrectos. Ahora propagan `NaN` vía `unwrap_or(f64::NAN)`.
+- **Dependencia `glam` duplicada en el build**: `grafito-complex`
+  declaraba `glam = "0.24"` (sin usarla), arrastrando `glam 0.24.2`
+  además de `0.29.3` y duplicando el binario. Eliminada la dependencia
+  muerta; `num-complex` alineada al workspace.
+
+#### Eliminado
+- **Código muerto**: `node_count` (`render_2d.rs`), `find_nearest_feature`
+  (`input.rs`), `export_pdf` sin callers y su test, y `draw_ripples` stub
+  vacío. Removidos los `#[allow(dead_code)]` falsos positivos en
+  `export_png`/`export_latex`/`escape_latex`, `ToolState` y el enum `Op`.
+
 ## [1.1.9-beta] - 2026-06-29
 
 #### Añadido
@@ -49,6 +111,25 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
   Alias: `quadrants`, `cuadrantes`.
 - **Opción `Tool::TrigAnimation`**: nueva herramienta para abrir el panel
   de animación trigonométrica directamente desde la toolbar.
+- **Geometría analítica 3D universitaria**: nuevos objetos `Plane3D` y
+  `Line3D` para planos `ax + by + cz + d = 0` y rectas punto+dirección.
+  Nuevos comandos `Plane3D[a,b,c,d]`, `Plane3D[P1,P2,P3]`,
+  `Line3D[x0,y0,z0,dx,dy,dz]`, `Line3D[P1,P2]`, `EquidistantFrom[...]`
+  y `Solve3DGeometry[...]`. Se resuelve el caso tipo UTN de puntos sobre
+  un eje equidistantes de un plano y una recta, creando los `Point3D`
+  solución automáticamente.
+- **Módulo `planes3d` en `grafito-geometry`**: añade `Plane3D`, `Line3D`,
+  distancia punto-plano, distancia punto-recta, proyección sobre plano y
+  punto más cercano en recta, con tests del problema `x+z+4=0` y
+  `r=(1,1,2)+β(1,1,0)`.
+- **Paquete UTN de álgebra lineal y geometría analítica**: nuevos comandos
+  `Intersection3D`, `Projection3D`, `PlaneThroughLines`,
+  `PlaneThroughLinePoint`, `LineRelation3D`, `Rank`, `NullSpace`,
+  `LinearSolve`, `Eigenvalues`, `ConditionNumber`, `P2Dependence`,
+  `P2Basis`, `P2Equations`, `SubspaceDimension`, `SubspaceBasis`,
+  `SubspaceSum`, `SubspaceIntersection`, `OrthogonalComplement`,
+  `SolveLine3DParameters` y `MatrixParamSolve` para ejercicios universitarios
+  con planos, rectas, matrices, polinomios de `P2` y subespacios de `Rn`.
 
 #### Cambiado
 - **Coloración de dominio unificada a HSL**: tanto el renderer wgpu
@@ -60,6 +141,9 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
   estático `add_complex_grid_geometry` se mantiene como fallback CPU; el
   método de instancia `add_complex_grid_geometry_gpu` delega al
   `DomainColoringComputePipeline` si hay device/queue disponibles.
+- **Render 3D de planos y rectas infinitas**: `Plane3D` se visualiza como
+  un parche translúcido con wireframe y `Line3D` como una recta extendida
+  centrada en su punto de paso, en los builders 3D estático y runtime.
 
 #### Corregido
 - **Bug Gamma y BesselJ stubs**: ambos devolvían `NaN` literal desde
@@ -70,6 +154,10 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 - **Convención `complex_sqrt` GPU**: el shader usaba `vec2<f32>` para
   constantes (vector 2D), no `f64` escalar. Confirmado y unificado en
   los nuevos shaders.
+- **Kernel de matrices subdeterminadas**: `null_space` ahora completa la
+  nullidad faltante con RREF cuando la SVD devuelve `Vᵀ` reducido para
+  matrices anchas de rango fila completo. Esto corrige intersecciones de
+  subespacios como `span(e1,e2) ∩ span(e2,e3) = span(e2)`.
 
 ## [1.1.4-beta] - 2026-06-22
 

@@ -5,6 +5,7 @@
 
 use grafito_ui::command_palette::{all_commands, CommandPaletteState};
 use grafito_ui::theme::{DARK, LIGHT};
+use grafito_ui::toolbar::ToolGroupId;
 use grafito_ui::Tool;
 
 // ── Command palette ──────────────────────────────────────────────────────
@@ -122,4 +123,36 @@ fn tool_enum_can_be_switched() {
     tool = Tool::Point;
     assert_eq!(tool, Tool::Point);
     assert_ne!(tool, Tool::Select);
+}
+
+#[test]
+fn point_group_does_not_expose_3d_tools() {
+    let (_, tools) = ToolGroupId::Point.def();
+    assert!(tools.iter().any(|(tool, _, _)| *tool == Tool::Point));
+    assert!(!tools.iter().any(|(tool, _, _)| *tool == Tool::Point3D));
+}
+
+#[test]
+fn three_d_and_dynamics_groups_expose_3d_tools() {
+    let (_, three_d_tools) = ToolGroupId::ThreeD.def();
+    assert!(three_d_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::Plane3D));
+    assert!(three_d_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::Line3D));
+    assert!(three_d_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::Surface3D));
+
+    let (_, dynamics_tools) = ToolGroupId::Dynamics.def();
+    assert!(dynamics_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::Attractor));
+    assert!(dynamics_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::VectorField3D));
+    assert!(dynamics_tools
+        .iter()
+        .any(|(tool, _, _)| *tool == Tool::HyperSurface4D));
 }

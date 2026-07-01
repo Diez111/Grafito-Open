@@ -132,6 +132,16 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         ));
     }
 
+    // Limit the total number of constraints to bound the cost of cycle
+    // detection / topological sort in `get_update_order`.
+    if doc.constraints.constraint_count() > MAX_OBJECT_COUNT {
+        return Err(format!(
+            "Document contains {} constraints, maximum is {}",
+            doc.constraints.constraint_count(),
+            MAX_OBJECT_COUNT
+        ));
+    }
+
     for (_, obj) in doc.objects_iter() {
         validate_geo_object(obj)?;
     }
@@ -260,7 +270,19 @@ fn validate_geo_object(obj: &GeoObject) -> Result<(), String> {
         {
             return Err("RegressionLine data length exceeds maximum".to_string());
         }
-        _ => {}
+        // Catch-all: validate the label length for every remaining object
+        // type (Point, Line, Circle, 3D primitives, Pencil, etc.) to
+        // mitigate huge label strings in untrusted save files.
+        _ => {
+            let label = obj.label();
+            if label.len() > MAX_STRING_LENGTH {
+                return Err(format!(
+                    "Object label length {} exceeds maximum {}",
+                    label.len(),
+                    MAX_STRING_LENGTH
+                ));
+            }
+        }
     }
     Ok(())
 }

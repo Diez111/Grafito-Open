@@ -51,10 +51,37 @@ fn project_segment(
     Some(((sax, say), (sbx, sby)))
 }
 
+fn plane_point_and_basis(a: f64, b: f64, c: f64, d: f64) -> Option<(Point3D, Vec3, Vec3)> {
+    let normal = Vec3::new(a as f32, b as f32, c as f32);
+    if normal.length_squared() < 1e-12 {
+        return None;
+    }
+    let point = if a.abs() >= b.abs() && a.abs() >= c.abs() {
+        Point3D::new(-d / a, 0.0, 0.0)
+    } else if b.abs() >= c.abs() {
+        Point3D::new(0.0, -d / b, 0.0)
+    } else {
+        Point3D::new(0.0, 0.0, -d / c)
+    };
+    let n = normal.normalize();
+    let seed = if n.x.abs() < 0.8 { Vec3::X } else { Vec3::Y };
+    let u = n.cross(seed).normalize();
+    let v = n.cross(u).normalize();
+    Some((point, u, v))
+}
+
+fn offset_point(base: Point3D, u: Vec3, v: Vec3, du: f32, dv: f32) -> Point3D {
+    Point3D::new(
+        base.x + (u.x * du + v.x * dv) as f64,
+        base.y + (u.y * du + v.y * dv) as f64,
+        base.z + (u.z * du + v.z * dv) as f64,
+    )
+}
+
 impl GrafitoApp {
     pub fn handle_3d_click(
         &mut self,
-        _ui: &egui::Ui,
+        ui: &egui::Ui,
         _response: &egui::Response,
         _canvas: Rect,
         w: f32,
@@ -67,19 +94,19 @@ impl GrafitoApp {
         } else {
             0.5
         };
+        let time = ui.ctx().input(|i| i.time);
 
         // Place objects at a point on the XZ plane (y=0), near camera target
         let t = self.camera.target;
+        let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
         match self.current_tool {
             Tool::Point => {
                 self.save_state();
-                let pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
-                    .add_object(GeoObject::Point3D(Point3DObj::new(pos)));
+                    .add_object(GeoObject::Point3D(Point3DObj::new(c)));
             }
             Tool::Line => {
-                self.pending_points_3d
-                    .push(Point3D::new(t.x as f64, t.y as f64, t.z as f64));
+                self.pending_points_3d.push(c);
                 if self.pending_points_3d.len() == 2 {
                     let a = self.pending_points_3d[0];
                     let b = self.pending_points_3d[1];
@@ -90,8 +117,7 @@ impl GrafitoApp {
                 }
             }
             Tool::Circle => {
-                self.pending_points_3d
-                    .push(Point3D::new(t.x as f64, t.y as f64, t.z as f64));
+                self.pending_points_3d.push(c);
                 if self.pending_points_3d.len() == 2 {
                     let center = self.pending_points_3d[0];
                     let edge = self.pending_points_3d[1];
@@ -105,13 +131,11 @@ impl GrafitoApp {
             Tool::Polygon => {
                 // Cube via polygon tool
                 self.save_state();
-                let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
                     .add_object(GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)));
             }
             Tool::Function => {
                 self.save_state();
-                let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
                     .add_object(GeoObject::Pyramid3D(Pyramid3DObj::new(
                         Point3D::new(c.x, c.y - approx_scale, c.z),
@@ -121,24 +145,99 @@ impl GrafitoApp {
             }
             Tool::Point3D => {
                 self.save_state();
-                let pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
-                    .add_object(GeoObject::Point3D(Point3DObj::new(pos)));
+                    .add_object(GeoObject::Point3D(Point3DObj::new(c)));
+            }
+            Tool::Segment3D => {
+                let s = approx_scale * 2.0;
+                self.execute_command_and_record(
+                    &format!(
+                        "Segment3D[{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}]",
+                        c.x - s,
+                        c.y,
+                        c.z,
+                        c.x + s,
+                        c.y,
+                        c.z
+                    ),
+                    time,
+                );
+            }
+            Tool::Line3D => {
+                self.execute_command_and_record(
+                    &format!("Line3D[{:.6},{:.6},{:.6},1,0,0]", c.x, c.y, c.z),
+                    time,
+                );
+            }
+            Tool::Plane3D => {
+                self.execute_command_and_record(&format!("Plane3D[0,0,1,{:.6}]", -c.z), time);
             }
             Tool::Sphere3D => {
                 self.save_state();
-                let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
                     .add_object(GeoObject::Sphere3D(Sphere3DObj::new(c, approx_scale * 1.5)));
             }
             Tool::Cube3D => {
                 self.save_state();
-                let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
                 self.document
                     .add_object(GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)));
             }
+            Tool::Cylinder3D => {
+                self.execute_command_and_record(
+                    &format!(
+                        "Cylinder[{:.6},{:.6},{:.6},{:.6},{:.6}]",
+                        c.x,
+                        c.y,
+                        c.z,
+                        approx_scale,
+                        approx_scale * 3.0
+                    ),
+                    time,
+                );
+            }
+            Tool::Cone3D => {
+                self.execute_command_and_record(
+                    &format!(
+                        "Cone[{:.6},{:.6},{:.6},{:.6},{:.6}]",
+                        c.x,
+                        c.y,
+                        c.z,
+                        approx_scale,
+                        approx_scale * 3.0
+                    ),
+                    time,
+                );
+            }
+            Tool::Torus3D => {
+                self.execute_command_and_record(
+                    &format!(
+                        "Torus[{:.6},{:.6},{:.6},{:.6},{:.6}]",
+                        c.x,
+                        c.y,
+                        c.z,
+                        approx_scale * 1.5,
+                        approx_scale * 0.4
+                    ),
+                    time,
+                );
+            }
+            Tool::MoebiusStrip => {
+                self.execute_command_and_record("Moebius[2,0.5]", time);
+            }
+            Tool::Surface3D => {
+                self.execute_command_and_record("Surface3D[x^2 + y^2, -2, 2, -2, 2]", time);
+            }
+            Tool::ParametricCurve3D => {
+                self.execute_command_and_record("Curve3D[(cos(t), sin(t), t/4), 0, 12.566]", time);
+            }
+            Tool::VectorField3D => {
+                self.execute_command_and_record("VectorField3D[-y, x, z/3]", time);
+            }
+            Tool::HyperSurface4D => {
+                self.execute_command_and_record("Hypercube[]", time);
+            }
             Tool::Attractor => {
-                self.input_text = "Lorenz[]".to_string();
+                self.execute_command_and_record("Lorenz[]", time);
             }
             Tool::Fractal => {
                 self.input_text = "Mandelbrot[]".to_string();
@@ -558,6 +657,14 @@ impl GrafitoApp {
                     let center = (l.a.to_vec3() + l.b.to_vec3()) * 0.5;
                     (center - camera_pos).length()
                 }
+                GeoObject::Plane3D(p) => {
+                    if let Some((point, _, _)) = plane_point_and_basis(p.a, p.b, p.c, p.d) {
+                        (point.to_vec3() - camera_pos).length()
+                    } else {
+                        1000.0
+                    }
+                }
+                GeoObject::Line3D(l) => (l.point.to_vec3() - camera_pos).length(),
                 GeoObject::Sphere3D(s) => (s.center.to_vec3() - camera_pos).length(),
                 GeoObject::Cube3D(c) => (c.center.to_vec3() - camera_pos).length(),
                 GeoObject::Pyramid3D(p) => {
@@ -659,6 +766,84 @@ impl GrafitoApp {
                                 egui::FontId::proportional(12.0),
                                 label_color,
                             );
+                        }
+                    }
+                }
+                GeoObject::Plane3D(p) => {
+                    if let Some((center, u, v)) = plane_point_and_basis(p.a, p.b, p.c, p.d) {
+                        let extent = 8.0;
+                        let steps = 8;
+                        let color = to_color32(p.color);
+                        let stroke =
+                            Stroke::new(1.0, color.linear_multiply(p.opacity.clamp(0.1, 1.0)));
+                        if !overlay_only {
+                            for i in 0..=steps {
+                                let t = -extent + 2.0 * extent * i as f32 / steps as f32;
+                                let a = offset_point(center, u, v, -extent, t);
+                                let b = offset_point(center, u, v, extent, t);
+                                if let Some((pa, pb)) = project_segment(&self.camera, &a, &b, w, h)
+                                {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pa.0, pa.1),
+                                            origin + Vec2::new(pb.0, pb.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                                let a = offset_point(center, u, v, t, -extent);
+                                let b = offset_point(center, u, v, t, extent);
+                                if let Some((pa, pb)) = project_segment(&self.camera, &a, &b, w, h)
+                                {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pa.0, pa.1),
+                                            origin + Vec2::new(pb.0, pb.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                            }
+                        }
+                        if !p.label.is_empty() {
+                            if let Some(pt) = self.camera.project(&center, w, h) {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &p.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::Line3D(l) => {
+                    let dir = l.direction.to_vec3();
+                    if dir.length_squared() > 1e-12 {
+                        let unit = dir.normalize();
+                        let a = Point3D::from_vec3(l.point.to_vec3() - unit * 40.0);
+                        let b = Point3D::from_vec3(l.point.to_vec3() + unit * 40.0);
+                        if let Some((pa, pb)) = project_segment(&self.camera, &a, &b, w, h) {
+                            if !overlay_only {
+                                painter.line_segment(
+                                    [
+                                        origin + Vec2::new(pa.0, pa.1),
+                                        origin + Vec2::new(pb.0, pb.1),
+                                    ],
+                                    Stroke::new(l.width, to_color32(l.color)),
+                                );
+                            }
+                            if !l.label.is_empty() {
+                                painter.text(
+                                    origin
+                                        + Vec2::new((pa.0 + pb.0) * 0.5, (pa.1 + pb.1) * 0.5 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &l.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
                         }
                     }
                 }

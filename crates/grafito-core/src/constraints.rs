@@ -63,13 +63,21 @@ impl ConstraintGraph {
     /// - If `id` is a free object, any constraint that used it as an input
     ///   is also removed (along with their outputs) so that no constraint
     ///   references a deleted object.
-    pub fn remove_object(&mut self, id: ObjectId) {
+    ///
+    /// Returns the list of output `ObjectId`s whose creating constraint was
+    /// removed by this call (i.e. objects that are now orphaned: still present
+    /// in the document's object map but no longer driven by any constraint).
+    /// The caller is responsible for removing these objects (and recursing
+    /// on them) from the owning document.
+    pub fn remove_object(&mut self, id: ObjectId) -> Vec<ObjectId> {
+        let mut orphaned: Vec<ObjectId> = Vec::new();
         self.free_objects.remove(&id);
         if let Some(cons_id) = self.creator.remove(&id) {
             if let Some(cons) = self.constraints.remove(&cons_id) {
                 for out in &cons.outputs {
                     self.creator.remove(out);
                     self.dependents.remove(out);
+                    orphaned.push(*out);
                 }
             }
         }
@@ -81,10 +89,12 @@ impl ConstraintGraph {
                     for out in &cons.outputs {
                         self.creator.remove(out);
                         self.dependents.remove(out);
+                        orphaned.push(*out);
                     }
                 }
             }
         }
+        orphaned
     }
 
     /// Add a constraint that produces output objects from input objects.
@@ -141,7 +151,15 @@ impl ConstraintGraph {
             visited: &mut HashSet<usize>,
             in_stack: &mut HashSet<usize>,
             order: &mut Vec<usize>,
+            depth: usize,
         ) {
+            const MAX_DFS_DEPTH: usize = 512;
+            if depth > MAX_DFS_DEPTH {
+                log::warn!(
+                    "Constraint graph DFS depth {depth} exceeds {MAX_DFS_DEPTH}, skipping deep branch"
+                );
+                return;
+            }
             if visited.contains(&cons_id) {
                 return;
             }
@@ -157,7 +175,7 @@ impl ConstraintGraph {
                 for output in &cons.outputs {
                     if let Some(deps) = this.dependents.get(output) {
                         for &next_id in deps {
-                            visit(this, next_id, visited, in_stack, order);
+                            visit(this, next_id, visited, in_stack, order, depth + 1);
                         }
                     }
                 }
@@ -171,7 +189,7 @@ impl ConstraintGraph {
         for id in changed {
             if let Some(deps) = self.dependents.get(id) {
                 for &cons_id in deps {
-                    visit(self, cons_id, &mut visited, &mut in_stack, &mut order);
+                    visit(self, cons_id, &mut visited, &mut in_stack, &mut order, 0);
                 }
             }
         }

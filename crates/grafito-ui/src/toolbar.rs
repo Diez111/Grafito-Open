@@ -14,7 +14,6 @@ const GROUP_MOVE: &[ToolEntry] = &[(Tool::Select, "↖ Seleccionar", "F1")];
 
 const GROUP_POINT: &[ToolEntry] = &[
     (Tool::Point, "· Punto", "F2"),
-    (Tool::Point3D, "· Punto 3D", "F7"),
     (Tool::Midpoint, "M Punto medio", ""),
 ];
 
@@ -96,8 +95,19 @@ const GROUP_BOOLEAN: &[ToolEntry] = &[
 
 const GROUP_3D: &[ToolEntry] = &[
     (Tool::Point3D, "● Punto 3D", ""),
+    (Tool::Segment3D, "─ Segmento 3D", ""),
+    (Tool::Line3D, "╱ Recta 3D", ""),
+    (Tool::Plane3D, "▱ Plano 3D", ""),
     (Tool::Sphere3D, "◯ Esfera", "F8"),
     (Tool::Cube3D, "□ Cubo", "F9"),
+    (Tool::Cylinder3D, "▥ Cilindro", ""),
+    (Tool::Cone3D, "△ Cono", ""),
+    (Tool::Torus3D, "◎ Toro", ""),
+    (Tool::MoebiusStrip, "∞ Möbius", ""),
+    (Tool::Surface3D, "z Superficie", ""),
+    (Tool::ParametricCurve3D, "(x,y,z) Curva 3D", ""),
+    (Tool::VectorField3D, "⇶ Campo 3D", ""),
+    (Tool::HyperSurface4D, "4D Hipersuperficie", ""),
 ];
 
 const GROUP_ADVANCED: &[ToolEntry] = &[
@@ -111,6 +121,12 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
     (Tool::Slider, "═ Deslizador", ""),
     (Tool::Button, "☑ Checkbox/Botón", ""),
     (Tool::Image, "🖼 Imagen", ""),
+];
+
+const GROUP_DYNAMICS: &[ToolEntry] = &[
+    (Tool::Attractor, "≈ Atractor 3D", ""),
+    (Tool::VectorField3D, "⇶ Campo vectorial 3D", ""),
+    (Tool::HyperSurface4D, "4D Hipersuperficie", ""),
 ];
 
 /// Identificador de un grupo de herramientas de la toolbar.
@@ -137,6 +153,7 @@ pub enum ToolGroupId {
     Boolean,
     ThreeD,
     Advanced,
+    Dynamics,
 }
 
 impl ToolGroupId {
@@ -158,6 +175,7 @@ impl ToolGroupId {
             ToolGroupId::Boolean => (icon_boolean, GROUP_BOOLEAN),
             ToolGroupId::ThreeD => (icon_3d, GROUP_3D),
             ToolGroupId::Advanced => (icon_advanced, GROUP_ADVANCED),
+            ToolGroupId::Dynamics => (icon_advanced, GROUP_DYNAMICS),
         }
     }
 }
@@ -178,6 +196,7 @@ pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Constraint,
     ToolGroupId::Boolean,
     ToolGroupId::Advanced,
+    ToolGroupId::Dynamics,
 ];
 
 // ── Vector icon drawing functions ──

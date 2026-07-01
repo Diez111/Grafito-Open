@@ -10,7 +10,6 @@ use grafito_geometry::Point2;
 use grafito_ui::Tool;
 
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct ToolState {
     pub pending: Vec<Point2>,
     pub driver: Option<ObjectId>,
@@ -28,7 +27,6 @@ pub struct ToolState {
     pub drawing_pencil: Option<ObjectId>,
 }
 
-#[allow(dead_code)]
 impl ToolState {
     pub fn clear(&mut self) {
         self.pending.clear();

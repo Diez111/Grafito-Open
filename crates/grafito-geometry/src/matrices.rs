@@ -408,11 +408,91 @@ fn null_space_basis_dense(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
     let svs = &svd.singular_values;
     let max_sv = svs.iter().copied().fold(0.0f64, f64::max).max(1e-300);
     let thr = tol.max(1e-12 * max_sv);
+    let rank = svs.iter().filter(|s| s.abs() > thr).count();
+    let expected_nullity = ncols.saturating_sub(rank);
     let mut basis = Vec::new();
     for i in 0..svs.len() {
         if svs[i].abs() <= thr {
             let vec: Vec<f64> = (0..ncols).map(|j| v_t[(i, j)]).collect();
             basis.push(vec);
+        }
+    }
+    for i in svs.len()..ncols.min(v_t.nrows()) {
+        let vec: Vec<f64> = (0..ncols).map(|j| v_t[(i, j)]).collect();
+        basis.push(vec);
+    }
+    if basis.len() < expected_nullity {
+        return null_space_basis_rref(m, thr);
+    }
+    basis
+}
+
+fn null_space_basis_rref(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
+    let nrows = m.nrows();
+    let ncols = m.ncols();
+    let scale = m.amax().max(1.0);
+    let eps = tol.max(1e-12 * scale);
+    let mut a = vec![vec![0.0; ncols]; nrows];
+    for r in 0..nrows {
+        for c in 0..ncols {
+            a[r][c] = m[(r, c)];
+        }
+    }
+
+    let mut row = 0;
+    let mut pivots = Vec::new();
+    for col in 0..ncols {
+        let mut pivot = row;
+        let mut pivot_abs = 0.0;
+        for (r, row_values) in a.iter().enumerate().skip(row) {
+            let value = row_values[col].abs();
+            if value > pivot_abs {
+                pivot = r;
+                pivot_abs = value;
+            }
+        }
+        if pivot_abs <= eps {
+            continue;
+        }
+        a.swap(row, pivot);
+        let pivot_value = a[row][col];
+        for value in &mut a[row][col..] {
+            *value /= pivot_value;
+        }
+        for r in 0..nrows {
+            if r == row {
+                continue;
+            }
+            let factor = a[r][col];
+            if factor.abs() <= eps {
+                continue;
+            }
+            let pivot_tail = a[row][col..].to_vec();
+            for (value, pivot_value) in a[r][col..].iter_mut().zip(pivot_tail.iter()) {
+                *value -= factor * pivot_value;
+            }
+        }
+        pivots.push(col);
+        row += 1;
+        if row == nrows {
+            break;
+        }
+    }
+
+    let free_cols: Vec<usize> = (0..ncols).filter(|c| !pivots.contains(c)).collect();
+    let mut basis = Vec::with_capacity(free_cols.len());
+    for free_col in free_cols {
+        let mut vector = vec![0.0; ncols];
+        vector[free_col] = 1.0;
+        for (pivot_row, pivot_col) in pivots.iter().enumerate() {
+            vector[*pivot_col] = -a[pivot_row][free_col];
+        }
+        let norm = vector.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm > eps {
+            for value in &mut vector {
+                *value /= norm;
+            }
+            basis.push(vector);
         }
     }
     basis
@@ -964,6 +1044,30 @@ mod tests {
         let m = Matrix::identity(3);
         let ns = null_space(&m).unwrap();
         assert!(ns.is_empty(), "identidad debe tener kernel vacío");
+    }
+
+    #[test]
+    fn test_null_space_underdetermined_full_row_rank() {
+        let m = Matrix::from_rows(vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, -1.0],
+        ])
+        .unwrap();
+        let ns = null_space(&m).unwrap();
+        assert_eq!(ns.len(), 1, "esperaba kernel unidimensional");
+        let v = &ns[0];
+        let residual: Vec<f64> = (0..m.rows)
+            .map(|r| (0..m.cols).map(|c| m.get(r, c) * v[c]).sum())
+            .collect();
+        assert!(
+            residual.iter().all(|x: &f64| x.abs() < 1e-8),
+            "vector no está en el kernel: {residual:?}"
+        );
+        assert!(
+            v[0].abs() < 1e-8 && v[3].abs() < 1e-8 && (v[1] - v[2]).abs() < 1e-8,
+            "kernel esperado paralelo a [0,1,1,0], obtuvo {v:?}"
+        );
     }
 
     #[test]

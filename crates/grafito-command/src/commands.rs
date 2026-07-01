@@ -3,11 +3,11 @@ use grafito_core::{
     analyzable::{self, default_analysis_features},
     Attractor3DObj, BoxPlotObj, CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj,
     Cone3DObj, Cube3DObj, Cylinder3DObj, Document, EllipseObj, Fractal2DObj, FunctionObj,
-    GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, LineKind, LineObj,
-    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj,
-    PhasePortraitObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, RegressionLineObj,
-    RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj, Surface3DObj, Torus3DObj,
-    VectorField2DObj, VectorField3DObj,
+    GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, Line3DObj,
+    LineKind, LineObj, MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj,
+    ParametricCurve3DObj, PhasePortraitObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj,
+    PolygonObj, RegressionLineObj, RelationOperator, ScatterPlotObj, Segment3DObj, Sphere3DObj,
+    Surface3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -15,12 +15,19 @@ use grafito_geometry::analysis::{
 };
 use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
-use grafito_geometry::matrices::{taylor_series, Matrix};
+use grafito_geometry::matrices::{
+    condition_number, eigenvalues, null_space, rank, solve_linear_system, taylor_series, Matrix,
+};
 use grafito_geometry::statistics;
 use grafito_geometry::symbolic;
 use grafito_geometry::Color;
 use grafito_geometry::Point2;
 use grafito_geometry::Point3D;
+use grafito_geometry::{
+    intersect_planes, line_line_relation, plane_through_lines, project_line_onto_plane,
+    Line3D as GeomLine3D, LineLineRelation, LineProjectionOnPlane, Plane3D as GeomPlane3D,
+    PlanePlaneIntersection, PlaneThroughLines,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -1232,8 +1239,183 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     return CommandOutcome::Ok;
                 }
             }
-            "Point3D" | "Segment3D" | "Sphere" | "Cube" | "Cylinder" | "Cone" | "Torus"
-            | "Moebius" | "Surface3D" => {
+            "Plane3D" if cmd.args.len() == 4 => {
+                // Plane3D[a, b, c, d]  →  ax + by + cz + d = 0
+                if let (Ok(a), Ok(b), Ok(c), Ok(d)) = (
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                ) {
+                    if a * a + b * b + c * c < 1e-18 {
+                        return CommandOutcome::Error(
+                            "Plane3D: el vector normal no puede ser cero".into(),
+                        );
+                    }
+                    let obj = GeoObject::Plane3D(Plane3DObj::from_equation(a, b, c, d));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                }
+            }
+            "Plane3D" if cmd.args.len() == 3 => {
+                // Plane3D[label1, label2, label3]  →  plano por 3 puntos
+                let pts = parse_three_point_labels(document, &cmd.args);
+                if let Some((p1, p2, p3)) = pts {
+                    let plane = Plane3DObj::from_three_points(p1, p2, p3);
+                    if plane.a * plane.a + plane.b * plane.b + plane.c * plane.c < 1e-18 {
+                        return CommandOutcome::Error(
+                            "Plane3D: los tres puntos son colineales o repetidos".into(),
+                        );
+                    }
+                    let obj = GeoObject::Plane3D(plane);
+                    document.add_object(obj);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                }
+            }
+            "Line3D" if cmd.args.len() == 6 => {
+                // Line3D[x0, y0, z0, dx, dy, dz]  →  punto + dirección
+                if let (Ok(x0), Ok(y0), Ok(z0), Ok(dx), Ok(dy), Ok(dz)) = (
+                    parse_numeric_arg(&cmd.args[0], &document.variables),
+                    parse_numeric_arg(&cmd.args[1], &document.variables),
+                    parse_numeric_arg(&cmd.args[2], &document.variables),
+                    parse_numeric_arg(&cmd.args[3], &document.variables),
+                    parse_numeric_arg(&cmd.args[4], &document.variables),
+                    parse_numeric_arg(&cmd.args[5], &document.variables),
+                ) {
+                    if dx * dx + dy * dy + dz * dz < 1e-18 {
+                        return CommandOutcome::Error(
+                            "Line3D: el vector dirección no puede ser cero".into(),
+                        );
+                    }
+                    let obj = GeoObject::Line3D(Line3DObj::from_point_and_direction(
+                        Point3D::new(x0, y0, z0),
+                        Point3D::new(dx, dy, dz),
+                    ));
+                    document.add_object(obj);
+                    input_text.clear();
+                    return CommandOutcome::Ok;
+                }
+            }
+            "Line3D" if cmd.args.len() == 2 => {
+                // Line3D[label1, label2]  →  recta por 2 puntos
+                if let (Some(id1), Some(id2)) = (
+                    find_object_by_label(document, &cmd.args[0]),
+                    find_object_by_label(document, &cmd.args[1]),
+                ) {
+                    if let (Some(GeoObject::Point3D(p1)), Some(GeoObject::Point3D(p2))) =
+                        (document.get_object(id1), document.get_object(id2))
+                    {
+                        if p1.position.distance(&p2.position) < 1e-9 {
+                            return CommandOutcome::Error(
+                                "Line3D: los dos puntos deben ser distintos".into(),
+                            );
+                        }
+                        let obj =
+                            GeoObject::Line3D(Line3DObj::from_two_points(p1.position, p2.position));
+                        document.add_object(obj);
+                        input_text.clear();
+                        return CommandOutcome::Ok;
+                    }
+                }
+                return CommandOutcome::Error(
+                    "Line3D: se requieren dos puntos 3D con etiquetas válidas".into(),
+                );
+            }
+            "EquidistantFrom" if cmd.args.len() >= 3 => {
+                let label_a = cmd.args[0].trim();
+                let label_b = cmd.args[1].trim();
+                let axis = match Axis3D::parse(&cmd.args[2]) {
+                    Some(axis) => axis,
+                    None => {
+                        return CommandOutcome::Error(
+                            "EquidistantFrom: usa \"x-axis\", \"y-axis\" o \"z-axis\"".into(),
+                        );
+                    }
+                };
+                let Some(id_a) = find_object_by_label(document, label_a) else {
+                    return CommandOutcome::Error(format!(
+                        "EquidistantFrom: no existe el objeto '{}'",
+                        label_a
+                    ));
+                };
+                let Some(id_b) = find_object_by_label(document, label_b) else {
+                    return CommandOutcome::Error(format!(
+                        "EquidistantFrom: no existe el objeto '{}'",
+                        label_b
+                    ));
+                };
+                let Some(obj_a) = document.get_object(id_a).cloned() else {
+                    return CommandOutcome::Error("EquidistantFrom: objeto inválido".into());
+                };
+                let Some(obj_b) = document.get_object(id_b).cloned() else {
+                    return CommandOutcome::Error("EquidistantFrom: objeto inválido".into());
+                };
+                return add_equidistant_solutions(document, &obj_a, &obj_b, axis);
+            }
+            "Solve3DGeometry" if cmd.args.len() >= 3 => {
+                let equation = cmd.args[0].trim().trim_matches('"');
+                let var = cmd.args[1].trim();
+                let constraint = cmd.args[2].trim().trim_matches('"');
+                let Some((label_a, label_b)) = parse_distance_equality_labels(equation) else {
+                    return CommandOutcome::Error(
+                        "Solve3DGeometry: usa una ecuación tipo dist(P,A)=dist(P,B)".into(),
+                    );
+                };
+                let Some(axis) = Axis3D::parse_point_constraint(constraint, var) else {
+                    return CommandOutcome::Error(
+                        "Solve3DGeometry: usa una restricción tipo P=(0,y,0)".into(),
+                    );
+                };
+                let Some(id_a) = find_object_by_label(document, label_a) else {
+                    return CommandOutcome::Error(format!(
+                        "Solve3DGeometry: no existe el objeto '{}'",
+                        label_a
+                    ));
+                };
+                let Some(id_b) = find_object_by_label(document, label_b) else {
+                    return CommandOutcome::Error(format!(
+                        "Solve3DGeometry: no existe el objeto '{}'",
+                        label_b
+                    ));
+                };
+                let Some(obj_a) = document.get_object(id_a).cloned() else {
+                    return CommandOutcome::Error("Solve3DGeometry: objeto inválido".into());
+                };
+                let Some(obj_b) = document.get_object(id_b).cloned() else {
+                    return CommandOutcome::Error("Solve3DGeometry: objeto inválido".into());
+                };
+                return add_equidistant_solutions(document, &obj_a, &obj_b, axis);
+            }
+            "Intersection3D" if cmd.args.len() == 2 => {
+                return run_intersection_3d(document, &cmd.args[0], &cmd.args[1]);
+            }
+            "Intersection3D" if cmd.args.len() == 3 => {
+                return run_three_plane_intersection(
+                    document,
+                    &cmd.args[0],
+                    &cmd.args[1],
+                    &cmd.args[2],
+                );
+            }
+            "Projection3D" if cmd.args.len() == 2 => {
+                return run_projection_3d(document, &cmd.args[0], &cmd.args[1]);
+            }
+            "PlaneThroughLines" if cmd.args.len() == 2 => {
+                return run_plane_through_lines(document, &cmd.args[0], &cmd.args[1]);
+            }
+            "PlaneThroughLinePoint" if cmd.args.len() == 2 => {
+                return run_plane_through_line_point(document, &cmd.args[0], &cmd.args[1]);
+            }
+            "LineRelation3D" if cmd.args.len() == 2 => {
+                return run_line_relation_3d(document, &cmd.args[0], &cmd.args[1]);
+            }
+            "SolveLine3DParameters" if cmd.args.len() >= 4 => {
+                return run_solve_line_3d_parameters(&cmd.args, document);
+            }
+            "Point3D" | "Segment3D" | "Plane3D" | "Line3D" | "Sphere" | "Cube" | "Cylinder"
+            | "Cone" | "Torus" | "Moebius" | "Surface3D" => {
                 return CommandOutcome::Error("Argumentos inválidos para comando 3D".into());
             }
             "Tangent" => {
@@ -2347,6 +2529,101 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                         return CommandOutcome::Message(format!("Inverse:\n{}", inv));
                     }
                 }
+            }
+            "Rank" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Rank: {e}")),
+                };
+                let Some(r) = rank(&matrix) else {
+                    return CommandOutcome::Error("Rank: matriz inválida".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("rank = {r}"));
+            }
+            "NullSpace" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("NullSpace: {e}")),
+                };
+                let Some(ns) = null_space(&matrix) else {
+                    return CommandOutcome::Error("NullSpace: matriz inválida".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "NullSpace dimension = {}\nbasis = {}",
+                    ns.len(),
+                    fmt_vector_basis(&ns)
+                ));
+            }
+            "LinearSolve" if cmd.args.len() >= 2 => {
+                let a = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("LinearSolve: {e}")),
+                };
+                let b = match parse_vector_or_matrix_arg(&cmd.args[1], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("LinearSolve: {e}")),
+                };
+                return solve_linear_command(&a, &b);
+            }
+            "Eigenvalues" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Eigenvalues: {e}")),
+                };
+                let Some(values) = eigenvalues(&matrix) else {
+                    return CommandOutcome::Error(
+                        "Eigenvalues: la matriz debe ser cuadrada".into(),
+                    );
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Eigenvalues: {}",
+                    values
+                        .iter()
+                        .map(|(re, im)| fmt_complex_pair(*re, *im))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            "ConditionNumber" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("ConditionNumber: {e}")),
+                };
+                let Some(cond) = condition_number(&matrix) else {
+                    return CommandOutcome::Error("ConditionNumber: matriz inválida".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("condition_number = {:.10}", cond));
+            }
+            "P2Dependence" if !cmd.args.is_empty() => {
+                return run_p2_dependence(&cmd.args, document);
+            }
+            "P2Basis" if !cmd.args.is_empty() => {
+                return run_p2_basis(&cmd.args, document);
+            }
+            "P2Equations" if !cmd.args.is_empty() => {
+                return run_p2_equations(&cmd.args, document);
+            }
+            "SubspaceDimension" if !cmd.args.is_empty() => {
+                return run_subspace_dimension(&cmd.args[0], document);
+            }
+            "SubspaceBasis" if !cmd.args.is_empty() => {
+                return run_subspace_basis(&cmd.args[0], document);
+            }
+            "SubspaceSum" if cmd.args.len() >= 2 => {
+                return run_subspace_sum(&cmd.args[0], &cmd.args[1], document);
+            }
+            "SubspaceIntersection" if cmd.args.len() >= 2 => {
+                return run_subspace_intersection(&cmd.args[0], &cmd.args[1], document);
+            }
+            "OrthogonalComplement" if !cmd.args.is_empty() => {
+                return run_orthogonal_complement(&cmd.args[0], document);
+            }
+            "MatrixParamSolve" if cmd.args.len() >= 2 => {
+                return run_matrix_param_solve(&cmd.args[0], &cmd.args[1], document);
             }
             "Taylor" if cmd.args.len() >= 2 => {
                 let expr = cmd.args[0].trim();
@@ -3789,6 +4066,13 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "correlation" | "correlacion" => "Correlation",
             "determinant" | "det" => "Determinant",
             "inverse" | "inversa" => "Inverse",
+            "rank" | "rango" | "matrixrank" => "Rank",
+            "nullspace" | "null_space" | "kernel" | "nucleo" | "núcleo" => "NullSpace",
+            "linearsolve" | "linsolve" | "solvesystem" | "sistema" | "resolver_sistema" => {
+                "LinearSolve"
+            }
+            "eigenvalues" | "autovalores" => "Eigenvalues",
+            "conditionnumber" | "condition_number" | "condicion" => "ConditionNumber",
             "taylor" => "Taylor",
             "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
             "complexsurface" | "complex_surface" | "csurface" => "ComplexSurface",
@@ -3837,6 +4121,37 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "ray" => "Ray",
             "vector" => "Vector",
             "regularpolygon" | "regular_polygon" => "RegularPolygon",
+            "plane3d" | "plane" | "plano" | "plano3d" => "Plane3D",
+            "line3d" | "line3" | "recta3d" | "recta" => "Line3D",
+            "equidistantfrom" | "equidistant" | "equidistante" => "EquidistantFrom",
+            "solve3dgeometry" | "solve3d" | "resolver3d" => "Solve3DGeometry",
+            "intersection3d" | "intersect3d" | "interseccion3d" | "intersección3d" => {
+                "Intersection3D"
+            }
+            "projection3d" | "project3d" | "proyeccion3d" | "proyección3d" => "Projection3D",
+            "planethroughlines" | "planebylines" | "planoporrectas" | "plano_por_rectas" => {
+                "PlaneThroughLines"
+            }
+            "planethroughlinepoint" | "planoporrectapunto" => "PlaneThroughLinePoint",
+            "linerelation3d" | "relacionrectas3d" | "relaciónrectas3d" => "LineRelation3D",
+            "solveline3dparameters" | "resolverparametrosrecta3d" | "parametrosrecta3d" => {
+                "SolveLine3DParameters"
+            }
+            "matrixparamsolve" | "solveparammatrix" | "matrizparametrica" => "MatrixParamSolve",
+            "p2dependence" | "p2dep" | "dependenciap2" => "P2Dependence",
+            "p2basis" | "basep2" => "P2Basis",
+            "p2equations" | "ecuacionesp2" => "P2Equations",
+            "subspacedimension" | "subspacedim" | "dimsubspace" | "dimensionsubespacio" => {
+                "SubspaceDimension"
+            }
+            "subspacebasis" | "basissubspace" | "basesubespacio" => "SubspaceBasis",
+            "subspacesum" | "sumsubspaces" | "sumasubespacios" => "SubspaceSum",
+            "subspaceintersection" | "intersectionsubspaces" | "interseccionsubespacios" => {
+                "SubspaceIntersection"
+            }
+            "orthogonalcomplement" | "orthogonal" | "complementoortogonal" | "ortogonal" => {
+                "OrthogonalComplement"
+            }
             _ => {
                 if args.is_empty()
                     || command.contains(' ')
@@ -4377,6 +4692,618 @@ pub fn find_object_by_label(document: &Document, label: &str) -> Option<ObjectId
         .map(|(id, _)| *id)
 }
 
+/// Busca tres `Point3D` por etiqueta y devuelve sus posiciones.
+fn parse_three_point_labels(
+    document: &Document,
+    args: &[String],
+) -> Option<(Point3D, Point3D, Point3D)> {
+    let id1 = find_object_by_label(document, &args[0])?;
+    let id2 = find_object_by_label(document, &args[1])?;
+    let id3 = find_object_by_label(document, &args[2])?;
+    let p1 = document.get_object(id1)?;
+    let p2 = document.get_object(id2)?;
+    let p3 = document.get_object(id3)?;
+    match (p1, p2, p3) {
+        (GeoObject::Point3D(a), GeoObject::Point3D(b), GeoObject::Point3D(c)) => {
+            Some((a.position, b.position, c.position))
+        }
+        _ => None,
+    }
+}
+
+fn clean_label(label: &str) -> &str {
+    label.trim().trim_matches('"').trim_matches('\'')
+}
+
+fn object_by_label_cloned(document: &Document, label: &str) -> Result<GeoObject, String> {
+    let label = clean_label(label);
+    let Some(id) = find_object_by_label(document, label) else {
+        return Err(format!("no existe el objeto '{}'", label));
+    };
+    document
+        .get_object(id)
+        .cloned()
+        .ok_or_else(|| format!("objeto '{}' inválido", label))
+}
+
+fn as_geom_plane(obj: &GeoObject) -> Option<GeomPlane3D> {
+    match obj {
+        GeoObject::Plane3D(p) => Some(GeomPlane3D::from_equation(p.a, p.b, p.c, p.d)),
+        _ => None,
+    }
+}
+
+fn as_geom_line(obj: &GeoObject) -> Option<GeomLine3D> {
+    match obj {
+        GeoObject::Line3D(l) => Some(GeomLine3D::from_point_and_direction(l.point, l.direction)),
+        _ => None,
+    }
+}
+
+fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) -> CommandOutcome {
+    let a = match object_by_label_cloned(document, a_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("Intersection3D: {e}")),
+    };
+    let b = match object_by_label_cloned(document, b_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("Intersection3D: {e}")),
+    };
+    let eps = 1e-9;
+
+    match (&a, &b) {
+        (GeoObject::Plane3D(_), GeoObject::Plane3D(_)) => {
+            let p1 = as_geom_plane(&a).unwrap();
+            let p2 = as_geom_plane(&b).unwrap();
+            match intersect_planes(p1, p2, eps) {
+                PlanePlaneIntersection::Line(line) => {
+                    let id = document.add_object(GeoObject::Line3D(
+                        Line3DObj::from_point_and_direction(line.point, line.direction),
+                    ));
+                    let label = document
+                        .get_object(id)
+                        .map(|o| o.label().to_string())
+                        .unwrap_or_default();
+                    CommandOutcome::Message(format!(
+                        "Intersection3D: recta {} + t{} → {}",
+                        fmt_point3(line.point),
+                        fmt_point3(line.direction),
+                        label
+                    ))
+                }
+                PlanePlaneIntersection::ParallelDistinct => {
+                    CommandOutcome::Message("Intersection3D: planos paralelos distintos".into())
+                }
+                PlanePlaneIntersection::Coincident => {
+                    CommandOutcome::Message("Intersection3D: planos coincidentes".into())
+                }
+                PlanePlaneIntersection::Degenerate => {
+                    CommandOutcome::Error("Intersection3D: plano degenerado".into())
+                }
+            }
+        }
+        (GeoObject::Line3D(_), GeoObject::Plane3D(_))
+        | (GeoObject::Plane3D(_), GeoObject::Line3D(_)) => {
+            let line = as_geom_line(&a).or_else(|| as_geom_line(&b)).unwrap();
+            let plane = as_geom_plane(&a).or_else(|| as_geom_plane(&b)).unwrap();
+            intersect_line_plane_command(document, line, plane, eps)
+        }
+        (GeoObject::Line3D(_), GeoObject::Line3D(_)) => {
+            let l1 = as_geom_line(&a).unwrap();
+            let l2 = as_geom_line(&b).unwrap();
+            match line_line_relation(l1, l2, eps) {
+                LineLineRelation::Intersecting(p) => {
+                    add_point3d_message(document, p, "Intersection3D")
+                }
+                LineLineRelation::ParallelDistinct => {
+                    CommandOutcome::Message("Intersection3D: rectas paralelas distintas".into())
+                }
+                LineLineRelation::Coincident => {
+                    CommandOutcome::Message("Intersection3D: rectas coincidentes".into())
+                }
+                LineLineRelation::Skew { distance, .. } => CommandOutcome::Message(format!(
+                    "Intersection3D: rectas alabeadas; distancia mínima ≈ {:.10}",
+                    distance
+                )),
+                LineLineRelation::Degenerate => {
+                    CommandOutcome::Error("Intersection3D: recta degenerada".into())
+                }
+            }
+        }
+        _ => CommandOutcome::Error(
+            "Intersection3D: soporta Plano-Plano, Recta-Plano o Recta-Recta".into(),
+        ),
+    }
+}
+
+fn run_three_plane_intersection(
+    document: &mut Document,
+    a_label: &str,
+    b_label: &str,
+    c_label: &str,
+) -> CommandOutcome {
+    let labels = [a_label, b_label, c_label];
+    let mut planes = Vec::new();
+    for label in labels {
+        let obj = match object_by_label_cloned(document, label) {
+            Ok(obj) => obj,
+            Err(e) => return CommandOutcome::Error(format!("Intersection3D: {e}")),
+        };
+        let Some(plane) = as_geom_plane(&obj) else {
+            return CommandOutcome::Error("Intersection3D: los 3 objetos deben ser Plane3D".into());
+        };
+        planes.push(plane);
+    }
+    let a = Matrix::from_rows(vec![
+        vec![planes[0].a, planes[0].b, planes[0].c],
+        vec![planes[1].a, planes[1].b, planes[1].c],
+        vec![planes[2].a, planes[2].b, planes[2].c],
+    ])
+    .unwrap();
+    let b = Matrix::from_rows(vec![
+        vec![-planes[0].d],
+        vec![-planes[1].d],
+        vec![-planes[2].d],
+    ])
+    .unwrap();
+    if let Some(sol) = solve_linear_system(&a, &b) {
+        add_point3d_message(
+            document,
+            Point3D::new(sol.get(0, 0), sol.get(1, 0), sol.get(2, 0)),
+            "Intersection3D",
+        )
+    } else {
+        CommandOutcome::Message("Intersection3D: los 3 planos no tienen intersección única".into())
+    }
+}
+
+fn intersect_line_plane_command(
+    document: &mut Document,
+    line: GeomLine3D,
+    plane: GeomPlane3D,
+    eps: f64,
+) -> CommandOutcome {
+    let n = (plane.a, plane.b, plane.c);
+    let d = (line.direction.x, line.direction.y, line.direction.z);
+    let denom = n.0 * d.0 + n.1 * d.1 + n.2 * d.2;
+    let at_point =
+        plane.a * line.point.x + plane.b * line.point.y + plane.c * line.point.z + plane.d;
+    if denom.abs() <= eps {
+        if at_point.abs() <= eps {
+            CommandOutcome::Message("Intersection3D: la recta está contenida en el plano".into())
+        } else {
+            CommandOutcome::Message("Intersection3D: recta paralela al plano".into())
+        }
+    } else {
+        let t = -at_point / denom;
+        let p = Point3D::new(
+            line.point.x + t * line.direction.x,
+            line.point.y + t * line.direction.y,
+            line.point.z + t * line.direction.z,
+        );
+        add_point3d_message(document, p, "Intersection3D")
+    }
+}
+
+fn run_projection_3d(
+    document: &mut Document,
+    source_label: &str,
+    target_label: &str,
+) -> CommandOutcome {
+    let source = match object_by_label_cloned(document, source_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("Projection3D: {e}")),
+    };
+    let target = match object_by_label_cloned(document, target_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("Projection3D: {e}")),
+    };
+    let eps = 1e-9;
+    match (&source, &target) {
+        (GeoObject::Point3D(p), GeoObject::Plane3D(_)) => {
+            let plane = as_geom_plane(&target).unwrap();
+            add_point3d_message(document, plane.project_point(p.position), "Projection3D")
+        }
+        (GeoObject::Point3D(p), GeoObject::Line3D(_)) => {
+            let line = as_geom_line(&target).unwrap();
+            add_point3d_message(document, line.closest_point_to(p.position), "Projection3D")
+        }
+        (GeoObject::Line3D(_), GeoObject::Plane3D(_)) => {
+            let line = as_geom_line(&source).unwrap();
+            let plane = as_geom_plane(&target).unwrap();
+            match project_line_onto_plane(line, plane, eps) {
+                LineProjectionOnPlane::Line(l) => add_line3d_message(document, l, "Projection3D"),
+                LineProjectionOnPlane::Point(p) => add_point3d_message(document, p, "Projection3D"),
+                LineProjectionOnPlane::DegenerateLine => {
+                    CommandOutcome::Error("Projection3D: recta degenerada".into())
+                }
+                LineProjectionOnPlane::DegeneratePlane => {
+                    CommandOutcome::Error("Projection3D: plano degenerado".into())
+                }
+            }
+        }
+        _ => CommandOutcome::Error(
+            "Projection3D: soporta Punto→Plano, Punto→Recta y Recta→Plano".into(),
+        ),
+    }
+}
+
+fn run_plane_through_lines(
+    document: &mut Document,
+    a_label: &str,
+    b_label: &str,
+) -> CommandOutcome {
+    let a = match object_by_label_cloned(document, a_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("PlaneThroughLines: {e}")),
+    };
+    let b = match object_by_label_cloned(document, b_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("PlaneThroughLines: {e}")),
+    };
+    let (Some(l1), Some(l2)) = (as_geom_line(&a), as_geom_line(&b)) else {
+        return CommandOutcome::Error("PlaneThroughLines: ambos objetos deben ser Line3D".into());
+    };
+    match plane_through_lines(l1, l2, 1e-9) {
+        PlaneThroughLines::Plane(p) => add_plane3d_message(document, p, "PlaneThroughLines"),
+        PlaneThroughLines::Skew => {
+            CommandOutcome::Error("PlaneThroughLines: las rectas son alabeadas".into())
+        }
+        PlaneThroughLines::CoincidentLines => CommandOutcome::Message(
+            "PlaneThroughLines: rectas coincidentes; existen infinitos planos".into(),
+        ),
+        PlaneThroughLines::DegenerateLine => {
+            CommandOutcome::Error("PlaneThroughLines: recta degenerada".into())
+        }
+    }
+}
+
+fn run_plane_through_line_point(
+    document: &mut Document,
+    line_label: &str,
+    point_label: &str,
+) -> CommandOutcome {
+    let line_obj = match object_by_label_cloned(document, line_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("PlaneThroughLinePoint: {e}")),
+    };
+    let point_obj = match object_by_label_cloned(document, point_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("PlaneThroughLinePoint: {e}")),
+    };
+    let Some(line) = as_geom_line(&line_obj) else {
+        return CommandOutcome::Error(
+            "PlaneThroughLinePoint: el primer objeto debe ser Line3D".into(),
+        );
+    };
+    let GeoObject::Point3D(point) = point_obj else {
+        return CommandOutcome::Error(
+            "PlaneThroughLinePoint: el segundo objeto debe ser Point3D".into(),
+        );
+    };
+    let d = (line.direction.x, line.direction.y, line.direction.z);
+    let w = (
+        point.position.x - line.point.x,
+        point.position.y - line.point.y,
+        point.position.z - line.point.z,
+    );
+    let n = (
+        d.1 * w.2 - d.2 * w.1,
+        d.2 * w.0 - d.0 * w.2,
+        d.0 * w.1 - d.1 * w.0,
+    );
+    let n_len = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+    if n_len < 1e-9 {
+        return CommandOutcome::Message(
+            "PlaneThroughLinePoint: el punto pertenece a la recta; existen infinitos planos".into(),
+        );
+    }
+    add_plane3d_message(
+        document,
+        GeomPlane3D::from_equation(
+            n.0,
+            n.1,
+            n.2,
+            -(n.0 * line.point.x + n.1 * line.point.y + n.2 * line.point.z),
+        ),
+        "PlaneThroughLinePoint",
+    )
+}
+
+fn run_line_relation_3d(document: &Document, a_label: &str, b_label: &str) -> CommandOutcome {
+    let a = match object_by_label_cloned(document, a_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("LineRelation3D: {e}")),
+    };
+    let b = match object_by_label_cloned(document, b_label) {
+        Ok(obj) => obj,
+        Err(e) => return CommandOutcome::Error(format!("LineRelation3D: {e}")),
+    };
+    let (Some(l1), Some(l2)) = (as_geom_line(&a), as_geom_line(&b)) else {
+        return CommandOutcome::Error("LineRelation3D: ambos objetos deben ser Line3D".into());
+    };
+    match line_line_relation(l1, l2, 1e-9) {
+        LineLineRelation::Intersecting(p) => {
+            CommandOutcome::Message(format!("LineRelation3D: se cortan en {}", fmt_point3(p)))
+        }
+        LineLineRelation::ParallelDistinct => {
+            CommandOutcome::Message("LineRelation3D: paralelas distintas".into())
+        }
+        LineLineRelation::Coincident => {
+            CommandOutcome::Message("LineRelation3D: coincidentes".into())
+        }
+        LineLineRelation::Skew {
+            closest_on_first,
+            closest_on_second,
+            distance,
+        } => CommandOutcome::Message(format!(
+            "LineRelation3D: alabeadas; distancia mínima ≈ {:.10}; puntos más cercanos {} y {}",
+            distance,
+            fmt_point3(closest_on_first),
+            fmt_point3(closest_on_second)
+        )),
+        LineLineRelation::Degenerate => {
+            CommandOutcome::Error("LineRelation3D: recta degenerada".into())
+        }
+    }
+}
+
+fn add_point3d_message(document: &mut Document, p: Point3D, command: &str) -> CommandOutcome {
+    let id = document.add_object(GeoObject::Point3D(Point3DObj::new(p)));
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!("{command}: punto {} → {label}", fmt_point3(p)))
+}
+
+fn add_line3d_message(document: &mut Document, line: GeomLine3D, command: &str) -> CommandOutcome {
+    let id = document.add_object(GeoObject::Line3D(Line3DObj::from_point_and_direction(
+        line.point,
+        line.direction,
+    )));
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "{command}: recta {} + t{} → {label}",
+        fmt_point3(line.point),
+        fmt_point3(line.direction)
+    ))
+}
+
+fn add_plane3d_message(
+    document: &mut Document,
+    plane: GeomPlane3D,
+    command: &str,
+) -> CommandOutcome {
+    let id = document.add_object(GeoObject::Plane3D(Plane3DObj::from_equation(
+        plane.a, plane.b, plane.c, plane.d,
+    )));
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "{command}: {:.10}x + {:.10}y + {:.10}z + {:.10} = 0 → {label}",
+        plane.a, plane.b, plane.c, plane.d
+    ))
+}
+
+fn fmt_point3(p: Point3D) -> String {
+    format!("({:.10}, {:.10}, {:.10})", p.x, p.y, p.z)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Axis3D {
+    X,
+    Y,
+    Z,
+}
+
+impl Axis3D {
+    fn parse(text: &str) -> Option<Self> {
+        let t = text
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_lowercase()
+            .replace('_', "-")
+            .replace(' ', "");
+        match t.as_str() {
+            "x" | "x-axis" | "axis-x" | "ejex" | "eje-x" => Some(Self::X),
+            "y" | "y-axis" | "axis-y" | "ejey" | "eje-y" => Some(Self::Y),
+            "z" | "z-axis" | "axis-z" | "ejez" | "eje-z" => Some(Self::Z),
+            _ => None,
+        }
+    }
+
+    fn parse_point_constraint(text: &str, var: &str) -> Option<Self> {
+        let normalized = text.replace(' ', "");
+        let rhs = normalized
+            .strip_prefix("P=")
+            .or_else(|| normalized.strip_prefix("p="))?;
+        let inner = rhs.strip_prefix('(')?.strip_suffix(')')?;
+        let parts: Vec<_> = inner.split(',').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let is_zero = |s: &str| matches!(s, "0" | "0.0" | "+0" | "-0");
+        if parts[0] == var && is_zero(parts[1]) && is_zero(parts[2]) {
+            Some(Self::X)
+        } else if is_zero(parts[0]) && parts[1] == var && is_zero(parts[2]) {
+            Some(Self::Y)
+        } else if is_zero(parts[0]) && is_zero(parts[1]) && parts[2] == var {
+            Some(Self::Z)
+        } else {
+            None
+        }
+    }
+
+    fn variable_name(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+
+    fn point(self, t: f64) -> Point3D {
+        match self {
+            Self::X => Point3D::new(t, 0.0, 0.0),
+            Self::Y => Point3D::new(0.0, t, 0.0),
+            Self::Z => Point3D::new(0.0, 0.0, t),
+        }
+    }
+}
+
+fn parse_distance_equality_labels(equation: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = equation.split_once('=')?;
+    Some((parse_dist_label(lhs.trim())?, parse_dist_label(rhs.trim())?))
+}
+
+fn parse_dist_label(term: &str) -> Option<&str> {
+    let term = term.trim();
+    let inner = term.strip_prefix("dist(")?.strip_suffix(')')?;
+    let mut parts = inner.split(',').map(str::trim);
+    let p = parts.next()?;
+    let label = parts.next()?;
+    if parts.next().is_some() || !p.eq_ignore_ascii_case("p") || label.is_empty() {
+        return None;
+    }
+    Some(label)
+}
+
+fn add_equidistant_solutions(
+    document: &mut Document,
+    obj_a: &GeoObject,
+    obj_b: &GeoObject,
+    axis: Axis3D,
+) -> CommandOutcome {
+    if squared_distance_to_3d_object(axis.point(0.0), obj_a).is_none()
+        || squared_distance_to_3d_object(axis.point(0.0), obj_b).is_none()
+    {
+        return CommandOutcome::Error(
+            "EquidistantFrom: solo soporta Point3D, Plane3D y Line3D".into(),
+        );
+    }
+
+    let f = |t: f64| -> Option<f64> {
+        let p = axis.point(t);
+        Some(squared_distance_to_3d_object(p, obj_a)? - squared_distance_to_3d_object(p, obj_b)?)
+    };
+    let roots = find_real_roots_scan(f, -100.0, 100.0, 8000, 1e-10);
+    if roots.is_empty() {
+        return CommandOutcome::Message(
+            "EquidistantFrom: no se encontraron soluciones reales en [-100, 100]".into(),
+        );
+    }
+
+    let mut parts = Vec::new();
+    for root in &roots {
+        let p = axis.point(*root);
+        document.add_object(GeoObject::Point3D(Point3DObj::new(p).with_label("Sol3D")));
+        parts.push(format!("{} ≈ {:.10}", axis.variable_name(), root));
+    }
+    CommandOutcome::Message(format!("Soluciones equidistantes: {}", parts.join(", ")))
+}
+
+fn squared_distance_to_3d_object(p: Point3D, obj: &GeoObject) -> Option<f64> {
+    match obj {
+        GeoObject::Point3D(point) => {
+            let d = p.distance(&point.position);
+            Some(d * d)
+        }
+        GeoObject::Plane3D(plane) => {
+            let numerator = plane.a * p.x + plane.b * p.y + plane.c * p.z + plane.d;
+            let denom = plane.a * plane.a + plane.b * plane.b + plane.c * plane.c;
+            if denom < 1e-15 {
+                None
+            } else {
+                Some(numerator * numerator / denom)
+            }
+        }
+        GeoObject::Line3D(line) => {
+            let q = line.point;
+            let d = line.direction;
+            let pq = (p.x - q.x, p.y - q.y, p.z - q.z);
+            let dir_len_sq = d.x * d.x + d.y * d.y + d.z * d.z;
+            if dir_len_sq < 1e-15 {
+                let dist = p.distance(&q);
+                return Some(dist * dist);
+            }
+            let pq_len_sq = pq.0 * pq.0 + pq.1 * pq.1 + pq.2 * pq.2;
+            let dot = pq.0 * d.x + pq.1 * d.y + pq.2 * d.z;
+            Some(pq_len_sq - dot * dot / dir_len_sq)
+        }
+        _ => None,
+    }
+}
+
+fn find_real_roots_scan<F>(f: F, lo: f64, hi: f64, steps: usize, tol: f64) -> Vec<f64>
+where
+    F: Fn(f64) -> Option<f64>,
+{
+    let mut roots = Vec::new();
+    let step = (hi - lo) / steps as f64;
+    let mut prev_x = lo;
+    let mut prev_y = match f(prev_x) {
+        Some(v) if v.is_finite() => v,
+        _ => f64::NAN,
+    };
+
+    for i in 1..=steps {
+        let x = lo + i as f64 * step;
+        let y = match f(x) {
+            Some(v) if v.is_finite() => v,
+            _ => {
+                prev_x = x;
+                prev_y = f64::NAN;
+                continue;
+            }
+        };
+
+        if y.abs() < tol {
+            push_unique_root(&mut roots, x);
+        } else if prev_y.is_finite() && prev_y * y < 0.0 {
+            let root = bisect_root(&f, prev_x, x, tol);
+            push_unique_root(&mut roots, root);
+        }
+        prev_x = x;
+        prev_y = y;
+    }
+    roots.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    roots
+}
+
+fn bisect_root<F>(f: &F, mut lo: f64, mut hi: f64, tol: f64) -> f64
+where
+    F: Fn(f64) -> Option<f64>,
+{
+    let mut flo = f(lo).unwrap_or(f64::NAN);
+    for _ in 0..100 {
+        let mid = 0.5 * (lo + hi);
+        let fmid = f(mid).unwrap_or(f64::NAN);
+        if !fmid.is_finite() || fmid.abs() < tol || (hi - lo).abs() < tol {
+            return mid;
+        }
+        if flo.is_finite() && flo * fmid <= 0.0 {
+            hi = mid;
+        } else {
+            lo = mid;
+            flo = fmid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+fn push_unique_root(roots: &mut Vec<f64>, root: f64) {
+    if roots.iter().all(|r| (r - root).abs() > 1e-5) {
+        roots.push(root);
+    }
+}
+
 /// Convierte un `GeoObject` en un [`IntersectionCurve`] cuando el tipo lo
 /// admite. Devuelve `None` para tipos no soportados (3D, polígonos, …).
 fn object_to_intersection_curve(obj: &GeoObject) -> Option<IntersectionCurve<'_>> {
@@ -4697,6 +5624,880 @@ fn parse_brace_list(s: &str) -> Vec<f64> {
             }
         })
         .collect()
+}
+
+fn parse_matrix_arg_strict(s: &str, variables: &HashMap<String, f64>) -> Result<Matrix, String> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return Err("se esperaba matriz con sintaxis [[...],[...]]".into());
+    }
+    let inner = &s[1..s.len() - 1];
+    let row_tokens = split_args(inner);
+    if row_tokens.is_empty() {
+        return Err("matriz vacía".into());
+    }
+    let mut rows = Vec::with_capacity(row_tokens.len());
+    for row_token in row_tokens {
+        let row_token = row_token.trim();
+        if !row_token.starts_with('[') || !row_token.ends_with(']') {
+            return Err(format!("fila inválida '{}': usa [a,b,c]", row_token));
+        }
+        let row_inner = &row_token[1..row_token.len() - 1];
+        let entries = split_args(row_inner);
+        if entries.is_empty() {
+            return Err("fila vacía".into());
+        }
+        let mut row = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let value = parse_numeric_arg(entry.trim(), variables)
+                .map_err(|_| format!("entrada numérica inválida '{}'", entry.trim()))?;
+            if !value.is_finite() {
+                return Err(format!("entrada no finita '{}'", entry.trim()));
+            }
+            row.push(value);
+        }
+        rows.push(row);
+    }
+    Matrix::from_rows(rows).ok_or_else(|| "filas con longitudes incompatibles".into())
+}
+
+fn parse_vector_or_matrix_arg(s: &str, variables: &HashMap<String, f64>) -> Result<Matrix, String> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return Err("se esperaba vector [a,b,c] o matriz [[...]]".into());
+    }
+    let inner = &s[1..s.len() - 1];
+    if inner.trim_start().starts_with('[') {
+        parse_matrix_arg_strict(s, variables)
+    } else {
+        let entries = split_args(inner);
+        if entries.is_empty() {
+            return Err("vector vacío".into());
+        }
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let value = parse_numeric_arg(entry.trim(), variables)
+                .map_err(|_| format!("entrada numérica inválida '{}'", entry.trim()))?;
+            if !value.is_finite() {
+                return Err(format!("entrada no finita '{}'", entry.trim()));
+            }
+            rows.push(vec![value]);
+        }
+        Matrix::from_rows(rows).ok_or_else(|| "vector inválido".into())
+    }
+}
+
+fn parse_expression_vector_arg(s: &str) -> Result<Vec<String>, String> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return Err("se esperaba vector [a,b,c]".into());
+    }
+    let inner = &s[1..s.len() - 1];
+    let entries = split_args(inner);
+    if entries.is_empty() {
+        return Err("vector vacío".into());
+    }
+    Ok(entries
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .collect())
+}
+
+fn parse_expression_matrix_arg(s: &str) -> Result<Vec<Vec<String>>, String> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return Err("se esperaba matriz con sintaxis [[...],[...]]".into());
+    }
+    let inner = &s[1..s.len() - 1];
+    let row_tokens = split_args(inner);
+    if row_tokens.is_empty() {
+        return Err("matriz vacía".into());
+    }
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(row_tokens.len());
+    for row_token in row_tokens {
+        let row_token = row_token.trim();
+        if !row_token.starts_with('[') || !row_token.ends_with(']') {
+            return Err(format!("fila inválida '{}': usa [a,b,c]", row_token));
+        }
+        let row_inner = &row_token[1..row_token.len() - 1];
+        let entries = split_args(row_inner);
+        if entries.is_empty() {
+            return Err("fila vacía".into());
+        }
+        rows.push(
+            entries
+                .into_iter()
+                .map(|entry| entry.trim().to_string())
+                .collect(),
+        );
+    }
+    if rows.iter().any(|row| row.len() != rows[0].len()) {
+        return Err("filas con longitudes incompatibles".into());
+    }
+    Ok(rows)
+}
+
+fn evaluate_expression_vector(
+    entries: &[String],
+    variables: &HashMap<String, f64>,
+) -> Result<Vec<f64>, String> {
+    entries
+        .iter()
+        .map(|entry| parse_numeric_arg(entry, variables))
+        .collect()
+}
+
+fn evaluate_expression_matrix(
+    rows: &[Vec<String>],
+    variables: &HashMap<String, f64>,
+) -> Result<Matrix, String> {
+    let mut numeric_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut numeric_row = Vec::with_capacity(row.len());
+        for entry in row {
+            numeric_row.push(parse_numeric_arg(entry, variables)?);
+        }
+        numeric_rows.push(numeric_row);
+    }
+    Matrix::from_rows(numeric_rows).ok_or_else(|| "matriz inválida".into())
+}
+
+fn clean_symbol_arg(s: &str) -> String {
+    s.trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn is_valid_parameter_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn linearized_parameter_system<F>(
+    params: &[String],
+    base_vars: &HashMap<String, f64>,
+    eval_equations: F,
+) -> Result<(Option<Matrix>, Option<Matrix>), String>
+where
+    F: Fn(&HashMap<String, f64>) -> Result<Vec<f64>, String>,
+{
+    let mut vars = base_vars.clone();
+    for param in params {
+        vars.insert(param.clone(), 0.0);
+    }
+    let constants = eval_equations(&vars)?;
+    let mut columns = Vec::with_capacity(params.len());
+    for param in params {
+        let mut vars = base_vars.clone();
+        for p in params {
+            vars.insert(p.clone(), 0.0);
+        }
+        vars.insert(param.clone(), 1.0);
+        let values = eval_equations(&vars)?;
+        if values.len() != constants.len() {
+            return Err("cantidad inconsistente de ecuaciones".into());
+        }
+        columns.push(values);
+    }
+
+    let mut rows = Vec::new();
+    let mut rhs = Vec::new();
+    for i in 0..constants.len() {
+        let coeffs = columns
+            .iter()
+            .map(|col| col[i] - constants[i])
+            .collect::<Vec<_>>();
+        let has_coeff = coeffs.iter().any(|x| x.abs() > 1e-10);
+        if has_coeff || constants[i].abs() > 1e-10 {
+            rows.push(coeffs);
+            rhs.push(vec![-constants[i]]);
+        }
+    }
+    if rows.is_empty() {
+        return Ok((None, None));
+    }
+    let a = Matrix::from_rows(rows).ok_or_else(|| "sistema paramétrico inválido".to_string())?;
+    let b = Matrix::from_rows(rhs).ok_or_else(|| "sistema paramétrico inválido".to_string())?;
+    Ok((Some(a), Some(b)))
+}
+
+fn format_parameter_solution(params: &[String], a: &Matrix, b: &Matrix) -> String {
+    let aug = augment_matrix(a, b);
+    let rank_a = rank(a).unwrap_or(0);
+    let rank_aug = rank(&aug).unwrap_or(0);
+    if rank_a < rank_aug {
+        return format!(
+            "No parameter solution: rank(A)={}, rank([A|b])={}",
+            rank_a, rank_aug
+        );
+    }
+    let (rref, pivots) = rref_with_pivots(&aug, 1e-10);
+    let x0 = particular_solution_from_augmented_rref(&rref, &pivots, params.len());
+    if rank_a == params.len() {
+        let assignments = params
+            .iter()
+            .zip(x0.iter())
+            .map(|(name, value)| format!("{} = {}", name, fmt_scalar(*value)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("Unique parameter solution: {assignments}");
+    }
+    let basis = null_space(a).unwrap_or_default();
+    format!(
+        "Infinite parameter solutions for [{}]:\nx0 = {}\nbasis = {}",
+        params.join(", "),
+        fmt_vector(&x0),
+        fmt_vector_basis(&basis)
+    )
+}
+
+fn solve_linear_command(a: &Matrix, b: &Matrix) -> CommandOutcome {
+    if b.rows != a.rows {
+        return CommandOutcome::Error(format!(
+            "LinearSolve: dimensiones incompatibles A={}x{}, b={}x{}",
+            a.rows, a.cols, b.rows, b.cols
+        ));
+    }
+    if b.cols != 1 {
+        if a.rows == a.cols {
+            if let Some(x) = solve_linear_system(a, b) {
+                return CommandOutcome::Message(format!("Unique solution:\n{}", x));
+            }
+        }
+        return CommandOutcome::Error("LinearSolve: RHS matricial no resoluble".into());
+    }
+
+    let aug = augment_matrix(a, b);
+    let rank_a = rank(a).unwrap_or(0);
+    let rank_aug = rank(&aug).unwrap_or(0);
+    if rank_a < rank_aug {
+        return CommandOutcome::Message(format!(
+            "No solution: rank(A)={}, rank([A|b])={}",
+            rank_a, rank_aug
+        ));
+    }
+    if rank_a == a.cols {
+        if a.rows == a.cols {
+            if let Some(x) = solve_linear_system(a, b) {
+                return CommandOutcome::Message(format!(
+                    "Unique solution: x = {}",
+                    fmt_column_matrix_as_vector(&x)
+                ));
+            }
+        }
+        let (rref, pivots) = rref_with_pivots(&aug, 1e-10);
+        let x = particular_solution_from_augmented_rref(&rref, &pivots, a.cols);
+        return CommandOutcome::Message(format!("Unique solution: x = {}", fmt_vector(&x)));
+    }
+
+    let (rref, pivots) = rref_with_pivots(&aug, 1e-10);
+    let x0 = particular_solution_from_augmented_rref(&rref, &pivots, a.cols);
+    let basis = null_space(a).unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "Infinite solutions:\nx0 = {}\nbasis Ker(A) = {}",
+        fmt_vector(&x0),
+        fmt_vector_basis(&basis)
+    ))
+}
+
+fn augment_matrix(a: &Matrix, b: &Matrix) -> Matrix {
+    let mut rows = Vec::with_capacity(a.rows);
+    for r in 0..a.rows {
+        let mut row = Vec::with_capacity(a.cols + b.cols);
+        for c in 0..a.cols {
+            row.push(a.get(r, c));
+        }
+        for c in 0..b.cols {
+            row.push(b.get(r, c));
+        }
+        rows.push(row);
+    }
+    Matrix::from_rows(rows).unwrap()
+}
+
+fn rref_with_pivots(m: &Matrix, eps: f64) -> (Matrix, Vec<usize>) {
+    let mut rref = m.clone();
+    let mut pivots = Vec::new();
+    let mut row = 0;
+    for col in 0..rref.cols {
+        let mut pivot = row;
+        let mut max_abs = 0.0;
+        for r in row..rref.rows {
+            let v = rref.get(r, col).abs();
+            if v > max_abs {
+                max_abs = v;
+                pivot = r;
+            }
+        }
+        if max_abs <= eps {
+            continue;
+        }
+        if pivot != row {
+            for c in 0..rref.cols {
+                let tmp = rref.get(row, c);
+                rref.set(row, c, rref.get(pivot, c));
+                rref.set(pivot, c, tmp);
+            }
+        }
+        let pv = rref.get(row, col);
+        for c in col..rref.cols {
+            rref.set(row, c, rref.get(row, c) / pv);
+        }
+        for r in 0..rref.rows {
+            if r == row {
+                continue;
+            }
+            let factor = rref.get(r, col);
+            if factor.abs() > eps {
+                for c in col..rref.cols {
+                    rref.set(r, c, rref.get(r, c) - factor * rref.get(row, c));
+                }
+            }
+        }
+        pivots.push(col);
+        row += 1;
+        if row == rref.rows {
+            break;
+        }
+    }
+    (rref, pivots)
+}
+
+fn particular_solution_from_augmented_rref(
+    rref: &Matrix,
+    pivots: &[usize],
+    vars: usize,
+) -> Vec<f64> {
+    let mut x = vec![0.0; vars];
+    for (row, &pivot_col) in pivots.iter().enumerate() {
+        if pivot_col < vars {
+            x[pivot_col] = rref.get(row, vars);
+        }
+    }
+    x
+}
+
+fn fmt_column_matrix_as_vector(m: &Matrix) -> String {
+    let values = (0..m.rows).map(|r| m.get(r, 0)).collect::<Vec<_>>();
+    fmt_vector(&values)
+}
+
+fn fmt_vector(v: &[f64]) -> String {
+    format!(
+        "[{}]",
+        v.iter()
+            .map(|x| fmt_scalar(*x))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn fmt_vector_basis(basis: &[Vec<f64>]) -> String {
+    if basis.is_empty() {
+        "[]".to_string()
+    } else {
+        format!(
+            "[{}]",
+            basis
+                .iter()
+                .map(|v| fmt_vector(v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn fmt_matrix_rows(rows: &[Vec<f64>]) -> String {
+    fmt_vector_basis(rows)
+}
+
+fn fmt_scalar(x: f64) -> String {
+    if x.abs() < 5e-11 {
+        "0".to_string()
+    } else if (x - x.round()).abs() < 5e-10 {
+        format!("{:.0}", x.round())
+    } else {
+        format!("{:.6}", x)
+    }
+}
+
+fn fmt_complex_pair(re: f64, im: f64) -> String {
+    if im.abs() < 1e-10 {
+        fmt_scalar(re)
+    } else if im >= 0.0 {
+        format!("{} + {}i", fmt_scalar(re), fmt_scalar(im))
+    } else {
+        format!("{} - {}i", fmt_scalar(re), fmt_scalar(-im))
+    }
+}
+
+fn run_p2_dependence(args: &[String], document: &Document) -> CommandOutcome {
+    let var = args.get(1).map(|s| s.trim()).unwrap_or("x");
+    let polys = match parse_p2_list(&args[0], var, document) {
+        Ok(p) => p,
+        Err(e) => return CommandOutcome::Error(format!("P2Dependence: {e}")),
+    };
+    let matrix = coefficient_columns_matrix(&polys);
+    let r = rank(&matrix).unwrap_or(0);
+    if r == polys.len() {
+        CommandOutcome::Message(format!("Independent in P2; dimension = {r}"))
+    } else {
+        let relation = null_space(&matrix).unwrap_or_default().into_iter().next();
+        let relation_text = relation
+            .as_deref()
+            .map(fmt_polynomial_relation)
+            .unwrap_or_else(|| "relación no única".to_string());
+        CommandOutcome::Message(format!(
+            "Dependent in P2; rank = {r}; relation: {relation_text}"
+        ))
+    }
+}
+
+fn run_p2_basis(args: &[String], document: &Document) -> CommandOutcome {
+    let var = args.get(1).map(|s| s.trim()).unwrap_or("x");
+    let polys = match parse_p2_list(&args[0], var, document) {
+        Ok(p) => p,
+        Err(e) => return CommandOutcome::Error(format!("P2Basis: {e}")),
+    };
+    let vectors = polys.iter().map(|p| p.coeffs.clone()).collect::<Vec<_>>();
+    let indices = independent_row_indices(&vectors);
+    let labels = indices
+        .iter()
+        .map(|&i| format!("p{}={}", i + 1, polys[i].expr))
+        .collect::<Vec<_>>();
+    let is_basis_p2 = indices.len() == 3;
+    CommandOutcome::Message(format!(
+        "Basis of span has dimension {}: {{{}}}. {}",
+        indices.len(),
+        labels.join(", "),
+        if is_basis_p2 {
+            "It is a basis of P2."
+        } else {
+            "Not a basis of P2."
+        }
+    ))
+}
+
+fn run_p2_equations(args: &[String], document: &Document) -> CommandOutcome {
+    let var = args.get(1).map(|s| s.trim()).unwrap_or("x");
+    let polys = match parse_p2_list(&args[0], var, document) {
+        Ok(p) => p,
+        Err(e) => return CommandOutcome::Error(format!("P2Equations: {e}")),
+    };
+    let rows = polys.iter().map(|p| p.coeffs.clone()).collect::<Vec<_>>();
+    let Some(matrix) = Matrix::from_rows(rows) else {
+        return CommandOutcome::Error("P2Equations: lista vacía".into());
+    };
+    let dim = rank(&matrix).unwrap_or(0);
+    let equations = null_space(&matrix).unwrap_or_default();
+    if equations.is_empty() {
+        CommandOutcome::Message(format!(
+            "P2 span dimension = {dim}\nEquations: none; span is P2"
+        ))
+    } else {
+        let eqs = equations
+            .iter()
+            .map(|n| fmt_p2_equation(n))
+            .collect::<Vec<_>>()
+            .join("; ");
+        CommandOutcome::Message(format!("P2 span dimension = {dim}\nEquations: {eqs}"))
+    }
+}
+
+#[derive(Clone)]
+struct P2Polynomial {
+    expr: String,
+    coeffs: Vec<f64>, // [x^2, x, 1]
+}
+
+fn parse_p2_list(text: &str, var: &str, document: &Document) -> Result<Vec<P2Polynomial>, String> {
+    let text = text.trim();
+    if !text.starts_with('{') || !text.ends_with('}') {
+        return Err("usa una lista {p1,p2,...}".into());
+    }
+    let inner = &text[1..text.len() - 1];
+    let exprs = split_args(inner);
+    if exprs.is_empty() {
+        return Err("lista vacía".into());
+    }
+    exprs
+        .into_iter()
+        .map(|expr| {
+            let coeffs = p2_coefficients(expr.trim(), var, document)?;
+            Ok(P2Polynomial {
+                expr: expr.trim().to_string(),
+                coeffs,
+            })
+        })
+        .collect()
+}
+
+fn p2_coefficients(expr: &str, var: &str, document: &Document) -> Result<Vec<f64>, String> {
+    let eval = |x: f64| -> Result<f64, String> {
+        let mut vars = document
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<Vec<_>>();
+        vars.push((var.to_string(), x));
+        evaluate(expr, &vars).map_err(|e| e.to_string())
+    };
+    let y0 = eval(0.0)?;
+    let y1 = eval(1.0)?;
+    let ym1 = eval(-1.0)?;
+    let c = y0;
+    let b = (y1 - ym1) * 0.5;
+    let a = (y1 + ym1 - 2.0 * c) * 0.5;
+    for x in [2.0, 3.0] {
+        let expected = a * x * x + b * x + c;
+        let got = eval(x)?;
+        if (got - expected).abs() > 1e-7 * got.abs().max(expected.abs()).max(1.0) {
+            return Err(format!(
+                "'{}' no es un polinomio de grado <= 2 en {}",
+                expr, var
+            ));
+        }
+    }
+    Ok(vec![a, b, c])
+}
+
+fn coefficient_columns_matrix(polys: &[P2Polynomial]) -> Matrix {
+    let mut rows = vec![Vec::new(), Vec::new(), Vec::new()];
+    for p in polys {
+        for (i, coeff) in p.coeffs.iter().enumerate() {
+            rows[i].push(*coeff);
+        }
+    }
+    Matrix::from_rows(rows).unwrap()
+}
+
+fn fmt_polynomial_relation(coeffs: &[f64]) -> String {
+    let mut terms = Vec::new();
+    for (i, c) in coeffs.iter().enumerate() {
+        if c.abs() > 1e-8 {
+            terms.push(format!("{}*p{}", fmt_scalar(*c), i + 1));
+        }
+    }
+    if terms.is_empty() {
+        "0 = 0".into()
+    } else {
+        format!("{} = 0", terms.join(" + ").replace("+ -", "- "))
+    }
+}
+
+fn fmt_p2_equation(n: &[f64]) -> String {
+    let names = ["a", "b", "c"];
+    let mut terms = Vec::new();
+    for (coeff, name) in n.iter().zip(names) {
+        if coeff.abs() > 1e-8 {
+            terms.push(format!("{}{}", fmt_scalar(*coeff), name));
+        }
+    }
+    if terms.is_empty() {
+        "0 = 0".into()
+    } else {
+        format!("{} = 0", terms.join(" + ").replace("+ -", "- "))
+    }
+}
+
+fn run_subspace_dimension(text: &str, document: &Document) -> CommandOutcome {
+    let matrix = match parse_matrix_arg_strict(text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceDimension: {e}")),
+    };
+    let dim = rank(&matrix).unwrap_or(0);
+    CommandOutcome::Message(format!(
+        "dimension = {dim}\nambient dimension = {}",
+        matrix.cols
+    ))
+}
+
+fn run_subspace_basis(text: &str, document: &Document) -> CommandOutcome {
+    let matrix = match parse_matrix_arg_strict(text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceBasis: {e}")),
+    };
+    let rows = matrix_rows(&matrix);
+    let basis = independent_rows(&rows);
+    CommandOutcome::Message(format!(
+        "basis = {}\ndimension = {}",
+        fmt_matrix_rows(&basis),
+        basis.len()
+    ))
+}
+
+fn run_subspace_sum(u_text: &str, v_text: &str, document: &Document) -> CommandOutcome {
+    let u = match parse_matrix_arg_strict(u_text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceSum: {e}")),
+    };
+    let v = match parse_matrix_arg_strict(v_text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceSum: {e}")),
+    };
+    if u.cols != v.cols {
+        return CommandOutcome::Error("SubspaceSum: dimensiones ambientales distintas".into());
+    }
+    let mut rows = matrix_rows(&u);
+    rows.extend(matrix_rows(&v));
+    let basis = independent_rows(&rows);
+    CommandOutcome::Message(format!(
+        "dim(U) = {}\ndim(V) = {}\ndim(U + V) = {}\nbasis(U + V) = {}",
+        rank(&u).unwrap_or(0),
+        rank(&v).unwrap_or(0),
+        basis.len(),
+        fmt_matrix_rows(&basis)
+    ))
+}
+
+fn run_subspace_intersection(u_text: &str, v_text: &str, document: &Document) -> CommandOutcome {
+    let u = match parse_matrix_arg_strict(u_text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceIntersection: {e}")),
+    };
+    let v = match parse_matrix_arg_strict(v_text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("SubspaceIntersection: {e}")),
+    };
+    if u.cols != v.cols {
+        return CommandOutcome::Error(
+            "SubspaceIntersection: dimensiones ambientales distintas".into(),
+        );
+    }
+    let basis = subspace_intersection_basis(&u, &v);
+    CommandOutcome::Message(format!(
+        "dim(U ∩ V) = {}\nbasis(U ∩ V) = {}",
+        basis.len(),
+        fmt_matrix_rows(&basis)
+    ))
+}
+
+fn run_orthogonal_complement(text: &str, document: &Document) -> CommandOutcome {
+    let matrix = match parse_matrix_arg_strict(text, &document.variables) {
+        Ok(m) => m,
+        Err(e) => return CommandOutcome::Error(format!("OrthogonalComplement: {e}")),
+    };
+    let basis = null_space(&matrix).unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "dim(U⊥) = {}\nbasis(U⊥) = {}",
+        basis.len(),
+        fmt_vector_basis(&basis)
+    ))
+}
+
+fn run_solve_line_3d_parameters(args: &[String], document: &Document) -> CommandOutcome {
+    let direction_exprs = match parse_expression_vector_arg(&args[0]) {
+        Ok(v) if v.len() == 3 => v,
+        Ok(_) => {
+            return CommandOutcome::Error(
+                "SolveLine3DParameters: el director debe tener 3 coordenadas".into(),
+            )
+        }
+        Err(e) => return CommandOutcome::Error(format!("SolveLine3DParameters: {e}")),
+    };
+    let relation = clean_symbol_arg(&args[1]).to_lowercase();
+    let target_exprs = match parse_expression_vector_arg(&args[2]) {
+        Ok(v) if v.len() == 3 => v,
+        Ok(_) => {
+            return CommandOutcome::Error(
+                "SolveLine3DParameters: el vector objetivo debe tener 3 coordenadas".into(),
+            )
+        }
+        Err(e) => return CommandOutcome::Error(format!("SolveLine3DParameters: {e}")),
+    };
+    let params = args[3..]
+        .iter()
+        .map(|arg| clean_symbol_arg(arg))
+        .collect::<Vec<_>>();
+    if params.is_empty() || params.iter().any(|p| !is_valid_parameter_name(p)) {
+        return CommandOutcome::Error(
+            "SolveLine3DParameters: indica parámetros válidos, por ejemplo h, k".into(),
+        );
+    }
+
+    let equations = |vars: &HashMap<String, f64>| -> Result<Vec<f64>, String> {
+        let d = evaluate_expression_vector(&direction_exprs, vars)?;
+        let v = evaluate_expression_vector(&target_exprs, vars)?;
+        match relation.as_str() {
+            "perpendicular" | "orthogonal" | "ortogonal" => {
+                Ok(vec![d[0] * v[0] + d[1] * v[1] + d[2] * v[2]])
+            }
+            "parallel" | "paralelo" | "paralela" => Ok(vec![
+                d[1] * v[2] - d[2] * v[1],
+                d[2] * v[0] - d[0] * v[2],
+                d[0] * v[1] - d[1] * v[0],
+            ]),
+            _ => Err("relación soportada: perpendicular u parallel".into()),
+        }
+    };
+
+    match linearized_parameter_system(&params, &document.variables, equations) {
+        Ok((Some(a), Some(b))) => {
+            CommandOutcome::Message(format_parameter_solution(&params, &a, &b))
+        }
+        Ok((None, None)) => CommandOutcome::Message(format!(
+            "All parameter values satisfy {} for [{}]",
+            relation,
+            params.join(", ")
+        )),
+        Ok(_) => CommandOutcome::Error("SolveLine3DParameters: sistema interno inválido".into()),
+        Err(e) => CommandOutcome::Error(format!("SolveLine3DParameters: {e}")),
+    }
+}
+
+fn run_matrix_param_solve(
+    matrix_text: &str,
+    param_text: &str,
+    document: &Document,
+) -> CommandOutcome {
+    let rows = match parse_expression_matrix_arg(matrix_text) {
+        Ok(rows) => rows,
+        Err(e) => return CommandOutcome::Error(format!("MatrixParamSolve: {e}")),
+    };
+    if rows.len() != rows[0].len() {
+        return CommandOutcome::Error("MatrixParamSolve: la matriz debe ser cuadrada".into());
+    }
+    let param = clean_symbol_arg(param_text);
+    if !is_valid_parameter_name(&param) {
+        return CommandOutcome::Error("MatrixParamSolve: parámetro inválido".into());
+    }
+    let mut det_expr = determinant_expression(&rows);
+    for (name, value) in &document.variables {
+        if name != &param && value.is_finite() {
+            det_expr = replace_variable(&det_expr, name, &format!("({value})"));
+        }
+    }
+
+    let mut vars_zero = document.variables.clone();
+    vars_zero.insert(param.clone(), 0.0);
+    let roots = find_real_roots_scan(
+        |x| {
+            let mut vars = document.variables.clone();
+            vars.insert(param.clone(), x);
+            let matrix = evaluate_expression_matrix(&rows, &vars).ok()?;
+            matrix.determinant()
+        },
+        -100.0,
+        100.0,
+        8000,
+        1e-10,
+    );
+    let symbolic_roots = symbolic::solve(&det_expr, &param)
+        .unwrap_or_else(|e| format!("no se pudo resolver simbólicamente: {e}"));
+    let roots_text = if roots.is_empty() {
+        "[]".to_string()
+    } else {
+        roots
+            .iter()
+            .map(|r| fmt_scalar(*r))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let rank_generic = evaluate_expression_matrix(&rows, &vars_zero)
+        .ok()
+        .and_then(|m| rank(&m))
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "n/d".into());
+    CommandOutcome::Message(format!(
+        "det(A) = {det_expr}\nSingular parameter values ({param}) in [-100,100]: [{roots_text}]\nSymbolic solve: {symbolic_roots}\nrank at {param}=0: {rank_generic}"
+    ))
+}
+
+fn determinant_expression(rows: &[Vec<String>]) -> String {
+    let n = rows.len();
+    if n == 1 {
+        return rows[0][0].clone();
+    }
+    let mut terms = Vec::new();
+    for col in 0..n {
+        let mut minor = Vec::with_capacity(n - 1);
+        for source_row in rows.iter().skip(1) {
+            let mut row = Vec::with_capacity(n - 1);
+            for (c, entry) in source_row.iter().enumerate() {
+                if c != col {
+                    row.push(entry.clone());
+                }
+            }
+            minor.push(row);
+        }
+        let term = format!("({})*({})", rows[0][col], determinant_expression(&minor));
+        if col % 2 == 0 {
+            terms.push(term);
+        } else {
+            terms.push(format!("-({term})"));
+        }
+    }
+    terms.join("+").replace("+-", "-")
+}
+
+fn matrix_rows(m: &Matrix) -> Vec<Vec<f64>> {
+    (0..m.rows)
+        .map(|r| (0..m.cols).map(|c| m.get(r, c)).collect())
+        .collect()
+}
+
+fn independent_row_indices(rows: &[Vec<f64>]) -> Vec<usize> {
+    let mut selected = Vec::new();
+    let mut current_rank = 0;
+    let mut current_rows: Vec<Vec<f64>> = Vec::new();
+    for (idx, row) in rows.iter().enumerate() {
+        current_rows.push(row.clone());
+        let candidate = Matrix::from_rows(current_rows.clone()).unwrap();
+        let r = rank(&candidate).unwrap_or(0);
+        if r > current_rank {
+            current_rank = r;
+            selected.push(idx);
+        } else {
+            current_rows.pop();
+        }
+    }
+    selected
+}
+
+fn independent_rows(rows: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    let indices = independent_row_indices(rows);
+    indices.into_iter().map(|i| rows[i].clone()).collect()
+}
+
+fn subspace_intersection_basis(u: &Matrix, v: &Matrix) -> Vec<Vec<f64>> {
+    let n = u.cols;
+    let k = u.rows;
+    let m = v.rows;
+    let mut rows = Vec::with_capacity(n);
+    for coord in 0..n {
+        let mut row = Vec::with_capacity(k + m);
+        for i in 0..k {
+            row.push(u.get(i, coord));
+        }
+        for j in 0..m {
+            row.push(-v.get(j, coord));
+        }
+        rows.push(row);
+    }
+    let Some(system) = Matrix::from_rows(rows) else {
+        return Vec::new();
+    };
+    let relations = null_space(&system).unwrap_or_default();
+    let u_rows = matrix_rows(u);
+    let mut candidates = Vec::new();
+    for rel in relations {
+        let mut vec = vec![0.0; n];
+        for i in 0..k {
+            for (coord, value) in vec.iter_mut().enumerate() {
+                *value += rel[i] * u_rows[i][coord];
+            }
+        }
+        if vec.iter().any(|x| x.abs() > 1e-8) {
+            candidates.push(vec);
+        }
+    }
+    independent_rows(&candidates)
 }
 
 fn parse_matrix_arg(s: &str) -> Option<Matrix> {

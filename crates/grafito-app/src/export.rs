@@ -154,7 +154,6 @@ pub fn export_svg(doc: &Document, width: f64, height: f64) -> String {
 }
 
 /// Export the document as a PNG raster image using CPU-side primitive rendering.
-#[allow(dead_code)]
 pub fn export_png(doc: &Document, width: u32, height: u32, path: &str) -> Result<()> {
     let mut img: RgbaImage = ImageBuffer::from_pixel(width, height, Rgba([255, 255, 255, 255]));
     let view = doc.view();
@@ -258,173 +257,7 @@ pub fn export_png(doc: &Document, width: u32, height: u32, path: &str) -> Result
     Ok(())
 }
 
-/// Export the document as a minimal valid PDF file.
-#[allow(dead_code)]
-pub fn export_pdf(doc: &Document, width: f64, height: f64, path: &str) -> Result<()> {
-    // Generate a minimal PDF with one page.
-    let page_w = width as f32;
-    let page_h = height as f32;
-
-    let mut content = String::new();
-    content.push_str("q\n");
-    content.push_str("1 0 0 1 0 0 cm\n");
-    // Draw white background
-    content.push_str("1 1 1 rg\n");
-    content.push_str(&format!("0 0 {} {} re f\n", page_w, page_h));
-    // Draw axes
-    content.push_str("0.7 0.7 0.7 RG\n1 w\n");
-    let view = doc.view();
-    let origin = view.world_to_screen(Point2::new(0.0, 0.0));
-    let origin_x = origin.x;
-    let origin_y = page_h - origin.y; // PDF Y is bottom-up
-    let pdf_scale = view.scale as f32;
-    content.push_str(&format!("{} 0 m {} {} l S\n", origin_x, origin_x, page_h));
-    content.push_str(&format!("0 {} m {} {} l S\n", origin_y, page_w, origin_y));
-
-    for (_, obj) in doc.objects_iter() {
-        if !obj.is_visible() {
-            continue;
-        }
-        let c = obj.color();
-        let r = (c.r * 255.0).clamp(0.0, 255.0) as u8 as f32 / 255.0;
-        let g = (c.g * 255.0).clamp(0.0, 255.0) as u8 as f32 / 255.0;
-        let b = (c.b * 255.0).clamp(0.0, 255.0) as u8 as f32 / 255.0;
-        content.push_str(&format!("{} {} {} RG\n", r, g, b));
-        match obj {
-            GeoObject::Point(p) => {
-                let sx = origin_x + p.position.x as f32 * pdf_scale;
-                let sy = origin_y - p.position.y as f32 * pdf_scale;
-                content.push_str(&format!(
-                    "{:.1} {:.1} m {:.1} {:.1} l {:.1} {:.1} l {:.1} {:.1} l S\n",
-                    sx - p.size,
-                    sy,
-                    sx + p.size,
-                    sy,
-                    sx,
-                    sy + p.size,
-                    sx,
-                    sy - p.size,
-                ));
-            }
-            GeoObject::Line(l) => {
-                let (a, b) = match l.kind {
-                    LineKind::Segment => (l.start, l.end),
-                    _ => (l.start, l.end),
-                };
-                let x1 = origin_x + a.x as f32 * pdf_scale;
-                let y1 = origin_y - a.y as f32 * pdf_scale;
-                let x2 = origin_x + b.x as f32 * pdf_scale;
-                let y2 = origin_y - b.y as f32 * pdf_scale;
-                content.push_str(&format!("{:.1} {:.1} m {:.1} {:.1} l S\n", x1, y1, x2, y2));
-            }
-            GeoObject::Circle(c) => {
-                let cx = origin_x + c.center.x as f32 * pdf_scale;
-                let cy = origin_y - c.center.y as f32 * pdf_scale;
-                let r = c.radius as f32 * pdf_scale;
-                // Approximate circle with 4 Bezier curves
-                let k = 0.5523_f32 * r;
-                content.push_str(&format!(
-                    "{:.1} {:.1} m {:.1} {:.1} {:.1} {:.1} {:.1} {:.1} c {:.1} {:.1} {:.1} {:.1} {:.1} {:.1} c {:.1} {:.1} {:.1} {:.1} {:.1} {:.1} c {:.1} {:.1} {:.1} {:.1} {:.1} {:.1} c h S\n",
-                    cx + r, cy, cx + r, cy + k, cx + k, cy + r, cx, cy + r,
-                    cx - k, cy + r, cx - r, cy + k, cx - r, cy,
-                    cx - r, cy - k, cx - k, cy - r, cx, cy - r,
-                    cx + k, cy - r, cx + r, cy - k, cx + r, cy,
-                ));
-            }
-            GeoObject::Function(f) => {
-                let x_min = f.domain_min.unwrap_or(-10.0);
-                let x_max = f.domain_max.unwrap_or(10.0);
-                let steps = 200;
-                let dx = (x_max - x_min) / steps as f64;
-                let mut started = false;
-                for i in 0..=steps {
-                    let x = x_min + i as f64 * dx;
-                    if let Ok(y) =
-                        grafito_geometry::expr::evaluate(&f.expr, &[("x".to_string(), x)])
-                    {
-                        if y.is_finite() {
-                            let sx = origin_x + x as f32 * pdf_scale;
-                            let sy = origin_y - y as f32 * pdf_scale;
-                            if !started {
-                                content.push_str(&format!("{:.1} {:.1} m\n", sx, sy));
-                                started = true;
-                            } else {
-                                content.push_str(&format!("{:.1} {:.1} l\n", sx, sy));
-                            }
-                        }
-                    }
-                }
-                if started {
-                    content.push_str("S\n");
-                }
-            }
-            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
-                for (i, v) in poly.vertices.iter().enumerate() {
-                    let sx = origin_x + v.x as f32 * pdf_scale;
-                    let sy = origin_y - v.y as f32 * pdf_scale;
-                    if i == 0 {
-                        content.push_str(&format!("{:.1} {:.1} m\n", sx, sy));
-                    } else {
-                        content.push_str(&format!("{:.1} {:.1} l\n", sx, sy));
-                    }
-                }
-                content.push_str("h S\n");
-            }
-            _ => {}
-        }
-    }
-    content.push_str("Q\n");
-
-    // Build minimal PDF
-    let mut pdf = String::new();
-    pdf.push_str("%PDF-1.4\n");
-    let mut offsets = Vec::new();
-
-    // Object 1: Catalog
-    offsets.push(pdf.len());
-    pdf.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-
-    // Object 2: Pages
-    offsets.push(pdf.len());
-    pdf.push_str("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-
-    // Object 3: Page
-    offsets.push(pdf.len());
-    pdf.push_str(&format!(
-        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << >> >>\nendobj\n",
-        page_w, page_h
-    ));
-
-    // Object 4: Content stream
-    offsets.push(pdf.len());
-    pdf.push_str(&format!(
-        "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
-        content.len(),
-        content
-    ));
-
-    // xref
-    let xref_pos = pdf.len();
-    pdf.push_str("xref\n");
-    pdf.push_str(&format!("0 {}\n", offsets.len() + 1));
-    pdf.push_str("0000000000 65535 f \n");
-    for off in &offsets {
-        pdf.push_str(&format!("{:010} 00000 n \n", off));
-    }
-
-    // trailer
-    pdf.push_str(&format!(
-        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
-        offsets.len() + 1,
-        xref_pos
-    ));
-
-    std::fs::write(path, pdf.as_bytes()).context("Failed to write PDF file")?;
-    Ok(())
-}
-
 /// Export the document as LaTeX (tikz/pgfplots) code.
-#[allow(dead_code)]
 pub fn export_latex(doc: &Document) -> String {
     let mut tex = String::new();
     tex.push_str("\\documentclass{standalone}\n");
@@ -516,7 +349,6 @@ pub fn export_latex(doc: &Document) -> String {
     tex
 }
 
-#[allow(dead_code)]
 fn escape_latex(s: &str) -> String {
     s.replace('\\', r"\textbackslash{}")
         .replace('{', r"\{")
@@ -647,18 +479,5 @@ mod tests {
         let result = export_png(&doc, 200, 200, path.to_str().unwrap());
         assert!(result.is_ok(), "export_png failed: {result:?}");
         assert!(path.exists());
-    }
-
-    #[test]
-    fn test_export_pdf_no_panic() {
-        let mut doc = Document::new();
-        let p = PointObj::new(grafito_geometry::Point2::new(1.0, 1.0));
-        doc.add_object(GeoObject::Point(p));
-        let path = std::env::temp_dir().join("grafito_test_export.pdf");
-        let result = export_pdf(&doc, 400.0, 300.0, path.to_str().unwrap());
-        assert!(result.is_ok(), "export_pdf failed: {result:?}");
-        let content = std::fs::read_to_string(path).unwrap();
-        assert!(content.starts_with("%PDF-1.4"));
-        assert!(content.contains("%%EOF"));
     }
 }

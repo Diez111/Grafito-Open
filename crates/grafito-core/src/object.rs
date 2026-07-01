@@ -25,6 +25,8 @@ pub enum GeoObject {
     // 3D
     Point3D(Point3DObj),
     Segment3D(Segment3DObj),
+    Plane3D(Plane3DObj),
+    Line3D(Line3DObj),
     Sphere3D(Sphere3DObj),
     Cube3D(Cube3DObj),
     Pyramid3D(Pyramid3DObj),
@@ -59,7 +61,63 @@ pub enum GeoObject {
     Transformed(TransformedObj),
 }
 
+/// Espacio principal donde se renderiza un objeto del documento.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSpace {
+    D2,
+    D3,
+}
+
 impl GeoObject {
+    pub fn render_space(&self) -> RenderSpace {
+        match self {
+            GeoObject::Point(_)
+            | GeoObject::Line(_)
+            | GeoObject::Circle(_)
+            | GeoObject::Polygon(_)
+            | GeoObject::Pencil(_)
+            | GeoObject::Function(_)
+            | GeoObject::Text(_)
+            | GeoObject::Ellipse(_)
+            | GeoObject::Parabola(_)
+            | GeoObject::Hyperbola(_)
+            | GeoObject::ParametricCurve2D(_)
+            | GeoObject::PolarCurve(_)
+            | GeoObject::ImplicitCurve(_)
+            | GeoObject::VectorField2D(_)
+            | GeoObject::ComplexGrid(_)
+            | GeoObject::ComplexMapping(_)
+            | GeoObject::ComplexIntegral(_)
+            | GeoObject::Fractal2D(_)
+            | GeoObject::Histogram(_)
+            | GeoObject::ScatterPlot(_)
+            | GeoObject::BoxPlot(_)
+            | GeoObject::RegressionLine(_)
+            | GeoObject::PhasePortrait(_) => RenderSpace::D2,
+            GeoObject::Point3D(_)
+            | GeoObject::Segment3D(_)
+            | GeoObject::Plane3D(_)
+            | GeoObject::Line3D(_)
+            | GeoObject::Sphere3D(_)
+            | GeoObject::Cube3D(_)
+            | GeoObject::Pyramid3D(_)
+            | GeoObject::Cone3D(_)
+            | GeoObject::Cylinder3D(_)
+            | GeoObject::Torus3D(_)
+            | GeoObject::MoebiusStrip(_)
+            | GeoObject::Surface3D(_)
+            | GeoObject::ParametricCurve3D(_)
+            | GeoObject::Attractor3D(_)
+            | GeoObject::HyperSurface4D(_)
+            | GeoObject::VectorField3D(_) => RenderSpace::D3,
+            GeoObject::Transformed(o) => o.inner.render_space(),
+        }
+    }
+
+    pub fn is_3d(&self) -> bool {
+        self.render_space() == RenderSpace::D3
+    }
+
     pub fn id(&self) -> ObjectId {
         match self {
             GeoObject::Point(o) => o.id,
@@ -73,6 +131,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.id,
             GeoObject::Point3D(o) => o.id,
             GeoObject::Segment3D(o) => o.id,
+            GeoObject::Plane3D(o) => o.id,
+            GeoObject::Line3D(o) => o.id,
             GeoObject::Sphere3D(o) => o.id,
             GeoObject::Cube3D(o) => o.id,
             GeoObject::Pyramid3D(o) => o.id,
@@ -116,6 +176,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => &o.label,
             GeoObject::Point3D(o) => &o.label,
             GeoObject::Segment3D(o) => &o.label,
+            GeoObject::Plane3D(o) => &o.label,
+            GeoObject::Line3D(o) => &o.label,
             GeoObject::Sphere3D(o) => &o.label,
             GeoObject::Cube3D(o) => &o.label,
             GeoObject::Pyramid3D(o) => &o.label,
@@ -159,6 +221,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.label = label,
             GeoObject::Point3D(o) => o.label = label,
             GeoObject::Segment3D(o) => o.label = label,
+            GeoObject::Plane3D(o) => o.label = label,
+            GeoObject::Line3D(o) => o.label = label,
             GeoObject::Sphere3D(o) => o.label = label,
             GeoObject::Cube3D(o) => o.label = label,
             GeoObject::Pyramid3D(o) => o.label = label,
@@ -203,6 +267,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.color,
             GeoObject::Point3D(o) => o.color,
             GeoObject::Segment3D(o) => o.color,
+            GeoObject::Plane3D(o) => o.color,
+            GeoObject::Line3D(o) => o.color,
             GeoObject::Sphere3D(o) => o.color,
             GeoObject::Cube3D(o) => o.color,
             GeoObject::Pyramid3D(o) => o.color,
@@ -246,6 +312,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.color = color,
             GeoObject::Point3D(o) => o.color = color,
             GeoObject::Segment3D(o) => o.color = color,
+            GeoObject::Plane3D(o) => o.color = color,
+            GeoObject::Line3D(o) => o.color = color,
             GeoObject::Sphere3D(o) => o.color = color,
             GeoObject::Cube3D(o) => o.color = color,
             GeoObject::Pyramid3D(o) => o.color = color,
@@ -289,6 +357,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.visible,
             GeoObject::Point3D(o) => o.visible,
             GeoObject::Segment3D(o) => o.visible,
+            GeoObject::Plane3D(o) => o.visible,
+            GeoObject::Line3D(o) => o.visible,
             GeoObject::Sphere3D(o) => o.visible,
             GeoObject::Cube3D(o) => o.visible,
             GeoObject::Pyramid3D(o) => o.visible,
@@ -332,6 +402,8 @@ impl GeoObject {
             GeoObject::Hyperbola(o) => o.visible = visible,
             GeoObject::Point3D(o) => o.visible = visible,
             GeoObject::Segment3D(o) => o.visible = visible,
+            GeoObject::Plane3D(o) => o.visible = visible,
+            GeoObject::Line3D(o) => o.visible = visible,
             GeoObject::Sphere3D(o) => o.visible = visible,
             GeoObject::Cube3D(o) => o.visible = visible,
             GeoObject::Pyramid3D(o) => o.visible = visible,
@@ -375,6 +447,8 @@ impl GeoObject {
             GeoObject::Hyperbola(_) => "Hyperbola",
             GeoObject::Point3D(_) => "Point3D",
             GeoObject::Segment3D(_) => "Segment3D",
+            GeoObject::Plane3D(_) => "Plane3D",
+            GeoObject::Line3D(_) => "Line3D",
             GeoObject::Sphere3D(_) => "Sphere3D",
             GeoObject::Cube3D(_) => "Cube3D",
             GeoObject::Pyramid3D(_) => "Pyramid3D",
@@ -842,6 +916,130 @@ impl Segment3DObj {
             width: 2.0,
         }
     }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Plane3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    /// Coeficientes de la ecuación `ax + by + cz + d = 0`.
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    /// Expresiones opcionales vinculantes (como en Surface3DObj).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub b_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub d_expr: Option<String>,
+    pub color: Color,
+    pub visible: bool,
+    /// Opacidad del relleno (0.0 = transparente, 1.0 = opaco).
+    #[serde(default = "default_plane_opacity")]
+    pub opacity: f32,
+}
+
+fn default_plane_opacity() -> f32 {
+    0.25
+}
+
+impl Plane3DObj {
+    /// Crea un plano a partir de los coeficientes `ax + by + cz + d = 0`.
+    pub fn from_equation(a: f64, b: f64, c: f64, d: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            a,
+            b,
+            c,
+            d,
+            a_expr: None,
+            b_expr: None,
+            c_expr: None,
+            d_expr: None,
+            color: Color::new(0.3, 0.6, 0.9, 1.0),
+            visible: true,
+            opacity: default_plane_opacity(),
+        }
+    }
+
+    /// Crea un plano a partir de tres puntos.
+    pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Self {
+        let v1 = (p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+        let v2 = (p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
+        // cross product v1 × v2
+        let a = v1.1 * v2.2 - v1.2 * v2.1;
+        let b = v1.2 * v2.0 - v1.0 * v2.2;
+        let c = v1.0 * v2.1 - v1.1 * v2.0;
+        let d = -(a * p1.x + b * p1.y + c * p1.z);
+        Self::from_equation(a, b, c, d)
+    }
+
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Line3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    /// Punto de paso de la recta.
+    pub point: Point3D,
+    /// Vector dirección.
+    pub direction: Point3D,
+    /// Expresiones opcionales vinculantes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub py_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pz_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dx_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dy_expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dz_expr: Option<String>,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl Line3DObj {
+    /// Crea una recta a partir de un punto y un vector dirección.
+    pub fn from_point_and_direction(point: Point3D, direction: Point3D) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            point,
+            direction,
+            px_expr: None,
+            py_expr: None,
+            pz_expr: None,
+            dx_expr: None,
+            dy_expr: None,
+            dz_expr: None,
+            color: Color::new(0.9, 0.3, 0.3, 1.0),
+            visible: true,
+            width: 2.0,
+        }
+    }
+
+    /// Crea una recta a partir de dos puntos.
+    pub fn from_two_points(a: Point3D, b: Point3D) -> Self {
+        Self::from_point_and_direction(a, Point3D::new(b.x - a.x, b.y - a.y, b.z - a.z))
+    }
+
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
         self
@@ -2914,5 +3112,22 @@ mod tests {
         let (lhs, rhs) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         assert_eq!(lhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
         assert_eq!(rhs.eval_2d("x", 1.0, "y", 0.0), 1.0);
+    }
+
+    #[test]
+    fn render_space_classifies_2d_and_3d_objects() {
+        let point = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
+        let plane = GeoObject::Plane3D(Plane3DObj::from_equation(0.0, 0.0, 1.0, 0.0));
+        let line = GeoObject::Line3D(Line3DObj::from_point_and_direction(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+        ));
+        let transformed = GeoObject::Transformed(TransformedObj::new(line.clone(), "z"));
+
+        assert_eq!(point.render_space(), RenderSpace::D2);
+        assert_eq!(plane.render_space(), RenderSpace::D3);
+        assert_eq!(line.render_space(), RenderSpace::D3);
+        assert_eq!(transformed.render_space(), RenderSpace::D3);
+        assert!(plane.is_3d());
     }
 }

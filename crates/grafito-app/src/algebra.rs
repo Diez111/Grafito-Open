@@ -318,13 +318,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 let (obj_label, obj_name, obj_vis, obj_col, obj_expr) = {
                     let Some(obj) = app.document.get_object(oid) else { continue; };
 
-                    // Filter objects by current view mode
-                    let is_3d_object = matches!(obj.name(),
-                        "Point3D" | "Segment3D" | "Sphere3D" | "Cube3D" | "Pyramid3D" |
-                        "Cone3D" | "Cylinder3D" | "Torus3D" | "MoebiusStrip" |
-                        "Surface3D" | "ParametricCurve3D" |
-                        "Attractor3D" | "HyperSurface4D" | "VectorField3D"
-                    );
+                    // Filtra por el espacio de render centralizado en GeoObject.
+                    let is_3d_object = obj.is_3d();
                     let is_3d_view = app.current_view == ViewMode::D3;
                     if is_3d_object != is_3d_view {
                         continue;

@@ -11,7 +11,6 @@ use grafito_core::{
     Point3DObj, PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality,
     VectorField2DObj,
 };
-use grafito_geometry::analysis::AnalysisResult;
 use grafito_geometry::{Camera3D, Point2, Point3D};
 use grafito_ui::Tool;
 use std::time::Instant;
@@ -1040,24 +1039,6 @@ impl GrafitoApp {
     }
 }
 
-#[allow(dead_code)]
-fn find_nearest_feature(
-    results: &[AnalysisResult],
-    world: Point2,
-    tolerance: f64,
-) -> Option<AnalysisResult> {
-    let mut best: Option<AnalysisResult> = None;
-    let mut best_dist = tolerance;
-    for r in results {
-        let dist = r.point.distance(&world);
-        if dist < best_dist {
-            best_dist = dist;
-            best = Some(r.clone());
-        }
-    }
-    best
-}
-
 fn point_to_line_distance(p: Point2, a: Point2, b: Point2) -> f64 {
     let abx = b.x - a.x;
     let aby = b.y - a.y;
@@ -1197,7 +1178,20 @@ impl GrafitoApp {
         self.tool_ghost = None;
         if matches!(
             self.current_tool,
-            Tool::Point3D | Tool::Sphere3D | Tool::Cube3D
+            Tool::Point3D
+                | Tool::Segment3D
+                | Tool::Line3D
+                | Tool::Plane3D
+                | Tool::Sphere3D
+                | Tool::Cube3D
+                | Tool::Cylinder3D
+                | Tool::Cone3D
+                | Tool::Torus3D
+                | Tool::MoebiusStrip
+                | Tool::Surface3D
+                | Tool::ParametricCurve3D
+                | Tool::VectorField3D
+                | Tool::HyperSurface4D
         ) {
             let t = self.camera.target;
             let ghost_pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);

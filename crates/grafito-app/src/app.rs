@@ -872,10 +872,9 @@ impl GrafitoApp {
         }
     }
 
-    /// Cambia la perspectiva activa, sincroniza `current_view`, la herramienta
-    /// por defecto, los paneles y carga ejemplos. Siempre limpia el estado
-    /// transitorio (selección, preview, color picker) para evitar residuos de
-    /// la perspectiva anterior.
+    /// Cambia la perspectiva activa y sincroniza `current_view`, la herramienta
+    /// por defecto y los paneles. La perspectiva es sólo una vista de trabajo:
+    /// nunca debe borrar ni reemplazar el documento del usuario.
     pub(crate) fn set_perspective(&mut self, p: Perspective) {
         if self.perspective == p {
             return;
@@ -921,12 +920,6 @@ impl GrafitoApp {
         // menú Vista — en ese caso se respeta el flag manual via set_exam_mode
         // externo). Aquí sólo sincronizamos el default de la perspective.
         self.exam_mode = matches!(p, Perspective::Exam);
-        // Cargar ejemplos SIEMPRE al cambiar de perspectiva. El usuario puede
-        // deshacer con Ctrl+Z si quería mantener su trabajo. Esto hace que el
-        // switch sea visualmente obvio (la queja "no veo que cambie nada").
-        self.save_state();
-        self.document.clear();
-        self.load_perspective_examples(p);
         // Siempre bump_version para invalidar caches GPU.
         self.document.bump_version();
     }

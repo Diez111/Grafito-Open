@@ -273,6 +273,8 @@ impl Document {
                 GeoObject::Hyperbola(o) => o.label = label,
                 GeoObject::Point3D(o) => o.label = label,
                 GeoObject::Segment3D(o) => o.label = label,
+                GeoObject::Plane3D(o) => o.label = label,
+                GeoObject::Line3D(o) => o.label = label,
                 GeoObject::Sphere3D(o) => o.label = label,
                 GeoObject::Cube3D(o) => o.label = label,
                 GeoObject::Pyramid3D(o) => o.label = label,
@@ -336,9 +338,23 @@ impl Document {
 
     pub fn remove_object(&mut self, id: ObjectId) -> Option<GeoObject> {
         self.bump_version();
-        self.constraints.remove_object(id);
+        // Eliminar del grafo de restricciones y recolectar los outputs que
+        // quedaron huérfanos (constraints eliminadas que producían esos
+        // objetos). Esos outputs ya no son impulsados por ninguna
+        // restricción, así que también deben eliminarse del documento de
+        // forma recursiva: un output huérfano podría ser a su vez input de
+        // otra restricción, lo que dispara una nueva cascada.
+        let orphaned = self.constraints.remove_object(id);
         self.spatial_dirty = true;
-        self.objects.remove(&id)
+        self.selection.retain(|&s| s != id);
+        let removed = self.objects.remove(&id);
+        for out in orphaned {
+            // Evitar doble eliminación si el output era el propio `id`.
+            if out != id {
+                let _ = self.remove_object(out);
+            }
+        }
+        removed
     }
 
     /// Move a free point and return IDs of all affected objects (via constraint propagation).
@@ -905,12 +921,12 @@ impl Document {
                     "Extrude" if !cons.inputs.is_empty() => {
                         let height = cons.params.get("height").copied().unwrap_or(0.0);
                         if height.abs() < 1e-12 {
-                            return;
+                            continue;
                         }
                         if let Some(GeoObject::Polygon(poly)) = self.get_object(cons.inputs[0]) {
                             let verts = poly.vertices.clone();
                             if verts.len() < 3 {
-                                return;
+                                continue;
                             }
                             let base_y = 0.0;
                             let top_y = height;
@@ -1897,6 +1913,8 @@ impl Document {
                 // 3D objects are not indexed in 2D spatial index
                 GeoObject::Point3D(_)
                 | GeoObject::Segment3D(_)
+                | GeoObject::Plane3D(_)
+                | GeoObject::Line3D(_)
                 | GeoObject::Sphere3D(_)
                 | GeoObject::Cube3D(_)
                 | GeoObject::Pyramid3D(_)

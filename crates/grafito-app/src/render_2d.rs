@@ -21,15 +21,6 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
-/// Cuenta el número de nodos en un AST. Históricamente se usaba para
-/// decidir el stride del scanline fill; hoy el fill cacheado siempre
-/// rasteriza a stride 1, pero se preserva el helper por si futuras
-/// optimizaciones vuelven a necesitarlo.
-#[allow(dead_code)]
-fn node_count(expr: &grafito_geometry::ast::Expr) -> usize {
-    expr.node_count()
-}
-
 /// Caché de textura para el relleno de curvas implícitas.
 ///
 /// Almacena la textura egui resultante de rasterizar el fill de una
@@ -349,7 +340,6 @@ fn superscript(exp: i32) -> String {
     result
 }
 
-#[allow(dead_code)]
 impl GrafitoApp {
     pub(crate) fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
         if !self.show_grid {
@@ -791,22 +781,8 @@ impl GrafitoApp {
             if !obj.is_visible() {
                 continue;
             }
-            // Skip 3D objects in 2D view — they can't be rendered here
-            if matches!(
-                obj,
-                GeoObject::Point3D(_)
-                    | GeoObject::Segment3D(_)
-                    | GeoObject::Sphere3D(_)
-                    | GeoObject::Cube3D(_)
-                    | GeoObject::Pyramid3D(_)
-                    | GeoObject::Cone3D(_)
-                    | GeoObject::Cylinder3D(_)
-                    | GeoObject::Surface3D(_)
-                    | GeoObject::ParametricCurve3D(_)
-                    | GeoObject::Attractor3D(_)
-                    | GeoObject::HyperSurface4D(_)
-                    | GeoObject::VectorField3D(_)
-            ) {
+            // Skip 3D objects in 2D view — they can't be rendered here.
+            if obj.is_3d() {
                 continue;
             }
 
@@ -932,10 +908,6 @@ impl GrafitoApp {
             }
             self.draw_complex_mapping_fill(painter, canvas_rect, view, ic, cm.id, map, fill_color);
         }
-    }
-
-    pub(crate) fn draw_ripples(&mut self, _painter: &egui::Painter, _current_time: f64) {
-        // Disabled
     }
 
     fn hovered_analysis_color(
@@ -2996,6 +2968,24 @@ impl GrafitoApp {
                         prev = None;
                     }
                 }
+            }
+            GeoObject::ComplexIntegral(ci) => {
+                if let Some(target) = self.document.get_object(ci.target) {
+                    self.draw_object_styled(
+                        painter,
+                        canvas_rect,
+                        target,
+                        Some(StyleOverride {
+                            color: Some(ci.color),
+                            width_scale: Some(1.4),
+                            ..Default::default()
+                        }),
+                        overlay_only,
+                    );
+                }
+            }
+            GeoObject::Transformed(t) => {
+                self.draw_object_styled(painter, canvas_rect, &t.inner, style, overlay_only);
             }
             _ => {}
         }

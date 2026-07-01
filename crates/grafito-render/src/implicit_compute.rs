@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-#[allow(dead_code)]
 pub(crate) enum Op {
     Nop = 0,
     PushConst = 1,

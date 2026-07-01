@@ -31,6 +31,7 @@ pub mod interval;
 pub mod lines;
 pub mod matrices;
 pub mod ode;
+pub mod planes3d;
 pub mod precision;
 pub mod special_curves;
 pub mod special_functions;
@@ -42,6 +43,7 @@ pub mod value;
 
 pub use boolean::*;
 pub use lines::*;
+pub use planes3d::*;
 pub use types::*;
 pub use types3d::*;
 

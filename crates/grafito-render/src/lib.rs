@@ -648,6 +648,34 @@ impl Renderer {
                         );
                     }
                 }
+                GeoObject::Plane3D(p) => {
+                    Self::add_plane3d_patch(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        p.a,
+                        p.b,
+                        p.c,
+                        p.d,
+                        p.opacity,
+                        p.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Line3D(l) => {
+                    Self::add_line3d_object(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &l.point,
+                        &l.direction,
+                        l.width,
+                        l.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
                 GeoObject::Sphere3D(s) => {
                     Self::add_wireframe_sphere(
                         &mut vertices,
@@ -670,6 +698,76 @@ impl Renderer {
                         c.size,
                         c.width,
                         c.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Pyramid3D(p) => {
+                    Self::add_wireframe_pyramid(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &p.base_center,
+                        &p.apex,
+                        p.base_size,
+                        p.width,
+                        p.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Cone3D(c) => {
+                    Self::add_wireframe_cone(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &c.base_center,
+                        &c.apex,
+                        c.radius,
+                        c.width,
+                        c.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Cylinder3D(c) => {
+                    Self::add_wireframe_cylinder(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &c.base_center,
+                        &c.top_center,
+                        c.radius,
+                        c.width,
+                        c.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Torus3D(t) => {
+                    Self::add_wireframe_torus(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &t.center,
+                        t.r_major,
+                        t.r_minor,
+                        t.width,
+                        t.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::MoebiusStrip(mb) => {
+                    Self::add_wireframe_moebius(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &mb.center,
+                        mb.radius,
+                        mb.width_r,
+                        mb.width,
+                        mb.color,
                         screen_w,
                         screen_h,
                     );
@@ -889,6 +987,90 @@ impl Renderer {
                 color,
             );
         }
+    }
+
+    fn add_line3d_object(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        camera: &Camera3D,
+        point: &Point3D,
+        direction: &Point3D,
+        width: f32,
+        color: Color,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let len =
+            (direction.x * direction.x + direction.y * direction.y + direction.z * direction.z)
+                .sqrt();
+        if len < 1e-15 {
+            return;
+        }
+        let span = (camera.distance as f64 * 4.0).max(20.0);
+        let dx = direction.x / len * span;
+        let dy = direction.y / len * span;
+        let dz = direction.z / len * span;
+        let a = Point3D::new(point.x - dx, point.y - dy, point.z - dz);
+        let b = Point3D::new(point.x + dx, point.y + dy, point.z + dz);
+        Self::add_line_3d(
+            vertices, indices, camera, &a, &b, width, color, screen_w, screen_h,
+        );
+    }
+
+    fn add_plane3d_patch(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        camera: &Camera3D,
+        a: f64,
+        b: f64,
+        c: f64,
+        d: f64,
+        opacity: f32,
+        color: Color,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let normal = glam::Vec3::new(a as f32, b as f32, c as f32);
+        let norm_sq = normal.length_squared();
+        if norm_sq < 1e-12 {
+            return;
+        }
+        let n = normal.normalize();
+        let anchor_factor = (-d as f32) / norm_sq;
+        let center = normal * anchor_factor;
+        let reference = if n.cross(glam::Vec3::Y).length_squared() > 1e-6 {
+            glam::Vec3::Y
+        } else {
+            glam::Vec3::X
+        };
+        let u = n.cross(reference).normalize();
+        let v = n.cross(u).normalize();
+        let half = (camera.distance * 1.25).max(6.0);
+
+        let p0 = Point3D::from_vec3(center + (-u - v) * half);
+        let p1 = Point3D::from_vec3(center + (u - v) * half);
+        let p2 = Point3D::from_vec3(center + (u + v) * half);
+        let p3 = Point3D::from_vec3(center + (-u + v) * half);
+        let fill = Color::new(color.r, color.g, color.b, opacity.clamp(0.0, 1.0));
+
+        Self::add_solid_triangle_3d(
+            vertices, indices, camera, &p0, n, &p1, n, &p2, n, fill, screen_w, screen_h,
+        );
+        Self::add_solid_triangle_3d(
+            vertices, indices, camera, &p0, n, &p2, n, &p3, n, fill, screen_w, screen_h,
+        );
+        Self::add_line_3d(
+            vertices, indices, camera, &p0, &p1, 1.5, color, screen_w, screen_h,
+        );
+        Self::add_line_3d(
+            vertices, indices, camera, &p1, &p2, 1.5, color, screen_w, screen_h,
+        );
+        Self::add_line_3d(
+            vertices, indices, camera, &p2, &p3, 1.5, color, screen_w, screen_h,
+        );
+        Self::add_line_3d(
+            vertices, indices, camera, &p3, &p0, 1.5, color, screen_w, screen_h,
+        );
     }
 
     #[allow(clippy::only_used_in_recursion)]
@@ -2892,6 +3074,34 @@ impl Renderer {
                         camera,
                         &l.a,
                         &l.b,
+                        l.width,
+                        l.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Plane3D(p) => {
+                    Self::add_plane3d_patch(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        p.a,
+                        p.b,
+                        p.c,
+                        p.d,
+                        p.opacity,
+                        p.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Line3D(l) => {
+                    Self::add_line3d_object(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &l.point,
+                        &l.direction,
                         l.width,
                         l.color,
                         screen_w,

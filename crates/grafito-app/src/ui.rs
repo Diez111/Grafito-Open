@@ -88,6 +88,26 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     if selected != app.perspective {
                         app.set_perspective(selected);
                     }
+                    ui.separator();
+                    if ui.button("Cargar ejemplo de esta perspectiva").clicked() {
+                        let time = ui.ctx().input(|i| i.time);
+                        if app.document.object_count() == 0 {
+                            app.load_perspective_examples(app.perspective);
+                            app.document.bump_version();
+                            app.toasts.push(
+                                "Ejemplo cargado para la perspectiva actual",
+                                grafito_ui::toast::ToastKind::Success,
+                                time,
+                            );
+                        } else {
+                            app.toasts.push(
+                                "No se cargó el ejemplo: el documento ya tiene objetos",
+                                grafito_ui::toast::ToastKind::Info,
+                                time,
+                            );
+                        }
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Herramientas", |ui| {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
@@ -110,8 +130,8 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // El switch 2D/3D ahora vive en el selector de perspectivas del
-                    // sidebar. El menú top bar sólo muestra marca + toggle de tema.
+                    // El cambio de perspectiva vive en el menú superior; el
+                    // sidebar queda dedicado a paneles de trabajo.
                     if ui.available_width() > 700.0 {
                         ui.label(
                             egui::RichText::new("Grafito")
@@ -164,8 +184,7 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
     // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
-    // legible. Las perspectivas se cambian con el dropdown arriba, no más
-    // array vertical de 10 elementos que saturaba el sidebar.
+    // legible. Las perspectivas se cambian únicamente desde la barra superior.
     let tabs: &[(&str, Icon, &str)] = &[
         ("Álgebra", Icon::Function, "Objetos, variables y comandos"),
         (
@@ -194,83 +213,6 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(8.0);
-
-                        // ── Botón Perspectiva (dropdown compacto) ──
-                        // Reemplaza las 10 lineas verticales de short_labels.
-                        // Una sola celda arriba anuncia la perspectiva activa y
-                        // al click abre el popup con las 10 opciones.
-                        let cur_p = app.perspective;
-                        let active_pbg = theme.sidebar_tab_active_bg;
-                        let active_txt = theme.sidebar_tab_active;
-                        let dropdown_rect_w = 46.0;
-                        let dropdown_rect_h = 38.0;
-                        let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(dropdown_rect_w, dropdown_rect_h),
-                            egui::Sense::click(),
-                        );
-                        if ui.is_rect_visible(rect) {
-                            ui.painter().rect_filled(rect, 6.0, active_pbg);
-                            // Icono del menú Hamburguesa arriba
-                            let icon_rect = egui::Rect::from_center_size(
-                                rect.center() - egui::vec2(0.0, 8.0),
-                                egui::vec2(18.0, 14.0),
-                            );
-                            draw_icon(ui.painter(), icon_rect, Icon::Menu, active_txt);
-                            // short_label abajo (G2, AL, etc.) en proporcional 9
-                            ui.painter().text(
-                                rect.center() + egui::vec2(0.0, 11.0),
-                                Align2::CENTER_CENTER,
-                                cur_p.short_label(),
-                                egui::FontId::proportional(9.0),
-                                active_txt,
-                            );
-                        }
-                        // Popup con las 10 perspectivas: open en click izquierdo.
-                        let popup_id = ui.make_persistent_id("sidebar_perspective_popup");
-                        if resp.clicked() {
-                            ui.memory_mut(|mem| mem.toggle_popup(popup_id));
-                        }
-                        egui::popup::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &resp,
-                            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                            |ui| {
-                                ui.set_min_width(220.0);
-                                let mut selected = app.perspective;
-                                for p in Perspective::ALL {
-                                    ui.radio_value(
-                                        &mut selected,
-                                        p,
-                                        format!(
-                                            "{}  (Ctrl+Shift+{})",
-                                            p.title(),
-                                            p.shortcut_number()
-                                        ),
-                                    );
-                                }
-                                if selected != app.perspective {
-                                    app.set_perspective(selected);
-                                    ui.memory_mut(|mem| mem.close_popup());
-                                }
-                            },
-                        );
-                        resp.on_hover_text(format!(
-                            "Perspectiva actual: {}  (Ctrl+Shift+{}) — click para cambiar",
-                            cur_p.title(),
-                            cur_p.shortcut_number()
-                        ));
-
-                        // Separador entre el botón perspectiva y los tabs.
-                        ui.add_space(6.0);
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(ui.min_rect().min.x + 10.0, ui.min_rect().min.y),
-                                egui::pos2(ui.min_rect().max.x - 10.0, ui.min_rect().min.y),
-                            ],
-                            egui::Stroke::new(1.0, sep_col),
-                        );
-                        ui.add_space(6.0);
 
                         // ── Tabs del sidebar (6, uno por panel izquierdo) ──
                         for (i, (label, icon, tip)) in tabs.iter().enumerate() {

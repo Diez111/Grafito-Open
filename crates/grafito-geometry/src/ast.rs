@@ -775,19 +775,60 @@ impl Expr {
                     a.eval_2d_depth(var1, val1, var2, val2, depth + 1) / den
                 }
             }
-            Pow(a, b) => a
-                .eval_2d_depth(var1, val1, var2, val2, depth + 1)
-                .powf(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
+            Pow(a, b) => {
+                let a_val = a.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                let b_val = b.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if (a_val < 0.0 && b_val != b_val.trunc()) || (a_val == 0.0 && b_val < 0.0) {
+                    f64::NAN
+                } else {
+                    a_val.powf(b_val)
+                }
+            }
             Sin(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).sin(),
             Cos(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).cos(),
             Tan(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).tan(),
-            Asin(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).asin(),
-            Acos(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).acos(),
+            Asin(u) => {
+                let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if v.abs() > 1.0 {
+                    f64::NAN
+                } else {
+                    v.asin()
+                }
+            }
+            Acos(u) => {
+                let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if v.abs() > 1.0 {
+                    f64::NAN
+                } else {
+                    v.acos()
+                }
+            }
             Atan(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).atan(),
             Exp(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).exp(),
-            Ln(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).ln(),
-            Log(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).log10(),
-            Sqrt(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).sqrt(),
+            Ln(u) => {
+                let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if v <= 0.0 {
+                    f64::NAN
+                } else {
+                    v.ln()
+                }
+            }
+            Log(u) => {
+                let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if v <= 0.0 {
+                    f64::NAN
+                } else {
+                    v.log10()
+                }
+            }
+            Sqrt(u) => {
+                let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
+                if v < 0.0 {
+                    f64::NAN
+                } else {
+                    v.sqrt()
+                }
+            }
             Abs(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).abs(),
             Sinh(u) => {
                 let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);

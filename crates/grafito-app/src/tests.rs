@@ -151,6 +151,28 @@ fn test_perspective_layout_tool_groups_nonempty() {
 }
 
 #[test]
+fn test_3d_perspectives_do_not_expose_2d_curve_group() {
+    use crate::Perspective;
+    use grafito_ui::toolbar::ToolGroupId;
+
+    let geometry_3d = Perspective::Geometry3D.layout();
+    assert!(geometry_3d
+        .visible_tool_groups
+        .contains(&ToolGroupId::ThreeD));
+    assert!(!geometry_3d
+        .visible_tool_groups
+        .contains(&ToolGroupId::Curve));
+
+    let dynamics = Perspective::Dynamics.layout();
+    assert!(dynamics
+        .visible_tool_groups
+        .contains(&ToolGroupId::Dynamics));
+    assert!(!dynamics
+        .visible_tool_groups
+        .contains(&ToolGroupId::Advanced));
+}
+
+#[test]
 fn test_perspective_layout_exam_restricted() {
     use crate::Perspective;
     let layout = Perspective::Exam.layout();

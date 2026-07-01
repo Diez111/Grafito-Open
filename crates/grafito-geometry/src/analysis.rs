@@ -1898,7 +1898,7 @@ pub fn normal_line_at(expr: &str, x: f64) -> Result<(f64, f64, f64), String> {
 pub fn arc_length(expr: &str, a: f64, b: f64) -> Result<f64, String> {
     let d = crate::symbolic::derivative(expr, "x")?;
     let g = |xv: f64| {
-        let dp = eval_function(&d, xv).unwrap_or(0.0);
+        let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
         (1.0 + dp * dp).sqrt()
     };
     Ok(tool_simpson(g, a, b, TOOL_SAMPLES))
@@ -1939,7 +1939,7 @@ pub fn curvature_at(expr: &str, x: f64) -> Result<f64, String> {
 /// ```
 pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
     let g = |xv: f64| {
-        let y = eval_function(expr, xv).unwrap_or(0.0);
+        let y = eval_function(expr, xv).unwrap_or(f64::NAN);
         y * y
     };
     Ok(std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES))
@@ -1958,8 +1958,8 @@ pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
 pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
     let d = crate::symbolic::derivative(expr, "x")?;
     let g = |xv: f64| {
-        let y = eval_function(expr, xv).unwrap_or(0.0);
-        let dp = eval_function(&d, xv).unwrap_or(0.0);
+        let y = eval_function(expr, xv).unwrap_or(f64::NAN);
+        let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
         2.0 * std::f64::consts::PI * y.abs() * (1.0 + dp * dp).sqrt()
     };
     Ok(tool_simpson(g, a, b, TOOL_SAMPLES))

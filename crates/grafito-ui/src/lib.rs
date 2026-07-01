@@ -39,8 +39,19 @@ pub enum Tool {
     Function,
     // 3D tools
     Point3D,
+    Segment3D,
+    Plane3D,
+    Line3D,
     Sphere3D,
     Cube3D,
+    Cylinder3D,
+    Cone3D,
+    Torus3D,
+    MoebiusStrip,
+    Surface3D,
+    ParametricCurve3D,
+    VectorField3D,
+    HyperSurface4D,
     // Advanced tools
     Attractor,
     Fractal,
@@ -113,8 +124,19 @@ impl Tool {
             Tool::Pencil => "Pencil",
             Tool::Function => "Function",
             Tool::Point3D => "Point3D",
+            Tool::Segment3D => "Segment3D",
+            Tool::Plane3D => "Plane3D",
+            Tool::Line3D => "Line3D",
             Tool::Sphere3D => "Sphere3D",
             Tool::Cube3D => "Cube3D",
+            Tool::Cylinder3D => "Cylinder3D",
+            Tool::Cone3D => "Cone3D",
+            Tool::Torus3D => "Torus3D",
+            Tool::MoebiusStrip => "MoebiusStrip",
+            Tool::Surface3D => "Surface3D",
+            Tool::ParametricCurve3D => "ParametricCurve3D",
+            Tool::VectorField3D => "VectorField3D",
+            Tool::HyperSurface4D => "HyperSurface4D",
             Tool::Attractor => "Attractor",
             Tool::Fractal => "Fractal",
             Tool::Histogram => "Histogram",
@@ -177,8 +199,19 @@ impl Tool {
             | Tool::Polygon
             | Tool::Pencil
             | Tool::Function
+            | Tool::Segment3D
+            | Tool::Plane3D
+            | Tool::Line3D
             | Tool::Sphere3D
             | Tool::Cube3D
+            | Tool::Cylinder3D
+            | Tool::Cone3D
+            | Tool::Torus3D
+            | Tool::MoebiusStrip
+            | Tool::Surface3D
+            | Tool::ParametricCurve3D
+            | Tool::VectorField3D
+            | Tool::HyperSurface4D
             | Tool::Attractor
             | Tool::Fractal
             | Tool::Histogram
