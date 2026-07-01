@@ -1147,7 +1147,7 @@ dependencies = [
  "objc2-foundation 0.2.2",
  "parking_lot",
  "percent-encoding",
- "pollster",
+ "pollster 0.3.0",
  "raw-window-handle",
  "static_assertions",
  "wasm-bindgen",
@@ -1810,7 +1810,7 @@ dependencies = [
  "image",
  "log",
  "num-complex",
- "pollster",
+ "pollster 0.4.0",
  "puffin",
  "puffin_http",
  "rayon",
@@ -1895,7 +1895,7 @@ dependencies = [
  "log",
  "lyon",
  "num-complex",
- "pollster",
+ "pollster 0.4.0",
  "rayon",
  "wgpu",
 ]
@@ -3245,6 +3245,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22686f4785f02a4fcc856d3b3bb19bf6c8160d103f7a99cc258bddd0251dc7f2"
 
 [[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
 name = "portable-atomic"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3537,7 +3543,7 @@ dependencies = [
  "objc",
  "objc-foundation",
  "objc_id",
- "pollster",
+ "pollster 0.3.0",
  "raw-window-handle",
  "urlencoding",
  "wasm-bindgen",

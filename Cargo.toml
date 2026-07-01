@@ -31,7 +31,7 @@ grafito-ui = { path = "crates/grafito-ui" }
 # Window & GPU
 eframe = "0.29"
 wgpu = "22.0"
-pollster = "0.3"
+pollster = "0.4"
 raw-window-handle = "0.6"
 
 # UI
