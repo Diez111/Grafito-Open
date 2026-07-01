@@ -27,7 +27,7 @@ eframe = { workspace = true, features = ["wgpu"] }
 pollster.workspace = true
 
 egui.workspace = true
-egui-wgpu = "0.29"
+egui-wgpu = "0.34"
 wgpu.workspace = true
 bytemuck.workspace = true
 
