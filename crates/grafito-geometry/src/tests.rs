@@ -344,4 +344,29 @@ mod tests_module {
         let geo = polygon_to_geo(&bowtie);
         let _result = geo.union(&polygon_to_geo(&bowtie));
     }
+
+    #[test]
+    fn test_high_precision_batch_eval() {
+        use crate::precision::{set_high_precision_mode, is_high_precision_mode};
+        let prev = is_high_precision_mode();
+        set_high_precision_mode(true);
+
+        // 1D batch test with sin
+        let xs = vec![0.0, std::f64::consts::PI / 2.0];
+        let res = eval_batch_1d("sin(x)", "x", xs.into_iter(), &std::collections::HashMap::new());
+        assert!(res.is_ok());
+        let res_vals = res.unwrap();
+        assert!((res_vals[0].unwrap() - 0.0).abs() < 1e-15);
+        assert!((res_vals[1].unwrap() - 1.0).abs() < 1e-15);
+
+        // 2D batch test
+        let pts = vec![(1.0, 2.0), (3.0, 4.0)];
+        let res2 = eval_batch_2d("x + y", "x", "y", pts.into_iter(), &std::collections::HashMap::new());
+        assert!(res2.is_ok());
+        let res2_vals = res2.unwrap();
+        assert_eq!(res2_vals[0], Some(3.0));
+        assert_eq!(res2_vals[1], Some(7.0));
+
+        set_high_precision_mode(prev);
+    }
 }

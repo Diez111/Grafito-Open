@@ -5,6 +5,18 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.2.1-beta] - 2026-07-04
+
+#### Añadido
+- **Derivadas de Wirtinger**: Nuevos operadores `deriv_z(f)` y `deriv_z_conj(f)` en expresiones complejas, facilitando el análisis y la visualización de derivadas respecto a $z$ y $\bar{z}$.
+
+#### Corregido
+- **Filtro de ruido en Domain Coloring**: Añadidas salvaguardas de magnitud mínima (`mag < 1e-6`) para pintar píxeles negros en lugar de ruido de fase caótico de punto flotante en la evaluación de funciones complejas idénticamente nulas (como `deriv_z_conj(z^2) = 0`), tanto en CPU como en el shader WGSL de la GPU.
+- **Soporte de Modos de Coloración**: Corregido el renderer en 2D que anteriormente ignoraba el campo `domain_coloring_mode`, permitiendo visualizar correctamente el HSL Clásico, Retrato de Fase Puro, y las rejillas Polar y Cartesiana Conformes.
+- **Solapamiento de Perspectivas**: Limpiar variables temporales de la animación trigonométrica al cambiar de perspectiva para evitar paneles superpuestos en la vista de Complejos.
+- **Barra de Entrada Duplicada**: Ocultar la barra de entrada inferior duplicada en la perspectiva de Complejos, ya que el panel izquierdo cuenta con su propia barra dedicada.
+- **Empaquetado y Compilación en build-deb.sh**: Compilar explícitamente el paquete `grafito-app` antes de copiar el binario para empaquetar, garantizando que el paquete `.deb` contenga siempre la última versión construida.
+
 ## [1.2.0-beta] - 2026-06-30
 
 #### Añadido
@@ -27,6 +39,24 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
   `SubspaceSum`, `SubspaceIntersection`, `OrthogonalComplement`,
   `SolveLine3DParameters` y `MatrixParamSolve` para ejercicios universitarios
   con planos, rectas, matrices, polinomios de `P2` y subespacios de `Rn`.
+- **Comandos avanzados de álgebra lineal**: `Transpose`, `Trace`,
+  `Eigenvectors`, `LU`, `QR`, `Cholesky` y `SVD`, exponiendo rutinas ya
+  disponibles en `grafito-geometry` desde el procesador CAS compartido.
+- **Comandos AM2 de cálculo multivariable**: `Gradient`,
+  `DirectionalDerivative`, `TangentPlane`, `Divergence`, `Curl`,
+  `DoubleIntegral` y `SurfaceArea`, con soporte para variables explícitas,
+  puntos/vectores numéricos y bounds internos constantes o dependientes de la
+  variable exterior.
+- **Solvers ODE avanzados expuestos por comando**: `ODE[...]` acepta ahora
+  métodos `rk45`/`rkf45` y `backward_euler`; `ODESystem[...]` acepta
+  `rk45`/`rkf45`. Se mantienen `euler` y `rk4` como antes.
+- **Comandos de sucesiones y series**: `SequenceLimit`, `SeriesSum`,
+  `RatioTest` y `RootTest` para límites heurísticos de sucesiones, sumas
+  finitas y criterios básicos de convergencia de series.
+- **Animación trigonométrica integrada al documento**: el panel ahora soporta
+  `sin`, `cos`, `tan`, `cot`, `sec` y `csc`, sincroniza variables
+  `trig_t`/`trig_value` y mantiene objetos reales `TrigGraph` y `TrigValue`
+  para que la animación no quede aislada de la escena.
 - **Guards NaN en `ast.rs`** (`eval_2d`): `Sqrt(negativo)`, `Ln/Log(≤0)`,
   `Pow(base negativa, exponente fraccionario)`, `Asin/Acos(|x|>1)`,
   `Acosh(<1)`, `Atanh(|x|≥1)`, y clamp de `Sinh/Cosh/Tanh` a 0 para
@@ -60,6 +90,9 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
   declaraba `glam = "0.24"` (sin usarla), arrastrando `glam 0.24.2`
   además de `0.29.3` y duplicando el binario. Eliminada la dependencia
   muerta; `num-complex` alineada al workspace.
+- **Panel trigonométrico apilado**: al activar la animación trigonométrica ya
+  no se crea un panel intermedio junto al protocolo de construcción; reemplaza
+  el panel derecho activo y se adapta con scroll a anchos reducidos.
 
 #### Eliminado
 - **Código muerto**: `node_count` (`render_2d.rs`), `find_nearest_feature`
@@ -455,6 +488,8 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
+[1.2.1-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.1-beta
+[1.2.0-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.0-beta
 [1.1.4-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.4-beta
 [1.0.0-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.0.0-beta
 [0.9.0-beta.1]: https://github.com/Diez111/Grafito/releases/tag/v0.9.0-beta.1

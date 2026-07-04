@@ -432,6 +432,20 @@ impl GeoObject {
             GeoObject::Transformed(o) => o.inner.set_visible(visible),
         }
     }
+    
+    pub fn invalidate_cache(&self) {
+        match self {
+            GeoObject::Function(o) => o.invalidate_cache(),
+            GeoObject::Surface3D(o) => o.invalidate_cache(),
+            GeoObject::ParametricCurve2D(o) => o.invalidate_cache(),
+            GeoObject::ParametricCurve3D(o) => o.invalidate_cache(),
+            GeoObject::PolarCurve(o) => o.invalidate_cache(),
+            GeoObject::VectorField2D(o) => o.invalidate_cache(),
+            GeoObject::ImplicitCurve(o) => o.invalidate_cache(),
+            GeoObject::Transformed(o) => o.inner.invalidate_cache(),
+            _ => {}
+        }
+    }
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -733,13 +747,20 @@ pub struct FunctionObj {
     pub domain_max_expr: Option<String>,
     pub fill_color: Option<Color>,
     // Integral function: ∫_[integral_lower]^x expr(var) d(var)
+    #[serde(default)]
     pub is_integral: bool,
+    #[serde(default = "default_integral_var")]
     pub integral_var: String,
+    #[serde(default)]
     pub integral_lower: f64,
     #[serde(skip)]
     pub cached_key: Arc<RwLock<Option<FunctionCacheKey>>>,
     #[serde(skip)]
     pub cached_samples: Arc<RwLock<FunctionSamples>>,
+}
+
+fn default_integral_var() -> String {
+    "x".to_string()
 }
 
 impl Clone for FunctionObj {
@@ -1893,6 +1914,8 @@ pub struct ComplexGridObj {
     pub visible: bool,
     /// 0 = grid lines, 1 = domain coloring (complex), 2 = heat map (real f(x,y))
     pub render_mode: u8,
+    #[serde(default)]
+    pub domain_coloring_mode: u8,
 }
 impl ComplexGridObj {
     pub fn new(expr: &str, x_min: f64, x_max: f64, y_min: f64, y_max: f64) -> Self {
@@ -1908,6 +1931,7 @@ impl ComplexGridObj {
             color: Color::BLUE,
             visible: true,
             render_mode: 0,
+            domain_coloring_mode: 0,
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1934,6 +1958,10 @@ pub struct ComplexMappingObj {
     pub target: ObjectId,
     pub color: Color,
     pub visible: bool,
+    #[serde(default)]
+    pub animate_homotopy: bool,
+    #[serde(default)]
+    pub homotopy_speed: f32, // speed factor, e.g. 1.0
     #[serde(skip)]
     pub conformal_cache: Option<ConformalMap>,
 }
@@ -1947,6 +1975,8 @@ impl ComplexMappingObj {
             target,
             color: Color::new(0.5, 0.0, 0.5, 1.0),
             visible: true,
+            animate_homotopy: false,
+            homotopy_speed: 1.0,
             conformal_cache,
         }
     }
@@ -1960,6 +1990,8 @@ impl ComplexMappingObj {
             target,
             color: Color::new(0.5, 0.0, 0.5, 1.0),
             visible: true,
+            animate_homotopy: false,
+            homotopy_speed: 1.0,
             conformal_cache,
         }
     }

@@ -230,33 +230,45 @@ impl NumericSolver {
                 });
             }
 
+            let mut step_accepted = false;
+            let mut alpha = 1.0;
             let mut trial = vars.to_vec();
-            for i in 0..n {
-                trial[i] += delta[i];
-                if let Some(b) = bounds.get(i) {
-                    if let Some(lower) = b.lower {
-                        trial[i] = trial[i].max(lower);
-                    }
-                    if let Some(upper) = b.upper {
-                        trial[i] = trial[i].min(upper);
+            let mut r_trial = Vec::new();
+            let mut residual_trial = f64::INFINITY;
+
+            // Backtracking line search: try alpha = 1.0, 0.5, 0.25, 0.125
+            for _ in 0..4 {
+                for i in 0..n {
+                    trial[i] = vars[i] + alpha * delta[i];
+                    if let Some(b) = bounds.get(i) {
+                        if let Some(lower) = b.lower {
+                            trial[i] = trial[i].max(lower);
+                        }
+                        if let Some(upper) = b.upper {
+                            trial[i] = trial[i].min(upper);
+                        }
                     }
                 }
+
+                if !trial.iter().all(|&x| x.is_finite()) {
+                    alpha *= 0.5;
+                    continue;
+                }
+
+                let rt = compute_residual(&trial, equations, m);
+                let rt_norm = norm(&rt);
+
+                if rt_norm.is_finite() && rt_norm < residual_norm {
+                    r_trial = rt;
+                    residual_trial = rt_norm;
+                    step_accepted = true;
+                    break;
+                }
+
+                alpha *= 0.5;
             }
 
-            if !trial.iter().all(|&x| x.is_finite()) {
-                lambda *= self.lambda_scale;
-                continue;
-            }
-
-            let r_trial = compute_residual(&trial, equations, m);
-            let residual_trial = norm(&r_trial);
-
-            if !residual_trial.is_finite() {
-                lambda *= self.lambda_scale;
-                continue;
-            }
-
-            if residual_trial < residual_norm {
+            if step_accepted {
                 vars.copy_from_slice(&trial);
                 r = r_trial;
                 residual_norm = residual_trial;

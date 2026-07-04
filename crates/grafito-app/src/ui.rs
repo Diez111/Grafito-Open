@@ -112,10 +112,12 @@ pub(crate) fn draw_top_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.menu_button("Herramientas", |ui| {
                     ui.checkbox(&mut app.keyboard_visible, "Teclado visible");
                     ui.separator();
+                    let mut trig_visible = app.show_trig_animation;
                     if ui
-                        .checkbox(&mut app.show_trig_animation, "Animación Trigonométrica")
+                        .checkbox(&mut trig_visible, "Animación Trigonométrica")
                         .changed()
                     {
+                        app.set_trig_animation_visible(trig_visible);
                         ui.close_menu();
                     }
                 });
@@ -269,8 +271,9 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
     let txt_dim = theme.text_tertiary;
     let txt_col = theme.text_primary;
 
-    // ── INPUT BAR (always visible, like GeoGebra) ──
-    {
+    // ── INPUT BAR (siempre visible excepto en perspectiva Complex, que tiene
+    // su propia barra de entrada en el panel izquierdo) ──
+    if app.perspective != crate::Perspective::Complex {
         let mut should_exec = false;
         egui::TopBottomPanel::bottom("input_bar")
             .exact_height(32.0)
@@ -384,7 +387,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context) {
             let time = ctx.input(|i| i.time);
             app.submit_input_text(time);
         }
-    }
+    } // end if != Complex
 
     // ── STATUS BAR ──
     egui::TopBottomPanel::bottom("status_bar")
@@ -512,72 +515,162 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Autocompletado de la barra de entrada
-// ─────────────────────────────────────────────────────────────────────────
 
-/// Coincidencia difusa por subsecuencia (case-insensitive).
-/// Devuelve `true` si todos los caracteres de `needle` aparecen en `haystack`
-/// en el mismo orden (no necesariamente contiguos).
-fn fuzzy_match(needle: &str, haystack: &str) -> bool {
-    if needle.is_empty() {
-        return true;
+
+/// Calcula el puntaje de similitud entre el query escrito y un candidato
+/// utilizando coincidencia exacta, prefijo, subsecuencia y distancia de Levenshtein (tolerancia a erratas).
+fn similarity_score(query: &str, candidate: &str) -> f64 {
+    let q = query.to_lowercase();
+    let c = candidate.to_lowercase();
+    
+    if q.is_empty() {
+        return 0.0;
     }
-    let haystack_lower = haystack.to_lowercase();
-    let mut it = haystack_lower.chars();
-    needle
-        .to_lowercase()
-        .chars()
-        .all(|nc| it.any(|hc| hc == nc))
+    
+    if c == q {
+        return 2.0; // Coincidencia perfecta
+    }
+    
+    if c.starts_with(&q) {
+        return 1.5 - (c.len() - q.len()) as f64 * 0.02; // Comienza con el query (más corto = mayor score)
+    }
+    
+    if c.contains(&q) {
+        return 1.2 - (c.find(&q).unwrap() as f64 * 0.05); // Contiene el query
+    }
+    
+    // Distancia de Levenshtein para tolerancia a erratas
+    let q_chars: Vec<char> = q.chars().collect();
+    let c_chars: Vec<char> = c.chars().collect();
+    
+    let mut dp = vec![vec![0; c_chars.len() + 1]; q_chars.len() + 1];
+    for i in 0..=q_chars.len() {
+        dp[i][0] = i;
+    }
+    for j in 0..=c_chars.len() {
+        dp[0][j] = j;
+    }
+    
+    for i in 1..=q_chars.len() {
+        for j in 1..=c_chars.len() {
+            if q_chars[i - 1] == c_chars[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = 1 + dp[i - 1][j - 1].min(dp[i - 1][j].min(dp[i][j - 1]));
+            }
+        }
+    }
+    
+    let distance = dp[q_chars.len()][c_chars.len()];
+    let max_len = q_chars.len().max(c_chars.len()) as f64;
+    1.0 - (distance as f64 / max_len)
 }
 
-/// Calcula hasta 8 sugerencias de autocompletado para el texto de entrada,
-/// combinando comandos de la paleta, etiquetas de objetos y variables del
-/// documento. Ordena primero las que comienzan con el prefijo escrito.
+const MATH_FUNCTIONS: &[(&str, &str)] = &[
+    ("deriv_z", "derivada complejos df/dz"),
+    ("deriv_z_conj", "derivada complejos df/d(conj z)"),
+    ("sin", "seno complejo/real"),
+    ("cos", "coseno complejo/real"),
+    ("tan", "tangente complejo/real"),
+    ("sinh", "seno hiperbólico"),
+    ("cosh", "coseno hiperbólico"),
+    ("tanh", "tangente hiperbólica"),
+    ("exp", "exponencial e^z"),
+    ("ln", "logaritmo natural"),
+    ("sqrt", "raíz cuadrada"),
+    ("abs", "módulo / valor absoluto"),
+    ("conj", "conjugado complejo"),
+    ("re", "parte real de z"),
+    ("im", "parte imaginaria de z"),
+    ("arg", "argumento principal de z"),
+    ("gamma", "función Gamma"),
+    ("zeta", "función Zeta de Riemann"),
+    ("bessel_j", "bessel J_0(z)"),
+    ("bessel_y", "bessel Y_0(z)"),
+    ("lambert_w", "función W de Lambert"),
+    ("erf", "función de error"),
+];
+
+/// Calcula hasta 8 sugerencias de autocompletado para el último token del texto de entrada,
+/// combinando comandos, objetos, variables y funciones matemáticas.
 fn compute_autocomplete_suggestions(
     input: &str,
     document: &grafito_core::Document,
 ) -> Vec<AutocompleteItem> {
-    let mut items: Vec<AutocompleteItem> = Vec::new();
+    let mut scored_items: Vec<(AutocompleteItem, f64)> = Vec::new();
+    
+    let separators = ['[', '(', ',', ' ', '\t', '=', '+', '-', '*', '/'];
+    let token_start = input
+        .rfind(|c: char| separators.contains(&c))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let current_token = input[token_start..].trim();
+    if current_token.is_empty() {
+        return Vec::new();
+    }
 
+    // 1. Agregar comandos de la paleta
     for cmd in grafito_ui::command_palette::all_commands() {
-        if fuzzy_match(input, cmd.name) {
-            items.push(AutocompleteItem {
+        let score = similarity_score(current_token, cmd.name);
+        if score >= 0.35 {
+            scored_items.push((AutocompleteItem {
                 text: cmd.name.to_string(),
                 detail: cmd.category.to_string(),
                 bracket: cmd.syntax_hint.contains('['),
-            });
+            }, score));
         }
     }
 
+    // 2. Agregar funciones matemáticas
+    for (name, desc) in MATH_FUNCTIONS {
+        let score = similarity_score(current_token, name);
+        if score >= 0.35 {
+            scored_items.push((AutocompleteItem {
+                text: name.to_string(),
+                detail: desc.to_string(),
+                bracket: false,
+            }, score));
+        }
+    }
+
+    // 3. Agregar objetos del documento
     for (_, obj) in document.objects_iter() {
         let label = obj.label();
-        if !label.is_empty() && fuzzy_match(input, label) {
-            items.push(AutocompleteItem {
-                text: label.to_string(),
-                detail: obj.name().to_string(),
-                bracket: false,
-            });
+        if !label.is_empty() {
+            let score = similarity_score(current_token, label);
+            if score >= 0.35 {
+                scored_items.push((AutocompleteItem {
+                    text: label.to_string(),
+                    detail: obj.name().to_string(),
+                    bracket: false,
+                }, score));
+            }
         }
     }
 
+    // 4. Agregar variables del documento
     for k in document.variables().keys() {
-        if fuzzy_match(input, k) {
-            items.push(AutocompleteItem {
+        let score = similarity_score(current_token, k);
+        if score >= 0.35 {
+            scored_items.push((AutocompleteItem {
                 text: k.clone(),
                 detail: "variable".to_string(),
                 bracket: false,
-            });
+            }, score));
         }
     }
 
-    let input_lower = input.to_lowercase();
-    items.sort_by(|a, b| {
-        let ap = a.text.to_lowercase().starts_with(&input_lower);
-        let bp = b.text.to_lowercase().starts_with(&input_lower);
-        bp.cmp(&ap)
-            .then_with(|| a.text.to_lowercase().cmp(&b.text.to_lowercase()))
+    // Ordenar por puntaje descendente (mejor coincidencia) y tie-breaker por longitud ascendente
+    scored_items.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.text.len().cmp(&b.0.text.len()))
     });
+
+    let mut items: Vec<AutocompleteItem> = scored_items
+        .into_iter()
+        .map(|(it, _)| it)
+        .collect();
     items.truncate(8);
     items
 }
@@ -586,14 +679,17 @@ fn compute_autocomplete_suggestions(
 /// último separador) por el item seleccionado. Para comandos bracket, añade
 /// `[` al final para que el usuario complete los argumentos.
 fn apply_autocomplete_item(input: &mut String, item: &AutocompleteItem) {
-    let separators = ['[', '(', ',', ' ', '\t', '='];
+    let separators = ['[', '(', ',', ' ', '\t', '=', '+', '-', '*', '/'];
     let token_start = input
         .rfind(|c: char| separators.contains(&c))
         .map(|i| i + 1)
         .unwrap_or(0);
     let prefix = &input[..token_start];
+    
     if item.bracket {
         *input = format!("{}{}[", prefix, item.text);
+    } else if MATH_FUNCTIONS.iter().any(|(name, _)| name == &item.text) {
+        *input = format!("{}{}(", prefix, item.text);
     } else {
         *input = format!("{}{}", prefix, item.text);
     }

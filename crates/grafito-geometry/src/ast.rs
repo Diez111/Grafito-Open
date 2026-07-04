@@ -1,4 +1,6 @@
 use std::fmt;
+use crate::dd::DD;
+use std::collections::HashMap;
 
 // Symbolic Expression AST for Grafito calculus engine.
 // Supports differentiation, simplification, display and numeric evaluation.
@@ -1599,6 +1601,59 @@ impl Expr {
                     }
                 }
                 default.eval_at_depth(var, value, depth + 1)
+            }
+        }
+    }
+
+    pub fn eval_dd(&self, vars: &HashMap<String, DD>) -> DD {
+        self.eval_dd_depth(vars, 0)
+    }
+
+    fn eval_dd_depth(&self, vars: &HashMap<String, DD>, depth: u32) -> DD {
+        const MAX_DEPTH: u32 = 256;
+        if depth > MAX_DEPTH {
+            return DD::from_f64(f64::NAN);
+        }
+        use Expr::*;
+        match self {
+            Const(c) => DD::from_f64(*c),
+            Var(v) => vars.get(v).copied().unwrap_or(DD::from_f64(f64::NAN)),
+            Neg(u) => -u.eval_dd_depth(vars, depth + 1),
+            Add(a, b) => a.eval_dd_depth(vars, depth + 1) + b.eval_dd_depth(vars, depth + 1),
+            Sub(a, b) => a.eval_dd_depth(vars, depth + 1) - b.eval_dd_depth(vars, depth + 1),
+            Mul(a, b) => a.eval_dd_depth(vars, depth + 1) * b.eval_dd_depth(vars, depth + 1),
+            Div(a, b) => {
+                let den = b.eval_dd_depth(vars, depth + 1);
+                if den.is_zero() {
+                    DD::from_f64(f64::NAN)
+                } else {
+                    a.eval_dd_depth(vars, depth + 1) / den
+                }
+            }
+            Pow(a, b) => {
+                let base = a.eval_dd_depth(vars, depth + 1);
+                let exp = b.eval_dd_depth(vars, depth + 1);
+                if base.is_zero() && exp.hi > 0.0 {
+                    DD::from_f64(0.0)
+                } else {
+                    (exp * base.ln()).exp()
+                }
+            }
+            Sin(u) => u.eval_dd_depth(vars, depth + 1).sin(),
+            Cos(u) => u.eval_dd_depth(vars, depth + 1).cos(),
+            Exp(u) => u.eval_dd_depth(vars, depth + 1).exp(),
+            Ln(u) => u.eval_dd_depth(vars, depth + 1).ln(),
+            Sqrt(u) => u.eval_dd_depth(vars, depth + 1).sqrt(),
+            Abs(u) => u.eval_dd_depth(vars, depth + 1).abs(),
+            other => {
+                // Fallback to f64 evaluation for complex mathematical functions or comparisons
+                let val = other.eval_3d_depth(
+                    "", 0.0,
+                    "", 0.0,
+                    "", 0.0,
+                    depth + 1,
+                );
+                DD::from_f64(val)
             }
         }
     }
@@ -3204,7 +3259,7 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
 // ============================================================
 
 /// Numerical definite integral using adaptive Gauss-Legendre 5-point quadrature.
-pub fn integrate_numeric(expr: &str, _var: &str, a: f64, b: f64) -> f64 {
+pub fn integrate_numeric(expr: &str, var: &str, a: f64, b: f64) -> f64 {
     // Gauss-Legendre 5-point nodes and weights on [-1,1]
     let nodes = [
         -0.906179845938664,
@@ -3226,7 +3281,7 @@ pub fn integrate_numeric(expr: &str, _var: &str, a: f64, b: f64) -> f64 {
     let mut sum = 0.0;
     for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
         let t = mid + half * xi;
-        let val = crate::expr::eval_function(expr, t).unwrap_or(0.0);
+        let val = crate::expr::eval_function_var(expr, var, t).unwrap_or(0.0);
         if val.is_finite() {
             sum += wi * val;
         }
@@ -3438,5 +3493,11 @@ mod tests {
         assert_eq!(t2, vec!["x", "==", "5"], "== should be preserved");
         // <= should be preserved: ["x", "<=", "5"]
         assert_eq!(t3, vec!["x", "<=", "5"], "<= should be preserved");
+    }
+
+    #[test]
+    fn integrate_numeric_respects_variable_name() {
+        let value = integrate_numeric("t", "t", 0.0, 1.0);
+        assert!((value - 0.5).abs() < 1e-9, "got {value}");
     }
 }

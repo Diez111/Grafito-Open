@@ -71,27 +71,43 @@ impl ConstraintGraph {
     /// on them) from the owning document.
     pub fn remove_object(&mut self, id: ObjectId) -> Vec<ObjectId> {
         let mut orphaned: Vec<ObjectId> = Vec::new();
+        let mut pending_constraints: Vec<usize> = Vec::new();
+        let mut seen_constraints = HashSet::new();
         self.free_objects.remove(&id);
+
         if let Some(cons_id) = self.creator.remove(&id) {
-            if let Some(cons) = self.constraints.remove(&cons_id) {
-                for out in &cons.outputs {
-                    self.creator.remove(out);
-                    self.dependents.remove(out);
-                    orphaned.push(*out);
-                }
-            }
+            pending_constraints.push(cons_id);
         }
         // Cascade: si quedan constraints que referencian a `id` como input,
         // eliminarlas también para que no queden referencias colgantes.
         if let Some(cons_ids) = self.dependents.remove(&id) {
-            for cons_id in cons_ids {
-                if let Some(cons) = self.constraints.remove(&cons_id) {
-                    for out in &cons.outputs {
-                        self.creator.remove(out);
-                        self.dependents.remove(out);
-                        orphaned.push(*out);
+            pending_constraints.extend(cons_ids);
+        }
+
+        while let Some(cons_id) = pending_constraints.pop() {
+            if !seen_constraints.insert(cons_id) {
+                continue;
+            }
+            let Some(cons) = self.constraints.remove(&cons_id) else {
+                continue;
+            };
+
+            for input in &cons.inputs {
+                if let Some(ids) = self.dependents.get_mut(input) {
+                    ids.retain(|&id| id != cons_id);
+                    if ids.is_empty() {
+                        self.dependents.remove(input);
                     }
                 }
+            }
+
+            for out in &cons.outputs {
+                self.creator.remove(out);
+                if let Some(dependent_ids) = self.dependents.get(out).cloned() {
+                    pending_constraints.extend(dependent_ids);
+                }
+                self.dependents.remove(out);
+                orphaned.push(*out);
             }
         }
         orphaned
@@ -344,5 +360,25 @@ mod tests {
         // The constraint that created `out` is removed.
         assert_eq!(graph.constraint_count(), 0);
         assert!(graph.creator_of(&out).is_none());
+    }
+
+    #[test]
+    fn remove_object_cascades_through_downstream_outputs() {
+        let mut graph = ConstraintGraph::new();
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let c = ObjectId::new();
+        graph.add_free_object(a);
+
+        graph.add_constraint("C1", vec![a], vec![b], HashMap::new());
+        graph.add_constraint("C2", vec![b], vec![c], HashMap::new());
+
+        let orphaned = graph.remove_object(a);
+        assert!(orphaned.contains(&b));
+        assert!(orphaned.contains(&c));
+        assert_eq!(graph.constraint_count(), 0);
+        assert!(graph.creator_of(&b).is_none());
+        assert!(graph.creator_of(&c).is_none());
+        assert!(graph.dependents_of(&b).is_none());
     }
 }

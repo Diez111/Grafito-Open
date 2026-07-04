@@ -247,6 +247,9 @@ pub fn compile_complex_expr(
             compile_complex_expr(a, document_vars, var_map, prog)?;
             prog.code.push(ComplexOp::BesselY.encode(0));
         }
+        ComplexExpr::DerivZ(_) | ComplexExpr::DerivZConj(_) => {
+            return Err(CompileError::UnsupportedNode(format!("{:?}", expr)));
+        }
     }
 
     if prog.code.len() > 4096 {

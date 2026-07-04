@@ -180,6 +180,16 @@ fn evaluate_function_samples(
             let x2 = min + (i + 1) as f64 * chunk_dx;
 
             let eval = |x: f64| -> Option<f64> {
+                if grafito_geometry::precision::is_high_precision_mode() {
+                    if let Some(ast) = &parsed_ast {
+                        let mut vars_map = std::collections::HashMap::new();
+                        vars_map.insert("x".to_string(), grafito_geometry::dd::DD::from_f64(x));
+                        let res = ast.eval_dd(&vars_map);
+                        if res.hi.is_finite() && res.hi.abs() < 1e6 {
+                            return Some(res.to_f64());
+                        }
+                    }
+                }
                 if let Some(ast) = &parsed_ast {
                     let res = ast.eval_at("x", x);
                     if res.is_finite() && res.abs() < 1e6 {

@@ -4,7 +4,8 @@
 //! pánicos y produzcan un `CommandOutcome` coherente.
 
 use grafito_command::commands::{process_input, CommandOutcome};
-use grafito_core::Document;
+use grafito_core::{Document, GeoObject, LineObj, PointObj};
+use grafito_geometry::Point2;
 
 fn run(doc: &mut Document, text: &str) -> CommandOutcome {
     let mut input = text.to_string();
@@ -130,4 +131,47 @@ fn deeply_nested_brackets_do_not_panic() {
     let outcome = run(&mut doc, "Function[sin(sin(sin(sin(sin(x)))))]]]");
     // We only require that it does not panic; any non-panic outcome is fine.
     let _ = outcome;
+}
+
+#[test]
+fn binomial_k_greater_than_n_returns_zero_no_panic() {
+    let mut doc = Document::new();
+    let outcome = run(&mut doc, "Binomial[3, 0.5, 10]");
+    assert!(
+        matches!(outcome, CommandOutcome::Message(ref m) if m.contains("0.000000")),
+        "k > n should produce zero probability, got {:?}",
+        outcome
+    );
+}
+
+#[test]
+fn xintercept_is_recognized_despite_uppercase_x() {
+    let mut doc = Document::new();
+    let outcome = run(&mut doc, "XIntercept[x^2 - 1]");
+    assert!(
+        !matches!(outcome, CommandOutcome::Error(ref e) if e.contains("no reconocido")),
+        "XIntercept should be recognized, got {:?}",
+        outcome
+    );
+}
+
+#[test]
+fn point_on_object_creates_projected_point_without_stealing_original() {
+    let mut doc = Document::new();
+    let line_id = doc.add_object(GeoObject::Line(
+        LineObj::new(Point2::new(0.0, 0.0), Point2::new(2.0, 0.0)).with_label("L"),
+    ));
+    let point_id = doc.add_object(GeoObject::Point(
+        PointObj::new(Point2::new(1.0, 3.0)).with_label("P"),
+    ));
+    let before = doc.object_count();
+
+    let outcome = run(&mut doc, "PointOnObject[L, P]");
+    assert!(matches!(outcome, CommandOutcome::Ok), "got {outcome:?}");
+    assert_eq!(doc.object_count(), before + 1);
+    assert!(doc.constraints.is_free(&point_id));
+    let affected = doc.move_point(point_id, Point2::new(1.0, 4.0));
+    assert!(affected.contains(&point_id));
+    assert!(affected.len() >= 2, "projected point should depend on P");
+    assert!(doc.get_object(line_id).is_some());
 }

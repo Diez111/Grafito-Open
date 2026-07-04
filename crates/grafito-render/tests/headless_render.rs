@@ -15,7 +15,7 @@ fn test_complex_mapping_transform_does_not_bridge_segments() {
         (Point2::new(-1.0, 0.0), Point2::new(-2.0, 0.0)),
     ];
 
-    let strokes = transform_complex_mapping_segments(ConformalMap::Inversion, &segments, 1);
+    let strokes = transform_complex_mapping_segments(ConformalMap::Inversion, &segments, 1, 1.0);
 
     assert_eq!(strokes.len(), 2);
     assert!(strokes.iter().all(|(a, b)| a.x.signum() == b.x.signum()));

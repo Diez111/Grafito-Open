@@ -157,7 +157,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
 struct GridParams {
     grid_size: u32,
     code_len: u32,
-    _pad0: u32,
+    dc_mode: u32,
     _pad1: u32,
 }
 
@@ -327,12 +327,40 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let mag = sqrt(re*re + im*im);
+    if (mag < 1e-6) {
+        out_colors[gid.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
     let arg = atan2(im, re);
 
     let hue = (arg + 3.14159265359) / (2.0 * 3.14159265359);
-    var lightness = atan(log(max(mag, 1e-10))) / 1.57079632679 * 0.5 + 0.5;
-    lightness = clamp(lightness, 0.0, 1.0);
+    var lightness: f32 = 0.5;
+    if params.dc_mode == 0u || params.dc_mode == 2u || params.dc_mode == 3u {
+        lightness = atan(log(max(mag, 1e-10))) / 1.57079632679 * 0.5 + 0.5;
+        lightness = clamp(lightness, 0.0, 1.0);
+    }
 
-    let rgb = hsl_to_rgb(hue, 0.85, lightness);
+    var sat: f32 = 0.85;
+    if params.dc_mode == 1u {
+        sat = 1.0;
+    }
+
+    var rgb = hsl_to_rgb(hue, sat, lightness);
+
+    if params.dc_mode == 2u {
+        // Polar grid overlay
+        let log_mag = log(max(mag, 1e-5));
+        let mag_grid = abs(sin(log_mag * 3.14159265359 * 2.0));
+        let arg_grid = abs(sin(arg * 10.0));
+        let grid_shading = 0.5 + 0.5 * pow(max(mag_grid * arg_grid, 0.0), 0.15);
+        rgb = rgb * grid_shading;
+    } else if params.dc_mode == 3u {
+        // Cartesian grid overlay
+        let grid_re = abs(sin(re * 3.14159265359 * 2.0));
+        let grid_im = abs(sin(im * 3.14159265359 * 2.0));
+        let grid_shading = 0.5 + 0.5 * pow(max(grid_re * grid_im, 0.0), 0.15);
+        rgb = rgb * grid_shading;
+    }
+
     out_colors[gid.x] = vec4<f32>(rgb, 1.0);
 }

@@ -126,6 +126,11 @@ impl Document {
     pub fn new() -> Self {
         Self::default()
     }
+    pub fn invalidate_all_caches(&self) {
+        for obj in self.objects.values() {
+            obj.invalidate_cache();
+        }
+    }
 
     pub fn migrate_complex_symbol(&mut self, new_symbol: &str) {
         let old = self.complex_base_symbol.clone();
@@ -2440,6 +2445,7 @@ fn doc_intersect(obj_a: &GeoObject, obj_b: &GeoObject) -> Vec<Point2> {
 mod tests {
     use super::*;
     use crate::CircleObj;
+    use crate::FunctionObj;
 
     #[test]
     fn new_document_is_empty() {
@@ -2534,6 +2540,43 @@ mod tests {
         }
         // Variables survive the round-trip.
         assert_eq!(doc2.get_variable("r"), Some(1.5));
+    }
+
+    #[test]
+    fn old_function_json_without_integral_fields_deserializes() {
+        let mut doc = Document::new();
+        doc.add_object(GeoObject::Function(FunctionObj::new("x^2")));
+        let mut value = serde_json::to_value(&doc).expect("serialize value");
+
+        fn strip_integral_fields(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("is_integral");
+                    map.remove("integral_var");
+                    map.remove("integral_lower");
+                    for child in map.values_mut() {
+                        strip_integral_fields(child);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        strip_integral_fields(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        strip_integral_fields(&mut value);
+        let loaded: Document = serde_json::from_value(value).expect("old document should load");
+        let function = loaded.objects_iter().find_map(|(_, obj)| match obj {
+            GeoObject::Function(f) => Some(f),
+            _ => None,
+        });
+        let function = function.expect("function should exist");
+        assert!(!function.is_integral);
+        assert_eq!(function.integral_var, "x");
+        assert_eq!(function.integral_lower, 0.0);
     }
 
     #[test]
