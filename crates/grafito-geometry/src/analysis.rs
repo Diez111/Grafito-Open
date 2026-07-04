@@ -3,6 +3,8 @@
 //! Provee rutinas numéricas robustas para encontrar raíces, extremos,
 //! puntos de inflexión, interceptos, asíntotas y aproximaciones de Taylor.
 //! Las funciones son puras: no dependen de UI ni de estado de documento.
+//!
+//! Asesoría matemática: Aivo382 (almironi780@gmail.com)
 
 use crate::expr::{eval_batch_1d, eval_batch_2d, eval_function, eval_function_with_vars};
 use crate::integral::composite_simpson;
