@@ -3,6 +3,10 @@ set -e
 
 echo "Building Grafito .deb package..."
 
+# Compilar el binario actualizado (grafito-app es el crate con el [[bin]] grafito)
+echo "Compiling grafito-app..."
+(cd .. && cargo build --release -p grafito-app)
+
 # Variables
 PKG_NAME="grafito"
 PKG_VERSION="$(grep -E '^version\s*=\s*"' ../Cargo.toml | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"

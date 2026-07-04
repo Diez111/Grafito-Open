@@ -74,14 +74,28 @@ fn config_path() -> std::path::PathBuf {
 }
 
 pub(crate) fn load_config() -> AppConfig {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = config_path();
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(config) => config,
+            Err(err) => {
+                log::warn!("No se pudo parsear {}: {err}", path.display());
+                AppConfig::default()
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppConfig::default(),
+        Err(err) => {
+            log::warn!("No se pudo leer {}: {err}", path.display());
+            AppConfig::default()
+        }
+    }
 }
 
 pub(crate) fn save_config(config: &AppConfig) {
     if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = std::fs::write(config_path(), json);
+        let path = config_path();
+        if let Err(err) = std::fs::write(&path, json) {
+            log::warn!("No se pudo guardar {}: {err}", path.display());
+        }
     }
 }

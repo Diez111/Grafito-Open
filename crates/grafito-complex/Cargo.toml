@@ -1,10 +1,13 @@
 [package]
 name = "grafito-complex"
-version = "1.2.0-beta"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Mathematical engine for complex variables and conformal mappings in Grafito."
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-grafito-geometry = { path = "../grafito-geometry" }
+serde.workspace = true
 num-complex.workspace = true

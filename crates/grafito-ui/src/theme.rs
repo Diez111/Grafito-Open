@@ -110,16 +110,16 @@ impl Theme {
         visuals.extreme_bg_color = self.input_bg;
         visuals.hyperlink_color = self.accent;
         visuals.selection.bg_fill = self.selection_bg;
-        visuals.selection.stroke = egui::Stroke::new(1.0, self.accent);
-        visuals.window_rounding = egui::Rounding::same(12.0);
-        visuals.menu_rounding = egui::Rounding::same(8.0);
+        visuals.selection.stroke = egui::Stroke::new(1.5, self.accent);
+        visuals.window_rounding = egui::Rounding::same(16.0);
+        visuals.menu_rounding = egui::Rounding::same(10.0);
 
-        // Premium window aesthetics
+        // Premium window aesthetics with soft, large floating shadows
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 24.0,
-            spread: 0.0,
-            color: Color32::from_black_alpha(if is_dark { 160 } else { 40 }),
+            offset: egui::vec2(0.0, 12.0),
+            blur: 32.0,
+            spread: -2.0,
+            color: Color32::from_black_alpha(if is_dark { 120 } else { 30 }),
         };
         visuals.popup_shadow = visuals.window_shadow;
 
@@ -127,12 +127,12 @@ impl Theme {
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.noninteractive.rounding = egui::Rounding::same(10.0);
 
         visuals.widgets.inactive.bg_fill = self.button_bg;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::TRANSPARENT);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(10.0);
 
         visuals.widgets.hovered.bg_fill = self.button_hover;
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(
@@ -140,12 +140,12 @@ impl Theme {
             Color32::from_black_alpha(if is_dark { 40 } else { 10 }),
         );
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(10.0);
 
         visuals.widgets.active.bg_fill = self.selection_bg;
-        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent.linear_multiply(0.5));
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.accent);
-        visuals.widgets.active.rounding = egui::Rounding::same(8.0);
+        visuals.widgets.active.rounding = egui::Rounding::same(10.0);
 
         ctx.set_visuals(visuals);
 
@@ -194,10 +194,10 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     grid_minor: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgb(26, 26, 30),
-    toolbar_bg: Color32::from_rgb(26, 26, 30),
-    input_bar_bg: Color32::from_rgb(32, 32, 40),
-    sidebar_bg: Color32::from_rgb(30, 30, 38),
+    panel_bg: Color32::from_rgba_unmultiplied(26, 26, 30, 240),
+    toolbar_bg: Color32::from_rgba_unmultiplied(26, 26, 30, 240),
+    input_bar_bg: Color32::from_rgba_unmultiplied(32, 32, 40, 240),
+    sidebar_bg: Color32::from_rgba_unmultiplied(30, 30, 38, 240),
     sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(94, 139, 255, 50),
     sidebar_tab_inactive: Color32::from_gray(130),
     sidebar_tab_active: Color32::from_rgb(94, 139, 255),
@@ -263,10 +263,10 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     grid_minor: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgb(255, 255, 255),
-    toolbar_bg: Color32::from_rgb(255, 255, 255),
-    input_bar_bg: Color32::from_rgb(245, 246, 250),
-    sidebar_bg: Color32::from_rgb(250, 250, 252),
+    panel_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
+    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
+    input_bar_bg: Color32::from_rgba_unmultiplied(245, 246, 250, 240),
+    sidebar_bg: Color32::from_rgba_unmultiplied(250, 250, 252, 240),
     sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
     sidebar_tab_inactive: Color32::from_gray(110),
     sidebar_tab_active: Color32::from_rgb(38, 99, 255),

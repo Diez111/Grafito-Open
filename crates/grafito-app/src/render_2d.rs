@@ -21,6 +21,59 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
+fn draw_dashed_line(
+    painter: &egui::Painter,
+    a: Pos2,
+    b: Pos2,
+    stroke: Stroke,
+    dash_len: f32,
+    gap_len: f32,
+) {
+    let delta = b - a;
+    let len = delta.length();
+    if !len.is_finite() || len <= 0.0 {
+        return;
+    }
+    let dir = delta / len;
+    let mut dist = 0.0;
+    while dist < len {
+        let start = a + dir * dist;
+        let end = a + dir * (dist + dash_len).min(len);
+        painter.line_segment([start, end], stroke);
+        dist += dash_len + gap_len;
+    }
+}
+
+fn trig_asymptotes(function: u8, x_min: f64, x_max: f64) -> Vec<f64> {
+    let (offset, step) = match function as usize {
+        2 | 4 => (std::f64::consts::FRAC_PI_2, std::f64::consts::PI),
+        3 | 5 => (0.0, std::f64::consts::PI),
+        _ => return Vec::new(),
+    };
+    let span = (x_max - x_min).abs();
+    // En zoom-out extremo, demasiadas asíntotas saturen la vista.
+    let max_asymptotes = if span > 80.0 {
+        8
+    } else if span > 40.0 {
+        16
+    } else {
+        64
+    };
+    let mut xs = Vec::new();
+    let k_min = ((x_min - offset) / step).floor() as i64 - 1;
+    let k_max = ((x_max - offset) / step).ceil() as i64 + 1;
+    for k in k_min..=k_max {
+        let x = offset + k as f64 * step;
+        if x >= x_min && x <= x_max {
+            xs.push(x);
+            if xs.len() >= max_asymptotes {
+                break;
+            }
+        }
+    }
+    xs
+}
+
 /// Caché de textura para el relleno de curvas implícitas.
 ///
 /// Almacena la textura egui resultante de rasterizar el fill de una
@@ -409,8 +462,13 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
-            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            let mut min_x = (world_tl.x / major_step).floor() as i64 - 1;
+            let mut max_x = (world_br.x / major_step).ceil() as i64 + 1;
+            if max_x.saturating_sub(min_x) > 500 {
+                let center = (min_x + max_x) / 2;
+                min_x = center - 250;
+                max_x = center + 250;
+            }
             for xi in min_x..=max_x {
                 let x = xi as f64 * major_step;
                 let a = view.world_to_screen(Point2::new(x, world_br.y.min(world_tl.y)));
@@ -480,8 +538,13 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let min_y = (world_br.y / major_step).floor() as i32 - 1;
-            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            let mut min_y = (world_br.y / major_step).floor() as i64 - 1;
+            let mut max_y = (world_tl.y / major_step).ceil() as i64 + 1;
+            if max_y.saturating_sub(min_y) > 500 {
+                let center = (min_y + max_y) / 2;
+                min_y = center - 250;
+                max_y = center + 250;
+            }
             for yi in min_y..=max_y {
                 let y = yi as f64 * major_step;
                 let a = view.world_to_screen(Point2::new(world_tl.x, y));
@@ -586,8 +649,13 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let min_x = (world_tl.x / major_step).floor() as i32 - 1;
-            let max_x = (world_br.x / major_step).ceil() as i32 + 1;
+            let mut min_x = (world_tl.x / major_step).floor() as i64 - 1;
+            let mut max_x = (world_br.x / major_step).ceil() as i64 + 1;
+            if max_x.saturating_sub(min_x) > 500 {
+                let center = (min_x + max_x) / 2;
+                min_x = center - 250;
+                max_x = center + 250;
+            }
             for xi in min_x..=max_x {
                 let x = xi as f64 * major_step;
                 if x.abs() < 1e-9 {
@@ -671,8 +739,13 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let min_y = (world_br.y / major_step).floor() as i32 - 1;
-            let max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+            let mut min_y = (world_br.y / major_step).floor() as i64 - 1;
+            let mut max_y = (world_tl.y / major_step).ceil() as i64 + 1;
+            if max_y.saturating_sub(min_y) > 500 {
+                let center = (min_y + max_y) / 2;
+                min_y = center - 250;
+                max_y = center + 250;
+            }
             for yi in min_y..=max_y {
                 let y = yi as f64 * major_step;
                 if y.abs() < 1e-9 {
@@ -711,6 +784,407 @@ impl GrafitoApp {
             font,
             text_color,
         );
+    }
+
+    pub(crate) fn draw_trig_canvas_overlay(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        if !self.show_trig_animation {
+            return;
+        }
+
+        if self.perspective == crate::Perspective::Complex {
+            self.draw_complex_animation_overlay(painter, canvas_rect);
+            return;
+        }
+
+        let view = self.document.view();
+        let theme = current_theme(painter.ctx());
+        let spec = Self::trig_spec(self.trig_function);
+        let accent = to_color32(spec.color);
+        let marker = Color32::from_rgb(255, 84, 84);
+        let projection_x = Color32::from_rgb(88, 180, 105);
+        let projection_y = Color32::from_rgb(80, 120, 240);
+
+        let to_pos = |p: Point2| {
+            let screen = view.world_to_screen(p);
+            canvas_rect.min + Vec2::new(screen.x, screen.y)
+        };
+
+        let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
+        let world_br =
+            view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
+        let x_min = world_tl.x.min(world_br.x);
+        let x_max = world_tl.x.max(world_br.x);
+        let y_min = world_tl.y.min(world_br.y);
+        let y_max = world_tl.y.max(world_br.y);
+        let (segments, asymptotes) =
+            self.trig_graph_segments(x_min, x_max, y_min, y_max, canvas_rect.width());
+        for x in asymptotes {
+            let a = to_pos(Point2::new(x, y_min));
+            let b = to_pos(Point2::new(x, y_max));
+            draw_dashed_line(
+                painter,
+                a,
+                b,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 84, 84, 115)),
+                8.0,
+                7.0,
+            );
+        }
+        for (a, b) in segments {
+            painter.line_segment([to_pos(a), to_pos(b)], Stroke::new(2.0, accent));
+        }
+
+        let t = self.trig_angle;
+        let value = Self::trig_value(self.trig_function, t);
+        if value.is_finite() && value >= y_min && value <= y_max && t >= x_min && t <= x_max {
+            let p = to_pos(Point2::new(t, value));
+            draw_dashed_line(
+                painter,
+                to_pos(Point2::new(t, y_min)),
+                to_pos(Point2::new(t, y_max)),
+                Stroke::new(1.2, marker),
+                10.0,
+                6.0,
+            );
+            painter.line_segment(
+                [to_pos(Point2::new(t, y_min)), to_pos(Point2::new(t, y_max))],
+                Stroke::new(0.4, Color32::from_rgba_unmultiplied(255, 84, 84, 90)),
+            );
+            painter.circle_filled(p, 4.0, marker);
+            painter.text(
+                p + Vec2::new(6.0, -6.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{}({:.2})", spec.name, t),
+                egui::FontId::proportional(11.0),
+                theme.text_primary,
+            );
+        }
+
+        match self.trig_view_mode {
+            crate::app::TrigViewMode::Didactic => {
+                self.draw_trig_unit_card(
+                    painter,
+                    canvas_rect,
+                    accent,
+                    marker,
+                    projection_x,
+                    projection_y,
+                );
+            }
+            crate::app::TrigViewMode::Grid => {
+                let center = to_pos(Point2::new(0.0, 0.0));
+                let unit_x = to_pos(Point2::new(1.0, 0.0));
+                let radius_px = center.distance(unit_x);
+                if radius_px.is_finite() && radius_px > 6.0 && radius_px < 5000.0 {
+                    painter.circle_stroke(center, radius_px, Stroke::new(1.6, accent));
+
+                    let t = self.trig_angle;
+                    let point_world = Point2::new(t.cos(), t.sin());
+                    let point = to_pos(point_world);
+                    let foot_x = to_pos(Point2::new(point_world.x, 0.0));
+                    let foot_y = to_pos(Point2::new(0.0, point_world.y));
+
+                    painter.line_segment([center, point], Stroke::new(2.0, marker));
+                    painter.line_segment([point, foot_x], Stroke::new(1.0, projection_x));
+                    painter.line_segment([point, foot_y], Stroke::new(1.0, projection_y));
+                    painter.circle_filled(point, 4.5, marker);
+
+                    painter.text(
+                        unit_x + Vec2::new(8.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        "cos",
+                        egui::FontId::proportional(11.0),
+                        theme.text_secondary,
+                    );
+                    painter.text(
+                        to_pos(Point2::new(0.0, 1.0)) + Vec2::new(0.0, -8.0),
+                        egui::Align2::CENTER_BOTTOM,
+                        "sin",
+                        egui::FontId::proportional(11.0),
+                        theme.text_secondary,
+                    );
+                }
+            }
+        }
+    }
+
+    fn draw_trig_unit_card(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        accent: Color32,
+        marker: Color32,
+        projection_x: Color32,
+        projection_y: Color32,
+    ) {
+        let theme = current_theme(painter.ctx());
+        let card_size = Vec2::new(210.0, 190.0);
+        let card = Rect::from_min_size(canvas_rect.min + Vec2::new(14.0, 14.0), card_size);
+        let bg = theme.panel_bg;
+        painter.rect_filled(card, 10.0, bg);
+        painter.rect_stroke(card, 10.0, Stroke::new(1.0, theme.separator));
+
+        let center = card.center() + Vec2::new(0.0, 8.0);
+        let radius = 58.0;
+        let t = self.trig_angle;
+        let cos_t = t.cos() as f32;
+        let sin_t = t.sin() as f32;
+        let point = center + Vec2::new(cos_t * radius, -sin_t * radius);
+        let foot_x = center + Vec2::new(cos_t * radius, 0.0);
+        let foot_y = center + Vec2::new(0.0, -sin_t * radius);
+
+        painter.text(
+            card.min + Vec2::new(12.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            "Círculo unitario",
+            egui::FontId::proportional(13.0),
+            theme.text_primary,
+        );
+        painter.circle_stroke(center, radius, Stroke::new(1.5, accent));
+        painter.line_segment(
+            [
+                center + Vec2::new(-radius - 8.0, 0.0),
+                center + Vec2::new(radius + 8.0, 0.0),
+            ],
+            Stroke::new(1.0, theme.separator),
+        );
+        painter.line_segment(
+            [
+                center + Vec2::new(0.0, -radius - 8.0),
+                center + Vec2::new(0.0, radius + 8.0),
+            ],
+            Stroke::new(1.0, theme.separator),
+        );
+        painter.line_segment([center, point], Stroke::new(2.0, marker));
+        painter.line_segment([point, foot_x], Stroke::new(1.2, projection_y));
+        painter.line_segment([point, foot_y], Stroke::new(1.2, projection_x));
+        painter.circle_filled(point, 4.5, marker);
+        painter.text(
+            card.left_bottom() + Vec2::new(12.0, -28.0),
+            egui::Align2::LEFT_BOTTOM,
+            format!("cos θ = {:.3}   sin θ = {:.3}", t.cos(), t.sin()),
+            egui::FontId::proportional(11.0),
+            theme.text_secondary,
+        );
+    }
+
+    fn trig_graph_segments(
+        &self,
+        x_min: f64,
+        x_max: f64,
+        y_min: f64,
+        y_max: f64,
+        width: f32,
+    ) -> (Vec<(Point2, Point2)>, Vec<f64>) {
+        let key = (
+            self.trig_function,
+            x_min.to_bits(),
+            x_max.to_bits(),
+            y_min.to_bits(),
+            y_max.to_bits(),
+            width.max(0.0).round() as u32,
+            self.document.render_quality,
+        );
+        if let Ok(cache) = self.trig_graph_cache.read() {
+            if let Some(cache) = cache.as_ref() {
+                if cache.function == key.0
+                    && cache.x_min_bits == key.1
+                    && cache.x_max_bits == key.2
+                    && cache.y_min_bits == key.3
+                    && cache.y_max_bits == key.4
+                    && cache.width_px == key.5
+                    && cache.quality == key.6
+                {
+                    return (cache.segments.clone(), cache.asymptotes.clone());
+                }
+            }
+        }
+
+        let y_span = (y_max - y_min).abs().max(1.0);
+        let x_span = (x_max - x_min).abs();
+        // En zoom-out extremo, reducir samples para evitar artefactos y lag.
+        let zoom_cap = if x_span > 80.0 {
+            200
+        } else if x_span > 40.0 {
+            320
+        } else {
+            760
+        };
+        let samples = match self.document.render_quality {
+            grafito_core::RenderQuality::Preview => (width as usize).clamp(120, zoom_cap.min(280)),
+            grafito_core::RenderQuality::Normal => (width as usize).clamp(200, zoom_cap.min(520)),
+            grafito_core::RenderQuality::High => (width as usize).clamp(280, zoom_cap),
+        };
+        let mut segments = Vec::with_capacity(samples);
+        let mut prev: Option<Point2> = None;
+        let asymptotes = trig_asymptotes(self.trig_function, x_min, x_max);
+        let dx = ((x_max - x_min).abs() / samples.max(1) as f64).max(1e-6);
+        let asymptote_pad = dx * 1.75;
+        for i in 0..=samples {
+            let x = x_min + (x_max - x_min) * i as f64 / samples as f64;
+            let y = Self::trig_value(self.trig_function, x);
+            let near_asymptote = asymptotes.iter().any(|a| (x - *a).abs() <= asymptote_pad);
+            let visible = !near_asymptote && y.is_finite() && y >= y_min && y <= y_max;
+            if visible {
+                let world = Point2::new(x, y);
+                if let Some(prev_world) = prev {
+                    let crosses_asymptote = asymptotes
+                        .iter()
+                        .any(|a| (prev_world.x - *a) * (world.x - *a) <= 0.0);
+                    if !crosses_asymptote && (world.y - prev_world.y).abs() <= y_span * 0.30 {
+                        segments.push((prev_world, world));
+                    }
+                }
+                prev = Some(world);
+            } else {
+                prev = None;
+            }
+        }
+
+        if let Ok(mut cache) = self.trig_graph_cache.write() {
+            *cache = Some(crate::app::TrigGraphCache {
+                function: key.0,
+                x_min_bits: key.1,
+                x_max_bits: key.2,
+                y_min_bits: key.3,
+                y_max_bits: key.4,
+                width_px: key.5,
+                quality: key.6,
+                segments: segments.clone(),
+                asymptotes: asymptotes.clone(),
+            });
+        }
+        (segments, asymptotes)
+    }
+
+    fn draw_complex_animation_overlay(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        use num_complex::Complex64;
+        use std::collections::HashMap;
+
+        let view = self.document.view();
+        let theme = current_theme(painter.ctx());
+        let source_color = Color32::from_rgb(255, 84, 84);
+        let image_color = Color32::from_rgb(150, 70, 255);
+        let unit_color = Color32::from_rgb(80, 150, 240);
+        let to_pos = |p: Point2| {
+            let screen = view.world_to_screen(p);
+            canvas_rect.min + Vec2::new(screen.x, screen.y)
+        };
+
+        let (expr, label) = self.active_complex_animation_expr();
+        let parsed = grafito_complex::complex_expr::parse(&expr).ok();
+        let eval_at = |z: Complex64| -> Option<Complex64> {
+            let expr = parsed.as_ref()?;
+            let mut vars: HashMap<String, Complex64> = HashMap::new();
+            vars.insert(self.document.complex_base_symbol.clone(), z);
+            for (name, value) in &self.document.variables {
+                vars.insert(name.clone(), Complex64::new(*value, 0.0));
+            }
+            expr.eval(&vars)
+                .ok()
+                .filter(|w| w.re.is_finite() && w.im.is_finite())
+        };
+
+        let mut prev_source: Option<Pos2> = None;
+        let mut prev_image: Option<Pos2> = None;
+        for i in 0..=128 {
+            let a = std::f64::consts::TAU * i as f64 / 128.0;
+            let z = Complex64::new(a.cos(), a.sin());
+            let source_pos = to_pos(Point2::new(z.re, z.im));
+            if let Some(prev) = prev_source {
+                painter.line_segment([prev, source_pos], Stroke::new(1.3, unit_color));
+            }
+            prev_source = Some(source_pos);
+
+            if let Some(w) = eval_at(z) {
+                let image_pos = to_pos(Point2::new(w.re, w.im));
+                if let Some(prev) = prev_image {
+                    if prev.distance(image_pos)
+                        < canvas_rect.width().max(canvas_rect.height()) * 0.75
+                    {
+                        painter.line_segment([prev, image_pos], Stroke::new(2.0, image_color));
+                    }
+                }
+                prev_image = Some(image_pos);
+            } else {
+                prev_image = None;
+            }
+        }
+
+        let t = self.trig_angle;
+        let z = Complex64::new(t.cos(), t.sin());
+        let z_pos = to_pos(Point2::new(z.re, z.im));
+        painter.circle_filled(z_pos, 5.0, source_color);
+        painter.text(
+            z_pos + Vec2::new(7.0, -7.0),
+            egui::Align2::LEFT_BOTTOM,
+            "z=e^(it)",
+            egui::FontId::proportional(11.0),
+            theme.text_primary,
+        );
+
+        if let Some(w) = eval_at(z) {
+            let w_pos = to_pos(Point2::new(w.re, w.im));
+            painter.line_segment(
+                [z_pos, w_pos],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 120, 120, 120)),
+            );
+            painter.circle_filled(w_pos, 5.0, image_color);
+            painter.text(
+                w_pos + Vec2::new(7.0, -7.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{}({})", label, self.document.complex_base_symbol),
+                egui::FontId::proportional(11.0),
+                theme.text_primary,
+            );
+        }
+
+        let card = Rect::from_min_size(
+            canvas_rect.min + Vec2::new(14.0, 14.0),
+            Vec2::new(250.0, 86.0),
+        );
+        let bg = theme.panel_bg;
+        painter.rect_filled(card, 10.0, bg);
+        painter.rect_stroke(card, 10.0, Stroke::new(1.0, theme.separator));
+        painter.text(
+            card.min + Vec2::new(12.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            "Animación compleja",
+            egui::FontId::proportional(13.0),
+            theme.text_primary,
+        );
+        painter.text(
+            card.min + Vec2::new(12.0, 34.0),
+            egui::Align2::LEFT_TOP,
+            format!("z(t) = {:.3} {:+.3}i", z.re, z.im),
+            egui::FontId::proportional(11.0),
+            theme.text_secondary,
+        );
+        painter.text(
+            card.min + Vec2::new(12.0, 56.0),
+            egui::Align2::LEFT_TOP,
+            format!("Imagen activa: {}", expr),
+            egui::FontId::proportional(11.0),
+            image_color,
+        );
+    }
+
+    fn active_complex_animation_expr(&self) -> (String, &'static str) {
+        for (_, obj) in self.document.objects_iter() {
+            if let GeoObject::ComplexMapping(cm) = obj {
+                if cm.visible {
+                    return (cm.expr.clone(), "f");
+                }
+            }
+        }
+        for (_, obj) in self.document.objects_iter() {
+            if let GeoObject::ComplexGrid(cg) = obj {
+                if cg.visible {
+                    return (cg.expr.clone(), "f");
+                }
+            }
+        }
+        (self.document.complex_base_symbol.clone(), "id")
     }
 
     pub(crate) fn draw_objects(
@@ -1081,7 +1555,10 @@ impl GrafitoApp {
         // 5) Verificar caché por el ObjectId del ComplexMapping (no del
         //    ImplicitCurve, para no pisarlo con su propia cache de fill).
         {
-            let cache = self.fill_textures.read().unwrap();
+            let cache = self.fill_textures.read().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache read lock poisoned; recovering");
+                poisoned.into_inner()
+            });
             if let Some(entry) = cache.get(&cm_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
@@ -1153,7 +1630,10 @@ impl GrafitoApp {
 
         // 9) Almacenar en cache y blit.
         {
-            let mut cache = self.fill_textures.write().unwrap();
+            let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache write lock poisoned; recovering");
+                poisoned.into_inner()
+            });
             cache.insert(
                 cm_id,
                 FillTextureCache {
@@ -1255,7 +1735,10 @@ impl GrafitoApp {
         //    dentro de la región cacheada, blitear la textura y retornar.
         let object_id = ic.id;
         {
-            let cache = self.fill_textures.read().unwrap();
+            let cache = self.fill_textures.read().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache read lock poisoned; recovering");
+                poisoned.into_inner()
+            });
             if let Some(entry) = cache.get(&object_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
@@ -1327,7 +1810,10 @@ impl GrafitoApp {
 
         // Almacenar en caché.
         {
-            let mut cache = self.fill_textures.write().unwrap();
+            let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache write lock poisoned; recovering");
+                poisoned.into_inner()
+            });
             cache.insert(
                 object_id,
                 FillTextureCache {
@@ -2485,6 +2971,10 @@ impl GrafitoApp {
                         for (name, val) in &self.document.variables {
                             vars.insert(name.clone(), Complex64::new(*val, 0.0));
                         }
+                        let dc_mode = cg.domain_coloring_mode;
+                        // Umbral: si |f(z)| < MAG_ZERO se considera cero y se pinta negro.
+                        // Evita que arg(~0) dé ruido aleatorio en retratos de fase.
+                        const MAG_ZERO: f64 = 1e-6;
                         for j in 0..res {
                             let y = cg.y_min + (res - 1 - j) as f64 * dy;
                             for i in 0..res {
@@ -2495,16 +2985,93 @@ impl GrafitoApp {
                                 );
                                 if let Ok(fz) = expr.eval(&vars) {
                                     if fz.re.is_finite() && fz.im.is_finite() {
-                                        let arg = fz.arg();
                                         let mag = fz.norm();
+                                        // Función identicamente nula → negro (evita ruido de arg(0))
+                                        if mag < MAG_ZERO {
+                                            let sp1 = view.world_to_screen(Point2::new(
+                                                cg.x_min + i as f64 * dx,
+                                                cg.y_min + (res - 1 - j) as f64 * dy,
+                                            ));
+                                            let sp2 = view.world_to_screen(Point2::new(
+                                                cg.x_min + (i + 1) as f64 * dx,
+                                                cg.y_min + (res - j) as f64 * dy,
+                                            ));
+                                            let min = canvas_rect.min + Vec2::new(sp1.x, sp2.y);
+                                            let max = canvas_rect.min + Vec2::new(sp2.x, sp1.y);
+                                            painter.rect_filled(
+                                                Rect::from_min_max(min, max),
+                                                0.0,
+                                                Color32::BLACK,
+                                            );
+                                            continue;
+                                        }
+                                        let arg = fz.arg();
                                         let hue = (arg + std::f64::consts::PI)
                                             / (2.0 * std::f64::consts::PI);
-                                        let lightness = (mag.max(1e-10).ln().atan()
-                                            / std::f64::consts::FRAC_PI_2)
-                                            * 0.5
-                                            + 0.5;
-                                        let (r, g, b) =
-                                            hsl_to_rgb(hue, 0.85, lightness.clamp(0.0, 1.0));
+                                        // Calcula lightness y saturation según el modo de coloración
+                                        let (lightness, saturation) = match dc_mode {
+                                            // 0: HSL Clásico — lightness varía con módulo
+                                            0 => {
+                                                let l = (mag.max(1e-10).ln().atan()
+                                                    / std::f64::consts::FRAC_PI_2)
+                                                    * 0.5
+                                                    + 0.5;
+                                                (l.clamp(0.0, 1.0), 0.85)
+                                            }
+                                            // 1: Retrato de Fase Puro — lightness=0.5 constante, sat=1
+                                            1 => (0.5, 1.0),
+                                            // 2: Rejilla Polar Conforme — como HSL + damping por rejilla polar
+                                            2 => {
+                                                let l = (mag.max(1e-10).ln().atan()
+                                                    / std::f64::consts::FRAC_PI_2)
+                                                    * 0.5
+                                                    + 0.5;
+                                                (l.clamp(0.0, 1.0), 0.85)
+                                            }
+                                            // 3: Rejilla Cartesiana — como HSL
+                                            3 => {
+                                                let l = (mag.max(1e-10).ln().atan()
+                                                    / std::f64::consts::FRAC_PI_2)
+                                                    * 0.5
+                                                    + 0.5;
+                                                (l.clamp(0.0, 1.0), 0.85)
+                                            }
+                                            _ => {
+                                                let l = (mag.max(1e-10).ln().atan()
+                                                    / std::f64::consts::FRAC_PI_2)
+                                                    * 0.5
+                                                    + 0.5;
+                                                (l.clamp(0.0, 1.0), 0.85)
+                                            }
+                                        };
+                                        let (mut r, mut g, mut b) =
+                                            hsl_to_rgb(hue, saturation, lightness);
+                                        // Overlay de rejillas conformes (modos 2 y 3)
+                                        if dc_mode == 2 {
+                                            let log_mag = mag.max(1e-5).ln();
+                                            let mag_grid =
+                                                (log_mag * std::f64::consts::PI * 2.0).sin().abs();
+                                            let arg_grid = (arg * 10.0).sin().abs();
+                                            let shading = 0.5
+                                                + 0.5
+                                                    * mag_grid.max(0.0).powf(0.15)
+                                                    * arg_grid.max(0.0).powf(0.15);
+                                            r *= shading;
+                                            g *= shading;
+                                            b *= shading;
+                                        } else if dc_mode == 3 {
+                                            let grid_re =
+                                                (fz.re * std::f64::consts::PI * 2.0).sin().abs();
+                                            let grid_im =
+                                                (fz.im * std::f64::consts::PI * 2.0).sin().abs();
+                                            let shading = 0.5
+                                                + 0.5
+                                                    * grid_re.max(0.0).powf(0.15)
+                                                    * grid_im.max(0.0).powf(0.15);
+                                            r *= shading;
+                                            g *= shading;
+                                            b *= shading;
+                                        }
                                         let sp1 = view.world_to_screen(Point2::new(
                                             cg.x_min + i as f64 * dx,
                                             cg.y_min + (res - 1 - j) as f64 * dy,

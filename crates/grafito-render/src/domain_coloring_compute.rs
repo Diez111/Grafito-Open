@@ -28,7 +28,7 @@ pub struct DomainColoringComputePipeline {
 struct GridParamsUniform {
     grid_size: u32,
     code_len: u32,
-    _pad0: u32,
+    dc_mode: u32,
     _pad1: u32,
 }
 
@@ -189,6 +189,7 @@ impl DomainColoringComputePipeline {
         expr: &ComplexExpr,
         points: &[(f64, f64)],
         variables: &HashMap<String, f64>,
+        dc_mode: u32,
     ) -> Option<GridColors> {
         if points.is_empty() {
             return Some(Vec::new());
@@ -218,7 +219,7 @@ impl DomainColoringComputePipeline {
         let params = GridParamsUniform {
             grid_size,
             code_len: prog.code.len() as u32,
-            _pad0: 0,
+            dc_mode,
             _pad1: 0,
         };
 

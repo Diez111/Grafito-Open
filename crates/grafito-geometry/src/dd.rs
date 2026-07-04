@@ -5,12 +5,29 @@
 //! `value = hi + lo` where `|lo| <= 0.5 * ulp(hi)`.
 //! This gives approximately 106 bits of precision (vs 53 bits for f64).
 
+#![allow(clippy::approx_constant)]
+
 use std::f64::consts::PI;
 use std::fmt;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// Split constant for Dekker's product algorithm
 const SPLIT: f64 = 134217729.0; // 2^27 + 1
+
+const PI_DD: DD = DD {
+    hi: 3.141592653589793,
+    lo: 1.2246467991473532e-16,
+};
+
+const TWO_PI_DD: DD = DD {
+    hi: 6.283185307179586,
+    lo: 2.4492935982947064e-16,
+};
+
+const LN2_DD: DD = DD {
+    hi: 0.6931471805599453,
+    lo: 2.3190468138462996e-17,
+};
 
 /// A double-double precision floating point number (~106 bits).
 #[derive(Clone, Copy, Default)]
@@ -90,16 +107,19 @@ impl DD {
         if !self.hi.is_finite() {
             return Self::new(f64::NAN, f64::NAN);
         }
-        // Reduce to [-pi, pi]
-        let two_pi = Self::from_f64(2.0 * PI);
-        let mut x = *self;
 
-        // Reduce to [-pi, pi]
+        let mut x = *self;
+        if x.hi.abs() > PI {
+            let n = (x.hi / (2.0 * PI)).round();
+            x = x - TWO_PI_DD * DD::from_f64(n);
+        }
+
+        // Final minor corrections to ensure x is strictly within [-pi, pi]
         while x.hi > PI {
-            x = x - two_pi;
+            x = x - TWO_PI_DD;
         }
         while x.hi < -PI {
-            x = x + two_pi;
+            x = x + TWO_PI_DD;
         }
 
         // Taylor series: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + ...
@@ -108,7 +128,7 @@ impl DD {
         let mut sum = x;
         let mut sign = -1.0;
 
-        for i in 1..=10 {
+        for i in 1..=12 {
             let denom = (2 * i) as f64 * (2 * i + 1) as f64;
             term = term * x2 / Self::from_f64(denom);
             if sign > 0.0 {
@@ -117,7 +137,7 @@ impl DD {
                 sum = sum - term;
             }
             sign = -sign;
-            if term.abs().to_f64() < 1e-30 {
+            if term.abs().to_f64() < 1e-32 {
                 break;
             }
         }
@@ -128,25 +148,43 @@ impl DD {
     /// Compute cos using Taylor series
     pub fn cos(&self) -> Self {
         // cos(x) = sin(x + pi/2)
-        let pi_over_2 = Self::from_f64(PI / 2.0);
+        let pi_over_2 = PI_DD / Self::from_f64(2.0);
         (*self + pi_over_2).sin()
     }
 
-    /// Compute exp using Taylor series
+    /// Compute exp using Taylor series and range reduction
     pub fn exp(&self) -> Self {
-        // exp(x) = 1 + x + x^2/2! + x^3/3! + ...
+        if !self.hi.is_finite() {
+            if self.hi.is_sign_positive() {
+                return *self;
+            } else {
+                return Self::new(0.0, 0.0);
+            }
+        }
+
+        // exp(x) = 2^k * exp(r), where k = round(x / ln(2)) and r = x - k * ln(2)
+        let k = (self.hi / std::f64::consts::LN_2).round();
+        if k.is_nan() || k.is_infinite() {
+            return Self::new(f64::NAN, f64::NAN);
+        }
+
+        let k_i = k as i32;
+        let r = *self - LN2_DD * DD::from_f64(k);
+
+        // Taylor series for exp(r)
         let mut sum = Self::from_f64(1.0);
         let mut term = Self::from_f64(1.0);
-
-        for i in 1..=30 {
-            term = term * *self / Self::from_f64(i as f64);
+        for i in 1..=15 {
+            term = term * r / Self::from_f64(i as f64);
             sum = sum + term;
-            if term.abs().to_f64() < 1e-30 {
+            if term.abs().to_f64() < 1e-32 {
                 break;
             }
         }
 
-        sum
+        // Multiply by 2^k_i by scaling the high and low parts.
+        let scale = libm::ldexp(1.0, k_i);
+        Self::new(sum.hi * scale, sum.lo * scale)
     }
 
     /// Compute ln using the identity: ln(x) = 2 * atanh((x-1)/(x+1))
@@ -222,10 +260,10 @@ fn split(a: f64) -> (f64, f64) {
 impl Add for DD {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        let (s1, t1) = two_sum(self.hi, rhs.hi);
-        let (_, t2) = two_sum(self.lo, rhs.lo);
-        let (s3, t3) = two_sum(s1, t1 + t2);
-        Self::new(s3, t3)
+        let (s, t) = two_sum(self.hi, rhs.hi);
+        let t = t + (self.lo + rhs.lo);
+        let (s, t) = two_sum(s, t);
+        Self::new(s, t)
     }
 }
 
@@ -331,5 +369,24 @@ mod tests {
         let sin_val = pi_over_4.sin().to_f64();
         let expected = (PI / 4.0).sin();
         assert!((sin_val - expected).abs() < 1e-14);
+
+        // Test huge input (range reduction check)
+        let huge = DD::from_f64(1e6);
+        let huge_sin = huge.sin().to_f64();
+        let expected_huge = 1e6_f64.sin();
+        assert!((huge_sin - expected_huge).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_exp() {
+        let x = DD::from_f64(2.5);
+        let exp_x = x.exp().to_f64();
+        let expected = 2.5_f64.exp();
+        assert!((exp_x - expected).abs() < 1e-14);
+
+        let neg_x = DD::from_f64(-5.0);
+        let exp_neg = neg_x.exp().to_f64();
+        let expected_neg = (-5.0_f64).exp();
+        assert!((exp_neg - expected_neg).abs() < 1e-14);
     }
 }

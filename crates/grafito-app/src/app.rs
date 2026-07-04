@@ -19,6 +19,60 @@ use std::time::{Duration, Instant};
 use grafito_command::commands::{register_gpu_function_evaluator, GpuFunctionEvaluator};
 
 const MAX_UNDO: usize = 50;
+const TRIG_GRAPH_LABEL: &str = "TrigGraph";
+const TRIG_VALUE_LABEL: &str = "TrigValue";
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrigFunctionSpec {
+    pub name: &'static str,
+    pub color: Color,
+}
+
+pub(crate) const TRIG_FUNCTIONS: [TrigFunctionSpec; 6] = [
+    TrigFunctionSpec {
+        name: "sin",
+        color: Color::new(0.15, 0.38, 0.95, 1.0),
+    },
+    TrigFunctionSpec {
+        name: "cos",
+        color: Color::new(0.90, 0.35, 0.10, 1.0),
+    },
+    TrigFunctionSpec {
+        name: "tan",
+        color: Color::new(0.55, 0.20, 0.90, 1.0),
+    },
+    TrigFunctionSpec {
+        name: "cot",
+        color: Color::new(0.05, 0.55, 0.45, 1.0),
+    },
+    TrigFunctionSpec {
+        name: "sec",
+        color: Color::new(0.90, 0.65, 0.05, 1.0),
+    },
+    TrigFunctionSpec {
+        name: "csc",
+        color: Color::new(0.85, 0.10, 0.35, 1.0),
+    },
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrigViewMode {
+    Didactic,
+    Grid,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TrigGraphCache {
+    pub function: u8,
+    pub x_min_bits: u64,
+    pub x_max_bits: u64,
+    pub y_min_bits: u64,
+    pub y_max_bits: u64,
+    pub width_px: u32,
+    pub quality: RenderQuality,
+    pub segments: Vec<(Point2, Point2)>,
+    pub asymptotes: Vec<f64>,
+}
 
 /// Evaluador GPU para la ruta híbrida de integrales definidas.
 struct AppGpuFunctionEvaluator {
@@ -36,7 +90,7 @@ impl GpuFunctionEvaluator for AppGpuFunctionEvaluator {
         samples: usize,
         variables: &std::collections::HashMap<String, f64>,
     ) -> Option<Vec<f64>> {
-        let renderer_lock = self.renderer.read().ok()?;
+        let renderer_lock = self.renderer.write().ok()?;
         let renderer = renderer_lock.as_ref()?;
         let pipeline = renderer.function_compute.as_ref()?;
         let grid_size = samples.saturating_sub(1).max(1);
@@ -195,6 +249,7 @@ pub struct GrafitoApp {
     pub hover_cached_analysis: Option<Option<HoveredAnalysis>>,
     pub document_snapshot: std::sync::Arc<Document>,
     pub snapshot_version: u64,
+    pub snapshot_render_quality: RenderQuality,
     pub style_applied: Option<bool>,
     pub command_palette: grafito_ui::command_palette::CommandPaletteState,
     /// Protocolo de construcción: historial de pasos que crean objetos o
@@ -221,8 +276,12 @@ pub struct GrafitoApp {
     pub trig_animating: bool,
     /// Velocidad de la animación trigonométrica (rad/seg).
     pub trig_speed: f64,
-    /// Función a visualizar: 0=sin, 1=cos, 2=tan
+    /// Función a visualizar: 0=sin, 1=cos, 2=tan, 3=cot, 4=sec, 5=csc.
     pub trig_function: u8,
+    /// Presentación visual de la animación trigonométrica.
+    pub(crate) trig_view_mode: TrigViewMode,
+    /// Cache de la curva trigonométrica visible; el marcador se anima aparte.
+    pub(crate) trig_graph_cache: std::sync::RwLock<Option<TrigGraphCache>>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +324,86 @@ pub struct AutocompleteItem {
 }
 
 impl GrafitoApp {
+    pub(crate) fn trig_spec(index: u8) -> TrigFunctionSpec {
+        TRIG_FUNCTIONS
+            .get(index as usize)
+            .copied()
+            .unwrap_or(TRIG_FUNCTIONS[0])
+    }
+
+    pub(crate) fn trig_value(index: u8, t: f64) -> f64 {
+        match index as usize {
+            0 => t.sin(),
+            1 => t.cos(),
+            2 => t.tan(),
+            3 => 1.0 / t.tan(),
+            4 => 1.0 / t.cos(),
+            5 => 1.0 / t.sin(),
+            _ => t.sin(),
+        }
+    }
+
+    pub(crate) fn trig_identity(index: u8) -> &'static str {
+        match index as usize {
+            0 => "sin θ es la altura del punto sobre el círculo unitario.",
+            1 => "cos θ es la distancia horizontal al eje vertical.",
+            2 => "tan θ = sin θ / cos θ; crece mucho cerca de cos θ = 0.",
+            3 => "cot θ = cos θ / sin θ; no está definida cuando sin θ = 0.",
+            4 => "sec θ = 1 / cos θ; mide el inverso de la proyección horizontal.",
+            5 => "csc θ = 1 / sin θ; mide el inverso de la altura.",
+            _ => "sin θ es la altura del punto sobre el círculo unitario.",
+        }
+    }
+
+    pub(crate) fn set_trig_animation_visible(&mut self, visible: bool) {
+        self.show_trig_animation = visible;
+        if !visible {
+            self.trig_animating = false;
+        }
+        self.cleanup_trig_document_artifacts();
+    }
+
+    pub(crate) fn set_trig_function(&mut self, index: u8) {
+        let clamped = (index as usize).min(TRIG_FUNCTIONS.len() - 1) as u8;
+        if self.trig_function != clamped {
+            self.trig_function = clamped;
+            if let Ok(mut cache) = self.trig_graph_cache.write() {
+                *cache = None;
+            }
+        }
+        self.cleanup_trig_document_artifacts();
+    }
+
+    pub(crate) fn cleanup_trig_document_artifacts(&mut self) {
+        let index = (self.trig_function as usize).min(TRIG_FUNCTIONS.len() - 1) as u8;
+        if self.trig_function != index {
+            self.trig_function = index;
+        }
+
+        let legacy_ids = self
+            .document
+            .objects_iter()
+            .filter_map(|(id, obj)| {
+                let label = obj.label();
+                (label == TRIG_GRAPH_LABEL || label == TRIG_VALUE_LABEL).then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for id in legacy_ids {
+            self.document.remove_object(id);
+        }
+
+        let legacy_vars = self
+            .document
+            .variables
+            .keys()
+            .filter(|name| name.as_str() == "trig_angle" || name.starts_with("trig_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in legacy_vars {
+            self.document.remove_variable(&name);
+        }
+    }
+
     fn gpu_renderer_ready(&self) -> bool {
         self.gpu_renderer
             .as_ref()
@@ -377,6 +516,7 @@ impl GrafitoApp {
         }
 
         let snapshot_version = document.version;
+        let snapshot_render_quality = document.render_quality;
         let document_snapshot = std::sync::Arc::new(document.clone());
 
         Self {
@@ -437,6 +577,7 @@ impl GrafitoApp {
             ],
             document_snapshot,
             snapshot_version,
+            snapshot_render_quality,
             style_applied: None,
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
             construction_log: Vec::new(),
@@ -450,6 +591,8 @@ impl GrafitoApp {
             trig_animating: false,
             trig_speed: 0.5,
             trig_function: 0,
+            trig_view_mode: TrigViewMode::Didactic,
+            trig_graph_cache: std::sync::RwLock::new(None),
         }
     }
 
@@ -463,9 +606,12 @@ impl GrafitoApp {
     /// Solo clona el documento cuando el `version` cambia (contenido modificado).
     /// Para cambios de view (pan/zoom), actualiza el view in-place vía `make_mut`.
     fn document_for_callback(&mut self) -> std::sync::Arc<Document> {
-        if self.document.version != self.snapshot_version {
+        if self.document.version != self.snapshot_version
+            || self.document.render_quality != self.snapshot_render_quality
+        {
             self.document_snapshot = std::sync::Arc::new(self.document.clone());
             self.snapshot_version = self.document.version;
+            self.snapshot_render_quality = self.document.render_quality;
         } else {
             let snap = std::sync::Arc::make_mut(&mut self.document_snapshot);
             snap.set_view(*self.document.view());
@@ -579,6 +725,14 @@ impl GrafitoApp {
     /// Ejecuta un comando de texto, gestiona su `CommandOutcome` y registra
     /// el paso de construcción resultante (snapshot+diff de etiquetas).
     pub(crate) fn execute_command_and_record(&mut self, cmd: &str, time: f64) {
+        let needs_snapshot = self
+            .undo_stack
+            .last()
+            .map(|snapshot| snapshot.version != self.document.version)
+            .unwrap_or(true);
+        if needs_snapshot {
+            self.save_state();
+        }
         let before = self.object_labels_snapshot();
         let mut buf = cmd.to_string();
         let outcome = crate::commands::process_input(&mut self.document, &mut buf);
@@ -750,18 +904,22 @@ impl GrafitoApp {
             .save_file()
         {
             let path_str = path.to_string_lossy().to_string();
-            if let Err(e) = crate::export::save_document(&self.document, &path_str) {
-                log::error!("Save failed: {}", e);
-                self.toasts.push(
-                    format!("Error al guardar: {}", e),
-                    grafito_ui::toast::ToastKind::Error,
-                    5.0,
-                );
+            match crate::export::save_document(&self.document, &path_str) {
+                Ok(()) => {
+                    if self.recent_files.len() >= 10 {
+                        self.recent_files.remove(0);
+                    }
+                    self.recent_files.push(path_str);
+                }
+                Err(e) => {
+                    log::error!("Save failed: {}", e);
+                    self.toasts.push(
+                        format!("Error al guardar: {}", e),
+                        grafito_ui::toast::ToastKind::Error,
+                        5.0,
+                    );
+                }
             }
-            if self.recent_files.len() >= 10 {
-                self.recent_files.remove(0);
-            }
-            self.recent_files.push(path_str);
         }
     }
 
@@ -887,6 +1045,10 @@ impl GrafitoApp {
         self.tool_ghost = None;
         self.canvas_drag_start = None;
         self.canvas_is_panning = false;
+        // Limpiar la animación trig al cambiar de perspectiva para que no se
+        // solape con el panel derecho de la nueva perspectiva.
+        self.show_trig_animation = false;
+        self.trig_animating = false;
 
         self.perspective = p;
         let layout = p.layout();
@@ -1515,46 +1677,48 @@ impl eframe::App for GrafitoApp {
         }
 
         let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
-        let mut any_animating = false;
-        let mut changes = Vec::new();
 
-        for (name, meta) in &self.document.variable_meta {
-            if meta.animating && meta.animation_speed != 0.0 {
-                any_animating = true;
-                if let Some(&current_val) = self.document.variables.get(name) {
-                    let mut next_val = current_val + meta.animation_speed * dt;
-                    let mut next_speed = meta.animation_speed;
-                    if next_val >= meta.max {
-                        next_val = meta.max;
-                        next_speed = -meta.animation_speed.abs();
-                    } else if next_val <= meta.min {
-                        next_val = meta.min;
-                        next_speed = meta.animation_speed.abs();
+        // En modo explorador trigonométrico, saltar las animaciones de
+        // variables del documento para evitar recomputes de fondo.
+        if !self.show_trig_animation {
+            let mut any_animating = false;
+            let mut changes = Vec::new();
+
+            for (name, meta) in &self.document.variable_meta {
+                if meta.animating && meta.animation_speed != 0.0 {
+                    any_animating = true;
+                    if let Some(&current_val) = self.document.variables.get(name) {
+                        let mut next_val = current_val + meta.animation_speed * dt;
+                        let mut next_speed = meta.animation_speed;
+                        if next_val >= meta.max {
+                            next_val = meta.max;
+                            next_speed = -meta.animation_speed.abs();
+                        } else if next_val <= meta.min {
+                            next_val = meta.min;
+                            next_speed = meta.animation_speed.abs();
+                        }
+                        changes.push((name.clone(), next_val, next_speed));
                     }
-                    changes.push((name.clone(), next_val, next_speed));
                 }
             }
-        }
 
-        for (name, new_val, new_speed) in changes {
-            // set_variable se encarga de recompute_bound_parameters() y bump_version()
-            // para que los objetos enlazados a la variable se actualicen en cada frame.
-            self.document.set_variable(name.clone(), new_val);
-            if let Some(meta) = self.document.variable_meta.get_mut(&name) {
-                meta.animation_speed = new_speed;
+            for (name, new_val, new_speed) in changes {
+                self.document.set_variable(name.clone(), new_val);
+                if let Some(meta) = self.document.variable_meta.get_mut(&name) {
+                    meta.animation_speed = new_speed;
+                }
+            }
+
+            if any_animating {
+                self.document.render_quality = RenderQuality::Preview;
+                self.is_view_changing = true;
+                self.last_interaction_time = Instant::now();
+                ctx.request_repaint();
             }
         }
 
-        if any_animating {
-            // Ya hicimos bump_version() via set_variable; sólo pedimos repaint.
-            self.document.render_quality = RenderQuality::Preview;
-            self.is_view_changing = true;
-            self.last_interaction_time = Instant::now();
-            ctx.request_repaint();
-        }
-
-        // Animación trigonométrica: actualizar ángulo
-        if self.trig_animating {
+        // Animación trigonométrica: sólo corre mientras el panel está visible.
+        if self.show_trig_animation && self.trig_animating {
             self.trig_angle += self.trig_speed * dt;
             // Mantener en [-2π, 2π] para evitar overflow
             let two_pi = 2.0 * std::f64::consts::PI;
@@ -1563,6 +1727,35 @@ impl eframe::App for GrafitoApp {
             } else if self.trig_angle < -two_pi {
                 self.trig_angle += two_pi;
             }
+            self.document.render_quality = RenderQuality::Preview;
+            ctx.request_repaint();
+        } else if !self.show_trig_animation && self.trig_animating {
+            self.trig_animating = false;
+        }
+
+        // Animación de homotopía en mapeo complejo
+        let mut mapping_animating = false;
+        for (_, obj) in self.document.objects_iter() {
+            if let GeoObject::ComplexMapping(cm) = obj {
+                if cm.visible && cm.animate_homotopy {
+                    mapping_animating = true;
+                    break;
+                }
+            }
+        }
+        if mapping_animating {
+            let current = self
+                .document
+                .variables
+                .get("t_homotopy")
+                .copied()
+                .unwrap_or(0.0);
+            self.document
+                .variables
+                .insert("t_homotopy".to_string(), current + dt);
+            self.document.render_quality = RenderQuality::Preview;
+            self.is_view_changing = true;
+            self.last_interaction_time = Instant::now();
             ctx.request_repaint();
         }
 
@@ -1737,30 +1930,21 @@ impl eframe::App for GrafitoApp {
             crate::ui::draw_top_bar(self, ctx);
             self.sync_pending_action_with_tool();
             match self.sidebar_tab {
-                0 => {
-                    // Álgebra por defecto, Complejos si la perspectiva es Complex.
-                    match self.perspective {
-                        Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
-                        _ => crate::algebra::draw_algebra_panel(self, ctx),
-                    }
-                }
-                1 => {
-                    // Herram. por defecto, Attractores si la perspectiva es Dynamics.
-                    match self.perspective {
-                        Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
-                        _ => crate::tools_panel::draw_tools_panel(self, ctx),
-                    }
-                }
+                0 => match self.perspective {
+                    Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
+                    _ => crate::algebra::draw_algebra_panel(self, ctx),
+                },
+                1 => match self.perspective {
+                    Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
+                    _ => crate::tools_panel::draw_tools_panel(self, ctx),
+                },
                 2 => crate::panels::draw_cas_panel(self, ctx),
-                3 => {
-                    // Tabla por defecto, Estadística si la perspectiva es Stats/Probability.
-                    match self.perspective {
-                        Perspective::Probability | Perspective::Statistics => {
-                            crate::panels::draw_statistics_panel(self, ctx)
-                        }
-                        _ => crate::panels::draw_table_panel(self, ctx),
+                3 => match self.perspective {
+                    Perspective::Probability | Perspective::Statistics => {
+                        crate::panels::draw_statistics_panel(self, ctx)
                     }
-                }
+                    _ => crate::panels::draw_table_panel(self, ctx),
+                },
                 4 => crate::panels::draw_spreadsheet_panel(self, ctx),
                 5 => crate::panels::draw_view_panel(self, ctx),
                 _ => crate::panels::draw_empty_panel(self, ctx),
@@ -1772,16 +1956,16 @@ impl eframe::App for GrafitoApp {
                 crate::keyboard::draw_math_keyboard(self, ctx);
             }
 
-            // Panel derecho: dispatch por layout.right_panel en lugar de flags
-            // booleanos separados. Sincroniza exactamente con la perspectiva.
-            // El panel de animación trigonométrica puede activarse desde cualquier
-            // perspectiva via el menú Herramientas.
-            if self.show_trig_animation {
-                crate::panels::draw_trig_animation_panel(self, ctx);
-            }
-
+            // La animación trigonométrica reemplaza al panel derecho de la
+            // perspectiva activa. No se apila con Protocolo/Tabla/Propiedades:
+            // evita el panel intermedio que separaba el canvas de la animación.
             use crate::RightPanelContent;
-            match self.perspective.layout().right_panel {
+            let right_panel = if self.show_trig_animation {
+                Some(RightPanelContent::TrigAnimation)
+            } else {
+                self.perspective.layout().right_panel
+            };
+            match right_panel {
                 None => {} // sin panel derecho
                 Some(RightPanelContent::ConstructionProtocol) => {
                     crate::panels::draw_construction_protocol(self, ctx);
@@ -1884,7 +2068,6 @@ impl eframe::App for GrafitoApp {
                             glam::Vec2::new(canvas_size.x, canvas_size.y);
 
                         if self.use_gpu && canvas_size.x > 0.0 && canvas_size.y > 0.0 {
-                            // Draw grid and axes BEFORE the GPU callback so they are underneath
                             let mut painter = ui.painter().clone();
                             painter.set_clip_rect(canvas_rect);
                             self.draw_grid(&painter, canvas_rect);
@@ -1903,12 +2086,14 @@ impl eframe::App for GrafitoApp {
 
                             // Overlay only: text, points drawn by CPU on top of GPU
                             self.draw_objects(&painter, canvas_rect, true);
+                            self.draw_trig_canvas_overlay(&painter, canvas_rect);
                         } else {
                             let mut painter = ui.painter().clone();
                             painter.set_clip_rect(canvas_rect);
                             self.draw_grid(&painter, canvas_rect);
                             self.draw_axes(&painter, canvas_rect);
                             self.draw_objects(&painter, canvas_rect, false);
+                            self.draw_trig_canvas_overlay(&painter, canvas_rect);
                         }
 
                         // Tool ghost and preview are transient overlays, render with CPU on top.

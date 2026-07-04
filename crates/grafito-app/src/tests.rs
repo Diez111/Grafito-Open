@@ -204,3 +204,30 @@ fn test_tool_group_id_def_nonempty() {
         assert!(!tools.is_empty(), "grupo {:?} vacío", gid);
     }
 }
+
+#[test]
+fn trig_animation_supports_six_internal_function_types() {
+    use crate::app::{GrafitoApp, TRIG_FUNCTIONS};
+
+    assert_eq!(TRIG_FUNCTIONS.len(), 6);
+    let names: Vec<&str> = TRIG_FUNCTIONS.iter().map(|spec| spec.name).collect();
+    assert_eq!(names, vec!["sin", "cos", "tan", "cot", "sec", "csc"]);
+
+    let t = std::f64::consts::FRAC_PI_4;
+    assert!((GrafitoApp::trig_value(0, t) - t.sin()).abs() < 1e-12);
+    assert!((GrafitoApp::trig_value(1, t) - t.cos()).abs() < 1e-12);
+    assert!((GrafitoApp::trig_value(2, t) - 1.0).abs() < 1e-12);
+    assert!((GrafitoApp::trig_value(3, t) - 1.0).abs() < 1e-12);
+    assert!((GrafitoApp::trig_value(4, t) - 2.0_f64.sqrt()).abs() < 1e-12);
+    assert!((GrafitoApp::trig_value(5, t) - 2.0_f64.sqrt()).abs() < 1e-12);
+}
+
+#[test]
+fn trig_animation_explains_identities_for_teaching() {
+    use crate::app::GrafitoApp;
+
+    assert!(GrafitoApp::trig_identity(0).contains("altura"));
+    assert!(GrafitoApp::trig_identity(2).contains("sin θ / cos θ"));
+    assert!(GrafitoApp::trig_identity(4).contains("1 / cos θ"));
+    assert!(GrafitoApp::trig_identity(5).contains("1 / sin θ"));
+}

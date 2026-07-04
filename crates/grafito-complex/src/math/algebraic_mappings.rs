@@ -66,7 +66,7 @@ impl ConformalMap {
     /// Aplica el mapeo al valor `z`. Devuelve `None` si la evaluación
     /// cae en una singularidad (división por cero, raíz de cero, etc.).
     pub fn apply(self, z: Complex64) -> Option<Complex64> {
-        match self {
+        finite_or_none(match self {
             Self::Inversion => {
                 if z.norm() < SINGULARITY_THRESHOLD {
                     None
@@ -134,7 +134,7 @@ impl ConformalMap {
                     Some(diff.inv())
                 }
             }
-        }
+        })
     }
 
     /// Aplica la **inversa** del mapeo: dado un valor `w` en el output,
@@ -289,6 +289,10 @@ impl ConformalMap {
     }
 }
 
+fn finite_or_none(value: Option<Complex64>) -> Option<Complex64> {
+    value.filter(|z| z.re.is_finite() && z.im.is_finite())
+}
+
 /// Parsea un literal numérico (entero o decimal) como `Complex64`.
 fn parse_complex_literal(s: &str) -> Option<Complex64> {
     s.parse::<f64>().ok().map(|r| Complex64::new(r, 0.0))
@@ -335,7 +339,7 @@ fn parse_mobius(s: &str) -> Option<ConformalMap> {
     let (a, b) = parse_linear_in_z(num_str)?;
     let (c, d) = parse_linear_in_z(den_str)?;
     // Detectar caso degenerado: a == 0, c == 0
-    if a.norm() < SINGULARITY_THRESHOLD && c.norm() < SINGULARITY_THRESHOLD {
+    if (a * d - b * c).norm() < SINGULARITY_THRESHOLD {
         return None;
     }
     Some(ConformalMap::Mobius { a, b, c, d })
@@ -723,5 +727,18 @@ mod tests {
         assert_eq!(ConformalMap::from_expr_string("z^2 + 1"), None);
         assert_eq!(ConformalMap::from_expr_string(""), None);
         assert_eq!(ConformalMap::from_expr_string("garbage"), None);
+    }
+
+    #[test]
+    fn apply_rejects_non_finite_results() {
+        assert_eq!(
+            ConformalMap::Exponential.apply(Complex64::new(1000.0, 0.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn from_string_rejects_degenerate_mobius() {
+        assert_eq!(ConformalMap::from_expr_string("(z+1)/(z+1)"), None);
     }
 }

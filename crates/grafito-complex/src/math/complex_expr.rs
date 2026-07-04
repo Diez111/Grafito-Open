@@ -125,6 +125,8 @@ pub enum ComplexExpr {
     LambertW(Box<ComplexExpr>),
     Zeta(Box<ComplexExpr>),
     BesselY(Box<ComplexExpr>),
+    DerivZ(Box<ComplexExpr>),
+    DerivZConj(Box<ComplexExpr>),
 }
 
 impl ComplexExpr {
@@ -298,6 +300,86 @@ impl ComplexExpr {
                 let z = a.eval_depth(vars, depth + 1)?;
                 Ok(ComplexMatrix::from_complex(complex_bessel_y(0.0, z)).to_complex())
             }
+            ComplexExpr::DerivZ(a) => {
+                let vars_base_symbol = if vars.contains_key("z") {
+                    "z".to_string()
+                } else if vars.contains_key("w") {
+                    "w".to_string()
+                } else {
+                    vars.keys()
+                        .next()
+                        .cloned()
+                        .unwrap_or_else(|| "z".to_string())
+                };
+                let z = vars
+                    .get(&vars_base_symbol)
+                    .copied()
+                    .unwrap_or(Complex64::new(0.0, 0.0));
+                let h = 1e-6;
+
+                let mut vars_plus_x = vars.clone();
+                vars_plus_x.insert(vars_base_symbol.clone(), z + Complex64::new(h, 0.0));
+                let f_plus_x = a.eval_depth(&vars_plus_x, depth + 1)?;
+
+                let mut vars_minus_x = vars.clone();
+                vars_minus_x.insert(vars_base_symbol.clone(), z - Complex64::new(h, 0.0));
+                let f_minus_x = a.eval_depth(&vars_minus_x, depth + 1)?;
+
+                let mut vars_plus_y = vars.clone();
+                vars_plus_y.insert(vars_base_symbol.clone(), z + Complex64::new(0.0, h));
+                let f_plus_y = a.eval_depth(&vars_plus_y, depth + 1)?;
+
+                let mut vars_minus_y = vars.clone();
+                vars_minus_y.insert(vars_base_symbol.clone(), z - Complex64::new(0.0, h));
+                let f_minus_y = a.eval_depth(&vars_minus_y, depth + 1)?;
+
+                let df_dx = (f_plus_x - f_minus_x) / (2.0 * h);
+                let df_dy = (f_plus_y - f_minus_y) / (2.0 * h);
+
+                let i = Complex64::new(0.0, 1.0);
+                let df_dz = (df_dx - i * df_dy) * 0.5;
+                Ok(df_dz)
+            }
+            ComplexExpr::DerivZConj(a) => {
+                let vars_base_symbol = if vars.contains_key("z") {
+                    "z".to_string()
+                } else if vars.contains_key("w") {
+                    "w".to_string()
+                } else {
+                    vars.keys()
+                        .next()
+                        .cloned()
+                        .unwrap_or_else(|| "z".to_string())
+                };
+                let z = vars
+                    .get(&vars_base_symbol)
+                    .copied()
+                    .unwrap_or(Complex64::new(0.0, 0.0));
+                let h = 1e-6;
+
+                let mut vars_plus_x = vars.clone();
+                vars_plus_x.insert(vars_base_symbol.clone(), z + Complex64::new(h, 0.0));
+                let f_plus_x = a.eval_depth(&vars_plus_x, depth + 1)?;
+
+                let mut vars_minus_x = vars.clone();
+                vars_minus_x.insert(vars_base_symbol.clone(), z - Complex64::new(h, 0.0));
+                let f_minus_x = a.eval_depth(&vars_minus_x, depth + 1)?;
+
+                let mut vars_plus_y = vars.clone();
+                vars_plus_y.insert(vars_base_symbol.clone(), z + Complex64::new(0.0, h));
+                let f_plus_y = a.eval_depth(&vars_plus_y, depth + 1)?;
+
+                let mut vars_minus_y = vars.clone();
+                vars_minus_y.insert(vars_base_symbol.clone(), z - Complex64::new(0.0, h));
+                let f_minus_y = a.eval_depth(&vars_minus_y, depth + 1)?;
+
+                let df_dx = (f_plus_x - f_minus_x) / (2.0 * h);
+                let df_dy = (f_plus_y - f_minus_y) / (2.0 * h);
+
+                let i = Complex64::new(0.0, 1.0);
+                let df_dconj = (df_dx + i * df_dy) * 0.5;
+                Ok(df_dconj)
+            }
         }
     }
 
@@ -336,7 +418,9 @@ impl ComplexExpr {
             | ComplexExpr::Erf(a)
             | ComplexExpr::LambertW(a)
             | ComplexExpr::Zeta(a)
-            | ComplexExpr::BesselY(a) => a.has_var(target),
+            | ComplexExpr::BesselY(a)
+            | ComplexExpr::DerivZ(a)
+            | ComplexExpr::DerivZConj(a) => a.has_var(target),
         }
     }
 }
@@ -379,6 +463,25 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     chars.next();
                 } else {
                     break;
+                }
+            }
+            if matches!(chars.peek(), Some('e') | Some('E')) {
+                num_str.push(chars.next().unwrap());
+                if matches!(chars.peek(), Some('+') | Some('-')) {
+                    num_str.push(chars.next().unwrap());
+                }
+                let mut has_exp_digit = false;
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() {
+                        has_exp_digit = true;
+                        num_str.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if !has_exp_digit {
+                    return Err("Invalid number".into());
                 }
             }
             tokens.push(Token::Number(
@@ -461,6 +564,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                         | "lambert_w"
                         | "zeta"
                         | "bessel_y"
+                        | "deriv_z"
+                        | "deriv_z_conj"
                 )
             }
             _ => false,
@@ -516,23 +621,41 @@ fn parse_add_sub(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
 
 fn parse_mul_div(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
     check_depth(depth)?;
-    let mut node = parse_pow(tokens, pos, depth + 1)?;
+    let mut node = parse_unary(tokens, pos, depth + 1)?;
     while *pos < tokens.len() {
         match tokens[*pos] {
             Token::Star => {
                 *pos += 1;
-                node =
-                    ComplexExpr::Mul(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
+                node = ComplexExpr::Mul(
+                    Box::new(node),
+                    Box::new(parse_unary(tokens, pos, depth + 1)?),
+                );
             }
             Token::Slash => {
                 *pos += 1;
-                node =
-                    ComplexExpr::Div(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
+                node = ComplexExpr::Div(
+                    Box::new(node),
+                    Box::new(parse_unary(tokens, pos, depth + 1)?),
+                );
             }
             _ => break,
         }
     }
     Ok(node)
+}
+
+fn parse_unary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
+    check_depth(depth)?;
+    if *pos < tokens.len() && tokens[*pos] == Token::Minus {
+        *pos += 1;
+        Ok(ComplexExpr::Neg(Box::new(parse_unary(
+            tokens,
+            pos,
+            depth + 1,
+        )?)))
+    } else {
+        parse_pow(tokens, pos, depth + 1)
+    }
 }
 
 fn parse_pow(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexExpr, String> {
@@ -541,7 +664,10 @@ fn parse_pow(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<ComplexE
     if *pos < tokens.len() && tokens[*pos] == Token::Caret {
         *pos += 1;
         // Right-associative
-        node = ComplexExpr::Pow(Box::new(node), Box::new(parse_pow(tokens, pos, depth + 1)?));
+        node = ComplexExpr::Pow(
+            Box::new(node),
+            Box::new(parse_unary(tokens, pos, depth + 1)?),
+        );
     }
     Ok(node)
 }
@@ -615,6 +741,8 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
                     "lambert_w" => Ok(ComplexExpr::LambertW(Box::new(arg))),
                     "zeta" => Ok(ComplexExpr::Zeta(Box::new(arg))),
                     "bessel_y" => Ok(ComplexExpr::BesselY(Box::new(arg))),
+                    "deriv_z" => Ok(ComplexExpr::DerivZ(Box::new(arg))),
+                    "deriv_z_conj" => Ok(ComplexExpr::DerivZConj(Box::new(arg))),
                     _ => Err(format!("Unknown function: {}", name)),
                 }
             } else {
@@ -1017,4 +1145,54 @@ pub fn eval_complex_batch(
         }
     }
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unary_minus_has_lower_precedence_than_power() {
+        let expr = parse("-z^2").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("z".to_string(), Complex64::new(2.0, 0.0));
+        let value = expr.eval(&vars).unwrap();
+        assert!(
+            (value + Complex64::new(4.0, 0.0)).norm() < 1e-12,
+            "got {value}"
+        );
+    }
+
+    #[test]
+    fn parser_accepts_scientific_notation() {
+        let expr = parse("1e-3*z").unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("z".to_string(), Complex64::new(2.0, 0.0));
+        let value = expr.eval(&vars).unwrap();
+        assert!((value.re - 0.002).abs() < 1e-12, "got {value}");
+        assert!(value.im.abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_wirtinger_derivatives() {
+        let mut vars = HashMap::new();
+        vars.insert("z".to_string(), Complex64::new(2.0, 3.0));
+
+        // d/dz z^2 = 2z -> 4 + 6i
+        let expr = parse("deriv_z(z^2)").unwrap();
+        let val = expr.eval(&vars).unwrap();
+        assert!((val.re - 4.0).abs() < 1e-4);
+        assert!((val.im - 6.0).abs() < 1e-4);
+
+        // d/dconj z^2 = 0
+        let expr2 = parse("deriv_z_conj(z^2)").unwrap();
+        let val2 = expr2.eval(&vars).unwrap();
+        assert!(val2.norm() < 1e-4);
+
+        // d/dconj conj(z) = 1
+        let expr3 = parse("deriv_z_conj(conj(z))").unwrap();
+        let val3 = expr3.eval(&vars).unwrap();
+        assert!((val3.re - 1.0).abs() < 1e-4);
+        assert!(val3.im.abs() < 1e-4);
+    }
 }

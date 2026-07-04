@@ -16,30 +16,57 @@ use std::f64::consts::PI;
 ///
 /// Equation: `|A - B| - target = 0`.
 pub struct DistanceEq {
-    a_idx: VarIndex,
-    b_idx: VarIndex,
+    ax: VarOrConst,
+    ay: VarOrConst,
+    bx: VarOrConst,
+    by: VarOrConst,
     target: f64,
 }
 
 impl DistanceEq {
     pub fn new(a_idx: VarIndex, b_idx: VarIndex, target: f64) -> Self {
+        Self::from_parts(
+            VarOrConst::new(Some(a_idx), 0.0),
+            VarOrConst::new(Some(a_idx + 1), 0.0),
+            VarOrConst::new(Some(b_idx), 0.0),
+            VarOrConst::new(Some(b_idx + 1), 0.0),
+            target,
+        )
+    }
+
+    fn from_parts(
+        ax: VarOrConst,
+        ay: VarOrConst,
+        bx: VarOrConst,
+        by: VarOrConst,
+        target: f64,
+    ) -> Self {
         Self {
-            a_idx,
-            b_idx,
+            ax,
+            ay,
+            bx,
+            by,
             target,
         }
     }
 
     pub fn from_inputs(
-        _doc: &crate::Document,
+        doc: &crate::Document,
         a: ObjectId,
         b: ObjectId,
         target: f64,
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
-        let a_idx = *var_index.get(&(a, ObjField::PointX))?;
-        let _ = *var_index.get(&(b, ObjField::PointX))?;
-        Some(Self::new(a_idx, var_index[&(b, ObjField::PointX)], target))
+        match (doc.get_object(a)?, doc.get_object(b)?) {
+            (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self::from_parts(
+                field_or_const(doc, a, ObjField::PointX, var_index),
+                field_or_const(doc, a, ObjField::PointY, var_index),
+                field_or_const(doc, b, ObjField::PointX, var_index),
+                field_or_const(doc, b, ObjField::PointY, var_index),
+                target,
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -49,10 +76,10 @@ impl ConstraintEquation for DistanceEq {
     }
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
-        let ax = vars[self.a_idx];
-        let ay = vars[self.a_idx + 1];
-        let bx = vars[self.b_idx];
-        let by = vars[self.b_idx + 1];
+        let ax = self.ax.get(vars);
+        let ay = self.ay.get(vars);
+        let bx = self.bx.get(vars);
+        let by = self.by.get(vars);
         let dx = ax - bx;
         let dy = ay - by;
         let d = (dx * dx + dy * dy).sqrt();
@@ -60,28 +87,28 @@ impl ConstraintEquation for DistanceEq {
     }
 
     fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
-        if vars.is_empty() {
-            return vec![
-                (0, self.a_idx, 1.0),
-                (0, self.a_idx + 1, 1.0),
-                (0, self.b_idx, 1.0),
-                (0, self.b_idx + 1, 1.0),
-            ];
-        }
-        let ax = vars[self.a_idx];
-        let ay = vars[self.a_idx + 1];
-        let bx = vars[self.b_idx];
-        let by = vars[self.b_idx + 1];
+        let ax = self.ax.get(vars);
+        let ay = self.ay.get(vars);
+        let bx = self.bx.get(vars);
+        let by = self.by.get(vars);
         let dx = ax - bx;
         let dy = ay - by;
         let d = (dx * dx + dy * dy).sqrt().max(1e-12);
         let inv = 1.0 / d;
-        vec![
-            (0, self.a_idx, dx * inv),
-            (0, self.a_idx + 1, dy * inv),
-            (0, self.b_idx, -dx * inv),
-            (0, self.b_idx + 1, -dy * inv),
-        ]
+        let mut triples = Vec::with_capacity(4);
+        if let Some(idx) = self.ax.idx {
+            triples.push((0, idx, dx * inv));
+        }
+        if let Some(idx) = self.ay.idx {
+            triples.push((0, idx, dy * inv));
+        }
+        if let Some(idx) = self.bx.idx {
+            triples.push((0, idx, -dx * inv));
+        }
+        if let Some(idx) = self.by.idx {
+            triples.push((0, idx, -dy * inv));
+        }
+        triples
     }
 }
 
@@ -254,10 +281,10 @@ impl ConstraintEquation for AngleEq {
 ///
 /// Equation: `distance(circle_center, line) - radius = 0`.
 pub struct TangentEq {
-    radius_idx: VarIndex,
+    radius: VarOrConst,
     center: Point2,
-    line_start: VarIndex,
-    line_end: VarIndex,
+    line_start: [VarOrConst; 2],
+    line_end: [VarOrConst; 2],
 }
 
 impl TangentEq {
@@ -267,8 +294,28 @@ impl TangentEq {
         line_start: VarIndex,
         line_end: VarIndex,
     ) -> Self {
+        Self::from_parts(
+            VarOrConst::new(Some(radius_idx), 0.0),
+            center,
+            [
+                VarOrConst::new(Some(line_start), 0.0),
+                VarOrConst::new(Some(line_start + 1), 0.0),
+            ],
+            [
+                VarOrConst::new(Some(line_end), 0.0),
+                VarOrConst::new(Some(line_end + 1), 0.0),
+            ],
+        )
+    }
+
+    fn from_parts(
+        radius: VarOrConst,
+        center: Point2,
+        line_start: [VarOrConst; 2],
+        line_end: [VarOrConst; 2],
+    ) -> Self {
         Self {
-            radius_idx,
+            radius,
             center,
             line_start,
             line_end,
@@ -286,10 +333,18 @@ impl TangentEq {
             (GeoObject::Line(l), GeoObject::Circle(c)) => (c, l),
             _ => return None,
         };
-        let radius_idx = *var_index.get(&(circle.id, ObjField::CircleRadius))?;
-        let line_start = *var_index.get(&(line.id, ObjField::LineStartX))?;
-        let line_end = *var_index.get(&(line.id, ObjField::LineEndX))?;
-        Some(Self::new(radius_idx, circle.center, line_start, line_end))
+        Some(Self::from_parts(
+            field_or_const(doc, circle.id, ObjField::CircleRadius, var_index),
+            circle.center,
+            [
+                field_or_const(doc, line.id, ObjField::LineStartX, var_index),
+                field_or_const(doc, line.id, ObjField::LineStartY, var_index),
+            ],
+            [
+                field_or_const(doc, line.id, ObjField::LineEndX, var_index),
+                field_or_const(doc, line.id, ObjField::LineEndY, var_index),
+            ],
+        ))
     }
 }
 
@@ -299,26 +354,16 @@ impl ConstraintEquation for TangentEq {
     }
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
-        let r = vars[self.radius_idx];
-        let start = Point2::new(vars[self.line_start], vars[self.line_start + 1]);
-        let end = Point2::new(vars[self.line_end], vars[self.line_end + 1]);
+        let r = self.radius.get(vars);
+        let start = Point2::new(self.line_start[0].get(vars), self.line_start[1].get(vars));
+        let end = Point2::new(self.line_end[0].get(vars), self.line_end[1].get(vars));
         let dist = point_to_line_distance(self.center, start, end);
         vec![dist - r]
     }
 
     fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
-        if vars.is_empty() {
-            return vec![
-                (0, self.radius_idx, 1.0),
-                (0, self.line_start, 1.0),
-                (0, self.line_start + 1, 1.0),
-                (0, self.line_end, 1.0),
-                (0, self.line_end + 1, 1.0),
-            ];
-        }
-        let _r = vars[self.radius_idx];
-        let start = Point2::new(vars[self.line_start], vars[self.line_start + 1]);
-        let end = Point2::new(vars[self.line_end], vars[self.line_end + 1]);
+        let start = Point2::new(self.line_start[0].get(vars), self.line_start[1].get(vars));
+        let end = Point2::new(self.line_end[0].get(vars), self.line_end[1].get(vars));
 
         let dx = end.x - start.x;
         let dy = end.y - start.y;
@@ -340,16 +385,20 @@ impl ConstraintEquation for TangentEq {
         let dey = ((self.center.x - start.x) * len2 - n * dy) * inv_len3;
 
         let mut triples = Vec::with_capacity(5);
-        if self.radius_idx < vars.len() {
-            triples.push((0, self.radius_idx, -1.0));
+        if let Some(idx) = self.radius.idx {
+            triples.push((0, idx, -1.0));
         }
-        if self.line_start + 1 < vars.len() {
-            triples.push((0, self.line_start, sign * dsx));
-            triples.push((0, self.line_start + 1, sign * dsy));
+        if let Some(idx) = self.line_start[0].idx {
+            triples.push((0, idx, sign * dsx));
         }
-        if self.line_end + 1 < vars.len() {
-            triples.push((0, self.line_end, sign * dex));
-            triples.push((0, self.line_end + 1, sign * dey));
+        if let Some(idx) = self.line_start[1].idx {
+            triples.push((0, idx, sign * dsy));
+        }
+        if let Some(idx) = self.line_end[0].idx {
+            triples.push((0, idx, sign * dex));
+        }
+        if let Some(idx) = self.line_end[1].idx {
+            triples.push((0, idx, sign * dey));
         }
         triples
     }
@@ -368,7 +417,9 @@ impl VarOrConst {
     }
 
     fn get(&self, vars: &[f64]) -> f64 {
-        self.idx.map_or(self.value, |i| vars[i])
+        self.idx
+            .and_then(|i| vars.get(i).copied())
+            .unwrap_or(self.value)
     }
 }
 

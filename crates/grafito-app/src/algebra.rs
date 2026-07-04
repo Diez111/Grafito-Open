@@ -16,6 +16,10 @@ fn color32_from_object_color(color: grafito_geometry::Color, alpha: u8) -> Color
     )
 }
 
+fn is_internal_trig_name(name: &str) -> bool {
+    name == "TrigGraph" || name == "TrigValue" || name == "trig_angle" || name.starts_with("trig_")
+}
+
 pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
     match obj {
         GeoObject::Function(f) => f.expr.clone(),
@@ -317,6 +321,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             for oid in ids {
                 let (obj_label, obj_name, obj_vis, obj_col, obj_expr) = {
                     let Some(obj) = app.document.get_object(oid) else { continue; };
+                    if is_internal_trig_name(obj.label()) {
+                        continue;
+                    }
 
                     // Filtra por el espacio de render centralizado en GeoObject.
                     let is_3d_object = obj.is_3d();
@@ -600,7 +607,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             if !app.document.variables.is_empty() {
                 ui.add_space(10.0);
 
-                let vars: Vec<(String, f64)> = app.document.variables.clone().into_iter().collect();
+                let vars: Vec<(String, f64)> = app
+                    .document
+                    .variables
+                    .clone()
+                    .into_iter()
+                    .filter(|(name, _)| !is_internal_trig_name(name))
+                    .collect();
                 let mut var_to_delete = None;
                 for (name, val) in &vars {
                     let mut v = *val;

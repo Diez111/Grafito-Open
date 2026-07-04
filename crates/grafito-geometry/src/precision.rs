@@ -2,6 +2,19 @@
 //! Provides HiFloat wrapper for guaranteed-precision computations (~106 bits).
 
 use crate::dd::DD;
+use std::cell::Cell;
+
+thread_local! {
+    static HIGH_PRECISION_MODE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn set_high_precision_mode(enabled: bool) {
+    HIGH_PRECISION_MODE.with(|m| m.set(enabled));
+}
+
+pub fn is_high_precision_mode() -> bool {
+    HIGH_PRECISION_MODE.with(|m| m.get())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Precision {

@@ -110,12 +110,34 @@ pub fn beta(a: f64, b: f64) -> f64 {
     (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)).exp()
 }
 
-/// Compute the Bessel function of the first kind J_n(x) using series expansion.
+fn bessel_asymptotic_j(n: f64, x: f64) -> f64 {
+    let chi = x - n * std::f64::consts::PI / 2.0 - std::f64::consts::PI / 4.0;
+    let mu = 4.0 * n * n;
+    let p = 1.0 - (mu - 1.0) * (mu - 9.0) / (2.0 * (8.0 * x).powi(2))
+        + (mu - 1.0) * (mu - 9.0) * (mu - 25.0) * (mu - 49.0) / (24.0 * (8.0 * x).powi(4));
+    let q =
+        (mu - 1.0) / (8.0 * x) - (mu - 1.0) * (mu - 9.0) * (mu - 25.0) / (6.0 * (8.0 * x).powi(3));
+    let amp = (2.0 / (std::f64::consts::PI * x)).sqrt();
+    amp * (p * chi.cos() - q * chi.sin())
+}
+
+fn bessel_asymptotic_y(n: f64, x: f64) -> f64 {
+    let chi = x - n * std::f64::consts::PI / 2.0 - std::f64::consts::PI / 4.0;
+    let mu = 4.0 * n * n;
+    let p = 1.0 - (mu - 1.0) * (mu - 9.0) / (2.0 * (8.0 * x).powi(2))
+        + (mu - 1.0) * (mu - 9.0) * (mu - 25.0) * (mu - 49.0) / (24.0 * (8.0 * x).powi(4));
+    let q =
+        (mu - 1.0) / (8.0 * x) - (mu - 1.0) * (mu - 9.0) * (mu - 25.0) / (6.0 * (8.0 * x).powi(3));
+    let amp = (2.0 / (std::f64::consts::PI * x)).sqrt();
+    amp * (p * chi.sin() + q * chi.cos())
+}
+
+/// Compute the Bessel function of the first kind J_n(x) using series expansion or asymptotic form.
 ///
 /// J_n(x) = Σ_{m=0}^∞ (-1)^m / (m! Γ(m+n+1)) * (x/2)^(2m+n)
 ///
-/// **Warning**: This series expansion is only accurate for small values of x (x < ~15.0).
-/// For larger x, it will suffer from catastrophic cancellation and return incorrect results or NaN.
+/// For larger x, it will suffer from catastrophic cancellation and return incorrect results or NaN,
+/// so it falls back to an asymptotic expansion.
 ///
 /// # Arguments
 /// * `n` - Order (integer)
@@ -128,6 +150,14 @@ pub fn bessel_j(n: i32, x: f64) -> f64 {
         // For integer orders: J_{-n}(x) = (-1)^n J_n(x)
         let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
         return sign * bessel_j(-n, x);
+    }
+    if x < 0.0 {
+        // J_n(-x) = (-1)^n J_n(x)
+        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+        return sign * bessel_j(n, -x);
+    }
+    if x > 15.0 {
+        return bessel_asymptotic_j(n as f64, x);
     }
     let n = n as f64;
     let mut sum = 0.0;
@@ -149,9 +179,6 @@ pub fn bessel_j(n: i32, x: f64) -> f64 {
 /// Y_n(x) = (J_n(x) cos(nπ) - J_{-n}(x)) / sin(nπ)
 ///
 /// For integer n, use the limit form.
-///
-/// **Warning**: This implementation relies on the series expansion of J_n(x) and Y_0(x),
-/// which is only accurate for small x (x < ~10.0). For larger x, it diverges.
 ///
 /// # Arguments
 /// * `n` - Order (integer)
@@ -200,6 +227,10 @@ pub fn bessel_y(n: i32, x: f64) -> f64 {
     if n < 0 {
         let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
         return sign * bessel_y(-n, x);
+    }
+
+    if x > 15.0 {
+        return bessel_asymptotic_y(n as f64, x);
     }
 
     let y0 = bessel_y0(x);
@@ -365,6 +396,12 @@ mod tests {
 
         // J_0(2.4048) ≈ 0 (first zero)
         assert!(bessel_j(0, 2.4048).abs() < 0.01);
+
+        // Large argument test (asymptotic)
+        // J_0(15.0) ≈ -0.01422447
+        assert!((bessel_j(0, 15.0) - (-0.01422447)).abs() < 1e-5);
+        // J_0(20.0) ≈ 0.16702466
+        assert!((bessel_j(0, 20.0) - 0.16702466).abs() < 1e-5);
     }
 
     #[test]
@@ -374,6 +411,18 @@ mod tests {
 
         // J_1(3.8317) ≈ 0 (first zero)
         assert!(bessel_j(1, 3.8317).abs() < 0.01);
+
+        // Large argument test (asymptotic)
+        // J_1(15.0) ≈ 0.205103
+        assert!((bessel_j(1, 15.0) - 0.205103).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_bessel_y() {
+        // Y_0(15.0) ≈ 0.205464
+        assert!((bessel_y(0, 15.0) - 0.205464).abs() < 1e-5);
+        // Y_0(20.0) ≈ 0.0626406
+        assert!((bessel_y(0, 20.0) - 0.0626406).abs() < 1e-5);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use egui::epaint::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
-use grafito_core::Document;
+use grafito_core::{Document, RenderQuality};
 use grafito_geometry::Camera3D;
 use grafito_render::Renderer;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ use std::sync::RwLock;
 pub struct Cache2DKey {
     pub version: u64,
     pub view: grafito_geometry::ViewTransform,
+    pub render_quality: RenderQuality,
     pub dark_mode: bool,
 }
 
@@ -23,6 +24,7 @@ pub struct Cache2DKey {
 pub struct Cache3DKey {
     pub version: u64,
     pub camera: Camera3D,
+    pub render_quality: RenderQuality,
     pub dark_mode: bool,
     pub screen_w: f32,
     pub screen_h: f32,
@@ -69,6 +71,7 @@ impl CallbackTrait for CanvasCallback {
         let current_key = Cache2DKey {
             version: self.document.version,
             view: *self.document.view(),
+            render_quality: self.document.render_quality,
             dark_mode: self.dark_mode,
         };
 
@@ -78,7 +81,7 @@ impl CallbackTrait for CanvasCallback {
         }
 
         let (vertices, indices) = {
-            let Ok(renderer_lock) = resources.renderer.read() else {
+            let Ok(renderer_lock) = resources.renderer.write() else {
                 log::warn!("Renderer lock poisoned in prepare (2D)");
                 return vec![];
             };
@@ -374,6 +377,7 @@ impl CallbackTrait for Canvas3DCallback {
         let current_key = Cache3DKey {
             version: self.document.version,
             camera: self.camera,
+            render_quality: self.document.render_quality,
             dark_mode: self.dark_mode,
             screen_w: self.screen_w,
             screen_h: self.screen_h,
@@ -385,7 +389,7 @@ impl CallbackTrait for Canvas3DCallback {
         }
 
         let (vertices, indices) = {
-            let Ok(renderer_lock) = resources.renderer.read() else {
+            let Ok(renderer_lock) = resources.renderer.write() else {
                 log::warn!("Renderer lock poisoned in prepare (3D)");
                 return vec![];
             };

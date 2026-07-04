@@ -194,6 +194,24 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     });
                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
                 ui.checkbox(&mut app.exam_mode, "Modo examen");
+
+                let mut high_prec = grafito_geometry::precision::is_high_precision_mode();
+                if ui
+                    .checkbox(&mut high_prec, "Alta Precisión (Double-Double)")
+                    .on_hover_text(
+                        "Usa aritmética Double-Double (~106 bits / 32 dígitos) para evaluar \
+                         expresiones simbólicas sin pérdida de precisión.",
+                    )
+                    .changed()
+                {
+                    grafito_geometry::precision::set_high_precision_mode(high_prec);
+                    app.document.invalidate_all_caches();
+                    app.document.bump_version();
+                    if let Ok(mut cache) = app.trig_graph_cache.write() {
+                        *cache = None;
+                    }
+                    app.re_evaluate_constraints(&[]);
+                }
                 // El toggle 2D/3D vive en el selector de perspectivas del sidebar
                 // (Geometría 2D / Geometría 3D). No duplicar aquí, era fuente de
                 // estado Frankenstein (canvas 3D + toolbar 2D).
@@ -350,17 +368,17 @@ pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
         });
 }
 
-/// Panel derecho: Animación trigonométrica (círculo unitario + gráfico sin/cos).
+/// Panel derecho: controles de la animación trigonométrica.
 ///
-/// Muestra un círculo unitario a la derecha con un vector radio en ángulo `t`
-/// y debajo el gráfico 2D de sin(t) o cos(t) con una línea vertical marcando
-/// el ángulo actual. La animación se controla con play/pause y slider de velocidad.
+/// El círculo y la función se dibujan como overlay del canvas 2D para compartir
+/// exactamente la grilla, escala y perspectiva de Geometry2D.
 pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_trig_animation")
-        .default_width(300.0)
-        .min_width(240.0)
+        .default_width(280.0)
+        .min_width(220.0)
+        .max_width((ctx.available_rect().width() * 0.45).max(240.0))
         .resizable(true)
         .frame(
             egui::Frame::none()
@@ -368,241 +386,191 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                 .stroke(egui::Stroke::new(1.0, sep_col)),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Animación Trigonométrica")
-                    .color(accent)
-                    .size(14.0)
-                    .strong(),
-            );
-            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(if app.perspective == crate::Perspective::Complex {
+                                "Animación Compleja"
+                            } else {
+                                "Explorador Trigonométrico"
+                            })
+                                .color(accent)
+                                .size(14.0)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Cerrar animación")
+                                .clicked()
+                            {
+                                app.set_trig_animation_visible(false);
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
 
-            // Selector de función
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Función:").color(hdr_col).size(12.0));
-                if ui
-                    .selectable_label(app.trig_function == 0, "sin(t)")
-                    .clicked()
-                {
-                    app.trig_function = 0;
-                }
-                if ui
-                    .selectable_label(app.trig_function == 1, "cos(t)")
-                    .clicked()
-                {
-                    app.trig_function = 1;
-                }
-                if ui
-                    .selectable_label(app.trig_function == 2, "tan(t)")
-                    .clicked()
-                {
-                    app.trig_function = 2;
-                }
-            });
+                    if app.perspective == crate::Perspective::Complex {
+                        ui.label(
+                            egui::RichText::new("z(t) = cos(t) + i sin(t) = e^(it)")
+                                .color(hdr_col)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "El punto rojo recorre el círculo unitario; el punto violeta muestra su imagen por la transformación compleja activa.",
+                            )
+                            .color(txt_dim)
+                            .size(10.5),
+                        );
+                        ui.add_space(8.0);
+                    }
 
-            ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Función activa")
+                            .color(hdr_col)
+                            .size(12.0),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for (idx, spec) in crate::app::TRIG_FUNCTIONS.iter().enumerate() {
+                            let label = format!("{}(t)", spec.name);
+                            if ui
+                                .selectable_label(app.trig_function as usize == idx, label)
+                                .clicked()
+                            {
+                                app.set_trig_function(idx as u8);
+                            }
+                        }
+                    });
 
-            // Controles de animación
-            ui.horizontal(|ui| {
-                if ui
-                    .button(if app.trig_animating {
-                        "⏸ Pausar"
+                    ui.add_space(6.0);
+
+                    let spec = GrafitoApp::trig_spec(app.trig_function);
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button(if app.trig_animating {
+                                "Pausar"
+                            } else {
+                                "Iniciar"
+                            })
+                            .clicked()
+                        {
+                            app.trig_animating = !app.trig_animating;
+                        }
+                        ui.label(egui::RichText::new("Velocidad").color(txt_dim).size(11.0));
+                        let speed_changed = ui
+                            .add(
+                                egui::Slider::new(&mut app.trig_speed, -6.0..=6.0)
+                                    .fixed_decimals(1)
+                                    .suffix(" rad/s"),
+                            )
+                            .changed();
+                        if speed_changed {
+                            ctx.request_repaint();
+                        }
+                    });
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("Vista").color(txt_dim).size(11.0));
+                        if ui
+                            .selectable_label(
+                                app.trig_view_mode == crate::app::TrigViewMode::Didactic,
+                                "Didáctica",
+                            )
+                            .on_hover_text("Círculo unitario siempre visible en una tarjeta flotante")
+                            .clicked()
+                        {
+                            app.trig_view_mode = crate::app::TrigViewMode::Didactic;
+                            ctx.request_repaint();
+                        }
+                        if ui
+                            .selectable_label(
+                                app.trig_view_mode == crate::app::TrigViewMode::Grid,
+                                "Sobre grilla",
+                            )
+                            .on_hover_text("Dibuja el círculo unitario en coordenadas reales")
+                            .clicked()
+                        {
+                            app.trig_view_mode = crate::app::TrigViewMode::Grid;
+                            ctx.request_repaint();
+                        }
+                    });
+
+                    let angle_changed = ui
+                        .horizontal(|ui| {
+                            ui.label(egui::RichText::new("Ángulo").color(txt_dim).size(11.0));
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut app.trig_angle,
+                                    -2.0 * std::f64::consts::PI..=2.0 * std::f64::consts::PI,
+                                )
+                                .fixed_decimals(2)
+                                .suffix(" rad"),
+                            )
+                            .changed()
+                        })
+                        .inner;
+                    if angle_changed {
+                        ctx.request_repaint();
+                    }
+
+                    let t = app.trig_angle;
+                    let fn_val = GrafitoApp::trig_value(app.trig_function, t);
+                    let cos_t = t.cos();
+                    let sin_t = t.sin();
+                    let value_text = if fn_val.is_finite() {
+                        format!("{}({:.2}) = {:.4}", spec.name, t, fn_val)
                     } else {
-                        "▶ Iniciar"
-                    })
-                    .clicked()
-                {
-                    app.trig_animating = !app.trig_animating;
-                }
-                ui.label(egui::RichText::new("Velocidad:").color(txt_dim).size(11.0));
-                ui.add(
-                    egui::Slider::new(&mut app.trig_speed, -3.0..=3.0)
-                        .fixed_decimals(1)
-                        .suffix(" rad/s"),
-                );
-            });
+                        format!("{}({:.2}) no está definido", spec.name, t)
+                    };
+                    ui.add_space(6.0);
+                    egui::Frame::none()
+                        .fill(current_theme(ctx).input_bg)
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(value_text).color(accent).size(12.0).strong());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Punto: (cos θ, sin θ) = ({:.3}, {:.3})",
+                                    cos_t, sin_t
+                                ))
+                                .color(hdr_col)
+                                .size(11.0),
+                            );
+                            ui.label(
+                                egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
+                                    .color(txt_dim)
+                                    .size(10.5),
+                            );
+                        });
 
-            ui.add_space(4.0);
+                    if app.perspective == crate::Perspective::Complex {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "z = {:.3} {:+.3}i  |z| = 1  arg(z) = {:.2}",
+                                cos_t, sin_t, t
+                            ))
+                            .color(hdr_col)
+                            .size(10.5),
+                        );
+                    }
 
-            // Slider manual del ángulo
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Ángulo:").color(txt_dim).size(11.0));
-                ui.add(
-                    egui::Slider::new(
-                        &mut app.trig_angle,
-                        -2.0 * std::f64::consts::PI..=2.0 * std::f64::consts::PI,
-                    )
-                    .fixed_decimals(2)
-                    .suffix(" rad"),
-                );
-            });
-
-            // Valor actual
-            let t = app.trig_angle;
-            let (fn_name, fn_val) = match app.trig_function {
-                0 => ("sin", t.sin()),
-                1 => ("cos", t.cos()),
-                _ => ("tan", t.tan()),
-            };
-            ui.label(
-                egui::RichText::new(format!("{}({:.2}) = {:.4}", fn_name, t, fn_val))
-                    .color(accent)
-                    .size(12.0),
-            );
-
-            ui.add_space(8.0);
-
-            // Dibujar círculo unitario
-            let circle_size = 160.0;
-            let (circle_resp, painter) = ui.allocate_painter(
-                egui::Vec2::new(circle_size, circle_size),
-                egui::Sense::hover(),
-            );
-            let center = circle_resp.rect.center();
-            let radius = circle_size * 0.4;
-
-            // Ejes
-            painter.line_segment(
-                [
-                    egui::pos2(center.x - radius - 10.0, center.y),
-                    egui::pos2(center.x + radius + 10.0, center.y),
-                ],
-                egui::Stroke::new(1.0, sep_col),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(center.x, center.y - radius - 10.0),
-                    egui::pos2(center.x, center.y + radius + 10.0),
-                ],
-                egui::Stroke::new(1.0, sep_col),
-            );
-
-            // Círculo
-            painter.circle_stroke(center, radius, egui::Stroke::new(1.5, accent));
-
-            // Punto en el círculo
-            let t_f32 = t as f32;
-            let px = center.x + radius * t_f32.cos();
-            let py = center.y - radius * t_f32.sin(); // invertir Y (pantalla vs matemática)
-            let point_color = egui::Color32::from_rgb(255, 100, 100);
-
-            // Vector radio
-            painter.line_segment(
-                [center, egui::pos2(px, py)],
-                egui::Stroke::new(2.0, point_color),
-            );
-
-            // Línea de proyección a eje X (coseno)
-            painter.line_segment(
-                [egui::pos2(px, py), egui::pos2(px, center.y)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 200, 100)),
-            );
-
-            // Línea de proyección a eje Y (seno)
-            painter.line_segment(
-                [egui::pos2(px, py), egui::pos2(center.x, py)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 255)),
-            );
-
-            // Punto
-            painter.circle_filled(egui::pos2(px, py), 4.0, point_color);
-
-            // Etiquetas
-            painter.text(
-                egui::pos2(center.x + radius + 12.0, center.y),
-                egui::Align2::LEFT_CENTER,
-                "cos",
-                egui::FontId::proportional(10.0),
-                txt_dim,
-            );
-            painter.text(
-                egui::pos2(center.x, center.y - radius - 12.0),
-                egui::Align2::CENTER_BOTTOM,
-                "sin",
-                egui::FontId::proportional(10.0),
-                txt_dim,
-            );
-
-            ui.add_space(8.0);
-
-            // Dibujar gráfico 2D de la función
-            let graph_h = 120.0;
-            let graph_w = circle_size;
-            let (graph_resp, graph_painter) =
-                ui.allocate_painter(egui::Vec2::new(graph_w, graph_h), egui::Sense::hover());
-            let graph_rect = graph_resp.rect;
-            let gx_min = graph_rect.left();
-            let gx_max = graph_rect.right();
-            let gy_min = graph_rect.top();
-            let gy_max = graph_rect.bottom();
-            let gcy = graph_rect.center().y;
-
-            // Eje X
-            graph_painter.line_segment(
-                [egui::pos2(gx_min, gcy), egui::pos2(gx_max, gcy)],
-                egui::Stroke::new(1.0, sep_col),
-            );
-
-            // Mapear t ∈ [-2π, 2π] a x ∈ [gx_min, gx_max]
-            let two_pi = 2.0 * std::f64::consts::PI;
-            let graph_w_f64 = (gx_max - gx_min) as f64;
-            let graph_h_f64 = graph_h as f64;
-            let t_to_x =
-                |tt: f64| -> f32 { gx_min + ((tt + two_pi) / (2.0 * two_pi) * graph_w_f64) as f32 };
-            // Mapear y ∈ [-1, 1] a [gy_max, gy_min] (invertido)
-            let y_to_screen = |yy: f64| -> f32 { gcy - (yy * graph_h_f64 * 0.4) as f32 };
-
-            // Dibujar curva
-            let mut prev: Option<egui::Pos2> = None;
-            for i in 0..=200 {
-                let tt = -two_pi + i as f64 / 200.0 * 2.0 * two_pi;
-                let yy = match app.trig_function {
-                    0 => tt.sin(),
-                    1 => tt.cos(),
-                    _ => {
-                        let v = tt.tan();
-                        if v.abs() > 3.0 {
-                            f64::NAN
-                        } else {
-                            v
+                    ui.add_space(8.0);
+                    if ui.button("Centrar vista en la gráfica").clicked() {
+                        app.document.set_view(grafito_geometry::ViewTransform::default());
+                        app.document.bump_version();
+                        if let Ok(mut cache) = app.trig_graph_cache.write() {
+                            *cache = None;
                         }
                     }
-                };
-                if yy.is_finite() {
-                    let p = egui::pos2(t_to_x(tt), y_to_screen(yy));
-                    if let Some(pp) = prev {
-                        graph_painter.line_segment([pp, p], egui::Stroke::new(1.5, accent));
-                    }
-                    prev = Some(p);
-                } else {
-                    prev = None;
-                }
-            }
-
-            // Línea vertical en t actual
-            let tx = t_to_x(t);
-            graph_painter.line_segment(
-                [egui::pos2(tx, gy_min), egui::pos2(tx, gy_max)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 100, 100)),
-            );
-
-            // Punto en la curva
-            if fn_val.is_finite() && fn_val.abs() <= 3.0 {
-                graph_painter.circle_filled(
-                    egui::pos2(tx, y_to_screen(fn_val)),
-                    3.0,
-                    egui::Color32::from_rgb(255, 100, 100),
-                );
-            }
-
-            // Etiqueta del eje
-            graph_painter.text(
-                egui::pos2(gx_max - 5.0, gcy + 5.0),
-                egui::Align2::RIGHT_TOP,
-                "t",
-                egui::FontId::proportional(10.0),
-                txt_dim,
-            );
+                });
         });
 }
 
@@ -1567,9 +1535,11 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
             ui.add_space(6.0);
 
             let mut has_grid = false;
-            for (_, obj) in app.document.objects_iter() {
+            let mut grid_id = None;
+            for (id, obj) in app.document.objects_iter() {
                 if matches!(obj, GeoObject::ComplexGrid(_)) {
                     has_grid = true;
+                    grid_id = Some(*id);
                     break;
                 }
             }
@@ -1588,7 +1558,39 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                 ui.label(egui::RichText::new("Tono = arg(f(z)).").color(txt_dim).size(11.0));
             }
 
-            ui.add_space(8.0);
+            // Selector de modo de coloreado de dominio
+            let mut grid_bump = false;
+            if let Some(id) = grid_id {
+                if let Some(GeoObject::ComplexGrid(cg)) = app.document.get_object_mut(id) {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("Modo de coloración").color(hdr_col).size(12.0).strong());
+                    let mut mode = cg.domain_coloring_mode;
+                    egui::ComboBox::from_id_salt("dc_mode_combo")
+                        .selected_text(match mode {
+                            0 => "HSL Clásico (Fase + Módulo)",
+                            1 => "Retrato de Fase Puro",
+                            2 => "Rejilla Polar Conforme",
+                            3 => "Rejilla Cartesiana Conforme",
+                            _ => "HSL Clásico",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut mode, 0, "HSL Clásico (Fase + Módulo)");
+                            ui.selectable_value(&mut mode, 1, "Retrato de Fase Puro");
+                            ui.selectable_value(&mut mode, 2, "Rejilla Polar Conforme");
+                            ui.selectable_value(&mut mode, 3, "Rejilla Cartesiana Conforme");
+                        });
+
+                    if mode != cg.domain_coloring_mode {
+                        cg.domain_coloring_mode = mode;
+                        grid_bump = true;
+                    }
+                }
+            }
+            if grid_bump {
+                app.document.bump_version();
+            }
+
+            ui.add_space(10.0);
             ui.label(egui::RichText::new("Símbolo base").color(hdr_col).size(12.0).strong());
             let mut sym = app.document.complex_base_symbol.clone();
             let r = ui.add(
@@ -1602,6 +1604,46 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                     app.document.migrate_complex_symbol(&new_sym);
                     app.document.bump_version();
                 }
+            }
+
+            // Animación de homotopía si hay algún mapeo complejo
+            let mut mapping_id = None;
+            for (id, obj) in app.document.objects_iter() {
+                if matches!(obj, GeoObject::ComplexMapping(_)) {
+                    mapping_id = Some(*id);
+                    break;
+                }
+            }
+
+            let mut mapping_bump = false;
+            if let Some(id) = mapping_id {
+                if let Some(GeoObject::ComplexMapping(cm)) = app.document.get_object_mut(id) {
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Animación de Mapeo Conforme")
+                            .color(accent)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+
+                    let mut anim = cm.animate_homotopy;
+                    if ui.checkbox(&mut anim, "Animar deformación (homotopía)").changed() {
+                        cm.animate_homotopy = anim;
+                        mapping_bump = true;
+                    }
+
+                    let mut speed = cm.homotopy_speed;
+                    ui.add(egui::Slider::new(&mut speed, 0.2..=3.0).text("Velocidad"));
+                    if speed != cm.homotopy_speed {
+                        cm.homotopy_speed = speed;
+                        mapping_bump = true;
+                    }
+                }
+            }
+            if mapping_bump {
+                app.document.bump_version();
             }
         });
 }

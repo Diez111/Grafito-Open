@@ -43,6 +43,7 @@ pub fn transform_complex_mapping_segments(
     map: ConformalMap,
     segments: &[(Point2, Point2)],
     subdivisions: usize,
+    t_val: f64,
 ) -> Vec<(Point2, Point2)> {
     let subdivisions = subdivisions.max(1);
     let mut strokes = Vec::new();
@@ -50,14 +51,16 @@ pub fn transform_complex_mapping_segments(
         let mut prev: Option<Point2> = None;
         for i in 0..=subdivisions {
             let t = i as f64 / subdivisions as f64;
-            let z = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
-            let current = map.apply(z).and_then(|w| {
-                if w.re.is_finite() && w.im.is_finite() {
-                    Some(Point2::new(w.re, w.im))
-                } else {
-                    None
+            let z_orig = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+            let z_mapped = map.apply(z_orig);
+            let current = match z_mapped {
+                Some(w) if w.re.is_finite() && w.im.is_finite() => {
+                    let morph_re = (1.0 - t_val) * z_orig.re + t_val * w.re;
+                    let morph_im = (1.0 - t_val) * z_orig.im + t_val * w.im;
+                    Some(Point2::new(morph_re, morph_im))
                 }
-            });
+                _ => None,
+            };
             if let (Some(prev), Some(current)) = (prev, current) {
                 strokes.push((prev, current));
             }
@@ -543,10 +546,21 @@ impl Renderer {
         let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(view.screen_size);
 
-        let min_x = world_tl.x.floor() as i32 - 1;
-        let max_x = world_br.x.ceil() as i32 + 1;
-        let min_y = world_br.y.floor() as i32 - 1;
-        let max_y = world_tl.y.ceil() as i32 + 1;
+        let mut min_x = world_tl.x.floor() as i64 - 1;
+        let mut max_x = world_br.x.ceil() as i64 + 1;
+        let mut min_y = world_br.y.floor() as i64 - 1;
+        let mut max_y = world_tl.y.ceil() as i64 + 1;
+
+        if max_x.saturating_sub(min_x) > 500 {
+            let center = (min_x + max_x) / 2;
+            min_x = center - 250;
+            max_x = center + 250;
+        }
+        if max_y.saturating_sub(min_y) > 500 {
+            let center = (min_y + max_y) / 2;
+            min_y = center - 250;
+            max_y = center + 250;
+        }
 
         let color = if dark_mode {
             Color::new(0.25, 0.25, 0.25, 1.0)
@@ -1899,10 +1913,10 @@ impl Renderer {
             5.0 * base
         };
 
-        let mut min_x = (world_tl.x / major_step).floor() as i32 - 1;
-        let mut max_x = (world_br.x / major_step).ceil() as i32 + 1;
-        let mut min_y = (world_br.y / major_step).floor() as i32 - 1;
-        let mut max_y = (world_tl.y / major_step).ceil() as i32 + 1;
+        let mut min_x = (world_tl.x / major_step).floor() as i64 - 1;
+        let mut max_x = (world_br.x / major_step).ceil() as i64 + 1;
+        let mut min_y = (world_br.y / major_step).floor() as i64 - 1;
+        let mut max_y = (world_tl.y / major_step).ceil() as i64 + 1;
 
         // Safety limit to prevent freezing due to massive zoom / floating point precision loss
         if max_x.saturating_sub(min_x) > 500 {
@@ -2062,7 +2076,14 @@ impl Renderer {
                 }
 
                 let vars = std::collections::HashMap::new();
-                if let Some(colors) = dc_pipeline.evaluate(device, queue, &parsed, &points, &vars) {
+                if let Some(colors) = dc_pipeline.evaluate(
+                    device,
+                    queue,
+                    &parsed,
+                    &points,
+                    &vars,
+                    cg.domain_coloring_mode as u32,
+                ) {
                     // Generar rectángulos con los colores del GPU
                     for (idx, color) in colors.iter().enumerate() {
                         let i = idx % res;
@@ -2135,11 +2156,43 @@ impl Renderer {
                                 let ang = fz.im.atan2(fz.re);
                                 let hue =
                                     (ang + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
-                                let lightness = (mag.max(1e-10).ln().atan()
-                                    / std::f64::consts::FRAC_PI_2)
-                                    * 0.5
-                                    + 0.5;
-                                let color = hsl_to_rgb_f64(hue, 0.85, lightness.clamp(0.0, 1.0));
+                                let mut lightness = 0.5;
+                                if cg.domain_coloring_mode == 0
+                                    || cg.domain_coloring_mode == 2
+                                    || cg.domain_coloring_mode == 3
+                                {
+                                    lightness = (mag.max(1e-10).ln().atan()
+                                        / std::f64::consts::FRAC_PI_2)
+                                        * 0.5
+                                        + 0.5;
+                                }
+                                let sat = if cg.domain_coloring_mode == 1 {
+                                    1.0
+                                } else {
+                                    0.85
+                                };
+                                let mut color = hsl_to_rgb_f64(hue, sat, lightness.clamp(0.0, 1.0));
+
+                                if cg.domain_coloring_mode == 2 {
+                                    let log_mag = mag.max(1e-5).ln();
+                                    let mag_grid =
+                                        (log_mag * std::f64::consts::PI * 2.0).sin().abs();
+                                    let arg_grid = (ang * 10.0).sin().abs();
+                                    let grid_shading =
+                                        0.5 + 0.5 * (mag_grid * arg_grid).max(0.0).powf(0.15);
+                                    color.r *= grid_shading as f32;
+                                    color.g *= grid_shading as f32;
+                                    color.b *= grid_shading as f32;
+                                } else if cg.domain_coloring_mode == 3 {
+                                    let grid_re = (fz.re * std::f64::consts::PI * 2.0).sin().abs();
+                                    let grid_im = (fz.im * std::f64::consts::PI * 2.0).sin().abs();
+                                    let grid_shading =
+                                        0.5 + 0.5 * (grid_re * grid_im).max(0.0).powf(0.15);
+                                    color.r *= grid_shading as f32;
+                                    color.g *= grid_shading as f32;
+                                    color.b *= grid_shading as f32;
+                                }
+
                                 let center =
                                     view.world_to_screen(Point2::new(x + dx * 0.5, y + dy * 0.5));
                                 Self::add_rect(
@@ -2567,7 +2620,14 @@ impl Renderer {
             RenderQuality::Normal => 8,
             RenderQuality::High => 16,
         };
-        for (a, b) in transform_complex_mapping_segments(map, &source_segments, subdivisions) {
+        let t_val = if cm.animate_homotopy {
+            let t_accum = document.variables.get("t_homotopy").copied().unwrap_or(0.0);
+            0.5 + 0.5 * (t_accum * cm.homotopy_speed as f64).cos()
+        } else {
+            1.0
+        };
+        for (a, b) in transform_complex_mapping_segments(map, &source_segments, subdivisions, t_val)
+        {
             let p1 = view.world_to_screen(a);
             let p2 = view.world_to_screen(b);
             if (p2.x - p1.x).abs() < 300.0 && (p2.y - p1.y).abs() < 300.0 {

@@ -16,7 +16,8 @@ use grafito_geometry::analysis::{
 use grafito_geometry::boolean::polygon_to_geo;
 use grafito_geometry::expr::{eval_function_with_vars, evaluate};
 use grafito_geometry::matrices::{
-    condition_number, eigenvalues, null_space, rank, solve_linear_system, taylor_series, Matrix,
+    cholesky, condition_number, eigenvalues, eigenvectors, lu_decomposition, null_space,
+    qr_decomposition, rank, solve_linear_system, svd, taylor_series, Matrix,
 };
 use grafito_geometry::statistics;
 use grafito_geometry::symbolic;
@@ -319,10 +320,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
         return CommandOutcome::Ok;
     }
 
-    // Sanitize mathematical unicode symbols and uppercase variables from virtual keyboard
+    // Sanitize mathematical unicode symbols from the virtual keyboard.
+    // Do not rewrite global `X`/`Y`: command names and object labels are case-sensitive.
     let text = raw_text
-        .replace("X", "x")
-        .replace("Y", "y")
         .replace("F(x)", "f(x)")
         .replace("G(x)", "g(x)")
         // **Superscripts Unicode**: el usuario escribe `x²` desde el teclado
@@ -1583,11 +1583,14 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     if document.get_object(object_id).is_some()
                         && matches!(document.get_object(point_id), Some(GeoObject::Point(_)))
                     {
-                        document.constraints.add_constraint(
+                        let seed = match document.get_object(point_id) {
+                            Some(GeoObject::Point(p)) => p.position,
+                            _ => Point2::new(0.0, 0.0),
+                        };
+                        document.add_constructed_object(
+                            GeoObject::Point(PointObj::new(seed).with_label("P_on")),
                             "PointOnObject",
-                            vec![object_id, point_id],
-                            vec![point_id],
-                            HashMap::new(),
+                            &[object_id, point_id],
                         );
                         let order = document.propagation_order(&[object_id, point_id]);
                         if !order.is_empty() {
@@ -2040,7 +2043,11 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     }
                     result
                 };
-                let prob = comb(n, k) * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32);
+                let prob = if k > n {
+                    0.0
+                } else {
+                    comb(n, k) * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32)
+                };
                 result = CommandOutcome::Message(format!(
                     "P(X={}) = {:.6} (Binom({},{}))",
                     k, prob, n, p
@@ -2530,6 +2537,25 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     }
                 }
             }
+            "Transpose" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Transpose: {e}")),
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("Transpose:\n{}", matrix.transpose()));
+            }
+            "Trace" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Trace: {e}")),
+                };
+                let Some(trace) = matrix.trace() else {
+                    return CommandOutcome::Error("Trace: la matriz debe ser cuadrada".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("trace = {}", fmt_scalar(trace)));
+            }
             "Rank" if !cmd.args.is_empty() => {
                 let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
                     Ok(m) => m,
@@ -2587,6 +2613,81 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                         .join(", ")
                 ));
             }
+            "Eigenvectors" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Eigenvectors: {e}")),
+                };
+                let Some(vectors) = eigenvectors(&matrix) else {
+                    return CommandOutcome::Error(
+                        "Eigenvectors: la matriz debe ser cuadrada".into(),
+                    );
+                };
+                let lines = vectors
+                    .iter()
+                    .map(|(v, re, im)| {
+                        format!(
+                            "lambda = {}, v = {}",
+                            fmt_complex_pair(*re, *im),
+                            fmt_vector(v)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                input_text.clear();
+                return CommandOutcome::Message(format!("Eigenvectors:\n{lines}"));
+            }
+            "LU" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("LU: {e}")),
+                };
+                let Some((l, u)) = lu_decomposition(&matrix) else {
+                    return CommandOutcome::Error("LU: la matriz debe ser cuadrada".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("L:\n{}U:\n{}", l, u));
+            }
+            "QR" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("QR: {e}")),
+                };
+                let Some((q, r)) = qr_decomposition(&matrix) else {
+                    return CommandOutcome::Error("QR: matriz inválida".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("Q:\n{}R:\n{}", q, r));
+            }
+            "Cholesky" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("Cholesky: {e}")),
+                };
+                let Some(l) = cholesky(&matrix) else {
+                    return CommandOutcome::Error(
+                        "Cholesky: matriz no simétrica definida positiva".into(),
+                    );
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!("Cholesky L:\n{}", l));
+            }
+            "SVD" if !cmd.args.is_empty() => {
+                let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
+                    Ok(m) => m,
+                    Err(e) => return CommandOutcome::Error(format!("SVD: {e}")),
+                };
+                let Some((u, sigma, v_t)) = svd(&matrix) else {
+                    return CommandOutcome::Error("SVD: matriz inválida".into());
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "SVD:\nU:\n{}Sigma = {}\nV^T:\n{}",
+                    u,
+                    fmt_vector(&sigma),
+                    v_t
+                ));
+            }
             "ConditionNumber" if !cmd.args.is_empty() => {
                 let matrix = match parse_matrix_arg_strict(&cmd.args[0], &document.variables) {
                     Ok(m) => m,
@@ -2624,6 +2725,39 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             }
             "MatrixParamSolve" if cmd.args.len() >= 2 => {
                 return run_matrix_param_solve(&cmd.args[0], &cmd.args[1], document);
+            }
+            "Gradient" if !cmd.args.is_empty() => {
+                return run_gradient_command(&cmd.args, document);
+            }
+            "DirectionalDerivative" if cmd.args.len() >= 4 => {
+                return run_directional_derivative_command(&cmd.args, document);
+            }
+            "TangentPlane" if cmd.args.len() >= 2 => {
+                return run_tangent_plane_command(&cmd.args, document);
+            }
+            "Divergence" if !cmd.args.is_empty() => {
+                return run_divergence_command(&cmd.args, document);
+            }
+            "Curl" if !cmd.args.is_empty() => {
+                return run_curl_command(&cmd.args, document);
+            }
+            "DoubleIntegral" if cmd.args.len() >= 7 => {
+                return run_double_integral_command(&cmd.args, document, false);
+            }
+            "SurfaceArea" if cmd.args.len() >= 7 => {
+                return run_double_integral_command(&cmd.args, document, true);
+            }
+            "SequenceLimit" if !cmd.args.is_empty() => {
+                return run_sequence_limit_command(&cmd.args, document);
+            }
+            "SeriesSum" if cmd.args.len() >= 4 => {
+                return run_series_sum_command(&cmd.args, document);
+            }
+            "RatioTest" if !cmd.args.is_empty() => {
+                return run_series_ratio_test_command(&cmd.args, document);
+            }
+            "RootTest" if !cmd.args.is_empty() => {
+                return run_series_root_test_command(&cmd.args, document);
             }
             "Taylor" if cmd.args.len() >= 2 => {
                 let expr = cmd.args[0].trim();
@@ -2784,10 +2918,37 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     .unwrap_or(0.0)
                 };
 
-                let solution = if method == "euler" {
-                    grafito_geometry::ode::euler(f, t0, y0, t_end, steps)
-                } else {
-                    grafito_geometry::ode::runge_kutta_4(f, t0, y0, t_end, steps)
+                let solution = match method.as_str() {
+                    "euler" => grafito_geometry::ode::euler(f, t0, y0, t_end, steps),
+                    "rk45" | "rkf45" | "fehlberg" => {
+                        let tol = cmd
+                            .args
+                            .get(6)
+                            .and_then(|s| parse_numeric_arg(s, &document.variables).ok())
+                            .unwrap_or(1e-6)
+                            .abs()
+                            .max(1e-12);
+                        grafito_geometry::ode::runge_kutta_45(f, t0, y0, t_end, tol)
+                    }
+                    "backward" | "backwardeuler" | "backward_euler" | "implicit" => {
+                        let jac_expr =
+                            symbolic::derivative(expr, "y").unwrap_or_else(|_| "0".into());
+                        let jac = |t: f64, y: f64| -> f64 {
+                            let mut vars = document.variables.clone();
+                            vars.insert("t".to_string(), t);
+                            vars.insert("y".to_string(), y);
+                            evaluate(
+                                &jac_expr,
+                                &vars
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), *v))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .unwrap_or(0.0)
+                        };
+                        grafito_geometry::ode::backward_euler(f, jac, t0, y0, t_end, steps)
+                    }
+                    _ => grafito_geometry::ode::runge_kutta_4(f, t0, y0, t_end, steps),
                 };
 
                 let points = grafito_geometry::ode::solution_to_points(&solution);
@@ -2798,8 +2959,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 }
                 input_text.clear();
                 return CommandOutcome::Message(format!(
-                    "ODE solved with {} method ({} steps)",
-                    method, steps
+                    "ODE solved with {} method ({} points)",
+                    method,
+                    solution.len()
                 ));
             }
             "ODESystem" if cmd.args.len() >= 5 => {
@@ -2847,16 +3009,20 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                     vec![dy1, dy2]
                 };
 
-                let solution = if method == "euler" {
-                    grafito_geometry::ode::euler_system(f, t0, vec![y0_1, y0_2], t_end, steps)
-                } else {
-                    grafito_geometry::ode::runge_kutta_4_system(
-                        f,
-                        t0,
-                        vec![y0_1, y0_2],
-                        t_end,
-                        steps,
-                    )
+                let initial = vec![y0_1, y0_2];
+                let solution = match method.as_str() {
+                    "euler" => grafito_geometry::ode::euler_system(f, t0, initial, t_end, steps),
+                    "rk45" | "rkf45" | "fehlberg" => {
+                        let tol = cmd
+                            .args
+                            .get(8)
+                            .and_then(|s| parse_numeric_arg(s, &document.variables).ok())
+                            .unwrap_or(1e-6)
+                            .abs()
+                            .max(1e-12);
+                        grafito_geometry::ode::runge_kutta_45_system(f, t0, &initial, t_end, tol)
+                    }
+                    _ => grafito_geometry::ode::runge_kutta_4_system(f, t0, initial, t_end, steps),
                 };
 
                 // Plot y1 vs y2 (phase portrait)
@@ -2872,8 +3038,9 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
                 }
                 input_text.clear();
                 return CommandOutcome::Message(format!(
-                    "ODE system solved with {} method ({} steps)",
-                    method, steps
+                    "ODE system solved with {} method ({} points)",
+                    method,
+                    solution.len()
                 ));
             }
             "Gamma" if !cmd.args.is_empty() => {
@@ -3741,10 +3908,19 @@ pub fn process_input(document: &mut Document, input_text: &mut String) -> Comman
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
+        let z_char = document.complex_base_symbol.chars().next().unwrap_or('z');
         if contains_var(text, 'x') {
             let label = next_function_label(document);
             let obj = GeoObject::Function(FunctionObj::new(text).with_label(label));
             document.add_object(obj);
+            input_text.clear();
+            return CommandOutcome::Ok;
+        } else if contains_var(text, z_char)
+            || text.contains("deriv_z")
+            || text.contains("deriv_z_conj")
+        {
+            let cg = ComplexGridObj::new(text, -2.0, 2.0, -2.0, 2.0).as_domain_coloring();
+            document.add_object(GeoObject::ComplexGrid(cg));
             input_text.clear();
             return CommandOutcome::Ok;
         } else if let Ok(val) = evaluate(text, &vars_vec) {
@@ -4066,14 +4242,38 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "correlation" | "correlacion" => "Correlation",
             "determinant" | "det" => "Determinant",
             "inverse" | "inversa" => "Inverse",
+            "transpose" | "transpuesta" => "Transpose",
+            "trace" | "traza" => "Trace",
             "rank" | "rango" | "matrixrank" => "Rank",
             "nullspace" | "null_space" | "kernel" | "nucleo" | "núcleo" => "NullSpace",
             "linearsolve" | "linsolve" | "solvesystem" | "sistema" | "resolver_sistema" => {
                 "LinearSolve"
             }
             "eigenvalues" | "autovalores" => "Eigenvalues",
+            "eigenvectors" | "autovectores" => "Eigenvectors",
+            "lu" | "ludecomposition" | "lu_decomposition" => "LU",
+            "qr" | "qrdecomposition" | "qr_decomposition" => "QR",
+            "cholesky" => "Cholesky",
+            "svd" | "singularvalues" | "valores_singulares" => "SVD",
             "conditionnumber" | "condition_number" | "condicion" => "ConditionNumber",
+            "gradient" | "gradiente" | "grad" => "Gradient",
+            "directionalderivative" | "directional_derivative" | "derivadadireccional" => {
+                "DirectionalDerivative"
+            }
+            "tangentplane" | "tangent_plane" | "planotangente" => "TangentPlane",
+            "divergence" | "divergencia" => "Divergence",
+            "curl" | "rotor" | "rotacional" => "Curl",
+            "doubleintegral" | "double_integral" | "integraldoble" => "DoubleIntegral",
+            "surfacearea" | "surface_area" | "areasuperficie" => "SurfaceArea",
+            "sequencelimit" | "sequence_limit" | "limitesucesion" | "limite_sucesion" => {
+                "SequenceLimit"
+            }
+            "seriessum" | "series_sum" | "sumaserie" | "suma_serie" => "SeriesSum",
+            "ratiotest" | "ratio_test" | "cociente" | "criteriocociente" => "RatioTest",
+            "roottest" | "root_test" | "criterioraiz" => "RootTest",
             "taylor" => "Taylor",
+            "ode" | "edo" => "ODE",
+            "odesystem" | "ode_system" | "sistemaedo" | "sistema_edo" => "ODESystem",
             "complexgrid" | "complex_grid" | "cgrid" => "ComplexGrid",
             "complexsurface" | "complex_surface" | "csurface" => "ComplexSurface",
             "quadrants" | "cuadrantes" => "Quadrants",
@@ -4099,6 +4299,7 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
             "extremum" | "extremos" | "max" | "min" => "Extremum",
             "intersect" | "interseccion" => "Intersect",
             "yintercept" | "interceptoy" | "intercepto_y" => "YIntercept",
+            "xintercept" | "interceptox" | "intercepto_x" => "XIntercept",
             "analyze" | "analizar" | "analisis" => "Analyze",
             "angle" => "Angle",
             "tangent" => "Tangent",
@@ -5762,6 +5963,513 @@ fn evaluate_expression_matrix(
     Matrix::from_rows(numeric_rows).ok_or_else(|| "matriz inválida".into())
 }
 
+fn parse_numeric_vector_arg(s: &str, variables: &HashMap<String, f64>) -> Result<Vec<f64>, String> {
+    let entries = parse_expression_vector_arg(s)?;
+    let values = evaluate_expression_vector(&entries, variables)?;
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err("vector con entradas no finitas".into());
+    }
+    Ok(values)
+}
+
+fn eval_multivar_expr(
+    expr: &str,
+    base_vars: &HashMap<String, f64>,
+    assignments: &[(&str, f64)],
+) -> Result<f64, String> {
+    let mut vars = base_vars.clone();
+    for (name, value) in assignments {
+        vars.insert((*name).to_string(), *value);
+    }
+    let bindings = vars.into_iter().collect::<Vec<_>>();
+    evaluate(expr, &bindings).and_then(|value| {
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(format!("evaluación no finita para '{expr}'"))
+        }
+    })
+}
+
+fn default_multivar_names(n: usize) -> Vec<String> {
+    ["x", "y", "z"]
+        .iter()
+        .take(n)
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+fn parse_vars_arg(args: &[String], index: usize, fallback_n: usize) -> Result<Vec<String>, String> {
+    if let Some(raw) = args.get(index) {
+        parse_expression_vector_arg(raw)
+            .map(|vars| vars.into_iter().map(|v| clean_symbol_arg(&v)).collect())
+    } else {
+        Ok(default_multivar_names(fallback_n))
+    }
+}
+
+fn symbolic_partial(expr: &str, var: &str) -> Result<String, String> {
+    symbolic::derivative(expr, var)
+}
+
+fn simplified_difference(a: &str, b: &str) -> String {
+    let raw = format!("({a}) - ({b})");
+    symbolic::simplify(&raw).unwrap_or(raw)
+}
+
+fn run_gradient_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let vars = match parse_vars_arg(args, 1, 2) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("Gradient: {e}")),
+    };
+    if vars.is_empty() {
+        return CommandOutcome::Error("Gradient: se requiere al menos una variable".into());
+    }
+    let mut parts = Vec::with_capacity(vars.len());
+    for var in &vars {
+        match symbolic_partial(&expr, var) {
+            Ok(d) => parts.push(d),
+            Err(e) => return CommandOutcome::Error(format!("Gradient: {e}")),
+        }
+    }
+    CommandOutcome::Message(format!(
+        "Gradient = [{}]",
+        parts
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn run_directional_derivative_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let vars = match parse_vars_arg(args, 1, 2) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("DirectionalDerivative: {e}")),
+    };
+    let point = match parse_numeric_vector_arg(&args[2], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("DirectionalDerivative: {e}")),
+    };
+    let direction = match parse_numeric_vector_arg(&args[3], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("DirectionalDerivative: {e}")),
+    };
+    if vars.len() != point.len() || vars.len() != direction.len() {
+        return CommandOutcome::Error(
+            "DirectionalDerivative: variables, punto y dirección deben tener la misma dimensión"
+                .into(),
+        );
+    }
+    let norm = direction.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if norm <= 1e-12 {
+        return CommandOutcome::Error("DirectionalDerivative: dirección nula".into());
+    }
+    let assignments = vars
+        .iter()
+        .zip(point.iter())
+        .map(|(name, value)| (name.as_str(), *value))
+        .collect::<Vec<_>>();
+    let mut gradient_values = Vec::with_capacity(vars.len());
+    for var in &vars {
+        let partial = match symbolic_partial(&expr, var) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("DirectionalDerivative: {e}")),
+        };
+        let value = match eval_multivar_expr(&partial, &document.variables, &assignments) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("DirectionalDerivative: {e}")),
+        };
+        gradient_values.push(value);
+    }
+    let unit = direction.iter().map(|v| *v / norm).collect::<Vec<_>>();
+    let value = gradient_values
+        .iter()
+        .zip(unit.iter())
+        .map(|(g, u)| g * u)
+        .sum::<f64>();
+    CommandOutcome::Message(format!(
+        "DirectionalDerivative = {} ; grad({}) = {}",
+        fmt_scalar(value),
+        fmt_vector(&point),
+        fmt_vector(&gradient_values)
+    ))
+}
+
+fn run_tangent_plane_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let point = match parse_numeric_vector_arg(&args[1], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    if point.len() != 2 {
+        return CommandOutcome::Error("TangentPlane: el punto debe ser [x0,y0]".into());
+    }
+    let vars = match parse_vars_arg(args, 2, 2) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    if vars.len() != 2 {
+        return CommandOutcome::Error("TangentPlane: se requieren dos variables".into());
+    }
+    let assignments = vec![(vars[0].as_str(), point[0]), (vars[1].as_str(), point[1])];
+    let z0 = match eval_multivar_expr(&expr, &document.variables, &assignments) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    let fx_expr = match symbolic_partial(&expr, &vars[0]) {
+        Ok(d) => d,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    let fy_expr = match symbolic_partial(&expr, &vars[1]) {
+        Ok(d) => d,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    let fx = match eval_multivar_expr(&fx_expr, &document.variables, &assignments) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    let fy = match eval_multivar_expr(&fy_expr, &document.variables, &assignments) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("TangentPlane: {e}")),
+    };
+    CommandOutcome::Message(format!(
+        "TangentPlane: z = {} + {}*({}-{}) + {}*({}-{})",
+        fmt_scalar(z0),
+        fmt_scalar(fx),
+        vars[0],
+        fmt_scalar(point[0]),
+        fmt_scalar(fy),
+        vars[1],
+        fmt_scalar(point[1])
+    ))
+}
+
+fn run_divergence_command(args: &[String], document: &Document) -> CommandOutcome {
+    let fields = match parse_expression_vector_arg(&args[0]) {
+        Ok(v) => v
+            .into_iter()
+            .map(|e| expand_all_cas(&e, document))
+            .collect::<Vec<_>>(),
+        Err(e) => return CommandOutcome::Error(format!("Divergence: {e}")),
+    };
+    let vars = match parse_vars_arg(args, 1, fields.len()) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("Divergence: {e}")),
+    };
+    if fields.len() != vars.len() || fields.is_empty() {
+        return CommandOutcome::Error(
+            "Divergence: campo y variables deben tener la misma dimensión".into(),
+        );
+    }
+    let mut terms = Vec::with_capacity(fields.len());
+    for (field, var) in fields.iter().zip(vars.iter()) {
+        match symbolic_partial(field, var) {
+            Ok(d) => terms.push(d),
+            Err(e) => return CommandOutcome::Error(format!("Divergence: {e}")),
+        }
+    }
+    let raw = terms.join(" + ");
+    let simplified = symbolic::simplify(&raw).unwrap_or(raw);
+    CommandOutcome::Message(format!("Divergence = {simplified}"))
+}
+
+fn run_curl_command(args: &[String], document: &Document) -> CommandOutcome {
+    let fields = match parse_expression_vector_arg(&args[0]) {
+        Ok(v) => v
+            .into_iter()
+            .map(|e| expand_all_cas(&e, document))
+            .collect::<Vec<_>>(),
+        Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+    };
+    let vars = match parse_vars_arg(args, 1, fields.len()) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+    };
+    if fields.len() == 2 && vars.len() == 2 {
+        let dq_dx = match symbolic_partial(&fields[1], &vars[0]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dp_dy = match symbolic_partial(&fields[0], &vars[1]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        return CommandOutcome::Message(format!(
+            "Curl = {}",
+            simplified_difference(&dq_dx, &dp_dy)
+        ));
+    }
+    if fields.len() == 3 && vars.len() == 3 {
+        let dr_dy = match symbolic_partial(&fields[2], &vars[1]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dq_dz = match symbolic_partial(&fields[1], &vars[2]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dp_dz = match symbolic_partial(&fields[0], &vars[2]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dr_dx = match symbolic_partial(&fields[2], &vars[0]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dq_dx = match symbolic_partial(&fields[1], &vars[0]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        let dp_dy = match symbolic_partial(&fields[0], &vars[1]) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("Curl: {e}")),
+        };
+        return CommandOutcome::Message(format!(
+            "Curl = [{}]",
+            [
+                simplified_difference(&dr_dy, &dq_dz),
+                simplified_difference(&dp_dz, &dr_dx),
+                simplified_difference(&dq_dx, &dp_dy),
+            ]
+            .join(", ")
+        ));
+    }
+    CommandOutcome::Error("Curl: use campo 2D [P,Q] o 3D [P,Q,R]".into())
+}
+
+fn run_double_integral_command(
+    args: &[String],
+    document: &Document,
+    surface_area: bool,
+) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let x_var = clean_symbol_arg(&args[1]);
+    let a = match parse_numeric_arg(&args[2], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("DoubleIntegral: {e}")),
+    };
+    let b = match parse_numeric_arg(&args[3], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return CommandOutcome::Error(format!("DoubleIntegral: {e}")),
+    };
+    let y_var = clean_symbol_arg(&args[4]);
+    let y_min_expr = args[5].trim();
+    let y_max_expr = args[6].trim();
+    let n = args
+        .get(7)
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(80)
+        .clamp(2, 400);
+    if (b - a).abs() < 1e-12 {
+        return CommandOutcome::Error("DoubleIntegral: intervalo exterior degenerado".into());
+    }
+
+    let fx_expr;
+    let fy_expr;
+    if surface_area {
+        fx_expr = match symbolic_partial(&expr, &x_var) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+        };
+        fy_expr = match symbolic_partial(&expr, &y_var) {
+            Ok(d) => d,
+            Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+        };
+    } else {
+        fx_expr = String::new();
+        fy_expr = String::new();
+    }
+
+    let dx = (b - a) / n as f64;
+    let mut total = 0.0;
+    for i in 0..n {
+        let x = a + (i as f64 + 0.5) * dx;
+        let x_assignment = [(x_var.as_str(), x)];
+        let y0 = match eval_multivar_expr(y_min_expr, &document.variables, &x_assignment) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("DoubleIntegral: {e}")),
+        };
+        let y1 = match eval_multivar_expr(y_max_expr, &document.variables, &x_assignment) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("DoubleIntegral: {e}")),
+        };
+        let dy = (y1 - y0) / n as f64;
+        for j in 0..n {
+            let y = y0 + (j as f64 + 0.5) * dy;
+            let assignments = [(x_var.as_str(), x), (y_var.as_str(), y)];
+            let value = if surface_area {
+                let fx = match eval_multivar_expr(&fx_expr, &document.variables, &assignments) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+                };
+                let fy = match eval_multivar_expr(&fy_expr, &document.variables, &assignments) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+                };
+                (1.0 + fx * fx + fy * fy).sqrt()
+            } else {
+                match eval_multivar_expr(&expr, &document.variables, &assignments) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("DoubleIntegral: {e}")),
+                }
+            };
+            total += value * dx * dy;
+        }
+    }
+    if surface_area {
+        CommandOutcome::Message(format!("SurfaceArea ≈ {}", fmt_scalar(total.abs())))
+    } else {
+        CommandOutcome::Message(format!("DoubleIntegral ≈ {}", fmt_scalar(total)))
+    }
+}
+
+fn eval_sequence_term(
+    expr: &str,
+    var: &str,
+    n: f64,
+    variables: &HashMap<String, f64>,
+) -> Result<f64, String> {
+    eval_multivar_expr(expr, variables, &[(var, n)])
+}
+
+fn convergence_label(limit: f64) -> &'static str {
+    if limit < 1.0 - 1e-3 {
+        "converges"
+    } else if limit > 1.0 + 1e-3 {
+        "diverges"
+    } else {
+        "inconclusive"
+    }
+}
+
+fn run_sequence_limit_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let var = args
+        .get(1)
+        .map(|s| clean_symbol_arg(s))
+        .unwrap_or_else(|| "n".to_string());
+    let samples = [100.0, 300.0, 1000.0, 3000.0, 10000.0];
+    let mut values = Vec::with_capacity(samples.len());
+    for n in samples {
+        match eval_sequence_term(&expr, &var, n, &document.variables) {
+            Ok(v) => values.push(v),
+            Err(e) => return CommandOutcome::Error(format!("SequenceLimit: {e}")),
+        }
+    }
+    let estimate = *values.last().unwrap_or(&f64::NAN);
+    let drift = values
+        .windows(2)
+        .last()
+        .map(|w| (w[1] - w[0]).abs())
+        .unwrap_or(f64::NAN);
+    let status = if drift.is_finite() && drift < 1e-4 {
+        "stable"
+    } else {
+        "heuristic"
+    };
+    CommandOutcome::Message(format!(
+        "SequenceLimit ≈ {} ({status}, drift {})",
+        fmt_scalar(estimate),
+        fmt_scalar(drift)
+    ))
+}
+
+fn run_series_sum_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    let start = match parse_numeric_arg(&args[2], &document.variables) {
+        Ok(v) => v.round() as i64,
+        Err(e) => return CommandOutcome::Error(format!("SeriesSum: {e}")),
+    };
+    let end = match parse_numeric_arg(&args[3], &document.variables) {
+        Ok(v) => v.round() as i64,
+        Err(e) => return CommandOutcome::Error(format!("SeriesSum: {e}")),
+    };
+    let count = (end - start).abs() + 1;
+    if count > 100_000 {
+        return CommandOutcome::Error("SeriesSum: demasiados términos".into());
+    }
+    let step = if end >= start { 1 } else { -1 };
+    let mut total = 0.0;
+    let mut n = start;
+    loop {
+        match eval_sequence_term(&expr, &var, n as f64, &document.variables) {
+            Ok(v) => total += v,
+            Err(e) => return CommandOutcome::Error(format!("SeriesSum: {e}")),
+        }
+        if n == end {
+            break;
+        }
+        n += step;
+    }
+    CommandOutcome::Message(format!(
+        "SeriesSum[{}={}..{}] = {}",
+        var,
+        start,
+        end,
+        fmt_scalar(total)
+    ))
+}
+
+fn run_series_ratio_test_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let var = args
+        .get(1)
+        .map(|s| clean_symbol_arg(s))
+        .unwrap_or_else(|| "n".to_string());
+    let samples = [20.0, 40.0, 80.0, 120.0];
+    let mut ratios = Vec::with_capacity(samples.len());
+    for n in samples {
+        let a_n = match eval_sequence_term(&expr, &var, n, &document.variables) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("RatioTest: {e}")),
+        };
+        let a_next = match eval_sequence_term(&expr, &var, n + 1.0, &document.variables) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("RatioTest: {e}")),
+        };
+        if a_n.abs() > 1e-300 {
+            ratios.push((a_next / a_n).abs());
+        }
+    }
+    let Some(limit) = ratios.last().copied() else {
+        return CommandOutcome::Error("RatioTest: no se pudo estimar el cociente".into());
+    };
+    CommandOutcome::Message(format!(
+        "RatioTest L ≈ {} -> {}",
+        fmt_scalar(limit),
+        convergence_label(limit)
+    ))
+}
+
+fn run_series_root_test_command(args: &[String], document: &Document) -> CommandOutcome {
+    let expr = expand_all_cas(&args[0], document);
+    let var = args
+        .get(1)
+        .map(|s| clean_symbol_arg(s))
+        .unwrap_or_else(|| "n".to_string());
+    let samples = [20.0, 40.0, 80.0, 120.0];
+    let mut roots = Vec::with_capacity(samples.len());
+    for n in samples {
+        let a_n = match eval_sequence_term(&expr, &var, n, &document.variables) {
+            Ok(v) => v,
+            Err(e) => return CommandOutcome::Error(format!("RootTest: {e}")),
+        };
+        roots.push(a_n.abs().powf(1.0 / n));
+    }
+    let Some(limit) = roots.last().copied() else {
+        return CommandOutcome::Error("RootTest: no se pudo estimar la raíz".into());
+    };
+    CommandOutcome::Message(format!(
+        "RootTest L ≈ {} -> {}",
+        fmt_scalar(limit),
+        convergence_label(limit)
+    ))
+}
+
 fn clean_symbol_arg(s: &str) -> String {
     s.trim()
         .trim_matches('"')
@@ -6618,6 +7326,20 @@ mod tests {
         assert!(
             union_exists,
             "union result polygon labeled 'U' should exist"
+        );
+    }
+
+    #[test]
+    fn test_complex_expression_creates_complex_grid() {
+        let mut doc = Document::new();
+        let outcome = process_input(&mut doc, &mut "deriv_z_conj(z^2)".to_string());
+        assert!(matches!(outcome, CommandOutcome::Ok));
+        let has_grid = doc
+            .objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ComplexGrid(_)));
+        assert!(
+            has_grid,
+            "Should automatically create a ComplexGrid for complex expressions"
         );
     }
 }
