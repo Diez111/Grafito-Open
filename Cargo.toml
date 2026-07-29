@@ -29,7 +29,7 @@ grafito-render = { path = "crates/grafito-render" }
 grafito-ui = { path = "crates/grafito-ui" }
 
 # Window & GPU
-eframe = "0.29"
+eframe = "0.34"
 wgpu = "22.0"
 pollster = "0.3"
 raw-window-handle = "0.6"
