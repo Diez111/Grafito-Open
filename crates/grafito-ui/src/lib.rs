@@ -17,6 +17,7 @@
 //! ```
 
 pub mod animation;
+pub mod assistant;
 pub mod color_picker;
 pub mod command_palette;
 pub mod icons;
@@ -52,6 +53,10 @@ pub enum Tool {
     ParametricCurve3D,
     VectorField3D,
     HyperSurface4D,
+    /// Crea un teseracto tipado centrado y proyectado.
+    Tesseract4D,
+    /// Crea un hipercubo 5D tipado centrado y proyectado.
+    Hypercube5D,
     // Advanced tools
     Attractor,
     Fractal,
@@ -137,6 +142,8 @@ impl Tool {
             Tool::ParametricCurve3D => "ParametricCurve3D",
             Tool::VectorField3D => "VectorField3D",
             Tool::HyperSurface4D => "HyperSurface4D",
+            Tool::Tesseract4D => "Tesseract4D",
+            Tool::Hypercube5D => "Hypercube5D",
             Tool::Attractor => "Attractor",
             Tool::Fractal => "Fractal",
             Tool::Histogram => "Histogram",
@@ -194,6 +201,7 @@ impl Tool {
         match self {
             Tool::Select => egui::CursorIcon::Default,
             Tool::Point | Tool::Point3D => egui::CursorIcon::Crosshair,
+            Tool::Tesseract4D | Tool::Hypercube5D => egui::CursorIcon::PointingHand,
             Tool::Line
             | Tool::Circle
             | Tool::Polygon

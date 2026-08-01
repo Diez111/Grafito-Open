@@ -1,7 +1,11 @@
 use crate::id::ObjectId;
 use crate::pencil::PencilObj;
 use grafito_complex::algebraic_mappings::ConformalMap;
-use grafito_geometry::{Circle as GeomCircle, Color, Point2, Point3D, AABB};
+use grafito_geometry::statistics::{FitDiagnostics, FitKind, FitResult};
+use grafito_geometry::{
+    Circle as GeomCircle, Color, Point2, Point3D, RegularPolychoron, RegularPolytopeFamily, AABB,
+    MAX_REGULAR_POLYTOPE_DIMENSION, MIN_REGULAR_POLYTOPE_DIMENSION,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -29,6 +33,7 @@ pub enum GeoObject {
     Line3D(Line3DObj),
     Sphere3D(Sphere3DObj),
     Cube3D(Cube3DObj),
+    Tetrahedron3D(Tetrahedron3DObj),
     Pyramid3D(Pyramid3DObj),
     Cone3D(Cone3DObj),
     Cylinder3D(Cylinder3DObj),
@@ -49,12 +54,15 @@ pub enum GeoObject {
     // AM4 Advanced: Attractors, Fractals, 4D, Statistics
     Attractor3D(Attractor3DObj),
     Fractal2D(Fractal2DObj),
+    RegularPolychoron4D(RegularPolychoron4DObj),
+    RegularPolytopeND(RegularPolytopeNDObj),
     HyperSurface4D(HyperSurface4DObj),
     VectorField3D(VectorField3DObj),
     Histogram(HistogramObj),
     ScatterPlot(ScatterPlotObj),
     BoxPlot(BoxPlotObj),
     RegressionLine(RegressionLineObj),
+    DataTable(DataTableObj),
     PhasePortrait(PhasePortraitObj),
 
     // Transformed Wrapper
@@ -93,6 +101,7 @@ impl GeoObject {
             | GeoObject::ScatterPlot(_)
             | GeoObject::BoxPlot(_)
             | GeoObject::RegressionLine(_)
+            | GeoObject::DataTable(_)
             | GeoObject::PhasePortrait(_) => RenderSpace::D2,
             GeoObject::Point3D(_)
             | GeoObject::Segment3D(_)
@@ -100,6 +109,7 @@ impl GeoObject {
             | GeoObject::Line3D(_)
             | GeoObject::Sphere3D(_)
             | GeoObject::Cube3D(_)
+            | GeoObject::Tetrahedron3D(_)
             | GeoObject::Pyramid3D(_)
             | GeoObject::Cone3D(_)
             | GeoObject::Cylinder3D(_)
@@ -108,6 +118,8 @@ impl GeoObject {
             | GeoObject::Surface3D(_)
             | GeoObject::ParametricCurve3D(_)
             | GeoObject::Attractor3D(_)
+            | GeoObject::RegularPolychoron4D(_)
+            | GeoObject::RegularPolytopeND(_)
             | GeoObject::HyperSurface4D(_)
             | GeoObject::VectorField3D(_) => RenderSpace::D3,
             GeoObject::Transformed(o) => o.inner.render_space(),
@@ -135,6 +147,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.id,
             GeoObject::Sphere3D(o) => o.id,
             GeoObject::Cube3D(o) => o.id,
+            GeoObject::Tetrahedron3D(o) => o.id,
             GeoObject::Pyramid3D(o) => o.id,
             GeoObject::Cone3D(o) => o.id,
             GeoObject::Cylinder3D(o) => o.id,
@@ -151,12 +164,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.id,
             GeoObject::Attractor3D(o) => o.id,
             GeoObject::Fractal2D(o) => o.id,
+            GeoObject::RegularPolychoron4D(o) => o.id,
+            GeoObject::RegularPolytopeND(o) => o.id,
             GeoObject::HyperSurface4D(o) => o.id,
             GeoObject::VectorField3D(o) => o.id,
             GeoObject::Histogram(o) => o.id,
             GeoObject::ScatterPlot(o) => o.id,
             GeoObject::BoxPlot(o) => o.id,
             GeoObject::RegressionLine(o) => o.id,
+            GeoObject::DataTable(o) => o.id,
             GeoObject::PhasePortrait(o) => o.id,
             GeoObject::Pencil(o) => o.id,
             GeoObject::Transformed(o) => o.inner.id(),
@@ -180,6 +196,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => &o.label,
             GeoObject::Sphere3D(o) => &o.label,
             GeoObject::Cube3D(o) => &o.label,
+            GeoObject::Tetrahedron3D(o) => &o.label,
             GeoObject::Pyramid3D(o) => &o.label,
             GeoObject::Cone3D(o) => &o.label,
             GeoObject::Cylinder3D(o) => &o.label,
@@ -196,12 +213,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => &o.label,
             GeoObject::Attractor3D(o) => &o.label,
             GeoObject::Fractal2D(o) => &o.label,
+            GeoObject::RegularPolychoron4D(o) => &o.label,
+            GeoObject::RegularPolytopeND(o) => &o.label,
             GeoObject::HyperSurface4D(o) => &o.label,
             GeoObject::VectorField3D(o) => &o.label,
             GeoObject::Histogram(o) => &o.label,
             GeoObject::ScatterPlot(o) => &o.label,
             GeoObject::BoxPlot(o) => &o.label,
             GeoObject::RegressionLine(o) => &o.label,
+            GeoObject::DataTable(o) => &o.label,
             GeoObject::PhasePortrait(o) => &o.label,
             GeoObject::Pencil(o) => &o.label,
             GeoObject::Transformed(o) => o.inner.label(),
@@ -225,6 +245,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.label = label,
             GeoObject::Sphere3D(o) => o.label = label,
             GeoObject::Cube3D(o) => o.label = label,
+            GeoObject::Tetrahedron3D(o) => o.label = label,
             GeoObject::Pyramid3D(o) => o.label = label,
             GeoObject::Cone3D(o) => o.label = label,
             GeoObject::Cylinder3D(o) => o.label = label,
@@ -241,12 +262,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.label = label,
             GeoObject::Attractor3D(o) => o.label = label,
             GeoObject::Fractal2D(o) => o.label = label,
+            GeoObject::RegularPolychoron4D(o) => o.label = label,
+            GeoObject::RegularPolytopeND(o) => o.label = label,
             GeoObject::HyperSurface4D(o) => o.label = label,
             GeoObject::VectorField3D(o) => o.label = label,
             GeoObject::Histogram(o) => o.label = label,
             GeoObject::ScatterPlot(o) => o.label = label,
             GeoObject::BoxPlot(o) => o.label = label,
             GeoObject::RegressionLine(o) => o.label = label,
+            GeoObject::DataTable(o) => o.label = label,
             GeoObject::PhasePortrait(o) => o.label = label,
             GeoObject::Pencil(o) => o.label = label,
             GeoObject::Transformed(o) => o.inner.set_label(label),
@@ -271,6 +295,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.color,
             GeoObject::Sphere3D(o) => o.color,
             GeoObject::Cube3D(o) => o.color,
+            GeoObject::Tetrahedron3D(o) => o.color,
             GeoObject::Pyramid3D(o) => o.color,
             GeoObject::Cone3D(o) => o.color,
             GeoObject::Cylinder3D(o) => o.color,
@@ -287,12 +312,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.color,
             GeoObject::Attractor3D(o) => o.color,
             GeoObject::Fractal2D(o) => o.color,
+            GeoObject::RegularPolychoron4D(o) => o.color,
+            GeoObject::RegularPolytopeND(o) => o.color,
             GeoObject::HyperSurface4D(o) => o.color,
             GeoObject::VectorField3D(o) => o.color,
             GeoObject::Histogram(o) => o.color,
             GeoObject::ScatterPlot(o) => o.color,
             GeoObject::BoxPlot(o) => o.color,
             GeoObject::RegressionLine(o) => o.color,
+            GeoObject::DataTable(o) => o.color,
             GeoObject::PhasePortrait(o) => o.color,
             GeoObject::Transformed(o) => o.inner.color(),
         }
@@ -316,6 +344,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.color = color,
             GeoObject::Sphere3D(o) => o.color = color,
             GeoObject::Cube3D(o) => o.color = color,
+            GeoObject::Tetrahedron3D(o) => o.color = color,
             GeoObject::Pyramid3D(o) => o.color = color,
             GeoObject::Cone3D(o) => o.color = color,
             GeoObject::Cylinder3D(o) => o.color = color,
@@ -332,12 +361,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.color = color,
             GeoObject::Attractor3D(o) => o.color = color,
             GeoObject::Fractal2D(o) => o.color = color,
+            GeoObject::RegularPolychoron4D(o) => o.color = color,
+            GeoObject::RegularPolytopeND(o) => o.color = color,
             GeoObject::HyperSurface4D(o) => o.color = color,
             GeoObject::VectorField3D(o) => o.color = color,
             GeoObject::Histogram(o) => o.color = color,
             GeoObject::ScatterPlot(o) => o.color = color,
             GeoObject::BoxPlot(o) => o.color = color,
             GeoObject::RegressionLine(o) => o.color = color,
+            GeoObject::DataTable(o) => o.color = color,
             GeoObject::PhasePortrait(o) => o.color = color,
             GeoObject::Transformed(o) => o.inner.set_color(color),
         }
@@ -361,6 +393,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.visible,
             GeoObject::Sphere3D(o) => o.visible,
             GeoObject::Cube3D(o) => o.visible,
+            GeoObject::Tetrahedron3D(o) => o.visible,
             GeoObject::Pyramid3D(o) => o.visible,
             GeoObject::Cone3D(o) => o.visible,
             GeoObject::Cylinder3D(o) => o.visible,
@@ -377,12 +410,17 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.visible,
             GeoObject::Attractor3D(o) => o.visible,
             GeoObject::Fractal2D(o) => o.visible,
+            GeoObject::RegularPolychoron4D(o) => o.visible,
+            GeoObject::RegularPolytopeND(o) => o.visible,
             GeoObject::HyperSurface4D(o) => o.visible,
             GeoObject::VectorField3D(o) => o.visible,
             GeoObject::Histogram(o) => o.visible,
             GeoObject::ScatterPlot(o) => o.visible,
             GeoObject::BoxPlot(o) => o.visible,
             GeoObject::RegressionLine(o) => o.visible,
+            // Las tablas no tienen geometría de canvas y nunca participan del
+            // render/export genérico aunque un documento legado marque visible.
+            GeoObject::DataTable(_) => false,
             GeoObject::PhasePortrait(o) => o.visible,
             GeoObject::Transformed(o) => o.inner.is_visible(),
         }
@@ -406,6 +444,7 @@ impl GeoObject {
             GeoObject::Line3D(o) => o.visible = visible,
             GeoObject::Sphere3D(o) => o.visible = visible,
             GeoObject::Cube3D(o) => o.visible = visible,
+            GeoObject::Tetrahedron3D(o) => o.visible = visible,
             GeoObject::Pyramid3D(o) => o.visible = visible,
             GeoObject::Cone3D(o) => o.visible = visible,
             GeoObject::Cylinder3D(o) => o.visible = visible,
@@ -422,12 +461,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(o) => o.visible = visible,
             GeoObject::Attractor3D(o) => o.visible = visible,
             GeoObject::Fractal2D(o) => o.visible = visible,
+            GeoObject::RegularPolychoron4D(o) => o.visible = visible,
+            GeoObject::RegularPolytopeND(o) => o.visible = visible,
             GeoObject::HyperSurface4D(o) => o.visible = visible,
             GeoObject::VectorField3D(o) => o.visible = visible,
             GeoObject::Histogram(o) => o.visible = visible,
             GeoObject::ScatterPlot(o) => o.visible = visible,
             GeoObject::BoxPlot(o) => o.visible = visible,
             GeoObject::RegressionLine(o) => o.visible = visible,
+            GeoObject::DataTable(_) => {}
             GeoObject::PhasePortrait(o) => o.visible = visible,
             GeoObject::Transformed(o) => o.inner.set_visible(visible),
         }
@@ -447,12 +489,97 @@ impl GeoObject {
         }
     }
 
+    /// Drops runtime-only caches before a document is used as a transaction
+    /// staging area. Clones normally share these `Arc` caches with the live
+    /// document, so staging must detach them before a failed operation can
+    /// invalidate a cache visible to the caller.
+    pub(crate) fn detach_runtime_caches(&mut self) {
+        let mut pending = vec![self];
+        while let Some(object) = pending.pop() {
+            match object {
+                GeoObject::Function(o) => {
+                    o.cached_key = Default::default();
+                    o.cached_samples = Default::default();
+                }
+                GeoObject::Surface3D(o) => {
+                    o.cached_grid = Default::default();
+                    o.cached_key = Default::default();
+                }
+                GeoObject::ParametricCurve2D(o) => {
+                    o.cached_samples = Default::default();
+                    o.cached_key = Default::default();
+                }
+                GeoObject::ParametricCurve3D(o) => {
+                    o.cached_samples = Default::default();
+                    o.cached_key = Default::default();
+                }
+                GeoObject::PolarCurve(o) => {
+                    o.cached_samples = Default::default();
+                    o.cached_key = Default::default();
+                }
+                GeoObject::VectorField2D(o) => {
+                    o.cached_samples = Default::default();
+                    o.cached_key = Default::default();
+                }
+                GeoObject::ImplicitCurve(o) => {
+                    o.cached_segments = Default::default();
+                    o.cached_key = Default::default();
+                    o.cached_region = Default::default();
+                    o.cached_asts = Default::default();
+                }
+                GeoObject::Transformed(o) => pending.push(o.inner.as_mut()),
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns every document object referenced by this object's semantic data.
+    /// Runtime caches and nested rendering state are intentionally excluded.
+    pub fn referenced_object_ids(&self) -> Vec<ObjectId> {
+        match self {
+            GeoObject::Pencil(object) => object
+                .locus_binding()
+                .map(|binding| vec![binding.driver, binding.target])
+                .unwrap_or_default(),
+            GeoObject::Function(object) => object
+                .fit
+                .as_ref()
+                .map(|fit| vec![fit.source])
+                .unwrap_or_default(),
+            GeoObject::ScatterPlot(object) => object
+                .source_data
+                .map(|source| vec![source])
+                .unwrap_or_default(),
+            GeoObject::ComplexMapping(object) => vec![object.target],
+            GeoObject::ComplexIntegral(object) => vec![object.target],
+            GeoObject::Transformed(object) => object.inner.referenced_object_ids(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// True when serializing this object would disclose local measurements or
+    /// diagnostics rather than ordinary geometric metadata.
+    pub fn contains_private_data(&self) -> bool {
+        match self {
+            GeoObject::Pencil(pencil) => pencil.is_dynamic_locus(),
+            GeoObject::DataTable(_)
+            | GeoObject::Histogram(_)
+            | GeoObject::ScatterPlot(_)
+            | GeoObject::BoxPlot(_)
+            | GeoObject::RegressionLine(_) => true,
+            GeoObject::Function(function) => function.fit.is_some(),
+            GeoObject::Transformed(object) => object.inner.contains_private_data(),
+            _ => false,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             GeoObject::Point(_) => "Point",
             GeoObject::Line(_) => "Line",
             GeoObject::Circle(_) => "Circle",
             GeoObject::Polygon(_) => "Polygon",
+            GeoObject::Pencil(pencil) if pencil.is_dynamic_locus() => "Locus",
             GeoObject::Pencil(_) => "Pencil",
             GeoObject::Function(_) => "Function",
             GeoObject::Text(_) => "Text",
@@ -465,6 +592,7 @@ impl GeoObject {
             GeoObject::Line3D(_) => "Line3D",
             GeoObject::Sphere3D(_) => "Sphere3D",
             GeoObject::Cube3D(_) => "Cube3D",
+            GeoObject::Tetrahedron3D(_) => "Tetrahedron3D",
             GeoObject::Pyramid3D(_) => "Pyramid3D",
             GeoObject::Cone3D(_) => "Cone3D",
             GeoObject::Cylinder3D(_) => "Cylinder3D",
@@ -481,12 +609,15 @@ impl GeoObject {
             GeoObject::ImplicitCurve(_) => "ImplicitCurve",
             GeoObject::Attractor3D(_) => "Attractor3D",
             GeoObject::Fractal2D(_) => "Fractal2D",
+            GeoObject::RegularPolychoron4D(_) => "RegularPolychoron4D",
+            GeoObject::RegularPolytopeND(_) => "RegularPolytopeND",
             GeoObject::HyperSurface4D(_) => "HyperSurface4D",
             GeoObject::VectorField3D(_) => "VectorField3D",
             GeoObject::Histogram(_) => "Histogram",
             GeoObject::ScatterPlot(_) => "ScatterPlot",
             GeoObject::BoxPlot(_) => "BoxPlot",
             GeoObject::RegressionLine(_) => "RegressionLine",
+            GeoObject::DataTable(_) => "DataTable",
             GeoObject::PhasePortrait(_) => "PhasePortrait",
             GeoObject::Transformed(_) => "Transformed",
         }
@@ -527,16 +658,7 @@ impl PointObj {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum LineKind {
-    /// Finite segment between two endpoints.
-    #[default]
-    Segment,
-    /// Infinite line through two points.
-    Line,
-    /// Ray starting at `start` and passing through `end`.
-    Ray,
-}
+pub use grafito_geometry::LineKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LineObj {
@@ -575,7 +697,7 @@ impl LineObj {
             start_y_expr: None,
             end_x_expr: None,
             end_y_expr: None,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
         }
@@ -636,11 +758,7 @@ impl LineObj {
     }
 
     pub fn kind_contains_t(&self, t: f64) -> bool {
-        match self.kind {
-            LineKind::Segment => (0.0..=1.0).contains(&t),
-            LineKind::Ray => t >= 0.0,
-            LineKind::Line => true,
-        }
+        self.kind.contains_t(t)
     }
 }
 
@@ -666,7 +784,7 @@ impl CircleObj {
             center,
             radius,
             radius_expr: None,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
             fill_color: None,
@@ -706,7 +824,7 @@ impl PolygonObj {
             vertices,
             x_exprs: Vec::new(),
             y_exprs: Vec::new(),
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.2)),
@@ -753,6 +871,10 @@ pub struct FunctionObj {
     pub integral_var: String,
     #[serde(default)]
     pub integral_lower: f64,
+    /// Metadatos de un ajuste local persistente, si esta función fue generada
+    /// desde una tabla de datos. Los samples siguen usando el pipeline normal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<FitMetadata>,
     #[serde(skip)]
     pub cached_key: Arc<RwLock<Option<FunctionCacheKey>>>,
     #[serde(skip)]
@@ -780,6 +902,7 @@ impl Clone for FunctionObj {
             is_integral: self.is_integral,
             integral_var: self.integral_var.clone(),
             integral_lower: self.integral_lower,
+            fit: self.fit.clone(),
             // Share the cache through Arc
             cached_key: self.cached_key.clone(),
             cached_samples: self.cached_samples.clone(),
@@ -803,6 +926,7 @@ impl PartialEq for FunctionObj {
             && self.is_integral == other.is_integral
             && self.integral_var == other.integral_var
             && self.integral_lower == other.integral_lower
+            && self.fit == other.fit
     }
 }
 
@@ -823,6 +947,7 @@ impl FunctionObj {
             is_integral: false,
             integral_var: String::new(),
             integral_lower: 0.0,
+            fit: None,
             cached_key: Arc::new(RwLock::new(None)),
             cached_samples: Arc::new(RwLock::new(FunctionSamples::new())),
         }
@@ -842,6 +967,12 @@ impl FunctionObj {
         self.is_integral = true;
         self.integral_var = var.to_string();
         self.integral_lower = lower;
+        self
+    }
+
+    /// Asocia la función renderizable a una tabla local y sus diagnósticos.
+    pub fn with_fit(mut self, fit: FitMetadata) -> Self {
+        self.fit = Some(fit);
         self
     }
 
@@ -879,7 +1010,7 @@ impl TextObj {
             label: String::new(),
             content: content.into(),
             position,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             font_size: 14.0,
         }
@@ -932,7 +1063,7 @@ impl Segment3DObj {
             label: String::new(),
             a,
             b,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
         }
@@ -1085,7 +1216,7 @@ impl Sphere3DObj {
             label: String::new(),
             center,
             radius,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
@@ -1115,10 +1246,40 @@ impl Cube3DObj {
             label: String::new(),
             center,
             size,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: None,
+        }
+    }
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tetrahedron3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub center: Point3D,
+    pub edge_length: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+impl Tetrahedron3DObj {
+    pub fn new(center: Point3D, edge_length: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            center,
+            edge_length,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 1.0)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -1147,7 +1308,7 @@ impl Pyramid3DObj {
             base_center,
             apex,
             base_size,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: None,
@@ -1179,7 +1340,7 @@ impl Cone3DObj {
             base_center,
             apex,
             radius,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: None,
@@ -1211,7 +1372,7 @@ impl Cylinder3DObj {
             base_center,
             top_center,
             radius,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: None,
@@ -1242,7 +1403,7 @@ impl Torus3DObj {
             center,
             r_major,
             r_minor,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
         }
@@ -1272,7 +1433,7 @@ impl MoebiusStripObj {
             center,
             radius,
             width_r,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
         }
@@ -1326,6 +1487,10 @@ pub struct Surface3DObj {
     /// Si es true, `expr` es una expresión compleja f(z) y la altura z = |f(z)|.
     #[serde(default)]
     pub is_complex: bool,
+    /// Compatibilidad para superficies explícitas/complex de schema v1, cuyo
+    /// resultado se dibujaba como `(x, f(x,y), y)`.
+    #[serde(default)]
+    pub legacy_axis_swap: bool,
     #[serde(skip)]
     pub cached_grid: Arc<RwLock<SurfaceSamples>>,
     #[serde(skip)]
@@ -1360,6 +1525,7 @@ impl Clone for Surface3DObj {
             solid: self.solid,
             mesh_res: self.mesh_res,
             is_complex: self.is_complex,
+            legacy_axis_swap: self.legacy_axis_swap,
             cached_grid: self.cached_grid.clone(),
             cached_key: self.cached_key.clone(),
         }
@@ -1393,6 +1559,7 @@ impl PartialEq for Surface3DObj {
             && self.solid == other.solid
             && self.mesh_res == other.mesh_res
             && self.is_complex == other.is_complex
+            && self.legacy_axis_swap == other.legacy_axis_swap
     }
 }
 
@@ -1424,6 +1591,7 @@ impl Surface3DObj {
             solid: false,
             mesh_res: 30,
             is_complex: false,
+            legacy_axis_swap: false,
             cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
         }
@@ -1462,6 +1630,7 @@ impl Surface3DObj {
             solid: false,
             mesh_res: 30,
             is_complex: false,
+            legacy_axis_swap: false,
             cached_grid: Arc::new(RwLock::new(SurfaceSamples::new())),
             cached_key: Arc::new(RwLock::new(None)),
         }
@@ -1481,6 +1650,16 @@ impl Surface3DObj {
         let mut s = Self::new(expr, xr, yr);
         s.is_complex = true;
         s
+    }
+
+    /// Convierte una muestra explícita `(x, y, f(x,y))` a coordenadas de
+    /// documento, preservando la orientación de archivos schema v1.
+    pub fn explicit_sample_point(&self, x: f64, y: f64, value: f64) -> Point3D {
+        if self.legacy_axis_swap {
+            Point3D::new(x, value, y)
+        } else {
+            Point3D::new(x, y, value)
+        }
     }
 
     /// Invalidate any cached grid for this surface.
@@ -1520,7 +1699,7 @@ impl EllipseObj {
             rx,
             ry,
             angle: 0.0,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
@@ -1700,6 +1879,10 @@ impl ParametricCurve2DObj {
     }
 }
 
+fn default_curve_3d_parameter() -> String {
+    "t".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ParametricCurve3DObj {
     pub id: ObjectId,
@@ -1707,6 +1890,8 @@ pub struct ParametricCurve3DObj {
     pub expr_x: String,
     pub expr_y: String,
     pub expr_z: String,
+    #[serde(default = "default_curve_3d_parameter")]
+    pub parameter: String,
     pub t_min: f64,
     pub t_max: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1730,6 +1915,7 @@ impl Clone for ParametricCurve3DObj {
             expr_x: self.expr_x.clone(),
             expr_y: self.expr_y.clone(),
             expr_z: self.expr_z.clone(),
+            parameter: self.parameter.clone(),
             t_min: self.t_min,
             t_max: self.t_max,
             t_min_expr: self.t_min_expr.clone(),
@@ -1750,6 +1936,7 @@ impl PartialEq for ParametricCurve3DObj {
             && self.expr_x == other.expr_x
             && self.expr_y == other.expr_y
             && self.expr_z == other.expr_z
+            && self.parameter == other.parameter
             && self.t_min == other.t_min
             && self.t_max == other.t_max
             && self.t_min_expr == other.t_min_expr
@@ -1768,6 +1955,7 @@ impl ParametricCurve3DObj {
             expr_x: expr_x.to_string(),
             expr_y: expr_y.to_string(),
             expr_z: expr_z.to_string(),
+            parameter: default_curve_3d_parameter(),
             t_min,
             t_max,
             t_min_expr: None,
@@ -1781,6 +1969,11 @@ impl ParametricCurve3DObj {
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
         self.label = l.into();
+        self
+    }
+
+    pub fn with_parameter(mut self, parameter: impl Into<String>) -> Self {
+        self.parameter = parameter.into();
         self
     }
 
@@ -2209,7 +2402,7 @@ pub type Curve2DSamples = Vec<(f64, f64)>;
 /// Cached samples for a 3D parametric curve.
 pub type Curve3DSamples = Vec<(f64, f64, f64)>;
 
-/// Cached world-space point grid for a 3D surface.
+/// Cached world-space point grid for a 3D surface in document `(x, y, z)` order.
 pub type SurfaceSamples = Vec<Vec<Point3D>>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2228,6 +2421,7 @@ pub struct FunctionCacheKey {
 pub struct ParametricCacheKey {
     pub t_domain: (f64, f64),
     pub steps: usize,
+    pub expr_hash: u64,
     pub variables_hash: u64,
 }
 
@@ -2746,7 +2940,7 @@ impl Fractal2DObj {
         self
     }
     pub fn with_max_iter(mut self, max_iter: u32) -> Self {
-        self.max_iter = max_iter;
+        self.max_iter = max_iter.min(grafito_geometry::fractals::MAX_FRACTAL_ITER);
         self
     }
 }
@@ -2763,6 +2957,115 @@ pub struct HyperSurface4DObj {
     pub visible: bool,
     pub width: f32,
 }
+
+/// Selector y presentación de un politopo regular convexo de cuatro dimensiones.
+///
+/// La topología canónica se deriva desde [`RegularPolychoron`] al renderizarse;
+/// nunca se duplica en documentos persistidos.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegularPolychoron4DObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub kind: RegularPolychoron,
+    pub scale: f64,
+    /// Ángulos para los planos indicados por [`Self::ROTATION_PLANES`].
+    pub rotation_angles: [f64; 6],
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+
+impl RegularPolychoron4DObj {
+    /// Orden canónico de los seis planos coordenados de SO(4):
+    /// `xy`, `xz`, `xw`, `yz`, `yw`, `zw`.
+    pub const ROTATION_PLANES: [(usize, usize); 6] =
+        [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+
+    /// Crea un selector de politopo 4D con una presentación renderizable por defecto.
+    pub fn new(kind: RegularPolychoron) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            kind,
+            scale: 1.0,
+            rotation_angles: [0.0; 6],
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 1.0)),
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+}
+
+/// Selector y presentación de una familia regular genérica en R^n.
+///
+/// La topología se deriva desde [`RegularPolytopeFamily`] al renderizarse. Para
+/// una dimensión `n`, `rotation_angles` sigue el orden lexicográfico de todos
+/// los planos coordenados: `(0, 1)`, `(0, 2)`, ..., `(0, n - 1)`, `(1, 2)`,
+/// ..., `(n - 2, n - 1)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RegularPolytopeNDObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub family: RegularPolytopeFamily,
+    pub dimension: usize,
+    pub scale: f64,
+    pub rotation_angles: Vec<f64>,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+
+impl RegularPolytopeNDObj {
+    /// Devuelve `n(n - 1) / 2` solo para las dimensiones publicadas por geometría.
+    pub fn expected_rotation_angle_count(dimension: usize) -> Option<usize> {
+        if !(MIN_REGULAR_POLYTOPE_DIMENSION..=MAX_REGULAR_POLYTOPE_DIMENSION).contains(&dimension) {
+            return None;
+        }
+
+        Some(dimension * (dimension - 1) / 2)
+    }
+
+    /// Itera los planos coordenados en el mismo orden que `rotation_angles`.
+    pub fn rotation_plane_pairs(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        (0..self.dimension)
+            .flat_map(move |first| ((first + 1)..self.dimension).map(move |second| (first, second)))
+    }
+
+    /// Crea un selector N-D con ángulos nulos para cada plano válido publicado.
+    ///
+    /// Las dimensiones fuera del intervalo admitido conservan un vector vacío
+    /// para no reservar según una entrada inválida; `Document::try_add_object`
+    /// las rechaza antes de crear topología.
+    pub fn new(family: RegularPolytopeFamily, dimension: usize) -> Self {
+        let rotation_angle_count = Self::expected_rotation_angle_count(dimension).unwrap_or(0);
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            family,
+            dimension,
+            scale: 1.0,
+            rotation_angles: vec![0.0; rotation_angle_count],
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 1.0)),
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+}
+
 impl HyperSurface4DObj {
     pub fn hypercube() -> Self {
         Self {
@@ -2868,6 +3171,8 @@ pub struct HistogramObj {
 }
 impl HistogramObj {
     pub fn new(data: Vec<f64>, bins: usize) -> Self {
+        let data: Vec<f64> = data.into_iter().filter(|value| value.is_finite()).collect();
+        let bins = bins.clamp(1, grafito_geometry::statistics::MAX_HISTOGRAM_BINS);
         let (x_min, x_max, y_max) = if data.is_empty() {
             (-5.0, 5.0, 5.0)
         } else {
@@ -2878,7 +3183,7 @@ impl HistogramObj {
             } else {
                 (hi - lo) * 0.05
             };
-            let hist = grafito_geometry::statistics::histogram(&data, bins.max(1));
+            let hist = grafito_geometry::statistics::histogram(&data, bins);
             let max_count = hist.iter().map(|(_, _, c)| *c).fold(0.0, f64::max);
             (lo - margin, hi + margin, max_count.max(1.0))
         };
@@ -2891,7 +3196,7 @@ impl HistogramObj {
             x_max,
             y_min: 0.0,
             y_max,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.4)),
@@ -2923,6 +3228,9 @@ pub struct ScatterPlotObj {
     pub color: Color,
     pub visible: bool,
     pub point_size: f32,
+    /// Tabla local de la que se creó este gráfico, si existe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_data: Option<ObjectId>,
 }
 impl ScatterPlotObj {
     pub fn new(xs: Vec<f64>, ys: Vec<f64>) -> Self {
@@ -2938,6 +3246,7 @@ impl ScatterPlotObj {
             color: Color::BLUE,
             visible: true,
             point_size: 5.0,
+            source_data: None,
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -2950,6 +3259,81 @@ impl ScatterPlotObj {
         self.y_min = y.0;
         self.y_max = y.1;
         self
+    }
+
+    /// Mantiene una referencia semántica a la tabla de la que provienen los puntos.
+    pub fn linked_to(mut self, source_data: ObjectId) -> Self {
+        self.source_data = Some(source_data);
+        self
+    }
+}
+
+/// Tabla local de dos columnas para análisis y ajustes, sin ruta de origen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataTableObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub x_name: String,
+    pub y_name: String,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+    pub color: Color,
+    pub visible: bool,
+}
+
+impl DataTableObj {
+    pub fn new(
+        x_name: impl Into<String>,
+        y_name: impl Into<String>,
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+    ) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            x_name: x_name.into(),
+            y_name: y_name.into(),
+            xs,
+            ys,
+            color: Color::BLUE,
+            // La tabla alimenta análisis y no tiene geometría de canvas.
+            visible: false,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+}
+
+/// Enlace persistente entre una función ajustada y su fuente local de datos.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FitMetadata {
+    pub source: ObjectId,
+    pub kind: FitKind,
+    pub coefficients: Vec<f64>,
+    #[serde(default)]
+    pub x_offset: f64,
+    #[serde(default = "default_fit_metadata_x_scale")]
+    pub x_scale: f64,
+    pub diagnostics: FitDiagnostics,
+}
+
+fn default_fit_metadata_x_scale() -> f64 {
+    1.0
+}
+
+impl FitMetadata {
+    pub fn from_result(source: ObjectId, result: FitResult) -> Self {
+        Self {
+            source,
+            kind: result.kind,
+            coefficients: result.coefficients,
+            x_offset: result.x_offset,
+            x_scale: result.x_scale,
+            diagnostics: result.diagnostics,
+        }
     }
 }
 
@@ -2981,7 +3365,7 @@ impl BoxPlotObj {
             x_max: 5.0,
             y_min: -5.0,
             y_max: 5.0,
-            color: Color::BLACK,
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 1.5,
             fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.3)),
@@ -3155,11 +3539,46 @@ mod tests {
             Point3D::new(1.0, 0.0, 0.0),
         ));
         let transformed = GeoObject::Transformed(TransformedObj::new(line.clone(), "z"));
+        let polychoron = GeoObject::RegularPolychoron4D(RegularPolychoron4DObj::new(
+            grafito_geometry::RegularPolychoron::Tesseract,
+        ));
+        let polytope = GeoObject::RegularPolytopeND(RegularPolytopeNDObj::new(
+            grafito_geometry::RegularPolytopeFamily::Hypercube,
+            5,
+        ));
 
         assert_eq!(point.render_space(), RenderSpace::D2);
         assert_eq!(plane.render_space(), RenderSpace::D3);
         assert_eq!(line.render_space(), RenderSpace::D3);
         assert_eq!(transformed.render_space(), RenderSpace::D3);
+        assert_eq!(polychoron.render_space(), RenderSpace::D3);
+        assert_eq!(polytope.render_space(), RenderSpace::D3);
         assert!(plane.is_3d());
+        assert!(polychoron.is_3d());
+        assert!(polytope.is_3d());
+    }
+
+    #[test]
+    fn regular_polytope_rotation_angles_use_canonical_coordinate_plane_order() {
+        assert_eq!(
+            RegularPolychoron4DObj::ROTATION_PLANES,
+            [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        );
+
+        let polytope =
+            RegularPolytopeNDObj::new(grafito_geometry::RegularPolytopeFamily::Hypercube, 4);
+        assert_eq!(polytope.rotation_angles.len(), 6);
+        assert_eq!(
+            polytope.rotation_plane_pairs().collect::<Vec<_>>(),
+            vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        );
+    }
+
+    #[test]
+    fn histogram_constructor_discards_non_finite_values_from_bounds_and_data() {
+        let histogram = HistogramObj::new(vec![1.0, f64::NAN, f64::INFINITY, 3.0], 2);
+
+        assert_eq!(histogram.data, vec![1.0, 3.0]);
+        assert!(histogram.x_min.is_finite() && histogram.x_max.is_finite());
     }
 }

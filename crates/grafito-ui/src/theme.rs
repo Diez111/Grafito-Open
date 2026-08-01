@@ -24,6 +24,7 @@
 //! El test de coherencia en `tests.rs` falla si encuentra
 //! `Color32::from_rgb(` en cualquier archivo que no sea este.
 
+use crate::tokens::{ANIM_MICRO, RADIUS_LG, RADIUS_MD};
 use egui::{Color32, Context};
 
 #[derive(Debug, Clone, Copy)]
@@ -48,6 +49,20 @@ pub struct Theme {
     pub input_text: Color32,
     pub button_bg: Color32,
     pub button_hover: Color32,
+
+    // ── Teclado matemático ──
+    pub keyboard_tab_active_bg: Color32,
+    pub keyboard_tab_active_text: Color32,
+    pub keyboard_tab_inactive: Color32,
+    pub keyboard_key_bg: Color32,
+    pub keyboard_key_hover: Color32,
+    pub keyboard_key_border: Color32,
+    pub keyboard_key_text: Color32,
+    pub keyboard_enter_bg: Color32,
+    pub keyboard_enter_hover: Color32,
+    pub keyboard_enter_text: Color32,
+    pub keyboard_delete_hover: Color32,
+    pub keyboard_delete_hover_text: Color32,
 
     // ── Texto ──
     pub text_primary: Color32,
@@ -95,7 +110,59 @@ pub struct Theme {
     pub hover_overlay: Color32,
 }
 
+/// Rol visual de una tecla del teclado matemático.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardKeyRole {
+    /// Tecla matemática ordinaria.
+    Standard,
+    /// Tecla que borra el último carácter.
+    Delete,
+    /// Tecla que ejecuta la entrada.
+    Enter,
+}
+
+/// Colores efectivos que el teclado pinta para un estado interactivo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyboardKeyVisuals {
+    /// Fondo de la tecla.
+    pub background: Color32,
+    /// Texto de la tecla.
+    pub text: Color32,
+    /// Borde visible; `Stroke::NONE` para Enter.
+    pub border: egui::Stroke,
+}
+
 impl Theme {
+    /// Resuelve los mismos colores que debe usar el render del teclado.
+    pub fn keyboard_key_visuals(&self, role: KeyboardKeyRole, hovered: bool) -> KeyboardKeyVisuals {
+        match (role, hovered) {
+            (KeyboardKeyRole::Enter, false) => KeyboardKeyVisuals {
+                background: self.keyboard_enter_bg,
+                text: self.keyboard_enter_text,
+                border: egui::Stroke::NONE,
+            },
+            (KeyboardKeyRole::Enter, true) => KeyboardKeyVisuals {
+                background: self.keyboard_enter_hover,
+                text: self.keyboard_enter_text,
+                border: egui::Stroke::NONE,
+            },
+            (KeyboardKeyRole::Delete, true) => KeyboardKeyVisuals {
+                background: self.keyboard_delete_hover,
+                text: self.keyboard_delete_hover_text,
+                border: egui::Stroke::new(1.0, self.keyboard_key_border),
+            },
+            (KeyboardKeyRole::Standard | KeyboardKeyRole::Delete, hovered) => KeyboardKeyVisuals {
+                background: if hovered {
+                    self.keyboard_key_hover
+                } else {
+                    self.keyboard_key_bg
+                },
+                text: self.keyboard_key_text,
+                border: egui::Stroke::new(1.0, self.keyboard_key_border),
+            },
+        }
+    }
+
     pub fn apply(&self, ctx: &Context) {
         let is_dark = self.canvas_bg.r() < 100;
         let mut visuals = if is_dark {
@@ -111,51 +178,47 @@ impl Theme {
         visuals.hyperlink_color = self.accent;
         visuals.selection.bg_fill = self.selection_bg;
         visuals.selection.stroke = egui::Stroke::new(1.5, self.accent);
-        visuals.window_rounding = egui::Rounding::same(16.0);
-        visuals.menu_rounding = egui::Rounding::same(10.0);
+        visuals.window_rounding = egui::Rounding::same(RADIUS_LG);
+        visuals.menu_rounding = egui::Rounding::same(RADIUS_MD);
 
-        // Premium window aesthetics with soft, large floating shadows
+        // Elevation separates floating controls without obscuring the canvas.
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 12.0),
-            blur: 32.0,
-            spread: -2.0,
-            color: Color32::from_black_alpha(if is_dark { 120 } else { 30 }),
+            offset: egui::vec2(0.0, 10.0),
+            blur: 24.0,
+            spread: -3.0,
+            color: Color32::from_black_alpha(if is_dark { 100 } else { 26 }),
         };
         visuals.popup_shadow = visuals.window_shadow;
 
-        // Widget visuals - Modern soft rounding and subtle borders
+        // The chrome is compact, but each interaction state remains visible.
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.noninteractive.rounding = egui::Rounding::same(10.0);
+        visuals.widgets.noninteractive.rounding = egui::Rounding::same(RADIUS_MD);
 
         visuals.widgets.inactive.bg_fill = self.button_bg;
-        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, Color32::TRANSPARENT);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.separator);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.inactive.rounding = egui::Rounding::same(10.0);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(RADIUS_MD);
 
         visuals.widgets.hovered.bg_fill = self.button_hover;
-        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(
-            1.0,
-            Color32::from_black_alpha(if is_dark { 40 } else { 10 }),
-        );
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(10.0);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(RADIUS_MD);
 
         visuals.widgets.active.bg_fill = self.selection_bg;
         visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.accent);
-        visuals.widgets.active.rounding = egui::Rounding::same(10.0);
+        visuals.widgets.active.rounding = egui::Rounding::same(RADIUS_MD);
 
         ctx.set_visuals(visuals);
 
-        // Spacing: Restore to original more compact sizes to avoid breaking layout
         ctx.style_mut(|s| {
-            s.animation_time = 0.15;
+            s.animation_time = ANIM_MICRO / 1_000.0;
             s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            s.spacing.button_padding = egui::vec2(8.0, 4.0);
+            s.spacing.button_padding = egui::vec2(8.0, 5.0);
             s.spacing.menu_margin = egui::Margin::same(6.0);
-            s.spacing.window_margin = egui::Margin::same(8.0);
+            s.spacing.window_margin = egui::Margin::same(10.0);
             s.spacing.indent = 20.0;
             s.spacing.interact_size = egui::vec2(36.0, 24.0);
         });
@@ -194,19 +257,34 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     grid_minor: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(26, 26, 30, 240),
-    toolbar_bg: Color32::from_rgba_unmultiplied(26, 26, 30, 240),
-    input_bar_bg: Color32::from_rgba_unmultiplied(32, 32, 40, 240),
-    sidebar_bg: Color32::from_rgba_unmultiplied(30, 30, 38, 240),
-    sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(94, 139, 255, 50),
+    panel_bg: Color32::from_rgba_unmultiplied(26, 29, 37, 228),
+    toolbar_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 236),
+    input_bar_bg: Color32::from_rgba_unmultiplied(32, 38, 52, 240),
+    sidebar_bg: Color32::from_rgba_unmultiplied(24, 28, 38, 228),
+    sidebar_tab_active_bg: Color32::from_rgb(40, 68, 130),
     sidebar_tab_inactive: Color32::from_gray(130),
-    sidebar_tab_active: Color32::from_rgb(94, 139, 255),
+    sidebar_tab_active: Color32::from_rgb(185, 208, 255),
     status_bar_bg: Color32::from_rgb(22, 22, 26),
     separator: Color32::from_rgb(55, 55, 60),
     input_bg: Color32::from_rgb(20, 20, 24),
     input_text: Color32::from_rgb(240, 240, 245),
     button_bg: Color32::from_rgb(34, 34, 38),
     button_hover: Color32::from_rgb(48, 48, 54),
+
+    // Teclado matemático: los estados seleccionados e inactivos mantienen
+    // contraste suficiente contra el panel oscuro.
+    keyboard_tab_active_bg: Color32::from_rgb(47, 80, 160),
+    keyboard_tab_active_text: Color32::from_rgb(245, 248, 255),
+    keyboard_tab_inactive: Color32::from_rgb(174, 180, 195),
+    keyboard_key_bg: Color32::from_rgb(40, 43, 52),
+    keyboard_key_hover: Color32::from_rgb(58, 64, 79),
+    keyboard_key_border: Color32::from_rgb(135, 145, 165),
+    keyboard_key_text: Color32::from_rgb(240, 242, 248),
+    keyboard_enter_bg: Color32::from_rgb(60, 102, 194),
+    keyboard_enter_hover: Color32::from_rgb(64, 107, 200),
+    keyboard_enter_text: Color32::from_rgb(245, 248, 255),
+    keyboard_delete_hover: Color32::from_rgb(90, 18, 28),
+    keyboard_delete_hover_text: Color32::from_rgb(240, 242, 248),
 
     // Texto
     text_primary: Color32::from_rgb(235, 235, 240),
@@ -216,12 +294,12 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 
     // Acentos y estados
     accent: Color32::from_rgb(94, 139, 255),
-    accent_muted: Color32::from_rgba_premultiplied(94, 139, 255, 90),
+    accent_muted: Color32::from_rgb(37, 55, 92),
     accent_strong: Color32::from_rgb(120, 165, 255),
     success: Color32::from_rgb(46, 212, 122),
     warning: Color32::from_rgb(255, 184, 0),
     danger: Color32::from_rgb(255, 74, 90),
-    selection_bg: Color32::from_rgba_premultiplied(94, 139, 255, 40),
+    selection_bg: Color32::from_rgb(47, 76, 145),
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
@@ -251,7 +329,7 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     ghost_preview: Color32::from_rgba_premultiplied(94, 139, 255, 120),
     newly_created_glow: Color32::from_rgba_premultiplied(94, 139, 255, 180),
     selection_outline: Color32::from_rgb(94, 139, 255),
-    hover_overlay: Color32::from_rgba_premultiplied(255, 255, 255, 12),
+    hover_overlay: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 });
 
 /// Tema claro. Ver `DARK`.
@@ -263,10 +341,10 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     grid_minor: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
-    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 240),
-    input_bar_bg: Color32::from_rgba_unmultiplied(245, 246, 250, 240),
-    sidebar_bg: Color32::from_rgba_unmultiplied(250, 250, 252, 240),
+    panel_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 228),
+    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 236),
+    input_bar_bg: Color32::from_rgba_unmultiplied(245, 247, 252, 242),
+    sidebar_bg: Color32::from_rgba_unmultiplied(248, 250, 255, 230),
     sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
     sidebar_tab_inactive: Color32::from_gray(110),
     sidebar_tab_active: Color32::from_rgb(38, 99, 255),
@@ -277,6 +355,20 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     button_bg: Color32::from_rgb(244, 244, 248),
     button_hover: Color32::from_rgb(232, 232, 238),
 
+    // Teclado matemático
+    keyboard_tab_active_bg: Color32::from_rgb(38, 99, 255),
+    keyboard_tab_active_text: Color32::WHITE,
+    keyboard_tab_inactive: Color32::from_rgb(79, 84, 96),
+    keyboard_key_bg: Color32::from_rgb(255, 255, 255),
+    keyboard_key_hover: Color32::from_rgb(230, 235, 245),
+    keyboard_key_border: Color32::from_rgb(105, 115, 135),
+    keyboard_key_text: Color32::from_rgb(35, 38, 45),
+    keyboard_enter_bg: Color32::from_rgb(20, 70, 220),
+    keyboard_enter_hover: Color32::from_rgb(36, 97, 252),
+    keyboard_enter_text: Color32::WHITE,
+    keyboard_delete_hover: Color32::from_rgb(255, 215, 220),
+    keyboard_delete_hover_text: Color32::from_rgb(35, 38, 45),
+
     // Texto
     text_primary: Color32::from_rgb(40, 40, 45),
     text_secondary: Color32::from_gray(80),
@@ -284,13 +376,13 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     text_label: Color32::from_gray(120),
 
     // Acentos y estados
-    accent: Color32::from_rgb(38, 99, 255),
-    accent_muted: Color32::from_rgba_premultiplied(38, 99, 255, 70),
+    accent: Color32::from_rgb(36, 97, 252),
+    accent_muted: Color32::from_rgba_unmultiplied(38, 99, 255, 70),
     accent_strong: Color32::from_rgb(20, 70, 220),
-    success: Color32::from_rgb(20, 175, 90),
-    warning: Color32::from_rgb(220, 150, 0),
-    danger: Color32::from_rgb(235, 50, 65),
-    selection_bg: Color32::from_rgba_premultiplied(38, 99, 255, 30),
+    success: Color32::from_rgb(0, 110, 60),
+    warning: Color32::from_rgb(140, 85, 0),
+    danger: Color32::from_rgb(190, 30, 50),
+    selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
@@ -365,6 +457,18 @@ mod tests {
         let _ = t.grid_line;
         let _ = t.panel_bg;
         let _ = t.input_bar_bg;
+        let _ = t.keyboard_tab_active_bg;
+        let _ = t.keyboard_tab_active_text;
+        let _ = t.keyboard_tab_inactive;
+        let _ = t.keyboard_key_bg;
+        let _ = t.keyboard_key_hover;
+        let _ = t.keyboard_key_border;
+        let _ = t.keyboard_key_text;
+        let _ = t.keyboard_enter_bg;
+        let _ = t.keyboard_enter_hover;
+        let _ = t.keyboard_enter_text;
+        let _ = t.keyboard_delete_hover;
+        let _ = t.keyboard_delete_hover_text;
         let _ = t.sidebar_bg;
         let _ = t.status_bar_bg;
         let _ = t.text_primary;
@@ -399,5 +503,117 @@ mod tests {
         let _ = t.newly_created_glow;
         let _ = t.selection_outline;
         let _ = t.hover_overlay;
+    }
+
+    fn relative_luminance(color: Color32) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+
+        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+    }
+
+    fn contrast_ratio(foreground: Color32, background: Color32) -> f64 {
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    fn assert_keyboard_state_contrast(theme: &Theme) {
+        assert!(
+            contrast_ratio(theme.keyboard_tab_active_text, theme.keyboard_tab_active_bg) >= 4.5,
+            "active tab text contrast is {}",
+            contrast_ratio(theme.keyboard_tab_active_text, theme.keyboard_tab_active_bg),
+        );
+        assert!(
+            contrast_ratio(theme.keyboard_tab_inactive, theme.panel_bg) >= 4.5,
+            "inactive tab text contrast is {}",
+            contrast_ratio(theme.keyboard_tab_inactive, theme.panel_bg),
+        );
+
+        for role in [
+            KeyboardKeyRole::Standard,
+            KeyboardKeyRole::Delete,
+            KeyboardKeyRole::Enter,
+        ] {
+            for hovered in [false, true] {
+                let state = theme.keyboard_key_visuals(role, hovered);
+                let name = format!("{role:?} {}", if hovered { "hover" } else { "normal" });
+                assert!(
+                    contrast_ratio(state.text, state.background) >= 4.5,
+                    "{name} text contrast is {}",
+                    contrast_ratio(state.text, state.background),
+                );
+                let (boundary, boundary_kind) = if state.border.width > 0.0 {
+                    (
+                        contrast_ratio(state.border.color, theme.panel_bg),
+                        "border-to-panel",
+                    )
+                } else {
+                    (
+                        contrast_ratio(state.background, theme.panel_bg),
+                        "fill-to-panel",
+                    )
+                };
+                assert!(
+                    boundary >= 3.0,
+                    "{name} {boundary_kind} contrast is {boundary}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_rendered_states_have_accessible_contrast() {
+        assert_keyboard_state_contrast(&DARK);
+        assert_keyboard_state_contrast(&LIGHT);
+    }
+
+    #[test]
+    fn dark_interactive_surfaces_keep_text_readable() {
+        assert!(contrast_ratio(DARK.text_primary, DARK.selection_bg) >= 4.5);
+        assert!(contrast_ratio(DARK.text_primary, DARK.accent_muted) >= 4.5);
+        assert!(contrast_ratio(DARK.text_secondary, DARK.toolbar_bg) >= 4.5);
+    }
+
+    #[test]
+    fn light_status_colors_have_readable_contrast() {
+        assert!(contrast_ratio(LIGHT.success, LIGHT.panel_bg) >= 4.5);
+        assert!(contrast_ratio(LIGHT.warning, LIGHT.panel_bg) >= 4.5);
+        assert!(contrast_ratio(LIGHT.danger, LIGHT.panel_bg) >= 4.5);
+    }
+
+    #[test]
+    fn chrome_surfaces_keep_depth_and_readable_text() {
+        for theme in [&*DARK, &*LIGHT] {
+            assert!(theme.panel_bg.a() <= 232);
+            assert!(theme.toolbar_bg.a() <= 236);
+            assert!(theme.sidebar_bg.a() <= 232);
+            assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
+            assert!(contrast_ratio(theme.text_secondary, theme.toolbar_bg) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn theme_uses_short_state_transition_timing() {
+        let ctx = Context::default();
+        DARK.apply(&ctx);
+
+        assert_eq!(ctx.style().animation_time, 0.18);
+    }
+
+    #[test]
+    fn transparent_interaction_tokens_are_not_declared_as_premultiplied() {
+        let source = include_str!("theme.rs");
+
+        assert!(
+            source.contains("hover_overlay: Color32::from_rgba_unmultiplied(255, 255, 255, 12)")
+        );
+        assert!(source.contains("selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30)"));
     }
 }

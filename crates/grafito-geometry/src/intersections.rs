@@ -25,6 +25,10 @@ pub fn line_line(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> Intersection
     let dx2 = b2.x - b1.x;
     let dy2 = b2.y - b1.y;
 
+    if dx1.hypot(dy1) < 1e-12 || dx2.hypot(dy2) < 1e-12 {
+        return IntersectionResult::None;
+    }
+
     let det = dx1 * dy2 - dy1 * dx2;
 
     if det.abs() < 1e-12 {
@@ -53,6 +57,10 @@ pub fn line_circle(p1: Point2, p2: Point2, center: Point2, radius: f64) -> Inter
     let b = 2.0 * (fx * dx + fy * dy);
     let c = fx * fx + fy * fy - radius * radius;
 
+    if !radius.is_finite() || radius <= 0.0 || a < 1e-24 {
+        return IntersectionResult::None;
+    }
+
     let discriminant = b * b - 4.0 * a * c;
 
     if discriminant < -1e-12 {
@@ -76,6 +84,10 @@ pub fn line_circle(p1: Point2, p2: Point2, center: Point2, radius: f64) -> Inter
 
 /// Intersection of two circles (c1, r1) and (c2, r2).
 pub fn circle_circle(c1: Point2, r1: f64, c2: Point2, r2: f64) -> IntersectionResult {
+    if !r1.is_finite() || !r2.is_finite() || r1 <= 0.0 || r2 <= 0.0 {
+        return IntersectionResult::None;
+    }
+
     let dx = c2.x - c1.x;
     let dy = c2.y - c1.y;
     let d = (dx * dx + dy * dy).sqrt();
@@ -118,9 +130,16 @@ pub fn segment_segment(a1: Point2, a2: Point2, b1: Point2, b2: Point2) -> Inters
             }
         }
         IntersectionResult::Infinite => {
-            let t_start = project_point_on_line(b1, a1, a2).max(0.0);
-            let t_end = project_point_on_line(b2, a1, a2).min(1.0);
-            if t_start < t_end {
+            let tb1 = project_point_on_line(b1, a1, a2);
+            let tb2 = project_point_on_line(b2, a1, a2);
+            let t_start = tb1.min(tb2).max(0.0);
+            let t_end = tb1.max(tb2).min(1.0);
+            if (t_start - t_end).abs() < 1e-12 {
+                IntersectionResult::One(Point2::new(
+                    a1.x + t_start * (a2.x - a1.x),
+                    a1.y + t_start * (a2.y - a1.y),
+                ))
+            } else if t_start < t_end {
                 let p1 = Point2::new(
                     a1.x + t_start * (a2.x - a1.x),
                     a1.y + t_start * (a2.y - a1.y),
@@ -167,7 +186,7 @@ pub fn function_line(
     x_min: f64,
     x_max: f64,
 ) -> Vec<Point2> {
-    find_roots(
+    let mut roots = find_roots(
         &|x| {
             let fy = crate::expr::evaluate(expr, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
             if fy.is_nan() {
@@ -177,7 +196,11 @@ pub fn function_line(
         },
         x_min,
         x_max,
-    )
+    );
+    for point in &mut roots {
+        point.y = slope * point.x + intercept;
+    }
+    roots
 }
 
 /// Intersection of two functions f(x) and g(x).
@@ -361,5 +384,53 @@ mod tests {
             Point2::new(3.0, 0.0),
         );
         assert!(matches!(result, IntersectionResult::None));
+    }
+
+    #[test]
+    fn function_line_returns_the_geometric_y_coordinate() {
+        let intersections = function_line("x", 2.0, 1.0, -2.0, 1.0);
+        assert_eq!(intersections.len(), 1);
+        assert!((intersections[0].x + 1.0).abs() < 1e-6);
+        assert!((intersections[0].y + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collinear_segments_handle_reversed_overlap_and_endpoint_touch() {
+        let overlap = segment_segment(
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(3.0, 0.0),
+            Point2::new(1.0, 0.0),
+        );
+        assert!(matches!(overlap, IntersectionResult::Two(_, _)));
+
+        let touch = segment_segment(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(2.0, 0.0),
+        );
+        assert!(matches!(touch, IntersectionResult::One(p) if (p.x - 1.0).abs() < 1e-12));
+    }
+
+    #[test]
+    fn degenerate_line_circle_input_returns_no_intersection() {
+        assert!(matches!(
+            line_circle(
+                Point2::new(0.0, 0.0),
+                Point2::new(0.0, 0.0),
+                Point2::new(0.0, 0.0),
+                1.0,
+            ),
+            IntersectionResult::None
+        ));
+    }
+
+    #[test]
+    fn degenerate_circle_input_returns_no_intersection() {
+        assert!(matches!(
+            circle_circle(Point2::new(0.0, 0.0), 0.0, Point2::new(1.0, 0.0), 1.0),
+            IntersectionResult::None
+        ));
     }
 }

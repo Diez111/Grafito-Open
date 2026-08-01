@@ -55,13 +55,15 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 
 ### Prerequisites
 
-- Rust 1.78 or later
-- System dependencies: `libgmp-dev`, `libmpfr-dev`, `libmpc-dev`, `m4`
+- Rust 1.81 or later
+- A C toolchain (Debian/Ubuntu: `build-essential`)
+- System dependencies: `libgmp-dev`, `libmpfr-dev`, `libmpc-dev`, `m4`, `pkg-config`, `libdbus-1-dev`
 - GPU with Vulkan, Metal, or DX12 support (for GPU compute shaders)
 
 ### Building
 
 ```bash
+sudo apt install build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
 git clone https://github.com/Diez111/Grafito.git
 cd grafito
 cargo build --release
@@ -97,9 +99,9 @@ cargo test --workspace
 
 ## Security
 
-- Report security vulnerabilities privately via email (see [SECURITY.md](.github/SECURITY.md))
+- Report security vulnerabilities privately via email (see [SECURITY.md](SECURITY.md))
 - Do not commit secrets, API keys, or credentials
-- All commits must be GPG-signed
+- Signing and branch-protection requirements are maintained in GitHub repository settings.
 
 ## Questions?
 

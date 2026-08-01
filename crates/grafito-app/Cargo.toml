@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "grafito"
@@ -21,6 +22,8 @@ grafito-geometry.workspace = true
 grafito-command.workspace = true
 grafito-ui.workspace = true
 grafito-render.workspace = true
+grafito-assistant.workspace = true
+grafito-assistant-types.workspace = true
 grafito-complex = { path = "../grafito-complex" }
 
 eframe = { workspace = true, features = ["wgpu"] }
@@ -36,14 +39,27 @@ log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
 image.workspace = true
+ab_glyph = "0.2.32"
+tiny-skia = "0.11.4"
 serde_json.workspace = true
 serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
 rfd.workspace = true
+keyring.workspace = true
 
-puffin = { version = "0.19", optional = true }
-puffin_http = { version = "0.16", optional = true }
+# This maintained profiler pair establishes the workspace Rust 1.81 minimum.
+puffin = { version = "=0.19.1", optional = true }
+puffin_http = { version = "=0.16.1", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
-profile = ["puffin", "puffin_http"]
+profile = ["puffin", "puffin_http", "eframe/puffin"]
+
+[build-dependencies]
+winresource = { version = "=0.1.31", default-features = false }

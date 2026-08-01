@@ -18,6 +18,7 @@ impl RTreeObject for SpatialItem {
 #[derive(Clone, Default)]
 pub struct SpatialIndex {
     tree: RTree<SpatialItem>,
+    unbounded: Vec<ObjectId>,
 }
 
 impl std::fmt::Debug for SpatialIndex {
@@ -28,7 +29,10 @@ impl std::fmt::Debug for SpatialIndex {
 
 impl SpatialIndex {
     pub fn new() -> Self {
-        Self { tree: RTree::new() }
+        Self {
+            tree: RTree::new(),
+            unbounded: Vec::new(),
+        }
     }
 
     pub fn insert(&mut self, id: ObjectId, min_x: f64, min_y: f64, max_x: f64, max_y: f64) {
@@ -37,6 +41,16 @@ impl SpatialIndex {
     }
 
     pub fn rebuild(&mut self, items: Vec<(ObjectId, f64, f64, f64, f64)>) {
+        self.rebuild_with_unbounded(items, Vec::new());
+    }
+
+    /// Rebuilds finite envelopes while retaining objects whose true envelope is
+    /// unbounded. Those IDs are conservatively returned for every point query.
+    pub fn rebuild_with_unbounded(
+        &mut self,
+        items: Vec<(ObjectId, f64, f64, f64, f64)>,
+        mut unbounded: Vec<ObjectId>,
+    ) {
         let sp: Vec<_> = items
             .into_iter()
             .map(|(id, min_x, min_y, max_x, max_y)| SpatialItem {
@@ -45,6 +59,9 @@ impl SpatialIndex {
             })
             .collect();
         self.tree = rstar::RTree::bulk_load(sp);
+        unbounded.sort_unstable();
+        unbounded.dedup();
+        self.unbounded = unbounded;
     }
 
     pub fn candidates(&self, x: f64, y: f64, tolerance: f64) -> Vec<ObjectId> {
@@ -52,18 +69,23 @@ impl SpatialIndex {
             [x - tolerance, y - tolerance],
             [x + tolerance, y + tolerance],
         );
-        self.tree
+        let mut candidates: Vec<_> = self
+            .tree
             .locate_in_envelope_intersecting(&query_aabb)
             .map(|item| item.id)
-            .collect()
+            .collect();
+        candidates.extend(self.unbounded.iter().copied());
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
     }
 
     pub fn len(&self) -> usize {
-        self.tree.size()
+        self.tree.size() + self.unbounded.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tree.size() == 0
+        self.tree.size() == 0 && self.unbounded.is_empty()
     }
 }
 

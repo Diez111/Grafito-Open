@@ -5,6 +5,202 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.2.20-beta] - 2026-07-12
+
+#### Añadido
+- **Escenas de asistente verificadas**: una respuesta puede proponer una escena `grafito-scene` de flor con tallo, centro y pétalos. Grafito la ejecuta y encuadra sobre un documento aislado antes de habilitar su aplicación atómica.
+- **Tetraedro sólido nativo**: `Tetrahedron[x, y, z, edge]` persiste un tetraedro regular por centroide y arista, renderiza cuatro caras triangulares rellenas y seis aristas en GPU y fallback CPU, y queda disponible para propuestas verificadas del asistente.
+- **Politopos regulares 4D y N-D**: Grafito incorpora pentácoron, teseracto, 16-celdas, 24-celdas, 120-celdas y 600-celdas con topología canónica exacta, seis planos de rotación 4D, proyección segura a 3D y renderizado GPU con profundidad. Las familias simplex, hipercubo y politopo cruzado también están disponibles entre 3 y 10 dimensiones.
+- **Comandos y herramientas multidimensionales**: `Pentachoron4D`, `Tesseract4D`, `SixteenCell4D`, `TwentyFourCell4D`, `OneTwentyCell4D`, `SixHundredCell4D`, `SimplexND`, `HypercubeND` y `CrossPolytopeND` se validan antes de crear objetos. El asistente puede proponerlos mediante tarjetas verificadas y la vista 3D incluye un grupo 4D e inspector de rotaciones.
+
+#### Cambiado
+- **Formato de documento**: los guardados actuales usan schema v5 para `Tetrahedron3D` y los politopos tipados 4D/N-D; los envelopes v1 a v4 siguen siendo legibles.
+- **Renderizado multidimensional**: las proyecciones 4D estáticas reutilizan `WorldMesh` y sus streams GPU con profundidad; durante movimiento usan un fallback CPU acotado. La selección usa la misma fase de rotación que el objeto visible.
+
+#### Corregido
+- **Propuestas remotas**: los botones de aplicar o editar aparecen sólo para comandos que pasaron parseo, staging y prueba local de geometría; una sugerencia inválida queda como texto sin capacidad de mutar el documento.
+- **DeepSeek en OpenCode Go**: cada consulta conserva proveedor y modelo de origen, bloquea cambios mientras está en curso, muestra el modelo consultado y transforma fallos de transporte en error visible y toast. El parser acepta contenido final de Chat Completions como texto o bloques de texto y rechaza respuestas parciales o no mostrables.
+- **Flor y render 3D**: las superficies paramétricas tienen fallback CPU mientras GPU prepara la escena; las escenas verificadas ajustan la cámara a todos sus componentes y no componen targets GPU de una clave de escena anterior.
+- **Curve3D y sólidos**: `Curve3D[..., parametro, minimo, maximo]` conserva y evalúa el parámetro declarado. Curvas inválidas y dominios no ordenados fallan antes de mutar; radios, tamaños y alturas 3D deben ser finitos y positivos.
+- **Límites de proyección 4D/N-D**: escalas finitas pero no renderizables se rechazan antes de persistir o mutar el documento, evitando objetos invisibles por desbordamiento.
+- **Edición de propiedades**: las modificaciones de objetos, colores y metadata de variables se aplican en staging validado, sin snapshots ni serialización de documentos durante frames inactivos.
+- **Variables y planilla**: cambios de variables recalculan fórmulas de la planilla y su geometría dependiente antes de confirmar; los valores propiedad de una celda sólo se editan desde esa celda.
+
+## [1.2.19-beta] - 2026-07-12
+
+#### Corregido
+- **Compositor responsive del asistente**: el alto inferior se calcula a partir del contexto, presupuesto y adjuntos acotados, en vez de reutilizar un alto persistido de egui. El editor vuelve a quedar anclado al borde inferior y el transcript recupera toda la altura disponible.
+- **Campo de consulta**: el área de texto tiene una superficie y color explícitos, diferenciados de la franja del compositor para que el placeholder y el texto escrito permanezcan visibles en temas claro y oscuro.
+
+## [1.2.18-beta] - 2026-07-12
+
+#### Corregido
+- **Superficies propuestas por IA**: las superficies vectoriales `Surface3D[(X(x,y), Y(x,y), Z(x,y)), xmin, xmax, ymin, ymax]` ahora aceptan `x,y` como parámetros del parche y se normalizan de forma segura a la representación interna `u,v`. Se rechaza la mezcla ambigua de ambos pares antes de crear un objeto.
+- **Compositor del asistente**: los controles de adjuntar imagen, enviar y cancelar comparten una única fila centrada. Se elimina el botón triangular `Play` duplicado y el contador de presupuesto baja a una línea independiente para no desbordar paneles estrechos.
+
+## [1.2.17-beta] - 2026-07-12
+
+#### Corregido
+- **Superficies paramétricas 3D**: `Surface3D` acepta la forma vectorial `Surface3D[(x(u,v), y(u,v), z(u,v)), umin, umax, vmin, vmax]` que generan las propuestas del asistente, además de la forma con tres expresiones separadas. Las componentes se validan antes de modificar el documento.
+- **Corazón 3D**: la superficie paramétrica del corazón se cubre desde el parser hasta el mesh world-space GPU, evitando que una propuesta válida termine interpretada como una superficie explícita inválida.
+- **Antialiasing 3D**: el target offscreen 3D usa el mismo MSAA que la superficie de eframe y resuelve a una textura muestreable antes de componer. La composición usa alpha premultiplicado, evitando bordes oscuros y doble aplicación de alpha.
+- **Coordenadas 3D finitas**: el render de superficies deja de descartar geometría enfocada por la cámara sólo por superar una cota absoluta de 1000 unidades.
+
+## [1.2.16-beta] - 2026-07-12
+
+#### Corregido
+- **Escenas GPU wire-only**: cubos sin relleno, atractores, líneas y otras escenas 3D que sólo generan aristas inicializan ahora sus recursos, target de profundidad y composición sin depender de triángulos opacos.
+- **Fallback de render fiable**: 2D y 3D conservan el renderizador CPU completo hasta que el callback GPU haya preparado con éxito la clave exacta de documento, cámara, viewport y calidad. Un fallo o una recompilación GPU ya no deja el canvas vacío.
+- **Carga de documentos**: abrir un archivo sustituye e invalida explícitamente el snapshot GPU, caches visuales y protocolo de construcción, evitando reutilizar una escena vacía de un documento anterior.
+- **Asistente gráfico**: `Editar` abre la perspectiva 2D/3D que requiere el comando; `Aplicar` verifica que la geometría propuesta intersecte el viewport y la cámara actual antes de confirmar. Los sólidos básicos aceptan expresiones numéricas finitas como `2*pi`.
+- **Geometría distante y layout**: el mesh 3D conserva coordenadas finitas enfocadas por la cámara sin una cota global arbitraria; el panel del asistente cede ancho antes de reducir en exceso el canvas.
+
+## [1.2.15-beta] - 2026-07-12
+
+#### Añadido
+- **Asistente gráfico con capacidades**: el asistente puede ofrecer y preflightar comandos autocontenidos para curvas, campos, datos, fractales, complejos, sólidos, superficies, atractores y proyecciones 4D. Cada propuesta declara aridad, vista requerida y ruta de render; las construcciones que requieren objetos etiquetados siguen pidiendo sólo el contexto faltante.
+
+#### Corregido
+- **Visualización 3D/4D**: aplicar una gráfica desde el asistente abre la perspectiva 2D o 3D requerida. Las proyecciones de hipercubo e hiperesfera mantienen su overlay CPU cuando el renderizador GPU está activo.
+- **Pruebas de render**: la geometría estática ahora cubre curvas paramétricas, polares e implícitas, gráficos estadísticos y retratos de fase; las esferas transparentes no escriben profundidad sobre geometría posterior.
+- **Layout responsive**: los paneles laterales se reservan antes del teclado matemático, por lo que el teclado ocupa sólo la columna central y ya no recorta el transcript ni el compositor. La conversación usa toda la altura disponible y el contexto seleccionado se trunca visualmente con el detalle completo al pasar el cursor.
+- **Recursos complejos**: `HeatMap` y `ComplexSurface` validan expresión, límites y resolución antes de crear objetos.
+
+## [1.2.14-beta] - 2026-07-12
+
+#### Añadido
+- **Coloración de dominio verificable**: `DomainColoring[expr, xmin, xmax, ymin, ymax, resolution]` queda registrado, valida expresión compleja, límites y resolución, y permite visualizar módulo y fase en el plano 2D.
+
+#### Cambiado
+- **Propuestas del asistente**: el catálogo contextual ofrece sólo `Function` para gráficas reales o `DomainColoring` para consultas complejas. Solicitudes polares, paramétricas, implícitas, vectoriales o 3D no reciben una sustitución engañosa.
+
+#### Corregido
+- **Aplicar en Grafito**: antes de confirmar una propuesta del asistente se ejecuta en un documento aislado y se exige geometría 2D propia, sin ejes, grilla ni objetos previos. Propuestas vacías o inválidas no alteran el documento, el undo ni el protocolo.
+- **Panel Complejos**: la acción rápida usa coloración de dominio ejecutable y diferencia esta visualización de una rejilla transformada como `ComplexGrid[1/z]`.
+
+## [1.2.13-beta] - 2026-07-12
+
+#### Corregido
+- **Gráficas propuestas por el asistente**: las expresiones aceptan la notación habitual `Sin[x]`/`Cos[t]` dentro de funciones y curvas; una expresión que no compila deja de consumir el presupuesto de muestreo adaptativo y de congelar la interfaz sin producir geometría.
+- **Acciones de comandos**: las tarjetas `grafito` truncadas o con argumentos vacíos ya no ofrecen aplicar/editar. El validador rechaza aridad incorrecta para funciones y curvas paramétricas, y todo rechazo muestra un toast además del error en el asistente. `Editar` enfoca la siguiente entrada de comandos visible.
+- **Texto matemático**: `$$...$$` inline, `\mathbb`, envoltorios tipográficos comunes y `\dfrac` se muestran como matemática legible en vez de fragmentarse o exponer la fuente cruda.
+- **Teclado matemático**: inicia visible, permanece disponible al cambiar cualquier perspectiva y no se oculta automáticamente en ventanas bajas; el usuario conserva el control manual de visibilidad.
+
+## [1.2.12-beta] - 2026-07-12
+
+#### Añadido
+- **Matemática tipografiada nativa**: las tarjetas LaTex del asistente ahora componen fracciones anidadas, raíces, potencias, subíndices, letras griegas, relaciones y operadores comunes sin dependencias adicionales. Las fórmulas extensas desplazan horizontalmente dentro de su tarjeta.
+- **Inicio orientado**: una conversación vacía muestra una guía compacta y acciones rápidas sin consumir historial ni ser reenviada al proveedor.
+
+#### Cambiado
+- **Legibilidad del asistente**: LaTeX inline deja de heredar el estilo azul de código y usa tipografía matemática proporcional; las macros no soportadas o malformadas permanecen visibles como fuente literal.
+- **Compositor del chat**: reserva una altura estable, reduce el editor inactivo a una fila, muestra el contexto seleccionado en una línea y oculta contadores sin relevancia hasta acercarse al límite.
+
+## [1.2.11-beta] - 2026-07-12
+
+#### Añadido
+- **Respuesta inmediata del asistente**: el mensaje del usuario se incorpora al transcript al enviarse y una onda animada de cuatro puntos indica que el modelo sigue procesando o cancelando la consulta.
+- **Acciones aplicables desde el chat**: un bloque `grafito` válido ofrece `Aplicar en Grafito`, que ejecuta la operación mediante el pipeline normal de validación, undo, errores y protocolo de construcción. `Editar` conserva la revisión manual en la barra de comandos.
+- **Contexto de herramientas**: el asistente recibe un catálogo acotado de firmas relevantes generado desde el registro canónico de comandos, incluyendo guía exacta para funciones explícitas, curvas paramétricas, polares e implícitas.
+
+#### Corregido
+- **Historial de conversación**: mensajes fallidos o cancelados quedan visibles, pero no se reenvían como contexto remoto incompleto; sólo se usan intercambios usuario-respuesta completos.
+- **Comandos sin argumentos**: sugerencias registradas como `Aizawa[]` ya no se rechazan por el validador del asistente, sin admitir argumentos vacíos dentro de comandos que los requieren.
+
+## [1.2.10-beta] - 2026-07-12
+
+#### Corregido
+- **Transcript del asistente**: las burbujas vuelven a apilar encabezado, texto, listas, tablas y fórmulas verticalmente. Se elimina el desborde que comprimía respuestas en columnas angostas.
+- **Espacio de trabajo responsive**: hasta 1120 px de ancho el shell oculta rail y drawer izquierdo, mantiene el asistente y restituye la barra de comandos inferior para preservar el canvas. El teclado matemático cede espacio por debajo de 760 px de alto.
+- **Uso vertical del panel**: el compositor reduce el editor vacío, acorta el contexto seleccionado y mueve los límites detallados al tooltip. Tablas y bloques de código desplazan horizontalmente dentro de su burbuja en lugar de recortar el panel.
+
+## [1.2.9-beta] - 2026-07-12
+
+#### Añadido
+- **Chat matemático enriquecido**: las respuestas del asistente muestran encabezados, listas, bloques de código, tablas Markdown y expresiones LaTex legibles en tarjetas matemáticas, sin exponer el marcado crudo.
+- **Comandos preparados**: el asistente puede proponer comandos registrados de Grafito en bloques `grafito`; el usuario los prepara en la barra de entrada y decide si los ejecuta. Scripts y comandos de carga externa se rechazan. Ninguna respuesta remota modifica el documento por sí sola.
+- **Visión Minimax M3**: `minimax-m3` acepta PNG/JPEG validados mediante bloques Anthropic base64 tras la confirmación explícita de capacidad y autorización de carga.
+
+#### Cambiado
+- **Conversación del asistente**: el historial ahora tiene scroll propio y el compositor permanece al pie del panel, con tarjetas redondeadas e iconos vectoriales para adjuntar, enviar, quitar imágenes y preparar comandos.
+- **Prompt remoto**: solicita respuestas matemáticas estructuradas, tablas y LaTex, además de sugerencias de graficación/análisis estrictamente acotadas.
+
+#### Corregido
+- **Adjuntos Minimax M3**: se eliminó el bloqueo que rechazaba imágenes antes de construir el payload Anthropic. Fusion sigue sin imágenes porque su auditoría final con DeepSeek es sólo textual.
+- **Consentimiento de imagen**: la autorización de carga se revoca al iniciar cada envío; conservar un adjunto requiere confirmarlo otra vez en la siguiente consulta.
+- **Formato estándar**: se aceptan tablas Markdown sin barras exteriores y expresiones LaTex de bloque multilínea con `$$...$$` o `\[...\]`.
+
+## [1.2.8-beta] - 2026-07-12
+
+#### Cambiado
+- **Configuración del asistente**: proveedor, modelo, actualización de catálogo y clave API se trasladan a un diálogo abierto desde el engranaje del asistente; la conversación queda libre de controles de conexión. El proveedor y modelo se conservan como preferencias no secretas.
+
+#### Corregido
+- **Clave API persistente en Linux**: Grafito deja de usar el backend temporal `mock` de `keyring` y usa Secret Service con persistencia `UntilDelete`. Guardar ya no desaparece al volver a leer ni al reiniciar la aplicación.
+- **Resiliencia de sesión**: una clave guardada también se conserva sólo en memoria durante la sesión actual, evitando que una falla transitoria de relectura del llavero bloquee una consulta recién configurada.
+- **Estado de proveedor**: cambiar proveedor invalida la disponibilidad de clave anterior y vuelve a comprobar el llavero al abrir configuración.
+
+## [1.2.7-beta] - 2026-07-12
+
+#### Añadido
+- **Minimax M3 y Fusion**: `minimax-m3` usa el endpoint Anthropic Messages de OpenCode Go; `fusion` hace que Minimax redacte una respuesta y que `deepseek-v4-pro` la audite antes de mostrarla. Si la auditoría falla, el borrador no se expone.
+
+#### Cambiado
+- **Modelos OpenCode Go**: el catálogo prioriza `deepseek-v4-pro`, `deepseek-v4-flash`, `minimax-m3`, `fusion` y GLM; Kimi y Mimo se omiten incluso si aparecen durante la actualización remota.
+- **Panel de conexión**: proveedor, modelo, actualización y clave ahora tienen filas completas en una tarjeta compacta, evitando controles cortados en paneles angostos. Enter en el campo de clave la guarda de forma explícita.
+
+#### Corregido
+- **Clave guardada**: Consultar y actualizar modelos recuperan la clave del llavero al momento de usarse; ya no quedan bloqueados por el indicador visual de clave tras reiniciar Grafito.
+- **Fusion y adjuntos**: modelos con protocolo o capacidad de imagen no confirmados bloquean adjuntos antes de transmitir datos.
+
+## [1.2.6-beta] - 2026-07-12
+
+#### Cambiado
+- **Asistente compacto**: el panel prioriza pregunta y conversación, muestra el contexto de función sólo cuando existe y reduce la configuración, sugerencias y texto persistente que no aporta a la consulta actual.
+- **Selector de modelos**: OpenCode Go y Ollama ofrecen listas desplegables con modelos conocidos y los detectados mediante actualización; ya no aceptan IDs de modelo escritos libremente.
+- **Límites y adjuntos**: se muestra el uso real de bytes de entrada, los límites de respuesta/tiempo/imágenes y el estado de importación dentro de la sección correspondiente.
+
+#### Corregido
+- **Consentimiento de visión**: cambiar proveedor, modelo o adjunto invalida las confirmaciones necesarias; una importación de imagen bloquea el envío hasta terminar.
+- **Historial contextual**: los turnos se recortan de forma segura y sólo se reenvían pares usuario-respuesta completos que caben en el presupuesto, evitando bloqueos de solicitudes futuras.
+
+## [1.2.5-beta] - 2026-07-11
+
+#### Añadido
+- **Asistente con proveedores**: integración segura con OpenCode Go y Ollama, consulta de modelos, solicitudes en segundo plano, cancelación y claves del usuario en el llavero del sistema.
+- **Contexto de función**: una función seleccionada aporta expresión y dominio a la consulta; el asistente conserva una conversación de sesión acotada y propone próximos pasos completables.
+- **Imágenes para visión**: selector PNG/JPEG validado, sin rutas de origen, con autorización separada para enviar bytes al modelo elegido.
+
+#### Cambiado
+- **Experiencia del asistente**: Enter envía la consulta, Shift+Enter conserva una línea nueva, y el panel reemplaza el flujo de resolución local por conversación contextual con proveedor y modelo configurables.
+
+#### Eliminado
+- **Transcripción manual**: se retiró el editor de transcripción de imágenes y la etiqueta/copy de asistente local.
+
+## [1.2.4-beta] - 2026-07-11
+
+#### Cambiado
+- **Asistente persistente**: el asistente local ahora es un panel lateral derecho siempre visible que reserva espacio antes de renderizar el lienzo 2D o 3D.
+- **Shell de escritorio**: los drawers contextuales sólo coexisten con el asistente a partir de 1360 px de ancho; la ventana nativa mantiene un mínimo de 960 x 600 px para conservar un área de trabajo útil.
+
+#### Eliminado
+- **Launcher del asistente**: se retiraron el botón vectorial dentro del canvas, la ventana flotante, el estado `open` y el icono exclusivo que permitían solapar o cerrar el asistente.
+
+## [1.2.3-beta] - 2026-07-11
+
+#### Añadido
+- **Entrada natural de integrales**: `f(x): ∫e−x2dx` se interpreta como la integral acumulada `f(x) = ∫₀ˣ exp(-x²) dx`, con validación atómica para no crear funciones ni variables fantasma.
+- **Asistente acoplado al lienzo**: control vectorial persistente, accesible y localizado en el canvas; abre un único panel local con contenido desplazable.
+
+#### Cambiado
+- **Espacio de trabajo inicial**: documento vacío y teclado matemático oculto al iniciar, para priorizar el lienzo.
+- **Contraste de objetos**: los objetos nuevos usan un trazo neutro visible sobre temas claros y oscuros.
+
+#### Corregido
+- **Asistente y protocolo**: se eliminaron el botón textual flotante, el acoplamiento tardío y los controles de reordenar/desactivar del protocolo que no modificaban la construcción real.
+- **Cambio de herramienta**: cancelar una construcción pendiente ahora limpia todos sus puntos, ghost y estado transitorio.
+- **Integración Linux**: `StartupWMClass` coincide con el `app_id` de la ventana para asociar correctamente el icono del lanzador.
+
 ## [1.2.1-beta] - 2026-07-04
 
 #### Añadido
@@ -488,6 +684,24 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ---
 
+[1.2.20-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.20-beta
+[1.2.19-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.19-beta
+[1.2.18-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.18-beta
+[1.2.17-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.17-beta
+[1.2.16-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.16-beta
+[1.2.15-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.15-beta
+[1.2.14-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.14-beta
+[1.2.13-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.13-beta
+[1.2.12-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.12-beta
+[1.2.11-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.11-beta
+[1.2.10-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.10-beta
+[1.2.9-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.9-beta
+[1.2.8-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.8-beta
+[1.2.7-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.7-beta
+[1.2.6-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.6-beta
+[1.2.5-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.5-beta
+[1.2.4-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.4-beta
+[1.2.3-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.3-beta
 [1.2.1-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.1-beta
 [1.2.0-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.0-beta
 [1.1.4-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.4-beta

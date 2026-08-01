@@ -110,17 +110,6 @@ pub fn beta(a: f64, b: f64) -> f64 {
     (ln_gamma(a) + ln_gamma(b) - ln_gamma(a + b)).exp()
 }
 
-fn bessel_asymptotic_j(n: f64, x: f64) -> f64 {
-    let chi = x - n * std::f64::consts::PI / 2.0 - std::f64::consts::PI / 4.0;
-    let mu = 4.0 * n * n;
-    let p = 1.0 - (mu - 1.0) * (mu - 9.0) / (2.0 * (8.0 * x).powi(2))
-        + (mu - 1.0) * (mu - 9.0) * (mu - 25.0) * (mu - 49.0) / (24.0 * (8.0 * x).powi(4));
-    let q =
-        (mu - 1.0) / (8.0 * x) - (mu - 1.0) * (mu - 9.0) * (mu - 25.0) / (6.0 * (8.0 * x).powi(3));
-    let amp = (2.0 / (std::f64::consts::PI * x)).sqrt();
-    amp * (p * chi.cos() - q * chi.sin())
-}
-
 fn bessel_asymptotic_y(n: f64, x: f64) -> f64 {
     let chi = x - n * std::f64::consts::PI / 2.0 - std::f64::consts::PI / 4.0;
     let mu = 4.0 * n * n;
@@ -132,12 +121,65 @@ fn bessel_asymptotic_y(n: f64, x: f64) -> f64 {
     amp * (p * chi.sin() + q * chi.cos())
 }
 
-/// Compute the Bessel function of the first kind J_n(x) using series expansion or asymptotic form.
+fn nonnegative_bessel_order(n: i32) -> Option<(i32, f64)> {
+    if n >= 0 {
+        return Some((n, 1.0));
+    }
+
+    let order = i32::try_from(n.unsigned_abs()).ok()?;
+    let sign = if order % 2 == 0 { 1.0 } else { -1.0 };
+    Some((order, sign))
+}
+
+/// Maximum absolute integer Bessel order accepted by all evaluators.
+pub const MAX_BESSEL_ORDER: i32 = 1_000;
+
+/// Convierte un orden de Bessel expresado como `f64` en un entero evaluable.
+///
+/// Los órdenes no finitos, no enteros o fuera del presupuesto son errores de
+/// dominio. Los evaluadores de expresiones los representan con `NaN` en vez de
+/// degradarlos silenciosamente a orden cero.
+pub fn parse_bessel_order(order: f64) -> Option<i32> {
+    if order.is_finite()
+        && order.fract() == 0.0
+        && (-(MAX_BESSEL_ORDER as f64)..=MAX_BESSEL_ORDER as f64).contains(&order)
+    {
+        Some(order as i32)
+    } else {
+        None
+    }
+}
+
+/// Maximum absolute Bessel Y order evaluated by the forward recurrence.
+pub const MAX_BESSEL_Y_ORDER: i32 = MAX_BESSEL_ORDER;
+
+/// Maximum absolute Bessel J order evaluated by the bounded recurrence.
+pub const MAX_BESSEL_J_ORDER: i32 = MAX_BESSEL_Y_ORDER;
+
+/// Maximum absolute modified Bessel I order evaluated by the bounded series.
+pub const MAX_BESSEL_I_ORDER: i32 = MAX_BESSEL_Y_ORDER;
+
+/// Whether an integer order can be evaluated by [`bessel_j`].
+pub fn bessel_j_order_is_supported(n: i32) -> bool {
+    nonnegative_bessel_order(n).is_some_and(|(order, _)| order <= MAX_BESSEL_J_ORDER)
+}
+
+/// Whether an integer order can be evaluated by [`bessel_y`].
+pub fn bessel_y_order_is_supported(n: i32) -> bool {
+    nonnegative_bessel_order(n).is_some_and(|(order, _)| order <= MAX_BESSEL_Y_ORDER)
+}
+
+/// Whether an integer order can be evaluated by [`bessel_i`].
+pub fn bessel_i_order_is_supported(n: i32) -> bool {
+    nonnegative_bessel_order(n).is_some_and(|(order, _)| order <= MAX_BESSEL_I_ORDER)
+}
+
+/// Compute the Bessel function of the first kind J_n(x).
 ///
 /// J_n(x) = Σ_{m=0}^∞ (-1)^m / (m! Γ(m+n+1)) * (x/2)^(2m+n)
 ///
-/// For larger x, it will suffer from catastrophic cancellation and return incorrect results or NaN,
-/// so it falls back to an asymptotic expansion.
+/// Uses forward recurrence when the argument dominates the order, and a
+/// continued fraction followed by normalized backward recurrence otherwise.
 ///
 /// # Arguments
 /// * `n` - Order (integer)
@@ -146,33 +188,26 @@ fn bessel_asymptotic_y(n: f64, x: f64) -> f64 {
 /// # Returns
 /// J_n(x)
 pub fn bessel_j(n: i32, x: f64) -> f64 {
-    if n < 0 {
-        // For integer orders: J_{-n}(x) = (-1)^n J_n(x)
-        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
-        return sign * bessel_j(-n, x);
+    if !x.is_finite() {
+        return f64::NAN;
     }
-    if x < 0.0 {
+
+    let Some((n, order_sign)) = nonnegative_bessel_order(n) else {
+        return f64::NAN;
+    };
+    if n > MAX_BESSEL_J_ORDER {
+        return f64::NAN;
+    }
+
+    let (x, argument_sign) = if x < 0.0 {
         // J_n(-x) = (-1)^n J_n(x)
         let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
-        return sign * bessel_j(n, -x);
-    }
-    if x > 15.0 {
-        return bessel_asymptotic_j(n as f64, x);
-    }
-    let n = n as f64;
-    let mut sum = 0.0;
-    let mut term = (x / 2.0).powf(n) / gamma(n + 1.0);
+        (-x, sign)
+    } else {
+        (x, 1.0)
+    };
 
-    for m in 0..100 {
-        sum += term;
-        term *= -x * x / (4.0 * (m as f64 + 1.0) * (m as f64 + n + 1.0));
-
-        if term.abs() < 1e-15 {
-            break;
-        }
-    }
-
-    sum
+    order_sign * argument_sign * libm::jn(n, x)
 }
 
 /// Compute the Bessel function of the second kind Y_n(x) using the relation:
@@ -223,24 +258,25 @@ pub fn bessel_y(n: i32, x: f64) -> f64 {
         return f64::NAN;
     }
 
-    // Use identities for negative integer orders.
-    if n < 0 {
-        let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
-        return sign * bessel_y(-n, x);
+    let Some((n, order_sign)) = nonnegative_bessel_order(n) else {
+        return f64::NAN;
+    };
+    if n > MAX_BESSEL_Y_ORDER {
+        return f64::NAN;
     }
 
     if x > 15.0 {
-        return bessel_asymptotic_y(n as f64, x);
+        return order_sign * bessel_asymptotic_y(n as f64, x);
     }
 
     let y0 = bessel_y0(x);
     if n == 0 {
-        return y0;
+        return order_sign * y0;
     }
 
     let y1 = bessel_y1_numerical(x);
     if n == 1 {
-        return y1;
+        return order_sign * y1;
     }
 
     // Forward recurrence: Y_{m+1}(x) = (2m/x) Y_m(x) - Y_{m-1}(x).
@@ -251,7 +287,7 @@ pub fn bessel_y(n: i32, x: f64) -> f64 {
         y_m1 = y_0;
         y_0 = y_p1;
     }
-    y_0
+    order_sign * y_0
 }
 
 /// Compute the modified Bessel function of the first kind I_n(x).
@@ -265,9 +301,15 @@ pub fn bessel_y(n: i32, x: f64) -> f64 {
 /// # Returns
 /// I_n(x)
 pub fn bessel_i(n: i32, x: f64) -> f64 {
-    if n < 0 {
-        // For integer orders: I_{-n}(x) = I_n(x)
-        return bessel_i(-n, x);
+    if !x.is_finite() {
+        return f64::NAN;
+    }
+
+    let Some((n, _)) = nonnegative_bessel_order(n) else {
+        return f64::NAN;
+    };
+    if n > MAX_BESSEL_I_ORDER {
+        return f64::NAN;
     }
     let n = n as f64;
     let mut sum = 0.0;
@@ -331,8 +373,19 @@ pub fn erfc(x: f64) -> f64 {
 /// # Returns
 /// ψ(x)
 pub fn digamma(x: f64) -> f64 {
+    if x.is_nan() || x == f64::NEG_INFINITY {
+        return f64::NAN;
+    }
+    if x == f64::INFINITY {
+        return f64::INFINITY;
+    }
     if x <= 0.0 && x.fract() == 0.0 {
         return f64::NAN;
+    }
+
+    if x < 0.0 {
+        let sin_pi_x = (std::f64::consts::PI * x).sin();
+        return digamma(1.0 - x) - std::f64::consts::PI / sin_pi_x.tan();
     }
 
     // Use recurrence relation to shift x to large values
@@ -349,6 +402,43 @@ pub fn digamma(x: f64) -> f64 {
     result += x.ln() - 0.5 / x - x2 * (1.0 / 12.0 - x2 * (1.0 / 120.0 - x2 * (1.0 / 252.0)));
 
     result
+}
+
+/// Compute the trigamma function ψ₁(x) = d/dx ψ(x).
+///
+/// The recurrence shifts finite inputs to a range where the asymptotic series
+/// converges rapidly. Non-positive integers are poles and return `NaN`.
+pub fn trigamma(x: f64) -> f64 {
+    if x.is_nan() || x == f64::NEG_INFINITY || (x <= 0.0 && x.fract() == 0.0) {
+        return f64::NAN;
+    }
+    if x == f64::INFINITY {
+        return 0.0;
+    }
+    if x < 0.0 {
+        let sin_pi_x = (std::f64::consts::PI * x).sin();
+        return std::f64::consts::PI.powi(2) / (sin_pi_x * sin_pi_x) - trigamma(1.0 - x);
+    }
+
+    let mut result = 0.0;
+    let mut x = x;
+    while x < 10.0 {
+        result += 1.0 / (x * x);
+        x += 1.0;
+    }
+
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    result
+        + inv
+        + inv2
+            * (0.5
+                + inv
+                    * (1.0 / 6.0
+                        + inv2
+                            * (-1.0 / 30.0
+                                + inv2
+                                    * (1.0 / 42.0 + inv2 * (-1.0 / 30.0 + inv2 * (5.0 / 66.0))))))
 }
 
 #[cfg(test)]
@@ -418,6 +508,58 @@ mod tests {
     }
 
     #[test]
+    fn bessel_j_high_order_moderate_argument_matches_reference() {
+        let expected = 3.961_755_094_336_252e-59;
+        let actual = bessel_j(100, 20.0);
+
+        assert!(actual.is_finite());
+        assert!(
+            ((actual - expected) / expected).abs() < 1e-12,
+            "J_100(20) = {actual:e}, expected {expected:e}"
+        );
+    }
+
+    #[test]
+    fn bessel_j_matches_low_order_and_transition_references() {
+        let cases = [
+            (0, 1.0, 0.765_197_686_557_966_6),
+            (1, 1.0, 0.440_050_585_744_933_5),
+            (2, 5.0, 0.046_565_116_277_752_216),
+            (10, 20.0, 0.186_482_558_023_945_1),
+            (100, 100.0, 0.096_366_673_295_861_56),
+        ];
+
+        for (order, argument, expected) in cases {
+            let actual = bessel_j(order, argument);
+            assert!(
+                (actual - expected).abs() <= 1e-13 * expected.abs().max(1.0),
+                "J_{order}({argument}) = {actual:e}, expected {expected:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn bessel_j_preserves_integer_order_and_argument_parity() {
+        for order in [3, 4, 100] {
+            let positive = bessel_j(order, 7.0);
+            let parity = if order % 2 == 0 { 1.0 } else { -1.0 };
+
+            assert_eq!(bessel_j(-order, 7.0), parity * positive);
+            assert_eq!(bessel_j(order, -7.0), parity * positive);
+            assert_eq!(bessel_j(-order, -7.0), positive);
+        }
+    }
+
+    #[test]
+    fn bessel_j_handles_zero_and_rejects_nonfinite_arguments() {
+        assert_eq!(bessel_j(0, 0.0), 1.0);
+        assert_eq!(bessel_j(100, 0.0), 0.0);
+        assert!(bessel_j(0, f64::NAN).is_nan());
+        assert!(bessel_j(0, f64::INFINITY).is_nan());
+        assert!(bessel_j(0, f64::NEG_INFINITY).is_nan());
+    }
+
+    #[test]
     fn test_bessel_y() {
         // Y_0(15.0) ≈ 0.205464
         assert!((bessel_y(0, 15.0) - 0.205464).abs() < 1e-5);
@@ -451,5 +593,47 @@ mod tests {
         // ψ(1) = -γ (Euler-Mascheroni constant)
         let gamma_euler = 0.5772156649015329;
         assert!((digamma(1.0) - (-gamma_euler)).abs() < 0.001);
+    }
+
+    #[test]
+    fn special_functions_reject_non_terminating_or_unrepresentable_orders() {
+        assert!(digamma(f64::NEG_INFINITY).is_nan());
+        assert!(bessel_j(i32::MIN, 1.0).is_nan());
+        assert!(bessel_y(i32::MIN, 1.0).is_nan());
+        assert!(bessel_i(i32::MIN, 1.0).is_nan());
+    }
+
+    #[test]
+    fn bessel_y_rejects_orders_beyond_the_recurrence_budget() {
+        assert!(bessel_y(MAX_BESSEL_Y_ORDER + 1, 1.0).is_nan());
+        assert!(!bessel_y_order_is_supported(MAX_BESSEL_Y_ORDER + 1));
+    }
+
+    #[test]
+    fn bessel_j_rejects_orders_beyond_the_recurrence_budget() {
+        assert_eq!(MAX_BESSEL_J_ORDER, MAX_BESSEL_Y_ORDER);
+        assert!(bessel_j(MAX_BESSEL_J_ORDER, 1.0).is_finite());
+        assert!(bessel_j(MAX_BESSEL_J_ORDER + 1, 1.0).is_nan());
+        assert!(bessel_j(-(MAX_BESSEL_J_ORDER + 1), 1.0).is_nan());
+        assert!(bessel_j(i32::MAX, 1.0).is_nan());
+    }
+
+    #[test]
+    fn bessel_i_rejects_orders_beyond_the_series_budget() {
+        assert_eq!(MAX_BESSEL_I_ORDER, MAX_BESSEL_Y_ORDER);
+        assert!(bessel_i_order_is_supported(MAX_BESSEL_I_ORDER));
+        assert!(bessel_i(MAX_BESSEL_I_ORDER + 1, 1.0).is_nan());
+        assert!(bessel_i(-(MAX_BESSEL_I_ORDER + 1), 1.0).is_nan());
+        assert!(bessel_i(i32::MAX, 1.0).is_nan());
+    }
+
+    #[test]
+    fn test_trigamma_standard_values_and_poles() {
+        let pi_squared_over_six = std::f64::consts::PI.powi(2) / 6.0;
+        assert!((trigamma(1.0) - pi_squared_over_six).abs() < 1e-12);
+        assert!((trigamma(2.0) - (pi_squared_over_six - 1.0)).abs() < 1e-12);
+        assert!(!trigamma(0.0).is_finite());
+        assert!(!trigamma(-1.0).is_finite());
+        assert!(trigamma(-1_000_000.5).is_finite());
     }
 }

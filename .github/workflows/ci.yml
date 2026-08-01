@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -9,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,91 +21,338 @@ jobs:
   check:
     name: cargo check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        toolchain: ['1.81', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - name: Install MinGW for the Windows MSRV check
+        if: matrix.toolchain == '1.81'
+        run: sudo apt-get install -y mingw-w64
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ matrix.toolchain == '1.81' && 'x86_64-pc-windows-gnu' || '' }}
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo check --workspace
+      - name: Parse the complete lockfile with the declared MSRV
+        if: matrix.toolchain == '1.81'
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - run: cargo check --workspace --locked
+      - name: Check the Windows GNU app with the declared MSRV
+        if: matrix.toolchain == '1.81'
+        run: cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        toolchain: ['1.81', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - run: cargo test --workspace --locked
+
+  gpu-compute:
+    name: required GPU renderer regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GRAFITO_REQUIRE_GPU_TESTS: "1"
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C toolchain, system deps, and Vulkan software driver
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev libvulkan1 mesa-vulkan-drivers
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo test --workspace
+      - name: Run required GPU renderer regressions
+        run: cargo test -p grafito-render --test gpu_compute --locked -- --nocapture
 
   examples:
     name: cargo check examples
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo check --workspace --examples
+      - run: cargo check --workspace --examples --locked
 
   benches:
     name: cargo check benches
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo check --workspace --benches
+      - run: cargo check --workspace --benches --locked
 
   docs:
     name: cargo doc
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
   lint:
     name: cargo clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        toolchain: ['1.81', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
-      - name: Install system deps (GMP/MPFR)
-        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  release-build:
+    name: cargo build release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
-          components: clippy
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo build --workspace --release --locked
 
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  all-targets:
+    name: cargo check all targets and features
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - run: cargo check --workspace --all-targets --all-features --locked
+
+  cross-platform-smoke:
+    name: app smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - run: cargo test -p grafito-app --test app_smoke --locked
+
+  supply-chain:
+    name: dependency advisories and policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - name: Install supply-chain tools
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-tools"
+          cargo install --locked --root "$tool_root" cargo-audit --version 0.22.2
+          cargo install --locked --root "$tool_root" cargo-deny --version 0.20.2
+          echo "$tool_root/bin" >> "$GITHUB_PATH"
+      - name: Test advisory exception policy
+        run: python3 .github/scripts/test_verify_advisory_exceptions.py
+      - name: Verify reviewed advisory exception boundary
+        run: python3 .github/scripts/verify_advisory_exceptions.py check
+      - name: Audit lockfile
+        # The script constructs the complete argument vector from one fixed ID tuple.
+        run: python3 .github/scripts/verify_advisory_exceptions.py audit
+      - run: cargo deny --workspace --locked check advisories bans licenses sources
+
+  workflow-lint:
+    name: workflow and shell lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install workflow and shell linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: Lint GitHub Actions workflows
+        run: "$RUNNER_TEMP/bin/actionlint"
+      - name: Parse and lint package scripts
+        run: |
+          bash -n packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh
+          shellcheck --shell=bash packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh
+          bash packaging/tests/packaging-fixtures.sh
+      - name: Verify Debian version mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          beta="$(packaging/build-deb.sh --print-debian-version 1.2.20-beta)"
+          beta_patch="$(packaging/build-deb.sh --print-debian-version 1.2.20-beta.1)"
+          release_candidate="$(packaging/build-deb.sh --print-debian-version 1.2.20-rc.2)"
+          [[ "$beta" == "1.2.20~beta" ]]
+          [[ "$beta_patch" == "1.2.20~beta.1" ]]
+          [[ "$release_candidate" == "1.2.20~rc.2" ]]
+          dpkg --compare-versions "$beta" lt 1.2.20
+          dpkg --compare-versions "$beta_patch" lt 1.2.20
+          dpkg --compare-versions "$release_candidate" lt 1.2.20
+          dpkg --compare-versions "$beta" lt "$beta_patch"
+          dpkg --compare-versions "$beta_patch" lt "$release_candidate"
+          [[ "$(packaging/build-deb.sh --print-debian-version 1.2.20)" == "1.2.20" ]]
+
+  package-debian:
+    name: Debian package smoke and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install package build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential desktop-file-utils dpkg-dev libgmp-dev libmpfr-dev libmpc-dev lintian m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - name: Validate packaging metadata and build the package
+        run: |
+          desktop-file-validate packaging/debian/grafito.desktop
+          packaging/build-deb.sh
+      - name: Verify package metadata, installation, ownership, and lint output
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(packaging/build/*.deb)
+          (( ${#packages[@]} == 1 )) || { echo "expected exactly one Debian package" >&2; exit 1; }
+          package="${packages[0]}"
+          expected_cargo_version="$(grep -E '^version\s*=\s*"' Cargo.toml | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"
+          expected_version="$(packaging/build-deb.sh --print-debian-version "$expected_cargo_version")"
+          expected_architecture="$(dpkg --print-architecture)"
+          [[ -n "$expected_version" ]] || { echo "could not read the workspace version" >&2; exit 1; }
+          [[ "$(dpkg-deb -f "$package" Package)" == "grafito" ]]
+          [[ "$(dpkg-deb -f "$package" Version)" == "$expected_version" ]]
+          [[ "$(dpkg-deb -f "$package" Architecture)" == "$expected_architecture" ]]
+          package_depends="$(dpkg-deb -f "$package" Depends)"
+          grep -Eq '(^|,)[[:space:]]*libdbus-1-3([[:space:]]*\([^)]*\))?[[:space:]]*(,|$)' <<< "$package_depends"
+          dpkg-deb --info "$package"
+          package_contents="$(dpkg-deb -c "$package")"
+          control_contents="$(dpkg-deb --ctrl-tarfile "$package" | tar -tvf -)"
+          if grep -Ev '^[-dlcbps][rwxStTs-]{9}[[:space:]]+root/root[[:space:]]+' <<< "$package_contents"; then
+            echo "package contains entries not owned by root:root" >&2
+            exit 1
+          fi
+          if grep -Ev '^[-dlcbps][rwxStTs-]{9}[[:space:]]+root/root[[:space:]]+' <<< "$control_contents"; then
+            echo "package control files are not owned by root:root" >&2
+            exit 1
+          fi
+          grep -Eq '^-rwxr-xr-x[[:space:]]+root/root[[:space:]]+[0-9]+[[:space:]]+.*[[:space:]]+\./usr/bin/grafito$' <<< "$package_contents"
+          grep -Eq '^-rw-r--r--[[:space:]]+root/root[[:space:]]+[0-9]+[[:space:]]+.*[[:space:]]+\./usr/share/applications/grafito.desktop$' <<< "$package_contents"
+          grep -Eq '^-rwxr-xr-x[[:space:]]+root/root[[:space:]]+.*[[:space:]]+\./postinst$' <<< "$control_contents"
+          grep -Eq '^-rwxr-xr-x[[:space:]]+root/root[[:space:]]+.*[[:space:]]+\./prerm$' <<< "$control_contents"
+          grep -Eq '^-rwxr-xr-x[[:space:]]+root/root[[:space:]]+.*[[:space:]]+\./postrm$' <<< "$control_contents"
+          lintian --fail-on error "$package"
+          sudo dpkg --install "$package"
+          installed=1
+          cleanup() {
+            if [[ "${installed:-0}" -eq 1 ]]; then
+              sudo dpkg --purge grafito
+            fi
+          }
+          trap cleanup EXIT
+          [[ -x /usr/bin/grafito ]]
+          /usr/bin/grafito --help
+          [[ "$(dpkg-query -W -f='${Version}' grafito)" == "$expected_version" ]]
+          [[ "$(dpkg-query -W -f='${Architecture}' grafito)" == "$expected_architecture" ]]
+          sudo dpkg --purge grafito
+          installed=0
+          trap - EXIT

@@ -11,6 +11,34 @@
 use egui::{Color32, Pos2, Rect, Sense, Ui, Vec2};
 use grafito_geometry::Color;
 
+/// Cambios producidos por el picker durante un frame.
+///
+/// Los favoritos pertenecen al estado transitorio de la interfaz, mientras que
+/// `color_changed` sólo informa cambios en el color preparado por el diálogo.
+/// El frontend decide si ese valor se confirma o se descarta.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColorPickerOutcome {
+    pub color_changed: bool,
+    pub favorites_changed: bool,
+}
+
+impl ColorPickerOutcome {
+    pub const fn any_changed(self) -> bool {
+        self.color_changed || self.favorites_changed
+    }
+}
+
+const COLOR_MATCH_EPSILON: f32 = 1.0e-5;
+
+/// Compara colores para cambios de UI sin convertir ruido de punto flotante
+/// de RGB a HSV y de vuelta en una edición persistida.
+pub fn colors_match(left: Color, right: Color) -> bool {
+    (left.r - right.r).abs() <= COLOR_MATCH_EPSILON
+        && (left.g - right.g).abs() <= COLOR_MATCH_EPSILON
+        && (left.b - right.b).abs() <= COLOR_MATCH_EPSILON
+        && (left.a - right.a).abs() <= COLOR_MATCH_EPSILON
+}
+
 /// Estado del color picker HSV
 #[derive(Clone, Debug)]
 pub struct HsvColorPicker {
@@ -20,6 +48,8 @@ pub struct HsvColorPicker {
     pub saturation: f32,
     /// Valor/Brillo (0-1)
     pub value: f32,
+    /// Opacidad (0-1), independiente de los canales HSV.
+    pub alpha: f32,
     /// Color original (para preview)
     pub original_color: Color,
 }
@@ -32,13 +62,16 @@ impl HsvColorPicker {
             hue: h,
             saturation: s,
             value: v,
+            alpha: color.a.clamp(0.0, 1.0),
             original_color: color,
         }
     }
 
     /// Obtener color RGB actual
     pub fn to_color(&self) -> Color {
-        hsv_to_rgb(self.hue, self.saturation, self.value)
+        let mut color = hsv_to_rgb(self.hue, self.saturation, self.value);
+        color.a = self.alpha.clamp(0.0, 1.0);
+        color
     }
 
     /// Actualizar desde color RGB
@@ -47,37 +80,52 @@ impl HsvColorPicker {
         self.hue = h;
         self.saturation = s;
         self.value = v;
+        self.alpha = color.a.clamp(0.0, 1.0);
     }
 
-    /// Dibujar el color picker completo
-    /// Retorna true si el color cambió
-    pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> bool {
-        let mut changed = false;
+    /// Restablece el color con el que se abrió el diálogo.
+    fn restore_original_color(&mut self) -> bool {
+        let color_before = self.to_color();
+        self.set_color(self.original_color);
+        !colors_match(self.to_color(), color_before)
+    }
+
+    /// Dibujar el color picker completo.
+    pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
+        let color_before = self.to_color();
 
         ui.columns(2, |cols| {
             // Columna Izquierda: Rueda
             cols[0].vertical_centered(|ui| {
-                changed |= self.show_wheel(ui, 136.0);
+                let _ = self.show_wheel(ui, 136.0);
             });
 
             // Columna Derecha: Slider y Preview
             cols[1].vertical_centered(|ui| {
                 ui.add_space(2.0);
-                changed |= self.show_value_slider(ui, 136.0);
-                ui.add_space(12.0);
-                changed |= self.show_preview(ui, 136.0);
+                let _ = self.show_value_slider(ui, 136.0);
+                ui.add_space(8.0);
+                let _ = self.show_opacity_slider(ui, 136.0);
+                ui.add_space(8.0);
+                let _ = self.show_preview(ui, 136.0);
             });
         });
 
         ui.add_space(12.0);
-        changed |= self.show_favorites(ui, favorites);
+        let favorites_outcome = self.show_favorites(ui, favorites);
 
-        changed
+        ColorPickerOutcome {
+            color_changed: !colors_match(self.to_color(), color_before),
+            favorites_changed: favorites_outcome.favorites_changed,
+        }
     }
 
     /// Dibujar rueda de color HSV con un gradiente Mesh ultra-suave
     fn show_wheel(&mut self, ui: &mut Ui, size: f32) -> bool {
         let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Tono y saturación")
+        });
         let rect = response.rect;
         let center = rect.center();
         let radius = size * 0.45;
@@ -187,6 +235,9 @@ impl HsvColorPicker {
 
         let (response, mut painter) =
             ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Brillo del color")
+        });
         let rect = response.rect;
 
         // Guardar clip rect original para evitar recortar el indicador
@@ -273,6 +324,25 @@ impl HsvColorPicker {
         false
     }
 
+    /// Expone la opacidad sin mezclarla con la rueda HSV.
+    fn show_opacity_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
+        ui.label(
+            egui::RichText::new("Opacidad:")
+                .strong()
+                .color(ui.visuals().hyperlink_color),
+        );
+        let response = ui.add_sized(
+            [width, 20.0],
+            egui::Slider::new(&mut self.alpha, 0.0..=1.0)
+                .show_value(true)
+                .trailing_fill(true),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Opacidad del color")
+        });
+        response.changed()
+    }
+
     /// Dibujar preview de color (actual vs nuevo) como una tarjeta unificada dividida
     fn show_preview(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
@@ -284,6 +354,13 @@ impl HsvColorPicker {
 
         let height = 32.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::ColorButton,
+                true,
+                "Restaurar color original",
+            )
+        });
         let painter = ui.painter();
 
         let left_rect = Rect::from_min_max(rect.min, Pos2::new(rect.center().x, rect.max.y));
@@ -301,6 +378,9 @@ impl HsvColorPicker {
             sw: 0.0,
             se: 6.0,
         };
+
+        draw_checkerboard(painter, left_rect);
+        draw_checkerboard(painter, right_rect);
 
         painter.rect_filled(
             left_rect,
@@ -330,9 +410,7 @@ impl HsvColorPicker {
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if pos.x < rect.center().x {
-                    let old_color = self.to_color();
-                    self.set_color(self.original_color);
-                    changed = self.to_color() != old_color;
+                    changed = self.restore_original_color();
                 }
             }
         }
@@ -358,9 +436,9 @@ impl HsvColorPicker {
         changed
     }
 
-    /// Dibujar colores favoritos alineados y centrados horizontalmente
-    fn show_favorites(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> bool {
-        let mut changed = false;
+    /// Dibujar colores favoritos alineados y centrados horizontalmente.
+    fn show_favorites(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
+        let mut outcome = ColorPickerOutcome::default();
 
         ui.label(
             egui::RichText::new("Favoritos:")
@@ -383,19 +461,25 @@ impl HsvColorPicker {
             for i in 0..5 {
                 let color = favorites[i];
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(item_w), Sense::click());
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::ColorButton,
+                        true,
+                        format!("Color favorito {}", i + 1),
+                    )
+                });
 
                 painter_draw_swatch_interactive(ui, &response, rect, color_to_color32(color));
 
                 // Click izquierdo: aplicar color favorito
                 if response.clicked() {
-                    self.set_color(color);
-                    changed = true;
+                    outcome.color_changed |= self.apply_favorite(color).color_changed;
                 }
 
                 // Click derecho: guardar color actual como favorito
                 if response.secondary_clicked() {
-                    favorites[i] = self.to_color();
-                    changed = true;
+                    outcome.favorites_changed |=
+                        self.save_favorite(&mut favorites[i]).favorites_changed;
                 }
 
                 // Tooltip
@@ -406,7 +490,30 @@ impl HsvColorPicker {
             }
         });
 
-        changed
+        outcome
+    }
+
+    fn apply_favorite(&mut self, color: Color) -> ColorPickerOutcome {
+        if colors_match(self.to_color(), color) {
+            return ColorPickerOutcome::default();
+        }
+        self.set_color(color);
+        ColorPickerOutcome {
+            color_changed: true,
+            favorites_changed: false,
+        }
+    }
+
+    fn save_favorite(&self, favorite: &mut Color) -> ColorPickerOutcome {
+        let color = self.to_color();
+        if colors_match(*favorite, color) {
+            return ColorPickerOutcome::default();
+        }
+        *favorite = color;
+        ColorPickerOutcome {
+            color_changed: false,
+            favorites_changed: true,
+        }
     }
 }
 
@@ -442,6 +549,36 @@ fn painter_draw_swatch_interactive(
             6.0,
             egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
         );
+    }
+}
+
+fn draw_checkerboard(painter: &egui::Painter, rect: Rect) {
+    let cell_size = 6.0;
+    let light = Color32::from_gray(210);
+    let dark = Color32::from_gray(165);
+    let mut row = 0usize;
+    let mut y = rect.top();
+    while y < rect.bottom() {
+        let mut column = 0usize;
+        let mut x = rect.left();
+        while x < rect.right() {
+            let cell = Rect::from_min_max(
+                Pos2::new(x, y),
+                Pos2::new(
+                    (x + cell_size).min(rect.right()),
+                    (y + cell_size).min(rect.bottom()),
+                ),
+            );
+            painter.rect_filled(
+                cell,
+                egui::Rounding::ZERO,
+                if (row + column) % 2 == 0 { light } else { dark },
+            );
+            column += 1;
+            x += cell_size;
+        }
+        row += 1;
+        y += cell_size;
     }
 }
 
@@ -509,7 +646,7 @@ fn hsv_to_color32(hue: f32, saturation: f32, value: f32) -> Color32 {
 
 /// Convertir Color a Color32
 fn color_to_color32(color: Color) -> Color32 {
-    Color32::from_rgba_premultiplied(
+    Color32::from_rgba_unmultiplied(
         (color.r * 255.0) as u8,
         (color.g * 255.0) as u8,
         (color.b * 255.0) as u8,
@@ -573,6 +710,15 @@ mod tests {
     }
 
     #[test]
+    fn test_hsv_to_rgb_purple_preserves_blue_channel() {
+        let color = hsv_to_rgb(300.0, 1.0, 1.0);
+
+        assert!((color.r - 1.0).abs() < 0.01);
+        assert!((color.g - 0.0).abs() < 0.01);
+        assert!((color.b - 1.0).abs() < 0.01);
+    }
+
+    #[test]
     fn test_roundtrip_conversion() {
         let original = Color::new(0.5, 0.3, 0.8, 1.0);
         let (h, s, v) = rgb_to_hsv(original);
@@ -581,6 +727,83 @@ mod tests {
         assert!((original.r - converted.r).abs() < 0.01);
         assert!((original.g - converted.g).abs() < 0.01);
         assert!((original.b - converted.b).abs() < 0.01);
+    }
+
+    #[test]
+    fn colors_match_accepts_hsv_roundtrip_ulp_noise() {
+        let original = Color::new(0.123_456_7, 0.456_789_1, 0.987_654_3, 0.35);
+        let converted = HsvColorPicker::new(original).to_color();
+
+        assert_ne!(
+            converted, original,
+            "fixture must exercise a ULP round trip"
+        );
+        assert!(colors_match(converted, original));
+    }
+
+    #[test]
+    fn picker_preserves_alpha_when_editing_hsv_channels() {
+        let mut picker = HsvColorPicker::new(Color::new(0.5, 0.3, 0.8, 0.35));
+
+        picker.hue = 120.0;
+        picker.value = 0.7;
+        assert!((picker.to_color().a - 0.35).abs() < f32::EPSILON);
+
+        picker.set_color(Color::new(0.2, 0.4, 0.6, 0.6));
+        assert!((picker.to_color().a - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn idle_picker_ui_reports_no_outcome() {
+        let context = egui::Context::default();
+        let mut picker = HsvColorPicker::new(Color::BLUE);
+        let mut favorites = [Color::RED; 5];
+        let mut outcome = ColorPickerOutcome::default();
+
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                outcome = picker.show(ui, &mut favorites);
+            });
+        });
+
+        assert_eq!(outcome, ColorPickerOutcome::default());
+    }
+
+    #[test]
+    fn saving_favorite_reports_only_a_favorites_change() {
+        let picker = HsvColorPicker::new(Color::BLUE);
+        let picker_color = picker.to_color();
+        let mut favorite = Color::RED;
+
+        let outcome = picker.save_favorite(&mut favorite);
+
+        assert!(!outcome.color_changed);
+        assert!(outcome.favorites_changed);
+        assert_eq!(favorite, picker_color);
+        assert_eq!(picker.to_color(), picker_color);
+    }
+
+    #[test]
+    fn applying_an_equal_favorite_reports_no_transient_color_change() {
+        let mut picker = HsvColorPicker::new(Color::RED);
+
+        let outcome = picker.apply_favorite(Color::RED);
+
+        assert_eq!(outcome, ColorPickerOutcome::default());
+    }
+
+    #[test]
+    fn restoring_the_original_color_resets_all_channels() {
+        let original = Color::new(0.3, 0.6, 0.9, 0.35);
+        let mut picker = HsvColorPicker::new(original);
+        picker.hue = 12.0;
+        picker.saturation = 0.9;
+        picker.value = 0.2;
+        picker.alpha = 0.8;
+
+        assert!(picker.restore_original_color());
+        assert!(colors_match(picker.to_color(), original));
+        assert!(!picker.restore_original_color());
     }
 
     #[test]

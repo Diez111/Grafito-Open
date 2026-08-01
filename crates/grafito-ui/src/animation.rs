@@ -1,6 +1,23 @@
 //! Grafito Animations — Easing functions and interactive effects.
 
+use crate::theme::{current_theme, Theme};
 use egui::{Color32, Pos2, Stroke};
+use std::time::Duration;
+
+/// Interpola colores de superficie sin modificar la geometría del control.
+pub fn interpolate_color(from: Color32, to: Color32, progress: f32) -> Color32 {
+    let progress = progress.clamp(0.0, 1.0);
+    let channel = |from: u8, to: u8| {
+        (f32::from(from) + (f32::from(to) - f32::from(from)) * progress).round() as u8
+    };
+
+    Color32::from_rgba_premultiplied(
+        channel(from.r(), to.r()),
+        channel(from.g(), to.g()),
+        channel(from.b(), to.b()),
+        channel(from.a(), to.a()),
+    )
+}
 
 /// Easing functions for smooth transitions.
 pub mod easing {
@@ -124,5 +141,240 @@ impl AnimatedValue {
 
     pub fn get(&self) -> f32 {
         self.current
+    }
+}
+
+/// Estado visual de un proceso local que todavía está en curso.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingOrbState {
+    /// El asistente está esperando o recibiendo una entrada.
+    Listening,
+    /// El asistente o un cálculo local está resolviendo el problema.
+    Solving,
+    /// Se está preparando una respuesta, una gráfica o un resultado.
+    Shaping,
+    /// Se pidió cancelar y el trabajo cooperativo todavía debe finalizar.
+    Cancelling,
+}
+
+impl ThinkingOrbState {
+    /// Etiqueta que complementa el indicador puramente visual.
+    pub fn accessible_label(self) -> &'static str {
+        match self {
+            Self::Listening => "Escuchando",
+            Self::Solving => "Resolviendo",
+            Self::Shaping => "Preparando respuesta",
+            Self::Cancelling => "Cancelando",
+        }
+    }
+}
+
+/// Indicador nativo y determinista para trabajo local en curso.
+///
+/// No mantiene estado entre frames: su movimiento depende únicamente del reloj
+/// de egui, por lo que no introduce hilos, red ni estado persistido.
+#[derive(Debug, Clone, Copy)]
+pub struct ThinkingOrb {
+    state: ThinkingOrbState,
+    size: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ThinkingOrbSample {
+    x: f32,
+    y: f32,
+    radius: f32,
+    alpha: u8,
+}
+
+impl ThinkingOrb {
+    /// Crea un orb para el estado y diámetro solicitados.
+    pub fn new(state: ThinkingOrbState, size: f32) -> Self {
+        Self {
+            state,
+            size: size.clamp(20.0, 128.0),
+        }
+    }
+
+    /// Pinta el indicador y solicita el siguiente frame sólo mientras es visible.
+    pub fn draw(self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(self.size, self.size), egui::Sense::hover());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, self.state.accessible_label())
+        });
+
+        let theme = current_theme(ui.ctx());
+        let accent = self.state_color(theme);
+        let center = rect.center();
+        let radius = self.size * 0.38;
+        let time = ui.input(|input| input.time as f32);
+        let painter = ui.painter_at(rect);
+
+        painter.circle_filled(center, radius * 0.92, with_alpha(accent, 20));
+        painter.circle_stroke(
+            center,
+            radius * 0.72,
+            Stroke::new((self.size * 0.035).max(1.0), with_alpha(accent, 96)),
+        );
+
+        let mut orbit = Vec::with_capacity(25);
+        let base_phase = self.base_phase(time);
+        for step in 0..=24 {
+            let phase = base_phase + step as f32 * std::f32::consts::TAU / 24.0;
+            let (x, y) = self.position_at(phase, 0);
+            orbit.push(center + egui::vec2(x * radius, y * radius));
+        }
+        painter.add(egui::Shape::line(
+            orbit,
+            Stroke::new((self.size * 0.022).max(0.8), with_alpha(accent, 118)),
+        ));
+
+        for sample in self.samples_at(time) {
+            let sample_center = center + egui::vec2(sample.x * radius, sample.y * radius);
+            painter.circle_filled(
+                sample_center,
+                (self.size * sample.radius).max(1.5),
+                with_alpha(accent, sample.alpha),
+            );
+        }
+        painter.circle_filled(center, (self.size * 0.11).max(2.0), with_alpha(accent, 225));
+
+        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        response
+    }
+
+    fn samples_at(self, time: f32) -> [ThinkingOrbSample; 3] {
+        let base_phase = self.base_phase(time);
+        std::array::from_fn(|index| {
+            let phase = base_phase + index as f32 * std::f32::consts::TAU / 3.0;
+            let (x, y) = self.position_at(phase, index);
+            let pulse = (phase.sin() + 1.0) * 0.5;
+            ThinkingOrbSample {
+                x,
+                y,
+                radius: 0.075 + pulse * 0.04,
+                alpha: (150.0 + pulse * 90.0) as u8,
+            }
+        })
+    }
+
+    fn base_phase(self, time: f32) -> f32 {
+        let time = if time.is_finite() { time } else { 0.0 };
+        let speed = match self.state {
+            ThinkingOrbState::Listening => 1.15,
+            ThinkingOrbState::Solving => 2.1,
+            ThinkingOrbState::Shaping => 1.65,
+            ThinkingOrbState::Cancelling => -0.9,
+        };
+        time * speed
+    }
+
+    fn position_at(self, phase: f32, satellite: usize) -> (f32, f32) {
+        let offset = satellite as f32 * 0.31;
+        match self.state {
+            ThinkingOrbState::Listening => (
+                phase.cos() * 0.56,
+                phase.sin() * 0.30 + (phase * 2.0 + offset).sin() * 0.08,
+            ),
+            ThinkingOrbState::Solving => (
+                (phase * 1.2).cos() * 0.58,
+                (phase * 2.0 + offset).sin() * 0.30,
+            ),
+            ThinkingOrbState::Shaping => (
+                (phase * 1.5 + offset).sin() * 0.58,
+                (phase * 2.5).sin() * 0.42,
+            ),
+            ThinkingOrbState::Cancelling => {
+                (phase.cos() * 0.42, (phase * 1.5 + offset).sin() * 0.24)
+            }
+        }
+    }
+
+    fn state_color(self, theme: &Theme) -> Color32 {
+        match self.state {
+            ThinkingOrbState::Listening => theme.accent_strong,
+            ThinkingOrbState::Solving => theme.accent,
+            ThinkingOrbState::Shaping => theme.success,
+            ThinkingOrbState::Cancelling => theme.warning,
+        }
+    }
+}
+
+fn with_alpha(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interpolate_color, ThinkingOrb, ThinkingOrbState};
+    use egui::Color32;
+
+    #[test]
+    fn color_interpolation_clamps_and_preserves_endpoints() {
+        let from = Color32::from_rgba_unmultiplied(10, 20, 30, 40);
+        let to = Color32::from_rgba_unmultiplied(110, 120, 130, 140);
+
+        assert_eq!(interpolate_color(from, to, -1.0), from);
+        assert_eq!(interpolate_color(from, to, 2.0), to);
+        assert_eq!(
+            interpolate_color(
+                Color32::from_rgb(10, 20, 30),
+                Color32::from_rgb(110, 120, 130),
+                0.5
+            ),
+            Color32::from_rgb(60, 70, 80)
+        );
+    }
+
+    #[test]
+    fn thinking_orb_samples_are_finite_bounded_and_deterministic() {
+        let orb = ThinkingOrb::new(ThinkingOrbState::Shaping, 32.0);
+        let first = orb.samples_at(0.75);
+        let second = orb.samples_at(0.75);
+
+        assert_eq!(first, second);
+        for sample in first {
+            assert!(sample.x.is_finite());
+            assert!(sample.y.is_finite());
+            assert!((-1.0..=1.0).contains(&sample.x));
+            assert!((-1.0..=1.0).contains(&sample.y));
+            assert!(sample.radius > 0.0);
+            assert!(sample.alpha > 0);
+        }
+    }
+
+    #[test]
+    fn thinking_orb_states_have_accessible_labels() {
+        assert_eq!(ThinkingOrbState::Listening.accessible_label(), "Escuchando");
+        assert_eq!(ThinkingOrbState::Solving.accessible_label(), "Resolviendo");
+        assert_eq!(
+            ThinkingOrbState::Shaping.accessible_label(),
+            "Preparando respuesta"
+        );
+        assert_eq!(
+            ThinkingOrbState::Cancelling.accessible_label(),
+            "Cancelando"
+        );
+    }
+
+    #[test]
+    fn thinking_orb_renders_for_every_state_in_light_and_dark_themes() {
+        for visuals in [egui::Visuals::dark(), egui::Visuals::light()] {
+            let context = egui::Context::default();
+            context.set_visuals(visuals);
+            for state in [
+                ThinkingOrbState::Listening,
+                ThinkingOrbState::Solving,
+                ThinkingOrbState::Shaping,
+                ThinkingOrbState::Cancelling,
+            ] {
+                let _ = context.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ThinkingOrb::new(state, 64.0).draw(ui);
+                    });
+                });
+            }
+        }
     }
 }

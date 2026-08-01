@@ -10,6 +10,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::ObjectId;
 
+/// Máxima cantidad de puntos que puede retener un trazo a mano alzada.
+pub const MAX_PENCIL_POINTS: usize = 8_192;
+
+/// Relación persistente de un lugar geométrico local.
+///
+/// Sólo identifica los puntos geométricos que impulsan y producen la traza.
+/// No guarda eventos de puntero, tiempo ni coordenadas de pantalla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocusBinding {
+    pub driver: ObjectId,
+    pub target: ObjectId,
+}
+
 /// Trazo de lápiz a mano alzada. Cada `PencilObj` representa **un trazo
 /// independiente** dentro del documento, lo que permite al usuario asignarle
 /// color y grosor desde el panel de álgebra sin afectar a otros trazos.
@@ -24,6 +37,10 @@ pub struct PencilObj {
     pub color: Color,
     pub visible: bool,
     pub width: f32,
+    /// Ausente para un trazo libre; presente para una trayectoria geométrica
+    /// que debe seguir actualizándose con el documento.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locus_binding: Option<LocusBinding>,
 }
 
 impl PencilObj {
@@ -34,9 +51,10 @@ impl PencilObj {
             id: ObjectId::new(),
             label: String::new(),
             points,
-            color: Color::new(0.1, 0.1, 0.1, 1.0),
+            color: Color::DEFAULT_STROKE,
             visible: true,
             width: 2.0,
+            locus_binding: None,
         }
     }
 
@@ -58,9 +76,48 @@ impl PencilObj {
         self
     }
 
+    /// Marca el trazo como un lugar geométrico impulsado por dos puntos del
+    /// documento. La validez de esas referencias se comprueba en `Document`.
+    pub fn with_locus_binding(mut self, driver: ObjectId, target: ObjectId) -> Self {
+        self.locus_binding = Some(LocusBinding { driver, target });
+        self
+    }
+
+    /// Devuelve la relación dinámica cuando este trazo es un locus.
+    pub const fn locus_binding(&self) -> Option<LocusBinding> {
+        self.locus_binding
+    }
+
+    /// Indica si el trazo es una trayectoria geométrica persistente.
+    pub const fn is_dynamic_locus(&self) -> bool {
+        self.locus_binding.is_some()
+    }
+
     /// Añade un punto al final del trazo. Usado durante el arrastre.
     pub fn push(&mut self, p: Point2) {
+        while self.points.len() >= MAX_PENCIL_POINTS {
+            let last = *self.points.last().expect("non-empty full Pencil stroke");
+            let mut decimated: Vec<_> = self.points.iter().step_by(2).copied().collect();
+            if decimated.last() != Some(&last) {
+                decimated.push(last);
+            }
+            self.points = decimated;
+        }
         self.points.push(p);
+    }
+
+    /// Registra una muestra de locus sólo si es finita y distinta de la última.
+    /// Devuelve si la polilínea cambió.
+    pub fn capture_locus_sample(&mut self, point: Point2) -> bool {
+        if !self.is_dynamic_locus()
+            || !point.x.is_finite()
+            || !point.y.is_finite()
+            || self.points.last() == Some(&point)
+        {
+            return false;
+        }
+        self.push(point);
+        true
     }
 
     /// Devuelve la cantidad de puntos almacenados.
@@ -121,6 +178,52 @@ mod tests {
         p.push(Point2::new(2.0, 2.0));
         assert_eq!(p.len(), 3);
         assert_eq!(p.segment_count(), 2);
+    }
+
+    #[test]
+    fn push_decimates_full_stroke_and_preserves_endpoints() {
+        let mut p = PencilObj::new(vec![Point2::new(0.0, 0.0)]);
+        for x in 1..MAX_PENCIL_POINTS {
+            p.push(Point2::new(x as f64, 0.0));
+        }
+
+        let previous_end = *p.points.last().expect("full stroke has an endpoint");
+        let final_end = Point2::new(MAX_PENCIL_POINTS as f64, 0.0);
+        p.push(final_end);
+
+        assert!(p.len() <= MAX_PENCIL_POINTS);
+        assert_eq!(p.points.first(), Some(&Point2::new(0.0, 0.0)));
+        assert_eq!(p.points[p.len() - 2], previous_end);
+        assert_eq!(p.points.last(), Some(&final_end));
+    }
+
+    #[test]
+    fn persistence_rejects_pencil_with_too_many_points() {
+        let points = (0..=MAX_PENCIL_POINTS)
+            .map(|x| Point2::new(x as f64, 0.0))
+            .collect();
+        let object = crate::GeoObject::Pencil(PencilObj::new(points));
+        let id = object.id();
+        let mut raw = serde_json::to_value(crate::Document::new()).expect("serialize document");
+        raw["objects"]
+            .as_object_mut()
+            .expect("objects are represented as a map")
+            .insert(
+                id.0.to_string(),
+                serde_json::to_value(object).expect("serialize unchecked Pencil"),
+            );
+        let document: crate::Document =
+            serde_json::from_value(raw).expect("deserialize unchecked test document");
+
+        let save_error = crate::serialize_document(&document)
+            .expect_err("over-cap Pencil must not be serialized");
+        assert!(save_error.to_string().contains("Pencil points"));
+
+        let raw_json =
+            serde_json::to_string(&document).expect("serialize raw document for load test");
+        let load_error = crate::deserialize_document(&raw_json)
+            .expect_err("over-cap persisted Pencil must not be loaded");
+        assert!(load_error.to_string().contains("Pencil points"));
     }
 
     #[test]

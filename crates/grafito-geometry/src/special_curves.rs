@@ -4,6 +4,61 @@
 //! commonly used in mathematics and physics.
 
 use crate::Point2;
+use std::fmt;
+
+/// Maximum number of samples accepted by a public special-curve sampler.
+pub const MAX_SPECIAL_CURVE_STEPS: usize = 100_000;
+/// Backwards-compatible name for the shared special-curve sampling budget.
+pub const MAX_ROSE_STEPS: usize = MAX_SPECIAL_CURVE_STEPS;
+
+/// Failure returned when special-curve sampling cannot safely produce points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecialCurveError {
+    /// The frequency ratio has a zero denominator.
+    ZeroFrequencyDenominator,
+    /// The requested point count exceeds the bounded sampling budget.
+    StepLimitExceeded { requested: usize, maximum: usize },
+    /// Reserving the bounded point buffer failed.
+    AllocationFailed,
+}
+
+impl fmt::Display for SpecialCurveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroFrequencyDenominator => {
+                write!(f, "el denominador de frecuencia no puede ser cero")
+            }
+            Self::StepLimitExceeded { requested, maximum } => {
+                write!(f, "se solicitaron {requested} muestras, máximo {maximum}")
+            }
+            Self::AllocationFailed => write!(f, "no se pudo reservar memoria para las muestras"),
+        }
+    }
+}
+
+/// Backwards-compatible name for the error returned by [`try_rose`].
+pub type RoseError = SpecialCurveError;
+
+fn try_sample_curve<F>(steps: usize, mut sample: F) -> Result<Vec<Point2>, SpecialCurveError>
+where
+    F: FnMut(usize) -> Point2,
+{
+    if steps > MAX_SPECIAL_CURVE_STEPS {
+        return Err(SpecialCurveError::StepLimitExceeded {
+            requested: steps,
+            maximum: MAX_SPECIAL_CURVE_STEPS,
+        });
+    }
+
+    let mut points = Vec::new();
+    points
+        .try_reserve_exact(steps)
+        .map_err(|_| SpecialCurveError::AllocationFailed)?;
+    for i in 0..steps {
+        points.push(sample(i));
+    }
+    Ok(points)
+}
 
 /// Generate points for a cardioid curve.
 ///
@@ -17,18 +72,16 @@ use crate::Point2;
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn cardioid(a: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
-    for i in 0..steps {
+    try_cardioid(a, steps).unwrap_or_default()
+}
+
+/// Intenta generar una cardioide dentro del presupuesto de muestreo público.
+pub fn try_cardioid(a: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
+    try_sample_curve(steps, |i| {
         let theta = 2.0 * std::f64::consts::PI * (i as f64) / (steps as f64);
         let r = a * (1.0 + theta.cos());
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(r * theta.cos(), r * theta.sin())
+    })
 }
 
 /// Generate points for a rose curve (rhodonea curve).
@@ -44,22 +97,26 @@ pub fn cardioid(a: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn rose(a: f64, n: i32, d: i32, steps: usize) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(steps);
+    try_rose(a, n, d, steps).unwrap_or_default()
+}
+
+/// Intenta generar una rosa con un presupuesto de muestras y reserva falible.
+pub fn try_rose(a: f64, n: i32, d: i32, steps: usize) -> Result<Vec<Point2>, RoseError> {
+    if d == 0 {
+        return Err(RoseError::ZeroFrequencyDenominator);
+    }
     let k = n as f64 / d as f64;
-    let max_theta = if (n * d) % 2 == 0 {
+    let max_theta = if n % 2 == 0 || d % 2 == 0 {
         2.0 * std::f64::consts::PI * d as f64
     } else {
         std::f64::consts::PI * d as f64
     };
 
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let theta = max_theta * (i as f64) / (steps as f64);
         let r = a * (k * theta).cos();
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(r * theta.cos(), r * theta.sin())
+    })
 }
 
 /// Generate points for an Archimedean spiral.
@@ -76,15 +133,21 @@ pub fn rose(a: f64, n: i32, d: i32, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn archimedean_spiral(a: f64, b: f64, max_theta: f64, steps: usize) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(steps);
-    for i in 0..steps {
+    try_archimedean_spiral(a, b, max_theta, steps).unwrap_or_default()
+}
+
+/// Intenta generar una espiral de Arquímedes dentro del presupuesto público.
+pub fn try_archimedean_spiral(
+    a: f64,
+    b: f64,
+    max_theta: f64,
+    steps: usize,
+) -> Result<Vec<Point2>, SpecialCurveError> {
+    try_sample_curve(steps, |i| {
         let theta = max_theta * (i as f64) / (steps as f64);
         let r = a + b * theta;
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(r * theta.cos(), r * theta.sin())
+    })
 }
 
 /// Generate points for a logarithmic spiral.
@@ -100,15 +163,21 @@ pub fn archimedean_spiral(a: f64, b: f64, max_theta: f64, steps: usize) -> Vec<P
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn logarithmic_spiral(a: f64, b: f64, max_theta: f64, steps: usize) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(steps);
-    for i in 0..steps {
+    try_logarithmic_spiral(a, b, max_theta, steps).unwrap_or_default()
+}
+
+/// Intenta generar una espiral logarítmica dentro del presupuesto público.
+pub fn try_logarithmic_spiral(
+    a: f64,
+    b: f64,
+    max_theta: f64,
+    steps: usize,
+) -> Result<Vec<Point2>, SpecialCurveError> {
+    try_sample_curve(steps, |i| {
         let theta = max_theta * (i as f64) / (steps as f64);
         let r = a * (b * theta).exp();
-        let x = r * theta.cos();
-        let y = r * theta.sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(r * theta.cos(), r * theta.sin())
+    })
 }
 
 /// Generate points for a Lissajous curve.
@@ -134,16 +203,24 @@ pub fn lissajous(
     delta: f64,
     steps: usize,
 ) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(steps);
+    try_lissajous(a, b, freq_x, freq_y, delta, steps).unwrap_or_default()
+}
+
+/// Intenta generar una curva de Lissajous dentro del presupuesto público.
+pub fn try_lissajous(
+    a: f64,
+    b: f64,
+    freq_x: f64,
+    freq_y: f64,
+    delta: f64,
+    steps: usize,
+) -> Result<Vec<Point2>, SpecialCurveError> {
     let max_t = 2.0 * std::f64::consts::PI;
 
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let t = max_t * (i as f64) / (steps as f64);
-        let x = a * (freq_x * t + delta).sin();
-        let y = b * (freq_y * t).sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(a * (freq_x * t + delta).sin(), b * (freq_y * t).sin())
+    })
 }
 
 /// Generate points for an epicycloid.
@@ -159,19 +236,19 @@ pub fn lissajous(
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn epicycloid(r: f64, k: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
+    try_epicycloid(r, k, steps).unwrap_or_default()
+}
+
+/// Intenta generar una epicicloide dentro del presupuesto público.
+pub fn try_epicycloid(r: f64, k: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
     let max_theta = 2.0 * std::f64::consts::PI * k.ceil();
 
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let theta = max_theta * (i as f64) / (steps as f64);
         let x = r * ((1.0 + k) * theta.cos() - k * ((1.0 + k) * theta / k).cos());
         let y = r * ((1.0 + k) * theta.sin() - k * ((1.0 + k) * theta / k).sin());
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(x, y)
+    })
 }
 
 /// Generate points for a hypocycloid.
@@ -186,16 +263,19 @@ pub fn epicycloid(r: f64, k: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn hypocycloid(r: f64, k: f64, steps: usize) -> Vec<Point2> {
-    let mut points = Vec::with_capacity(steps);
+    try_hypocycloid(r, k, steps).unwrap_or_default()
+}
+
+/// Intenta generar una hipocicloide dentro del presupuesto público.
+pub fn try_hypocycloid(r: f64, k: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
     let max_theta = 2.0 * std::f64::consts::PI * k.ceil();
 
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let theta = max_theta * (i as f64) / (steps as f64);
         let x = r * ((k - 1.0) * theta.cos() + ((k - 1.0) * theta).cos());
         let y = r * ((k - 1.0) * theta.sin() - ((k - 1.0) * theta).sin());
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(x, y)
+    })
 }
 
 /// Generate points for an astroid curve.
@@ -210,17 +290,15 @@ pub fn hypocycloid(r: f64, k: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn astroid(a: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
-    for i in 0..steps {
+    try_astroid(a, steps).unwrap_or_default()
+}
+
+/// Intenta generar una astroide dentro del presupuesto público.
+pub fn try_astroid(a: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
+    try_sample_curve(steps, |i| {
         let t = 2.0 * std::f64::consts::PI * (i as f64) / (steps as f64);
-        let x = a * t.cos().powi(3);
-        let y = a * t.sin().powi(3);
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(a * t.cos().powi(3), a * t.sin().powi(3))
+    })
 }
 
 /// Generate points for a deltoid curve.
@@ -235,17 +313,18 @@ pub fn astroid(a: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn deltoid(a: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
-    for i in 0..steps {
+    try_deltoid(a, steps).unwrap_or_default()
+}
+
+/// Intenta generar una deltoide dentro del presupuesto público.
+pub fn try_deltoid(a: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
+    try_sample_curve(steps, |i| {
         let t = 2.0 * std::f64::consts::PI * (i as f64) / (steps as f64);
-        let x = 2.0 * a * t.cos() + a * (2.0 * t).cos();
-        let y = 2.0 * a * t.sin() - a * (2.0 * t).sin();
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(
+            2.0 * a * t.cos() + a * (2.0 * t).cos(),
+            2.0 * a * t.sin() - a * (2.0 * t).sin(),
+        )
+    })
 }
 
 /// Generate points for a tractrix curve.
@@ -261,18 +340,16 @@ pub fn deltoid(a: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn tractrix(a: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
+    try_tractrix(a, steps).unwrap_or_default()
+}
+
+/// Intenta generar una tractriz dentro del presupuesto público.
+pub fn try_tractrix(a: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
     let t_max = 5.0;
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let t = t_max * (i as f64) / (steps as f64) + 1e-6;
-        let x = a / t.cosh();
-        let y = a * (t - t.tanh());
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(a / t.cosh(), a * (t - t.tanh()))
+    })
 }
 
 /// Generate points for a brachistochrone curve.
@@ -288,18 +365,16 @@ pub fn tractrix(a: f64, steps: usize) -> Vec<Point2> {
 /// # Returns
 /// Vector of Point2 representing the curve
 pub fn brachistochrone(a: f64, steps: usize) -> Vec<Point2> {
-    if steps == 0 {
-        return vec![];
-    }
-    let mut points = Vec::with_capacity(steps);
+    try_brachistochrone(a, steps).unwrap_or_default()
+}
+
+/// Intenta generar una braquistócrona dentro del presupuesto público.
+pub fn try_brachistochrone(a: f64, steps: usize) -> Result<Vec<Point2>, SpecialCurveError> {
     let t_max = 2.0 * std::f64::consts::PI;
-    for i in 0..steps {
+    try_sample_curve(steps, |i| {
         let t = t_max * (i as f64) / (steps as f64);
-        let x = a * (t - t.sin());
-        let y = a * (1.0 - t.cos());
-        points.push(Point2::new(x, y));
-    }
-    points
+        Point2::new(a * (t - t.sin()), a * (1.0 - t.cos()))
+    })
 }
 
 #[cfg(test)]
@@ -319,6 +394,61 @@ mod tests {
     fn test_rose() {
         let points = rose(1.0, 3, 1, 100);
         assert_eq!(points.len(), 100);
+    }
+
+    #[test]
+    fn rose_rejects_zero_denominators_and_avoids_frequency_overflow() {
+        assert!(rose(1.0, 3, 0, 100).is_empty());
+        assert_eq!(
+            try_rose(1.0, 3, 0, 100),
+            Err(RoseError::ZeroFrequencyDenominator)
+        );
+
+        let points = rose(1.0, i32::MAX, 2, 3);
+        assert_eq!(points.len(), 3);
+        assert!(points
+            .iter()
+            .all(|point| point.x.is_finite() && point.y.is_finite()));
+    }
+
+    #[test]
+    fn try_rose_rejects_step_budgets_before_allocating() {
+        assert_eq!(
+            try_rose(1.0, 3, 1, MAX_ROSE_STEPS + 1),
+            Err(RoseError::StepLimitExceeded {
+                requested: MAX_ROSE_STEPS + 1,
+                maximum: MAX_ROSE_STEPS,
+            })
+        );
+    }
+
+    #[test]
+    fn every_public_curve_sampler_rejects_unbounded_step_counts_before_allocation() {
+        let expected = Err(SpecialCurveError::StepLimitExceeded {
+            requested: usize::MAX,
+            maximum: MAX_SPECIAL_CURVE_STEPS,
+        });
+
+        assert_eq!(try_cardioid(1.0, usize::MAX), expected);
+        assert_eq!(try_rose(1.0, 3, 1, usize::MAX), expected);
+        assert_eq!(
+            try_archimedean_spiral(0.0, 1.0, std::f64::consts::TAU, usize::MAX),
+            expected
+        );
+        assert_eq!(
+            try_logarithmic_spiral(1.0, 0.1, std::f64::consts::TAU, usize::MAX),
+            expected
+        );
+        assert_eq!(try_lissajous(1.0, 1.0, 3.0, 2.0, 0.0, usize::MAX), expected);
+        assert_eq!(try_epicycloid(1.0, 3.0, usize::MAX), expected);
+        assert_eq!(try_hypocycloid(1.0, 4.0, usize::MAX), expected);
+        assert_eq!(try_astroid(1.0, usize::MAX), expected);
+        assert_eq!(try_deltoid(1.0, usize::MAX), expected);
+        assert_eq!(try_tractrix(1.0, usize::MAX), expected);
+        assert_eq!(try_brachistochrone(1.0, usize::MAX), expected);
+
+        assert!(cardioid(1.0, usize::MAX).is_empty());
+        assert!(archimedean_spiral(0.0, 1.0, 1.0, usize::MAX).is_empty());
     }
 
     #[test]

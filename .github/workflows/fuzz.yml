@@ -1,0 +1,73 @@
+name: Fuzzing
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_FUZZ_VERSION: "0.12.0"
+  FUZZ_TOOLCHAIN: nightly-2025-02-15
+  FUZZ_SECONDS_PER_TARGET: "180"
+
+jobs:
+  fuzz:
+    name: libFuzzer targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev m4
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+          components: rust-src
+      - name: Install pinned cargo-fuzz
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root="$RUNNER_TEMP/cargo-fuzz"
+          cargo +"$FUZZ_TOOLCHAIN" install --locked --root "$tool_root" cargo-fuzz --version "$CARGO_FUZZ_VERSION"
+          printf '%s\n' "$tool_root/bin" >> "$GITHUB_PATH"
+      - name: Verify the isolated fuzz lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +"$FUZZ_TOOLCHAIN" fetch --locked --manifest-path fuzz/Cargo.toml
+          cargo +"$FUZZ_TOOLCHAIN" metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps >/dev/null
+      - name: Run every fuzz target with a bounded budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets=(
+            ast_parser
+            complex_parser
+            document_deserialization
+            command_atomicity
+          )
+          failed=0
+          for target in "${targets[@]}"; do
+            echo "Fuzzing $target for at most ${FUZZ_SECONDS_PER_TARGET}s"
+            if ! CARGO_NET_OFFLINE=true cargo +"$FUZZ_TOOLCHAIN" fuzz run "$target" --fuzz-dir fuzz -- -max_total_time="$FUZZ_SECONDS_PER_TARGET" -max_len=65536; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Upload libFuzzer crash artifacts
+        if: ${{ always() && hashFiles('fuzz/artifacts/**') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: fuzz-crashes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fuzz/artifacts/
+          if-no-files-found: error
+          retention-days: 14

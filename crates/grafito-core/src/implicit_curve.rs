@@ -11,12 +11,31 @@ use grafito_geometry::{expr, Point2};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+/// Maximum resolution supported by the implicit-curve cache and render paths.
+pub const MAX_IMPLICIT_GRID_SIZE: usize = 1024;
+/// Maximum number of marching-squares segments retained for one curve.
+pub const MAX_MARCHING_SQUARES_SEGMENTS: usize = 50_000;
+/// Maximum cells visited while extracting all contour levels for one curve.
+pub const MAX_MARCHING_SQUARES_WORK_UNITS: usize = crate::validation::MAX_CONTOUR_WORK_UNITS;
+
+const MAX_IMPLICIT_GRID_CELLS: usize = MAX_IMPLICIT_GRID_SIZE * MAX_IMPLICIT_GRID_SIZE;
+
+/// Returns the number of scalar samples for a square grid when its dimensions
+/// are representable and within the public per-object limit.
+fn implicit_grid_sample_count(grid_size: usize) -> Option<usize> {
+    if grid_size > MAX_IMPLICIT_GRID_SIZE {
+        return None;
+    }
+    let samples_per_axis = grid_size.checked_add(1)?;
+    samples_per_axis.checked_mul(samples_per_axis)
+}
+
 /// Choose a grid resolution that keeps cells close to screen pixels while
 /// avoiding excessive work on high-DPI or huge canvases.
 ///
 /// Clamped between 128 and 1024 samples per axis.
 pub fn recommended_grid_size(canvas_width: f32, canvas_height: f32) -> usize {
-    ((canvas_width.max(canvas_height)) as f64).clamp(128.0, 1024.0) as usize
+    ((canvas_width.max(canvas_height)) as f64).clamp(128.0, MAX_IMPLICIT_GRID_SIZE as f64) as usize
 }
 
 /// Choose a grid resolution capped by the current render quality.
@@ -96,8 +115,9 @@ pub fn segments_or_compute<'a>(
     let grid_size = match quality {
         RenderQuality::Preview => grid_size.min(128),
         RenderQuality::Normal => grid_size.min(512),
-        RenderQuality::High => grid_size.min(1024),
+        RenderQuality::High => grid_size.min(MAX_IMPLICIT_GRID_SIZE),
     };
+    let key = ic.cache_key(padded_bounds, grid_size, variables);
 
     {
         let cached_key = ic.cached_key.read().unwrap_or_else(|p| {
@@ -105,12 +125,7 @@ pub fn segments_or_compute<'a>(
             p.into_inner()
         });
         if let Some(cached) = cached_key.as_ref() {
-            if cached.view_bounds == padded_bounds
-                && cached.grid_size == grid_size
-                && cached.expr_lhs == ic.expr_lhs
-                && cached.expr_rhs == ic.expr_rhs
-                && cached.operator == ic.operator
-            {
+            if cached == &key {
                 let cached_region = ic.cached_region.read().unwrap_or_else(|p| {
                     log::warn!("cache lock envenenado; recuperando estado parcial");
                     p.into_inner()
@@ -129,7 +144,6 @@ pub fn segments_or_compute<'a>(
         }
     }
 
-    let key = ic.cache_key(padded_bounds, grid_size, variables);
     let segments = evaluate_implicit_curve(ic, padded_bounds, grid_size, variables);
     *ic.cached_segments.write().unwrap_or_else(|p| {
         log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -162,6 +176,7 @@ pub fn evaluate_implicit_curve(
 ) -> ImplicitCurveSegments {
     let (x_min, x_max, y_min, y_max) = view_bounds;
     if grid_size == 0
+        || implicit_grid_sample_count(grid_size).is_none()
         || !x_min.is_finite()
         || !x_max.is_finite()
         || !y_min.is_finite()
@@ -232,59 +247,120 @@ pub fn evaluate_implicit_curve(
         })
         .collect();
 
-    // Build per-level segments. This is serial but cheap compared to evaluation.
-    let mut per_level: ImplicitCurveSegments = ImplicitCurveSegments::new();
-    let mut total = 0usize;
-    const MAX_SEGMENTS: usize = 50_000;
-    for level in &levels {
-        let segs = marching_squares_level(&rows, *level, x_min, y_min, dx, dy);
-        total += segs.len();
-        per_level.push((*level, segs));
-        if total > MAX_SEGMENTS {
-            break;
+    marching_squares_from_grid(&rows, &levels, x_min, y_min, x_max, y_max)
+}
+
+/// Validate the persisted contour limits before a runtime command creates a
+/// curve. Extraction also defends these limits, but rejecting early preserves
+/// command atomicity and matches document persistence rules.
+pub fn validate_contour_levels(levels: &[f64]) -> Result<(), String> {
+    if levels.len() > crate::validation::MAX_CONTOUR_LEVELS {
+        return Err(format!(
+            "contour level count {} exceeds maximum {}",
+            levels.len(),
+            crate::validation::MAX_CONTOUR_LEVELS
+        ));
+    }
+
+    let work = levels
+        .len()
+        .checked_mul(MAX_IMPLICIT_GRID_CELLS)
+        .ok_or_else(|| "contour work budget overflowed".to_string())?;
+    if work > MAX_MARCHING_SQUARES_WORK_UNITS {
+        return Err(format!(
+            "contour work budget {} exceeds maximum {}",
+            work, MAX_MARCHING_SQUARES_WORK_UNITS
+        ));
+    }
+
+    for (index, level) in levels.iter().copied().enumerate() {
+        if !level.is_finite() {
+            return Err(format!("contour level {index} must be finite"));
+        }
+        if levels[..index].contains(&level) {
+            return Err("contains duplicate contour levels".to_string());
         }
     }
+    Ok(())
+}
 
-    // Safety cap: avoid pathological curves exploding the vertex buffer.
-    if total > MAX_SEGMENTS {
-        let mut kept = 0usize;
-        per_level.retain_mut(|(_, segs)| {
-            if kept >= MAX_SEGMENTS {
-                segs.clear();
-                false
-            } else if kept + segs.len() > MAX_SEGMENTS {
-                let take = MAX_SEGMENTS - kept;
-                segs.truncate(take);
-                kept = MAX_SEGMENTS;
-                true
-            } else {
-                kept += segs.len();
-                true
-            }
-        });
+/// Extract contour segments from an already evaluated scalar grid.
+///
+/// Work is charged before every cell visit, including cells with no crossing,
+/// and segments are retained as they are produced. This keeps both budgets
+/// bounded without materializing a dense contour level first.
+pub fn marching_squares_from_grid(
+    rows: &[Vec<f64>],
+    levels: &[f64],
+    x_min: f64,
+    y_min: f64,
+    x_max: f64,
+    y_max: f64,
+) -> ImplicitCurveSegments {
+    let grid_size = rows.len().saturating_sub(1);
+    if grid_size == 0
+        || !x_min.is_finite()
+        || !y_min.is_finite()
+        || !x_max.is_finite()
+        || !y_max.is_finite()
+        || rows.iter().any(|row| row.len() != grid_size + 1)
+    {
+        return Vec::new();
     }
 
-    per_level
+    let dx = (x_max - x_min) / grid_size as f64;
+    let dy = (y_max - y_min) / grid_size as f64;
+    if dx == 0.0 || dy == 0.0 || !dx.is_finite() || !dy.is_finite() {
+        return Vec::new();
+    }
+
+    let mut remaining_work = MAX_MARCHING_SQUARES_WORK_UNITS;
+    let mut remaining_segments = MAX_MARCHING_SQUARES_SEGMENTS;
+    let mut contours = Vec::with_capacity(levels.len().min(crate::validation::MAX_CONTOUR_LEVELS));
+    for level in levels
+        .iter()
+        .copied()
+        .take(crate::validation::MAX_CONTOUR_LEVELS)
+    {
+        if remaining_work == 0 || remaining_segments == 0 {
+            break;
+        }
+        let segments = marching_squares_level(
+            rows,
+            level,
+            (x_min, y_min),
+            (dx, dy),
+            &mut remaining_work,
+            &mut remaining_segments,
+        );
+        contours.push((level, segments));
+    }
+    contours
 }
 
 fn marching_squares_level(
     rows: &[Vec<f64>],
     level: f64,
-    x_min: f64,
-    y_min: f64,
-    dx: f64,
-    dy: f64,
+    (x_min, y_min): (f64, f64),
+    (dx, dy): (f64, f64),
+    remaining_work: &mut usize,
+    remaining_segments: &mut usize,
 ) -> Vec<(Point2, Point2)> {
     let grid_size = rows.len().saturating_sub(1);
     if grid_size == 0 {
         return Vec::new();
     }
 
-    let mut segments = Vec::with_capacity((grid_size * 2).max(64));
-    for i in 0..grid_size {
+    let mut segments =
+        Vec::with_capacity(grid_size.saturating_mul(2).max(64).min(*remaining_segments));
+    'cells: for i in 0..grid_size {
         let x0 = x_min + i as f64 * dx;
         let x1 = x0 + dx;
         for j in 0..grid_size {
+            if *remaining_work == 0 || *remaining_segments == 0 {
+                break 'cells;
+            }
+            *remaining_work -= 1;
             let y0 = y_min + j as f64 * dy;
             let y1 = y0 + dy;
 
@@ -318,7 +394,12 @@ fn marching_squares_level(
                 }
             };
 
-            let mut push = |a: Point2, b: Point2| segments.push((a, b));
+            let mut push = |a: Point2, b: Point2| {
+                if *remaining_segments > 0 {
+                    segments.push((a, b));
+                    *remaining_segments -= 1;
+                }
+            };
 
             let bottom = |t: f64| Point2::new(x0 + t * (x1 - x0), y0);
             let top = |t: f64| Point2::new(x0 + t * (x1 - x0), y1);
@@ -346,6 +427,9 @@ fn marching_squares_level(
                     push(left(il), top(it));
                 }
                 _ => {}
+            }
+            if *remaining_segments == 0 {
+                break 'cells;
             }
         }
     }
@@ -436,5 +520,15 @@ mod tests {
                 db
             );
         }
+    }
+
+    #[test]
+    fn implicit_grid_sample_count_rejects_oversized_and_overflowing_dimensions() {
+        assert_eq!(
+            implicit_grid_sample_count(MAX_IMPLICIT_GRID_SIZE),
+            Some((MAX_IMPLICIT_GRID_SIZE + 1) * (MAX_IMPLICIT_GRID_SIZE + 1))
+        );
+        assert_eq!(implicit_grid_sample_count(MAX_IMPLICIT_GRID_SIZE + 1), None);
+        assert_eq!(implicit_grid_sample_count(usize::MAX), None);
     }
 }

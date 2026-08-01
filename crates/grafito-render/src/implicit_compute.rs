@@ -9,10 +9,17 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
-use grafito_core::object::{ImplicitCurveObj, ImplicitCurveSegments};
+use grafito_core::object::{ImplicitCurveObj, RelationOperator};
 use grafito_core::RenderQuality;
-use grafito_geometry::{Point2, ViewTransform};
+use grafito_geometry::ViewTransform;
 use std::collections::HashMap;
+
+pub use grafito_core::implicit_curve::{
+    marching_squares_from_grid, MAX_IMPLICIT_GRID_SIZE, MAX_MARCHING_SQUARES_SEGMENTS,
+};
+
+/// Matches `STACK_SIZE` in each scalar WGSL bytecode interpreter.
+const GPU_SCALAR_STACK_SIZE: i32 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -81,6 +88,20 @@ impl Op {
 pub(crate) struct BytecodeProgram {
     pub(crate) code: Vec<u32>,
     pub(crate) constants: Vec<f32>,
+}
+
+pub(crate) fn f32_bounds_have_precision(values: &[f64], min_step: f64) -> bool {
+    if !min_step.is_finite() || min_step <= 0.0 {
+        return false;
+    }
+    let max_error = min_step * 0.25;
+    values.iter().all(|v| {
+        if !v.is_finite() {
+            return false;
+        }
+        let narrowed = *v as f32;
+        narrowed.is_finite() && (*v - narrowed as f64).abs() <= max_error
+    })
 }
 
 /// Reason why an expression cannot be compiled to GPU bytecode.
@@ -374,7 +395,7 @@ pub(crate) fn compile_expr_with_mapping(
             _ => {}
         }
     }
-    if max_sp > 32 || prog.code.len() > 4096 {
+    if max_sp > GPU_SCALAR_STACK_SIZE || prog.code.len() > 4096 {
         return Err(CompileError::StackTooDeep);
     }
     Ok(())
@@ -388,6 +409,52 @@ pub(crate) fn compile_expr(
     prog: &mut BytecodeProgram,
 ) -> Result<(), CompileError> {
     compile_expr_with_mapping(expr, document_vars, &[("x", 0), ("y", 1)], prog)
+}
+
+fn prepare_implicit_field(
+    ic: &ImplicitCurveObj,
+    variables: &HashMap<String, f64>,
+) -> Option<grafito_geometry::ast::Expr> {
+    let lhs =
+        grafito_geometry::expr::prepare_function_ast(&ic.expr_lhs, variables, &["x", "y"]).ok()?;
+    let rhs =
+        grafito_geometry::expr::prepare_function_ast(&ic.expr_rhs, variables, &["x", "y"]).ok()?;
+
+    Some(
+        match ic.operator {
+            RelationOperator::Greater | RelationOperator::GreaterEq => {
+                grafito_geometry::ast::Expr::Sub(Box::new(rhs), Box::new(lhs))
+            }
+            _ => grafito_geometry::ast::Expr::Sub(Box::new(lhs), Box::new(rhs)),
+        }
+        .simplify(),
+    )
+}
+
+fn nonfinite_gpu_field_matches_cpu(
+    ic: &ImplicitCurveObj,
+    rows: &[Vec<f64>],
+    bounds: (f64, f64, f64, f64),
+    grid_size: usize,
+    variables: &HashMap<String, f64>,
+) -> bool {
+    if rows.iter().flatten().all(|value| value.is_finite()) {
+        return true;
+    }
+    let Some(field) = prepare_implicit_field(ic, variables) else {
+        return false;
+    };
+    if rows.len() != grid_size + 1 || rows.iter().any(|row| row.len() != grid_size + 1) {
+        return false;
+    }
+    let (x_min, x_max, y_min, y_max) = bounds;
+    rows.iter().enumerate().all(|(j, row)| {
+        row.iter().enumerate().all(|(i, gpu)| {
+            let x = x_min + i as f64 / grid_size as f64 * (x_max - x_min);
+            let y = y_min + j as f64 / grid_size as f64 * (y_max - y_min);
+            gpu.is_finite() == field.eval_2d("x", x, "y", y).is_finite()
+        })
+    })
 }
 
 /// GPU resources needed to evaluate one implicit curve per dispatch.
@@ -483,6 +550,7 @@ impl ImplicitComputePipeline {
             cache: None,
         });
 
+        let max_grid = max_grid.min(MAX_IMPLICIT_GRID_SIZE);
         let max_values = (max_grid + 1) * (max_grid + 1);
 
         let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -544,9 +612,9 @@ impl ImplicitComputePipeline {
         }
     }
 
-    /// Evaluate the implicit curve `lhs - rhs` on the GPU and return a grid of
-    /// scalar values. Returns `None` if the expression cannot be compiled to
-    /// GPU bytecode (caller should fall back to CPU).
+    /// Evaluate the relation-normalized implicit scalar field on the GPU and
+    /// return a grid of values. Returns `None` if the expression cannot be
+    /// compiled to GPU bytecode (caller should fall back to CPU).
     pub fn evaluate(
         &self,
         device: &wgpu::Device,
@@ -556,31 +624,29 @@ impl ImplicitComputePipeline {
         grid_size: usize,
         variables: &HashMap<String, f64>,
     ) -> Option<Vec<Vec<f64>>> {
-        let lhs_ast =
-            grafito_geometry::expr::prepare_function_ast(&ic.expr_lhs, variables, &["x", "y"])
-                .ok()?;
-        let rhs_ast =
-            grafito_geometry::expr::prepare_function_ast(&ic.expr_rhs, variables, &["x", "y"])
-                .ok()?;
-
-        // Build lhs - rhs and simplify (e.g., eliminate "x - 0" → "x")
-        let combined =
-            grafito_geometry::ast::Expr::Sub(Box::new(lhs_ast), Box::new(rhs_ast)).simplify();
+        let combined = prepare_implicit_field(ic, variables)?;
 
         let mut prog = BytecodeProgram::default();
         compile_expr(&combined, variables, &mut prog).ok()?;
 
-        if grid_size > self.max_grid {
+        if grid_size == 0 || grid_size > self.max_grid || grid_size > MAX_IMPLICIT_GRID_SIZE {
             return None;
         }
+        let sample_axis = grid_size.checked_add(1)?;
+        let sample_count = sample_axis.checked_mul(sample_axis)?;
 
         let (x_min, x_max, y_min, y_max) = view_bounds;
+        let min_step = ((x_max - x_min).abs() / grid_size.max(1) as f64)
+            .min((y_max - y_min).abs() / grid_size.max(1) as f64);
+        if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
+            return None;
+        }
         let params = GridParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,
             y_min: y_min as f32,
             y_max: y_max as f32,
-            grid_size: (grid_size + 1) as u32,
+            grid_size: sample_axis as u32,
             code_len: prog.code.len() as u32,
             _pad0: 0,
             _pad1: 0,
@@ -627,7 +693,7 @@ impl ImplicitComputePipeline {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let wg = (grid_size as u32 + 1).div_ceil(16).max(1);
+            let wg = (sample_axis as u32).div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg, wg, 1);
         }
         encoder.copy_buffer_to_buffer(
@@ -635,7 +701,7 @@ impl ImplicitComputePipeline {
             0,
             &self.values_readback,
             0,
-            ((grid_size + 1) * (grid_size + 1) * std::mem::size_of::<f32>()) as u64,
+            (sample_count * std::mem::size_of::<f32>()) as u64,
         );
         queue.submit(std::iter::once(encoder.finish()));
 
@@ -715,7 +781,7 @@ pub fn maybe_compute_on_gpu(
             view.screen_size.x,
             view.screen_size.y,
         )
-        .min(1024),
+        .min(grafito_core::implicit_curve::MAX_IMPLICIT_GRID_SIZE),
     };
 
     let key = ic.cache_key(padded_bounds, grid_size, variables);
@@ -733,6 +799,9 @@ pub fn maybe_compute_on_gpu(
     else {
         return false;
     };
+    if !nonfinite_gpu_field_matches_cpu(ic, &rows, padded_bounds, grid_size, variables) {
+        return false;
+    }
 
     let levels: Vec<f64> = ic
         .contour_levels
@@ -763,95 +832,63 @@ pub fn maybe_compute_on_gpu(
     true
 }
 
-/// Run marching squares on a scalar grid and return per-level segments.
-pub fn marching_squares_from_grid(
-    rows: &[Vec<f64>],
-    levels: &[f64],
-    x_min: f64,
-    y_min: f64,
-    x_max: f64,
-    y_max: f64,
-) -> ImplicitCurveSegments {
-    let grid_size = rows.len().saturating_sub(1);
-    if grid_size == 0 {
-        return Vec::new();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafito_core::RelationOperator;
+
+    #[test]
+    fn greater_relations_prepare_the_cpu_field_for_nonzero_contours() {
+        for operator in [RelationOperator::Greater, RelationOperator::GreaterEq] {
+            let curve = ImplicitCurveObj::new("y", "3", operator);
+            let field = prepare_implicit_field(&curve, &HashMap::new()).unwrap();
+
+            assert_eq!(field.eval_2d("x", 0.0, "y", 1.0), 2.0);
+            assert_eq!(field.eval_2d("x", 0.0, "y", 3.0), 0.0);
+
+            let segments = marching_squares_from_grid(
+                &[vec![2.0, 2.0], vec![0.0, 0.0]],
+                &[1.0],
+                0.0,
+                1.0,
+                1.0,
+                3.0,
+            );
+            let (_, segments) = &segments[0];
+            assert_eq!(segments.len(), 1);
+            assert!((segments[0].0.y - 2.0).abs() <= f64::EPSILON);
+            assert!((segments[0].1.y - 2.0).abs() <= f64::EPSILON);
+        }
     }
-    let dx = (x_max - x_min) / grid_size as f64;
-    let dy = (y_max - y_min) / grid_size as f64;
 
-    levels
-        .iter()
-        .map(|level| {
-            let mut segs = Vec::new();
-            for i in 0..grid_size {
-                let x0 = x_min + i as f64 * dx;
-                let x1 = x0 + dx;
-                for j in 0..grid_size {
-                    let y0 = y_min + j as f64 * dy;
-                    let y1 = y0 + dy;
+    #[test]
+    fn compiler_accepts_an_expression_using_exactly_32_stack_slots() {
+        let expression = (1..32).fold("x".to_string(), |expression, _| {
+            format!("min(x, {expression})")
+        });
+        let expression =
+            grafito_geometry::expr::prepare_function_ast(&expression, &HashMap::new(), &["x"])
+                .expect("the exact-stack expression must parse");
+        let mut program = BytecodeProgram::default();
 
-                    let v00 = rows[j][i];
-                    let v10 = rows[j][i + 1];
-                    let v01 = rows[j + 1][i];
-                    let v11 = rows[j + 1][i + 1];
+        compile_expr(&expression, &HashMap::new(), &mut program)
+            .expect("the compiler must accept the shader's 32-slot stack limit");
+        assert_eq!(program.code.len(), 63);
+    }
 
-                    if v00.is_nan() || v10.is_nan() || v01.is_nan() || v11.is_nan() {
-                        continue;
-                    }
+    #[test]
+    fn gpu_bytecode_rejects_bessel_expressions_for_cpu_domain_handling() {
+        let expression = grafito_geometry::expr::prepare_function_ast(
+            "besselj(n, x)",
+            &HashMap::new(),
+            &["x", "n"],
+        )
+        .unwrap();
+        let mut program = BytecodeProgram::default();
 
-                    let s00 = (v00 - level) >= 0.0;
-                    let s10 = (v10 - level) >= 0.0;
-                    let s01 = (v01 - level) >= 0.0;
-                    let s11 = (v11 - level) >= 0.0;
-
-                    let case =
-                        (s00 as u8) | ((s10 as u8) << 1) | ((s11 as u8) << 2) | ((s01 as u8) << 3);
-
-                    if case == 0 || case == 15 {
-                        continue;
-                    }
-
-                    let interp = |va: f64, vb: f64, pa: f64, pb: f64| -> f64 {
-                        let denom = (va - level) - (vb - level);
-                        if denom.abs() < f64::EPSILON * (va.abs() + vb.abs()).max(1.0) {
-                            (pa + pb) * 0.5
-                        } else {
-                            let t = (va - level) / denom;
-                            pa + t * (pb - pa)
-                        }
-                    };
-
-                    let bottom = |t: f64| Point2::new(x0 + t * (x1 - x0), y0);
-                    let top = |t: f64| Point2::new(x0 + t * (x1 - x0), y1);
-                    let left = |t: f64| Point2::new(x0, y0 + t * (y1 - y0));
-                    let right = |t: f64| Point2::new(x1, y0 + t * (y1 - y0));
-
-                    let ib = interp(v00, v10, 0.0, 1.0);
-                    let ir = interp(v10, v11, 0.0, 1.0);
-                    let it = interp(v01, v11, 0.0, 1.0);
-                    let il = interp(v00, v01, 0.0, 1.0);
-
-                    let mut push = |a: Point2, b: Point2| segs.push((a, b));
-                    match case {
-                        1 | 14 => push(bottom(ib), left(il)),
-                        2 | 13 => push(right(ir), bottom(ib)),
-                        3 | 12 => push(right(ir), left(il)),
-                        4 | 11 => push(top(it), right(ir)),
-                        5 => {
-                            push(bottom(ib), left(il));
-                            push(top(it), right(ir));
-                        }
-                        6 | 9 => push(top(it), bottom(ib)),
-                        7 | 8 => push(top(it), left(il)),
-                        10 => {
-                            push(right(ir), bottom(ib));
-                            push(left(il), top(it));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            (*level, segs)
-        })
-        .collect()
+        assert!(matches!(
+            compile_expr(&expression, &HashMap::new(), &mut program),
+            Err(CompileError::UnsupportedNode(_))
+        ));
+    }
 }

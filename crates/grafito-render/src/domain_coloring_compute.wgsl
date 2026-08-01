@@ -216,16 +216,27 @@ fn eval_bytecode_dc(z: mat2x2<f32>) -> mat2x2<f32> {
 
     let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
-        if sp < 0 || sp >= STACK_SIZE {
+        if sp < 0 || sp > STACK_SIZE {
             return dc_new(bitcast<f32>(0x7fc00000u), bitcast<f32>(0x7fc00000u));
         }
         let instr = bytecode[pc];
         let op = instr & 0xFFu;
         let operand = instr >> 8u;
+        let is_push = op == OP_PUSH_CONST || op == OP_PUSH_VAR;
+        let is_binary = op >= OP_ADD && op <= OP_POW;
+        let is_unary = (op >= OP_NEG && op <= OP_ABS)
+            || (op >= OP_ASIN && op <= OP_TANH)
+            || (op >= OP_SEC && op <= OP_COT)
+            || (op >= OP_CONJUGATE && op <= OP_ARG);
+        if (is_push && sp >= STACK_SIZE) || (is_binary && sp < 2) || (is_unary && sp < 1) {
+            return dc_new(bitcast<f32>(0x7fc00000u), bitcast<f32>(0x7fc00000u));
+        }
 
         switch op {
+            case 0u: {}
             case OP_PUSH_CONST: {
-                let c = constants[operand];
+                // Bytecode operands address f64 storage as scalar re/im pairs.
+                let c = constants[operand / 2u];
                 stack[sp] = dc_new(c.x, c.y);
                 sp = sp + 1;
             }
@@ -321,12 +332,18 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let re = dc_real(result);
     let im = dc_imag(result);
 
-    if re != re || im != im {
-        out_colors[gid.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if re != re || im != im || abs(re) > 3.0e38 || abs(im) > 3.0e38 {
+        let nan = bitcast<f32>(0x7fc00000u);
+        out_colors[gid.x] = vec4<f32>(nan, nan, nan, nan);
         return;
     }
 
     let mag = sqrt(re*re + im*im);
+    if mag != mag || mag > 3.0e38 {
+        let nan = bitcast<f32>(0x7fc00000u);
+        out_colors[gid.x] = vec4<f32>(nan, nan, nan, nan);
+        return;
+    }
     if (mag < 1e-6) {
         out_colors[gid.x] = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         return;

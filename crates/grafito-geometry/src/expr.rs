@@ -2,18 +2,21 @@ use evalexpr::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// Convierte un f64 a orden de Bessel (i32) de forma segura.
-fn bessel_order(f: f64) -> i32 {
-    if !f.is_finite() {
-        return 0;
-    }
-    let rounded = f.round();
-    if rounded > 1000.0 {
-        1000
-    } else if rounded < -1000.0 {
-        -1000
+fn safe_sinh(a: f64) -> f64 {
+    a.sinh()
+}
+
+fn safe_cosh(a: f64) -> f64 {
+    a.cosh()
+}
+
+fn safe_tanh(a: f64) -> f64 {
+    if a > 20.0 {
+        1.0
+    } else if a < -20.0 {
+        -1.0
     } else {
-        rounded as i32
+        a.tanh()
     }
 }
 
@@ -118,15 +121,15 @@ fn setup_math_context() -> HashMapContext {
     );
     let _ = ctx.set_function(
         "sinh".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.sinh()))),
+        evalexpr::Function::new(|arg| Ok(Value::Float(safe_sinh(arg.as_float()?)))),
     );
     let _ = ctx.set_function(
         "cosh".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.cosh()))),
+        evalexpr::Function::new(|arg| Ok(Value::Float(safe_cosh(arg.as_float()?)))),
     );
     let _ = ctx.set_function(
         "tanh".into(),
-        evalexpr::Function::new(|arg| Ok(Value::Float(arg.as_float()?.tanh()))),
+        evalexpr::Function::new(|arg| Ok(Value::Float(safe_tanh(arg.as_float()?)))),
     );
     let _ = ctx.set_function(
         "sign".into(),
@@ -254,6 +257,14 @@ fn setup_math_context() -> HashMapContext {
             )))
         }),
     );
+    let _ = ctx.set_function(
+        "trigamma".into(),
+        evalexpr::Function::new(|arg| {
+            Ok(Value::Float(crate::special_functions::trigamma(
+                arg.as_float()?,
+            )))
+        }),
+    );
     // Multi-arg functions via tuples
     let _ = ctx.set_function(
         "atan2".into(),
@@ -316,9 +327,16 @@ fn setup_math_context() -> HashMapContext {
         evalexpr::Function::new(|arg| {
             let t = arg.as_tuple()?;
             if t.len() == 3 {
-                Ok(Value::Float(
-                    t[0].as_float()?.clamp(t[1].as_float()?, t[2].as_float()?),
-                ))
+                let value = t[0].as_float()?;
+                let lower = t[1].as_float()?;
+                let upper = t[2].as_float()?;
+                crate::ast::checked_clamp(value, lower, upper)
+                    .map(Value::Float)
+                    .ok_or_else(|| {
+                        evalexpr::EvalexprError::CustomMessage(
+                            "clamp requires finite bounds where lower <= upper".into(),
+                        )
+                    })
             } else {
                 Err(evalexpr::EvalexprError::wrong_function_argument_amount(
                     3,
@@ -349,10 +367,11 @@ fn setup_math_context() -> HashMapContext {
         evalexpr::Function::new(|arg| {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
-                Ok(Value::Float(crate::special_functions::bessel_j(
-                    bessel_order(t[0].as_float()?),
-                    t[1].as_float()?,
-                )))
+                let order = crate::special_functions::parse_bessel_order(t[0].as_float()?);
+                let input = t[1].as_float()?;
+                Ok(Value::Float(order.map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_j(order, input)
+                })))
             } else {
                 Err(evalexpr::EvalexprError::wrong_function_argument_amount(
                     2,
@@ -366,10 +385,11 @@ fn setup_math_context() -> HashMapContext {
         evalexpr::Function::new(|arg| {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
-                Ok(Value::Float(crate::special_functions::bessel_y(
-                    bessel_order(t[0].as_float()?),
-                    t[1].as_float()?,
-                )))
+                let order = crate::special_functions::parse_bessel_order(t[0].as_float()?);
+                let input = t[1].as_float()?;
+                Ok(Value::Float(order.map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_y(order, input)
+                })))
             } else {
                 Err(evalexpr::EvalexprError::wrong_function_argument_amount(
                     2,
@@ -383,10 +403,11 @@ fn setup_math_context() -> HashMapContext {
         evalexpr::Function::new(|arg| {
             let t = arg.as_tuple()?;
             if t.len() == 2 {
-                Ok(Value::Float(crate::special_functions::bessel_i(
-                    bessel_order(t[0].as_float()?),
-                    t[1].as_float()?,
-                )))
+                let order = crate::special_functions::parse_bessel_order(t[0].as_float()?);
+                let input = t[1].as_float()?;
+                Ok(Value::Float(order.map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_i(order, input)
+                })))
             } else {
                 Err(evalexpr::EvalexprError::wrong_function_argument_amount(
                     2,
@@ -463,22 +484,16 @@ fn replace_standalone_var(expr: &str, var: &str, value: f64) -> String {
     result
 }
 
+const MAX_SUM_PRODUCT_TERMS: usize = 2_000;
+const MAX_EXPANDED_EXPR_LEN: usize = 50_000;
+
 fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
-    let chars: Vec<char> = expr.chars().collect();
     let patterns: &[(&str, bool)] = &[("sum(", false), ("product(", true), ("prod(", true)];
-    for (i, _c) in chars.iter().enumerate() {
+    for (byte_offset, _) in expr.char_indices() {
         for &(pat, is_prod) in patterns {
-            // **Bug fix**: `i` es un char index pero `expr[i..]` espera byte
-            // index. Para strings ASCII funciona, pero con caracteres
-            // multi-byte (como `x²` donde `²` son 2 bytes UTF-8), panic.
-            // Convertimos el char index a byte index.
-            let byte_offset = expr
-                .char_indices()
-                .nth(i)
-                .map(|(b, _)| b)
-                .unwrap_or(expr.len());
             if expr[byte_offset..].starts_with(pat) {
-                let is_standalone = i == 0 || !chars[i - 1].is_ascii_alphabetic();
+                let is_standalone =
+                    byte_offset == 0 || !expr.as_bytes()[byte_offset - 1].is_ascii_alphabetic();
                 if is_standalone {
                     let open_paren = byte_offset + pat.len() - 1;
                     if let Some(close) = find_matching_close(expr, open_paren) {
@@ -489,33 +504,6 @@ fn find_standalone_sum_product(expr: &str) -> Option<(usize, usize, bool)> {
         }
     }
     None
-}
-
-fn eval_single_point(expr: &str, x_value: f64) -> Option<f64> {
-    const MAX_EXPR_LEN: usize = 5000;
-    const MAX_PAREN_DEPTH: usize = 64;
-    if expr.len() > MAX_EXPR_LEN {
-        return None;
-    }
-    let mut depth: i32 = 0;
-    for c in expr.chars() {
-        if c == '(' {
-            depth += 1;
-            if depth > MAX_PAREN_DEPTH as i32 {
-                return None;
-            }
-        } else if c == ')' {
-            depth -= 1;
-        }
-    }
-    // Quick magnitude check — avoids full preprocess_expr recursion risk
-    let mut ctx = setup_math_context();
-    let _ = ctx.set_value("x".to_string(), Value::Float(x_value));
-    match evalexpr::eval_with_context(expr, &ctx) {
-        Ok(Value::Float(n)) if n.is_finite() => Some(n),
-        Ok(Value::Int(n)) => Some(n as f64),
-        _ => None,
-    }
 }
 
 fn expand_sum_product_once(expr: &str) -> Option<String> {
@@ -532,38 +520,28 @@ fn expand_sum_product_once(expr: &str) -> Option<String> {
     let var = &args[1];
     let start: i64 = args[2].trim().parse().ok()?;
     let end: i64 = args[3].trim().parse().ok()?;
-
-    let num_terms = (end.abs_diff(start) + 1) as usize;
-    const MAX_TERMS: usize = 2000;
-    if num_terms > MAX_TERMS {
+    if var.is_empty() {
         return None;
     }
-    if num_terms == 0 {
-        let identity = if is_product { "1" } else { "0" };
-        return Some(identity.to_string());
+
+    let num_terms = usize::try_from(end.abs_diff(start).checked_add(1)?).ok()?;
+    if num_terms > MAX_SUM_PRODUCT_TERMS {
+        return None;
     }
 
     let step: i64 = if end >= start { 1 } else { -1 };
     let mut terms = Vec::with_capacity(num_terms);
+    let mut expanded_len = func_start.checked_add(expr.len().checked_sub(close + 1)?)?;
     let mut val = start;
-    let mut tiny_count = 0u32;
-    let min_terms = 5usize;
     loop {
         let substituted = replace_standalone_var(body, var, val as f64);
-        // Auto-truncate: stop when terms become numerically negligible
-        // (coefficients < 1e-14 or arguments to trig exceed f64 precision at ~1e15)
-        if terms.len() >= min_terms {
-            // Evaluate at x=0.5 (not x=0) to expose precision loss in trig:
-            // cos(11^50 * pi * 0.5) has argument ~5e51 → f64 mantissa saturated → garbage
-            let mag = eval_single_point(&substituted, 0.5);
-            if mag.map_or(true, |v| v.abs() < 1e-10) {
-                tiny_count += 1;
-                if tiny_count >= 3 {
-                    break; // Series has converged numerically — remaining terms won't affect result
-                }
-            } else {
-                tiny_count = 0;
-            }
+        let separator_len = if terms.is_empty() { 0 } else { op.len() };
+        let term_len = substituted.len().checked_add(2)?;
+        expanded_len = expanded_len
+            .checked_add(separator_len)?
+            .checked_add(term_len)?;
+        if expanded_len > MAX_EXPANDED_EXPR_LEN {
+            return None;
         }
         terms.push(format!("({})", substituted));
         if val == end {
@@ -607,12 +585,9 @@ fn find_matching_close(s: &str, open: usize) -> Option<usize> {
 
 fn expand_sum_product(expr: &str) -> String {
     let mut s = expr.to_string();
-    let mut new_len;
-    const MAX_EXPANDED_LEN: usize = 50_000;
-    while s.len() <= MAX_EXPANDED_LEN {
+    while s.len() <= MAX_EXPANDED_EXPR_LEN {
         if let Some(expanded) = expand_sum_product_once(&s) {
-            new_len = expanded.len();
-            if new_len == s.len() {
+            if expanded.len() == s.len() {
                 break;
             }
             s = expanded;
@@ -624,7 +599,7 @@ fn expand_sum_product(expr: &str) -> String {
 }
 
 pub fn preprocess_expr(expr: &str) -> String {
-    let mut s = expand_sum_product(expr);
+    let mut s = normalize_bracketed_function_calls(&expand_sum_product(expr));
 
     // Replace LaTeX rac{A}{B} with ((A)/(B))
     // We will do a simple iterative replacement finding rac
@@ -752,7 +727,10 @@ pub fn preprocess_expr(expr: &str) -> String {
         if i + 1 < chars.len() {
             let c1 = chars[i];
             let c2 = chars[i + 1];
-            if c1.is_ascii_digit() && c2.is_ascii_alphabetic() {
+            if c1.is_ascii_digit()
+                && c2.is_ascii_alphabetic()
+                && !starts_scientific_exponent(&chars, i + 1)
+            {
                 res.push('*');
             }
             if c1 == ')' && c2.is_ascii_alphabetic() {
@@ -770,6 +748,119 @@ pub fn preprocess_expr(expr: &str) -> String {
         }
     }
     res
+}
+
+fn starts_scientific_exponent(chars: &[char], exponent_index: usize) -> bool {
+    if !matches!(chars.get(exponent_index), Some('e' | 'E')) {
+        return false;
+    }
+    let mut digit_index = exponent_index + 1;
+    if matches!(chars.get(digit_index), Some('+' | '-')) {
+        digit_index += 1;
+    }
+    chars
+        .get(digit_index)
+        .is_some_and(|character| character.is_ascii_digit())
+}
+
+/// Convierte `Sin[x]` en `Sin(x)` sólo para llamadas matemáticas conocidas.
+///
+/// Los comandos de Grafito usan corchetes, pero las expresiones internas usan
+/// paréntesis. Limitar la conversión a este vocabulario evita reinterpretar
+/// índices, listas u otros textos entre corchetes como llamadas matemáticas.
+fn normalize_bracketed_function_calls(expr: &str) -> String {
+    let mut normalized = String::with_capacity(expr.len());
+    let mut brackets = Vec::new();
+    let mut offset = 0;
+
+    while offset < expr.len() {
+        let rest = &expr[offset..];
+        let character = rest.chars().next().expect("offset must be in bounds");
+        if character.is_ascii_alphabetic() {
+            let end = rest
+                .char_indices()
+                .find_map(|(index, candidate)| (!candidate.is_ascii_alphabetic()).then_some(index))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            normalized.push_str(name);
+            offset += end;
+
+            if expr[offset..].starts_with('[') && is_known_math_function(name) {
+                normalized.push('(');
+                brackets.push(true);
+                offset += 1;
+            }
+            continue;
+        }
+
+        match character {
+            '[' => {
+                normalized.push('[');
+                brackets.push(false);
+            }
+            ']' => {
+                if brackets.pop().unwrap_or(false) {
+                    normalized.push(')');
+                } else {
+                    normalized.push(']');
+                }
+            }
+            _ => normalized.push(character),
+        }
+        offset += character.len_utf8();
+    }
+
+    normalized
+}
+
+fn is_known_math_function(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "abs"
+            | "acos"
+            | "acosh"
+            | "asin"
+            | "asinh"
+            | "atan"
+            | "atan2"
+            | "atanh"
+            | "bessel_i"
+            | "bessel_j"
+            | "bessel_y"
+            | "besseli"
+            | "besselj"
+            | "bessely"
+            | "beta"
+            | "cbrt"
+            | "ceil"
+            | "clamp"
+            | "cos"
+            | "cosh"
+            | "cot"
+            | "csc"
+            | "digamma"
+            | "erf"
+            | "erfc"
+            | "exp"
+            | "floor"
+            | "gamma"
+            | "heaviside"
+            | "ln"
+            | "lngamma"
+            | "log"
+            | "max"
+            | "min"
+            | "piecewise"
+            | "round"
+            | "sec"
+            | "sign"
+            | "sin"
+            | "sinh"
+            | "sqrt"
+            | "tan"
+            | "tanh"
+            | "trigamma"
+    )
 }
 
 thread_local! {
@@ -807,6 +898,7 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
 
 /// Evaluate a mathematical expression string with given variable values.
 pub fn evaluate(expr: &str, vars: &[(String, f64)]) -> Result<f64, String> {
+    crate::ast::validate_numeric_literals(expr)?;
     let expr = preprocess_expr(expr);
 
     if crate::precision::is_high_precision_mode() {
@@ -1172,6 +1264,7 @@ pub enum Opcode {
     Gamma,
     LnGamma,
     Digamma,
+    Trigamma,
     Beta,
     BesselJ,
     BesselY,
@@ -1460,6 +1553,12 @@ pub fn compile_ast(
             }
             ops.push(Opcode::Digamma);
         }
+        Trigamma(u) => {
+            if !compile_ast(u, ops, v1, v2, v3) {
+                return false;
+            }
+            ops.push(Opcode::Trigamma);
+        }
         Beta(a, b) => {
             if !compile_ast(a, ops, v1, v2, v3) || !compile_ast(b, ops, v1, v2, v3) {
                 return false;
@@ -1541,6 +1640,7 @@ impl CompiledExpr {
         expr: &str,
         constants: &std::collections::HashMap<String, f64>,
     ) -> Result<Self, String> {
+        crate::ast::validate_numeric_literals(expr)?;
         let expr_clean = preprocess_expr(expr);
 
         if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
@@ -1695,25 +1795,13 @@ impl CompiledExpr {
                             stack[sp - 1] = stack[sp - 1].abs();
                         }
                         Opcode::Sinh => {
-                            stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
-                                0.0
-                            } else {
-                                stack[sp - 1].sinh()
-                            };
+                            stack[sp - 1] = safe_sinh(stack[sp - 1]);
                         }
                         Opcode::Cosh => {
-                            stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
-                                0.0
-                            } else {
-                                stack[sp - 1].cosh()
-                            };
+                            stack[sp - 1] = safe_cosh(stack[sp - 1]);
                         }
                         Opcode::Tanh => {
-                            stack[sp - 1] = if stack[sp - 1].abs() > 1e9 {
-                                0.0
-                            } else {
-                                stack[sp - 1].tanh()
-                            };
+                            stack[sp - 1] = safe_tanh(stack[sp - 1]);
                         }
                         Opcode::Floor => {
                             stack[sp - 1] = stack[sp - 1].floor();
@@ -1787,7 +1875,12 @@ impl CompiledExpr {
                         }
                         Opcode::Clamp => {
                             sp -= 2;
-                            stack[sp - 1] = stack[sp - 1].clamp(stack[sp], stack[sp + 1]);
+                            stack[sp - 1] =
+                                crate::ast::checked_clamp(stack[sp - 1], stack[sp], stack[sp + 1])
+                                    .ok_or_else(|| {
+                                        "clamp requires finite bounds where lower <= upper"
+                                            .to_string()
+                                    })?;
                         }
                         Opcode::Erf => {
                             stack[sp - 1] = crate::special_functions::erf(stack[sp - 1]);
@@ -1804,6 +1897,9 @@ impl CompiledExpr {
                         Opcode::Digamma => {
                             stack[sp - 1] = crate::special_functions::digamma(stack[sp - 1]);
                         }
+                        Opcode::Trigamma => {
+                            stack[sp - 1] = crate::special_functions::trigamma(stack[sp - 1]);
+                        }
                         Opcode::Beta => {
                             sp -= 1;
                             stack[sp - 1] =
@@ -1811,24 +1907,24 @@ impl CompiledExpr {
                         }
                         Opcode::BesselJ => {
                             sp -= 1;
-                            stack[sp - 1] = crate::special_functions::bessel_j(
-                                crate::ast::bessel_order(stack[sp - 1]),
-                                stack[sp],
-                            );
+                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                                .map_or(f64::NAN, |order| {
+                                    crate::special_functions::bessel_j(order, stack[sp])
+                                });
                         }
                         Opcode::BesselY => {
                             sp -= 1;
-                            stack[sp - 1] = crate::special_functions::bessel_y(
-                                crate::ast::bessel_order(stack[sp - 1]),
-                                stack[sp],
-                            );
+                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                                .map_or(f64::NAN, |order| {
+                                    crate::special_functions::bessel_y(order, stack[sp])
+                                });
                         }
                         Opcode::BesselI => {
                             sp -= 1;
-                            stack[sp - 1] = crate::special_functions::bessel_i(
-                                crate::ast::bessel_order(stack[sp - 1]),
-                                stack[sp],
-                            );
+                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                                .map_or(f64::NAN, |order| {
+                                    crate::special_functions::bessel_i(order, stack[sp])
+                                });
                         }
                         Opcode::Lt => {
                             sp -= 1;
@@ -2162,10 +2258,99 @@ mod tests {
     }
 
     #[test]
+    fn finite_sum_and_product_never_drop_terms_using_an_unrelated_x_value() {
+        let sum = eval_function("sum(x^n, n, 1, 50)", 2.0).unwrap();
+        let expected_sum = 2.0_f64.powi(51) - 2.0;
+        assert_eq!(sum, expected_sum);
+
+        let product = eval_function("product(x^n, n, 1, 45)", 1.1).unwrap();
+        let expected_product = 1.1_f64.powi(45 * 46 / 2);
+        assert!((product / expected_product - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn finite_sum_expansion_stops_before_exceeding_its_output_budget() {
+        let expression = format!("sum({}, i, 1, 2000)", "x".repeat(100));
+
+        assert_eq!(expand_sum_product(&expression), expression);
+    }
+
+    #[test]
     fn compiled_expr_substitutes_constants() {
         let constants = HashMap::from([("a".to_string(), 2.0)]);
         let compiled = CompiledExpr::new("a*x", &constants).unwrap();
         let value = compiled.eval(&[("x".to_string(), 3.0)]).unwrap();
         assert!((value - 6.0).abs() < 1e-12, "got {value}");
+    }
+
+    #[test]
+    fn all_expression_evaluators_preserve_invalid_bessel_order_domain_failures() {
+        for expression in [
+            "besselj(0/0, x)",
+            "bessely(1.5, x)",
+            "besseli(1/0, x)",
+            "besselj(1001, x)",
+            "bessely(-2147483648, x)",
+        ] {
+            let vars = [("x".to_string(), 1.0)];
+            if let Ok(value) = evaluate(expression, &vars) {
+                assert!(
+                    value.is_nan(),
+                    "evalexpr fallback leaked a finite value for {expression}"
+                );
+            }
+            if let Ok(value) = CompiledExpr::new(expression, &HashMap::new())
+                .unwrap()
+                .eval(&vars)
+            {
+                assert!(
+                    value.is_nan(),
+                    "compiled evaluator leaked a finite value for {expression}"
+                );
+            }
+        }
+
+        let vars = [("x".to_string(), 1.0)];
+        assert_eq!(
+            evaluate("besselj(2, x)", &vars).unwrap(),
+            crate::special_functions::bessel_j(2, 1.0)
+        );
+    }
+
+    #[test]
+    fn preprocesses_known_mathematica_style_function_calls() {
+        assert_eq!(
+            preprocess_expr("Sin[x] / (x^2 + 1) + Cos[t]"),
+            "Sin(x) / (x^2 + 1) + Cos(t)"
+        );
+        assert_eq!(
+            preprocess_expr("max[Sin[x], Cos[x]]"),
+            "max(Sin(x), Cos(x))"
+        );
+    }
+
+    #[test]
+    fn evaluates_trigamma() {
+        let value = evaluate("trigamma(1)", &[]).unwrap();
+        assert!((value - std::f64::consts::PI.powi(2) / 6.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hyperbolic_evaluator_preserves_finite_values_until_f64_overflow() {
+        assert!(evaluate("sinh(710.1)", &[]).unwrap().is_finite());
+        assert!(evaluate("cosh(710.1)", &[]).unwrap().is_finite());
+    }
+
+    #[test]
+    fn invalid_clamp_bounds_return_errors_without_panicking() {
+        let invalid = "clamp(x, 2, 1)";
+        let vars = [("x".to_string(), 0.0)];
+
+        assert!(evaluate(invalid, &vars).is_err());
+        assert!(evaluate_cached(invalid, &vars).is_err());
+        assert!(std::panic::catch_unwind(|| {
+            crate::ast::parse_ast("clamp(0, 2, 1)").unwrap().simplify()
+        })
+        .is_ok());
     }
 }

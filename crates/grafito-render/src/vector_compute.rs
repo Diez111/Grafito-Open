@@ -10,7 +10,7 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
-use crate::implicit_compute::{compile_expr, BytecodeProgram};
+use crate::implicit_compute::{compile_expr, f32_bounds_have_precision, BytecodeProgram};
 use grafito_core::object::{VectorField2DObj, VectorFieldSamples};
 use grafito_core::vector_field_sampling;
 use std::collections::HashMap;
@@ -196,6 +196,11 @@ impl VectorComputePipeline {
         compile_expr(&ast_v, variables, &mut prog).ok()?;
 
         let (x_min, x_max, y_min, y_max) = bounds;
+        let min_step = ((x_max - x_min).abs() / grid_size.max(1) as f64)
+            .min((y_max - y_min).abs() / grid_size.max(1) as f64);
+        if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
+            return None;
+        }
         let params = VectorParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,

@@ -1,128 +1,86 @@
-# Grafito — Plan de Desarrollo
+# Grafito Plans
 
-> **Versión:** 0.6.0-alpha | **24 commits** | **~9300 líneas Rust** | **33 tests**
+Creado: 2026-07-10
 
-## DoD (Definition of Done) por Feature
+Este plan sustituye el roadmap heredado. La prioridad es convertir las capacidades actuales en matemáticas confiables y una aplicación segura antes de ampliar el producto.
 
-Cada feature se considera completa cuando:
-1. Compila sin errores ni warnings (`cargo check`)
-2. Tiene al menos 1 test unitario que verifica el comportamiento esperado
-3. Está documentada en el README
-4. No introduce `unwrap()` sin contexto ni `#[allow(dead_code)]`
-5. El código está en el archivo correcto (no en main.rs si es genérico)
+## Reglas de ejecución
 
----
+- Toda tarea de código usa TDD salvo que indique `[tdd:skip:...]`.
+- Un resultado matemático no puede ocultar `NaN`, infinito, error de dominio, falta de convergencia ni límite de recursos.
+- Las tareas que toquen archivos ya modificados requieren primero integrar o aislar los cambios existentes.
+- No se anuncian capacidades como estables hasta contar con pruebas de referencia y documentación consistente.
 
-## Fase 0: Infraestructura ✅
+## Phase 0: Línea base e integración segura
 
-- [x] Workspace con 5 crates
-- [x] eframe 0.29 + wgpu backend
-- [x] Compilación limpia
-- [ ] CI/CD (GitHub Actions) ← PENDIENTE
-- [ ] Tests unitarios ← PENDIENTE (0 tests)
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| 0.1 | Inventariar y verificar los cambios locales existentes por área antes de cualquier merge funcional. [tdd:skip:integration-audit] | Cada archivo sucio está clasificado como integrar, dividir o descartar con pruebas asociadas; no se pierde trabajo ajeno. | - | cc:完了 |
+| 0.2 | Crear fixtures y pruebas de regresión para los P0 matemáticos y de recursos. [tdd:required] | Las pruebas fallan en HEAD para integral indefinida, trigonometría grande, histogramas, fractales y Script; los casos son independientes. | 0.1 | cc:完了 |
+| 0.3 | Imponer límites consistentes a histogramas, fractales, scripts, comandos, AST y exportación. [tdd:required] | Entradas límite-1/límite/límite+1 no hacen OOM, freeze ni panic; carga, constructor y comando comparten invariantes. | 0.2 | cc:完了 |
+| 0.4 | Corregir los resultados matemáticos falsos y propagar dominio/no-convergencia. [tdd:required] | No hay fallback de integral indefinida a `[0,1]`; simplificación y derivadas auditadas coinciden con valores de referencia. | 0.2 | cc:完了 |
+| 0.5 | Hacer la ejecución de comandos atómica ante parseo, validación y Script fallidos. [tdd:required] | Un `CommandOutcome::Error` deja hash semántico, variables, objetos y constraints idénticos; Script es all-or-nothing. | 0.2 | cc:完了 |
+| 0.6 | Ejecutar y corregir la batería workspace con la Fase 0 integrada. [tdd:skip:verification-only] | `fmt`, `clippy -D warnings`, tests y release build pasan; no hay P0/major abiertos de la fase. | 0.3, 0.4, 0.5 | cc:完了 |
+| 0.7 | Corregir los pánicos y freezes P0 descubiertos en el explorador trigonométrico, evaluador `clamp`, tablas de valores y `SeriesSum`. [tdd:required] | Zoom extremo no hace panic; límites inválidos devuelven error; tablas y series se mantienen dentro de presupuestos explícitos. | 0.6 | cc:完了 |
+| 0.8 | Corregir series finitas, asíntotas y análisis de rectas que hoy pueden publicar resultados matemáticamente falsos. [tdd:required] | `sum`/`product` preservan exactamente todos sus términos acotados; funciones sin asíntota no reciben una; intersecciones e interceptos respetan `LineKind`. | 0.7 | cc:完了 |
 
-## Fase 1: Canvas 2D ✅
+## Phase H: Asistente local-first y harness nativo
 
-- [x] Grid, ejes, pan/zoom
-- [x] 5 herramientas (Select, Point, Line, Circle, Polygon)
-- [x] Hit testing O(n) → [ ] Actualizar a O(log n) con spatial_index
-- [x] Snap to grid toggle
-- [x] Zoom-to-fit
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| H.1 | Enrutar `Submit` por resolución local, pedir autorización explícita para red y aplicar `ProposedPlan` de forma atómica. [tdd:required] | Aritmética local no consulta keyring ni red; casos no soportados muestran una acción de autorización; Apply crea exactamente un undo y rechaza bases obsoletas. | 0.8 | cc:完了 |
+| H.2 | Separar la presentación pública de la identidad técnica y normalizar transcript matemático. [tdd:required] | Fuera de Configuración avanzada sólo aparecen `Local` o `Consulta remota autorizada`; no se truncan respuestas válidas de 4096 caracteres ni se pierden delimitadores matemáticos comunes. | H.1 | cc:完了 |
+| H.3 | Diferenciar respuestas explicativas de propuestas ejecutables y eliminar escalamiento remoto automático. [tdd:required] | Una respuesta remota sin acción termina correctamente; una reparación sigue requiriendo propuesta; ningún fallo inicia una segunda consulta sin una acción nueva del usuario. | H.1 | cc:完了 |
+| H.4 | Exponer catálogo de herramientas derivado del registro y migrar propuestas a invocaciones tipadas. [tdd:required] | Cada entrada visible resuelve a un `CommandSpec`; UI no es autoridad de parsing; acciones desconocidas, de archivos, scripts o red no son ejecutables. | H.1, 1.4 | cc:DONE |
+| H.5 | Extraer el harness headless, receipts de staging/evidencia y replay local opt-in. [tdd:required] | El flujo request-plan-preview-apply puede ejecutarse sin egui, red ni keyring; replay local valida base, delta y evidencia sin guardar contenido sensible. | H.1, 1.3 | cc:DONE |
 
-## Fase 2: Geometría 2D ✅
+## Phase 1: Contratos de núcleo confiable
 
-- [x] Point, Line, Circle, Polygon, Ellipse, Parabola, Hyperbola
-- [x] Function plotting con 1000 samples paralelos (rayon)
-- [x] Asymptote detection via interval arithmetic
-- [x] Text objects con rendering
-- [x] 29 variantes de GeoObject
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| 1.1 | Introducir errores y resultados matemáticos tipados con dominio, estimación y convergencia. [tdd:required] | APIs migradas devuelven `Exact`, `Approximate`, `DomainError`, `NotConverged`, `Unsupported` o `ResourceLimit`; no hay clasificación por texto. | 0.6 | cc:TODO |
+| 1.2 | Versionar el formato de documentos, validar referencias y guardar atómicamente. [tdd:required] | Envelope con `schema_version`, migración de JSON legado, roundtrip, archivos truncados y referencias inválidas cubiertos. | 0.6 | cc:完了 |
+| 1.3 | Introducir `OperationBatch` y `ChangeSet` para mutaciones de documento e historial. [tdd:required] | Cambios se validan antes de commit, incrementan una revisión por operación y undo/redo restaura estado semántico. | 0.6 | cc:完了 |
+| 1.4 | Crear un registro declarativo de comandos y alimentar parser, paleta, autocomplete y documentación. [tdd:required] | Todo comando estable tiene ID, firmas, aliases, ayuda y handler; no hay entradas de UI o docs que no resuelvan. | 0.5, 1.1 | cc:TODO |
 
-## Fase 3: Álgebra + Sliders ✅
+## Phase A: Universidad e ingeniería confiable
 
-- [x] Variables (`a=5`, `f(x)=a*x^2`)
-- [x] Sliders con animación paramétrica
-- [x] Panel de variables en sidebar
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| A.1 | Construir corpus de referencia de cálculo, álgebra lineal, estadística, ODE y geometría. [tdd:required] | 2.000 casos versionados con oráculo, tolerancia y semilla; CI ejecuta el corpus en Linux, Windows y macOS. | 1.1 | cc:TODO |
+| A.2 | Robustecer cálculo, estadística, ODE, matrices y solver según contratos numéricos. [tdd:required] | Cada operación estable informa precisión/residuo; los oráculos A.1 cumplen sus tolerancias. | A.1 | cc:TODO |
+| A.3 | Unificar escena 2D, paridad CPU/GPU, cachés externas y pruebas golden. [tdd:required] | Producción y tests usan el mismo preparador de escena; 200 goldens y diferencia CPU/GPU <=0.5 px. | 1.3 | cc:TODO |
+| A.4 | Rehacer 3D sobre world-space, profundidad, clipping y convención única de ejes. [tdd:required] | Depth test, selección por rayo y 100 escenarios de oclusión/geometría 3D pasan. | A.3 | cc:TODO |
+| A.5 | Cerrar accesibilidad, navegación por teclado, exportación honesta y documentación generada. [tdd:required] | Todos los controles estables son accesibles; export informa omisiones; UI/docs/registro coinciden. | 1.4, A.3 | cc:TODO |
 
-## Fase 4: Gráficos 3D ✅
+## Phase B: Producto de geometría dinámica nativo
 
-- [x] Cámara orbital (rotate/zoom/pan)
-- [x] 8 sólidos wireframe (Point3D, Segment3D, Sphere3D, Cube3D, Pyramid3D, Cone3D, Cylinder3D, Surface3D)
-- [x] Ejes XYZ con labels y arrow tips
-- [x] Curvas paramétricas 3D (`Curve3D[(t,sin(t),cos(t)), t, 0, 6.28]`)
-- [x] Extrusión 2D→3D (`Extrude[polygon, height]`)
-- [ ] Surface of revolution ← PENDIENTE
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| B.1 | Completar herramientas y objetos persistentes reales, hoja incremental y workflows guiados. [tdd:required] | 120 operaciones de construcción tienen objetos reales, undo y E2E; no hay placeholders visibles. | A.5 | cc:TODO |
+| B.2 | Importar/exportar `.ggb`, CSV y recursos autocontenidos. [tdd:required] | Corpus compatible preserva >=98% al importar y >=95% al exportar; pérdidas se informan. | 1.2, B.1 | cc:TODO |
+| B.3 | Completar experiencia desktop offline: shell responsive, touch opcional, i18n ES/EN, accesibilidad y modo examen aplicado en cada ingreso de operación. [tdd:required] | No hay panel o herramienta esencial inaccesible a 960 px; WCAG 2.2 AA desktop; operaciones prohibidas se bloquean fuera de UI sin usar backend ni red. | B.1, B.2 | cc:TODO |
 
-## Fase 5: CAS ✅
+## Phase D: Espacio de trabajo local durable
 
-- [x] Derivada numérica (diferencias finitas)
-- [x] Integral numérica (Simpson)
-- [x] Newton root finding
-- [x] Límites (Richardson extrapolation)
-- [x] Symbolic (Factor, Expand, Simplify)
-- [x] Comandos CAS: `Derivative[expr]`, `Integral[expr,a,b]`, `Solve[expr,a,b]`, `Limit[expr,x0]`
-- [x] FunctionInspector (raíces + extremos)
-- [ ] Integrar rug::Float en el pipeline de evaluación ← PENDIENTE (módulo creado, sin cablear)
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| D.1 | Persistir protocolo de construcción, datasets, resultados CAS/análisis fijados y preferencias de workspace en un formato versionado. [tdd:required] | Abrir/guardar/restaurar conserva cada dato document-bound y undo/redo no deja historial visual divergente. | 1.2, 1.3 | cc:TODO |
+| D.2 | Añadir autosave, journal local, recuperación tras crash, versiones locales y archivos recientes. [tdd:required] | Simulaciones de cierre/crash recuperan transacciones confirmadas sin sobrescribir el documento original. | D.1 | cc:TODO |
+| D.3 | Completar integración de archivos nativa: `.grafito`, argumentos CLI, asociaciones MIME, print/PDF, assets persistentes y reportes de pérdidas de formato. [tdd:required] | Abrir desde SO/CLI funciona; assets y exportación tienen contratos explícitos sin red. | D.1, B.2 | cc:TODO |
 
-## Fase 6: Avanzado ✅
+## Phase E: Tutor y educación local verificable
 
-- [x] Export SVG, PNG, TikZ/LaTeX
-- [x] Save/Load documentos (.grafito JSON)
-- [x] Undo/Redo (Ctrl+Z/Y) + Delete key
-- [x] Spreadsheet View (grid A-H × 20 filas)
-- [x] Status bar (object count, view mode, scale, CAS result)
-- [x] Recent files (File > Recent submenu)
-- [x] Right-click context menu (2D y 3D)
-- [x] Measurements en properties panel
-- [x] Transformaciones (Translate, Rotate, Dilate, Reflect)
-- [x] Herramientas geométricas (Tangent, PerpBisector, AngleBisector, Midpoint, Vector, Ray, RegularPolygon, Locus)
-- [x] Probabilidad (Normal, Binomial, Poisson)
-- [x] Scripting básico (`Script[cmd1;cmd2]`, `SetValue[label,val]`)
-- [x] Exam Mode (bloquea CAS/input/File)
-- [x] Constraint Graph (módulo creado) → [ ] Cablear a add_object/update cascade
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| E.1 | Integrar tutor local determinista, derivaciones verificadas y focus para geometría, datos, matrices y constraints. [tdd:required] | El usuario puede pedir pista/verificación/paso siguiente sin red; cada paso expone regla y comprobación. | 1.1, D.1 | cc:TODO |
+| E.2 | Añadir lecciones, tareas, pistas escalonadas, objetivos estructurales y evidencia de completitud locales. [tdd:required] | Paquetes de lección funcionan offline y aceptan construcciones alternativas válidas. | E.1, B.1 | cc:TODO |
+| E.3 | Endurecer distribución y calidad desktop: tests visuales, E2E nativo, firmas, provenance, installers y actualizaciones fail-closed. [tdd:required] | Linux/Windows/macOS validan apertura, recuperación, GPU fallback y artefactos firmados sin dependencia de servicios de producto. | A.1, A.5, D.2 | cc:TODO |
 
----
+## Phase C: CAS científico amplio
 
-## Tech Debt (priorizado)
-
-### P0 — Bloqueantes para beta
-1. **0 tests** — Agregar tests unitarios para geometry/core, tests de integración para app
-2. **main.rs: 2200+ líneas** — Modularizar en ~7 archivos
-3. **Sin CI/CD** — Configurar GitHub Actions
-4. **README desactualizado** — Actualizar con features reales
-5. **3 módulos sin integrar**: spatial_index, constraint_graph, interval arithmetic
-
-### P1 — Calidad de código
-6. Match arms duplicados en GeoObject — Crear macro `geo_match!`
-7. thiserror sin usar — Definir `GrafitoError`
-8. anyhow sin usar — Eliminar o usar
-9. Magic numbers sin nombrar — Constantes para FUNCTION_SAMPLES, MAX_GAP, etc.
-10. SVG/TikZ/PNG export duplicados — Unificar en trait `Exportable`
-
-### P2 — Features pendientes
-11. Surface of revolution en 3D
-12. rug::Float integrado en CAS pipeline
-13. GPU compute shaders para evaluación masiva
-14. Undo/Redo por comando (no snapshots)
-15. Soporte para archivos .ggb (GeoGebra XML)
-
----
-
-## Dependencias pendientes de instalar
-
-```bash
-# Para rug (MPFR precisión arbitraria)
-sudo apt install libgmp-dev libmpfr-dev libmpc-dev m4
-
-# Para symbolica (CAS simbólico completo)
-# Requiere m4 instalado — ya disponible
-```
-
-## Comandos de verificación
-
-```bash
-cargo check                    # Compilación
-cargo test                     # Tests (0 actualmente)
-cargo clippy                   # Linting
-cargo build --release          # Build optimizado
-cargo doc --no-deps --open    # Documentación
-```
+| Task | Contenido | DoD | Depends | Status |
+|------|-----------|-----|---------|--------|
+| C.1 | Incorporar torre numérica exacta y de precisión arbitraria. [tdd:required] | Integer/Rational/BigFloat/Complex preservan precisión solicitada y pasan corpus exacto. | 1.1, 1.2 | cc:TODO |
+| C.2 | Crear IR simbólico canónico con assumptions, ramas e intervalos certificados. [tdd:required] | Simplificaciones conservan dominio; el intervalo contiene el oráculo en el corpus certificado. | C.1 | cc:TODO |
+| C.3 | Añadir álgebra polinómica, solve, cálculo simbólico, transformadas y API headless cancelable. [tdd:required] | 21.000 casos simbólicos y 20.000 puntos numéricos cumplen el corpus C; ningún comando bloquea UI. | C.2, A.2 | cc:TODO |

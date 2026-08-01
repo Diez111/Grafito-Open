@@ -9,7 +9,14 @@
 
 use crate::ObjectId;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+/// Maximum number of constraints accepted in one document or serialized graph.
+pub const MAX_CONSTRAINTS: usize = 5_000;
+const MAX_CONSTRAINT_REFERENCES: usize = 256;
+const MAX_CONSTRAINT_PARAMS: usize = 64;
+const MAX_CONSTRAINT_NAME_LENGTH: usize = 10_000;
+const MAX_CONSTRAINT_PARAM_NAME_LENGTH: usize = 10_000;
 
 /// A geometric constraint / construction algorithm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +37,7 @@ pub struct Constraint {
 }
 
 /// The constraint graph: a DAG of dependencies between geometric objects.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ConstraintGraph {
     /// All constraints, indexed by ID.
     constraints: HashMap<usize, Constraint>,
@@ -46,9 +53,249 @@ pub struct ConstraintGraph {
     next_order: usize,
 }
 
+#[derive(Deserialize)]
+struct SerializedConstraintGraph {
+    #[serde(default)]
+    constraints: HashMap<usize, Constraint>,
+    #[serde(default)]
+    free_objects: HashSet<ObjectId>,
+}
+
+impl<'de> Deserialize<'de> for ConstraintGraph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serialized = SerializedConstraintGraph::deserialize(deserializer)?;
+        let mut graph = Self {
+            constraints: serialized.constraints,
+            free_objects: serialized.free_objects,
+            ..Self::default()
+        };
+        graph.canonicalize_persisted_orders();
+        // Reject malformed canonical data before rebuilding derived indexes.
+        // Rebuilding first would hide duplicate creators by overwriting them.
+        graph
+            .validate_structure()
+            .map_err(serde::de::Error::custom)?;
+        graph.rebuild_indexes();
+        Ok(graph)
+    }
+}
+
 impl ConstraintGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild derived lookup indexes from the canonical constraints map.
+    fn rebuild_indexes(&mut self) {
+        self.dependents.clear();
+        self.creator.clear();
+
+        let mut ids: Vec<usize> = self.constraints.keys().copied().collect();
+        ids.sort_unstable();
+        for id in &ids {
+            let constraint = self
+                .constraints
+                .get(id)
+                .expect("constraint id collected from its map");
+            for input in &constraint.inputs {
+                self.dependents.entry(*input).or_default().push(*id);
+            }
+            for output in &constraint.outputs {
+                self.creator.insert(*output, *id);
+            }
+        }
+
+        for ids in self.dependents.values_mut() {
+            ids.sort_unstable();
+        }
+        self.next_id = ids
+            .into_iter()
+            .max()
+            .map_or(0, |id| id.checked_add(1).expect("validated constraint id"));
+        self.next_order = self
+            .constraints
+            .values()
+            .map(|constraint| constraint.order)
+            .max()
+            .map_or(0, |order| {
+                order.checked_add(1).expect("validated constraint order")
+            });
+    }
+
+    /// Orders are metadata only; canonicalizing hostile persisted values keeps
+    /// the next allocation representable without changing dependency topology.
+    fn canonicalize_persisted_orders(&mut self) {
+        let mut seen = HashSet::new();
+        let needs_canonicalization = self
+            .constraints
+            .values()
+            .any(|constraint| constraint.order == usize::MAX || !seen.insert(constraint.order));
+        if !needs_canonicalization {
+            return;
+        }
+
+        let mut ids: Vec<usize> = self.constraints.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| {
+            let constraint = self
+                .constraints
+                .get(id)
+                .expect("constraint id collected from its map");
+            (constraint.order, *id)
+        });
+        for (order, id) in ids.into_iter().enumerate() {
+            self.constraints
+                .get_mut(&id)
+                .expect("constraint id collected from its map")
+                .order = order;
+        }
+    }
+
+    /// Validate the canonical constraint data without modifying the graph.
+    ///
+    /// This detects duplicate output creators, dependency cycles, and overlap
+    /// between constructed and free objects. `validate_semantics` additionally
+    /// checks that the free/constructed partition covers a document's objects.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self.constraints.len() > MAX_CONSTRAINTS {
+            return Err(format!(
+                "Constraint graph contains {} constraints, maximum is {}",
+                self.constraints.len(),
+                MAX_CONSTRAINTS
+            ));
+        }
+        if self.free_objects.len() > MAX_CONSTRAINTS {
+            return Err(format!(
+                "Constraint graph contains {} free objects, maximum is {}",
+                self.free_objects.len(),
+                MAX_CONSTRAINTS
+            ));
+        }
+        let mut creators = HashMap::new();
+        let mut orders = HashSet::new();
+        for (id, constraint) in &self.constraints {
+            if *id == usize::MAX {
+                return Err("Constraint graph contains maximum identifier".to_string());
+            }
+            if constraint.id != *id {
+                return Err(format!(
+                    "Constraint map key {} does not match constraint id {}",
+                    id, constraint.id
+                ));
+            }
+            if constraint.order == usize::MAX {
+                return Err(format!("Constraint {id} has maximum order"));
+            }
+            if !orders.insert(constraint.order) {
+                return Err(format!("Constraint {id} duplicates a construction order"));
+            }
+            if constraint.name.len() > MAX_CONSTRAINT_NAME_LENGTH {
+                return Err(format!("Constraint {id} name exceeds maximum length"));
+            }
+            if constraint.inputs.len() > MAX_CONSTRAINT_REFERENCES
+                || constraint.outputs.len() > MAX_CONSTRAINT_REFERENCES
+            {
+                return Err(format!(
+                    "Constraint {id} references more than {} objects",
+                    MAX_CONSTRAINT_REFERENCES
+                ));
+            }
+            if constraint.params.len() > MAX_CONSTRAINT_PARAMS {
+                return Err(format!(
+                    "Constraint {id} has more than {} parameters",
+                    MAX_CONSTRAINT_PARAMS
+                ));
+            }
+            for (name, value) in &constraint.params {
+                if name.len() > MAX_CONSTRAINT_PARAM_NAME_LENGTH {
+                    return Err(format!(
+                        "Constraint {id} parameter name exceeds maximum length"
+                    ));
+                }
+                if !value.is_finite() {
+                    return Err(format!("Constraint {id} parameter {name} must be finite"));
+                }
+            }
+            for output in &constraint.outputs {
+                if let Some(previous) = creators.insert(*output, *id) {
+                    return Err(format!(
+                        "Object {} is created by multiple constraints ({previous} and {id})",
+                        output
+                    ));
+                }
+                if self.free_objects.contains(output) {
+                    return Err(format!("Object {} is both free and constructed", output));
+                }
+            }
+        }
+
+        // Iterative DFS keeps hostile serialized chains from exhausting the
+        // call stack before the graph-size cap can reject them.
+        let mut states: HashMap<usize, u8> = HashMap::new();
+        for root in self.constraints.keys().copied() {
+            if states.get(&root).copied().unwrap_or(0) == 2 {
+                continue;
+            }
+            let mut stack = vec![(root, false)];
+            while let Some((id, finishing)) = stack.pop() {
+                if finishing {
+                    states.insert(id, 2);
+                    continue;
+                }
+                match states.get(&id).copied().unwrap_or(0) {
+                    1 => return Err(format!("Constraint dependency cycle at constraint {id}")),
+                    2 => continue,
+                    _ => {}
+                }
+                states.insert(id, 1);
+                stack.push((id, true));
+                let constraint = self
+                    .constraints
+                    .get(&id)
+                    .ok_or_else(|| format!("Constraint {id} disappeared during validation"))?;
+                for input in &constraint.inputs {
+                    if let Some(creator) = creators.get(input) {
+                        match states.get(creator).copied().unwrap_or(0) {
+                            1 => {
+                                return Err(format!(
+                                    "Constraint dependency cycle at constraint {creator}"
+                                ));
+                            }
+                            2 => {}
+                            _ => stack.push((*creator, false)),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate graph structure and that every document object is exactly one
+    /// of a free object or an output created by a constraint.
+    pub fn validate_semantics<I>(&self, object_ids: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        self.validate_structure()?;
+
+        let mut constructed = HashSet::new();
+        for constraint in self.constraints.values() {
+            constructed.extend(constraint.outputs.iter().copied());
+        }
+        for id in object_ids {
+            let is_free = self.free_objects.contains(&id);
+            let is_constructed = constructed.contains(&id);
+            if is_free == is_constructed {
+                return Err(format!(
+                    "Object {} is not in exactly one side of the free-object partition",
+                    id
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Register a free (user-created) object.
@@ -114,17 +361,70 @@ impl ConstraintGraph {
     }
 
     /// Add a constraint that produces output objects from input objects.
-    pub fn add_constraint(
+    pub fn validate_new_constraint(
+        &self,
+        name: &str,
+        inputs: &[ObjectId],
+        outputs: &[ObjectId],
+        params: &HashMap<String, f64>,
+    ) -> Result<(), String> {
+        if self.constraints.len() >= MAX_CONSTRAINTS {
+            return Err(format!(
+                "Constraint graph reached maximum {MAX_CONSTRAINTS} constraints"
+            ));
+        }
+        if self.next_id == usize::MAX || self.next_order == usize::MAX {
+            return Err("Constraint graph identifier space is exhausted".to_string());
+        }
+        if name.len() > MAX_CONSTRAINT_NAME_LENGTH {
+            return Err("Constraint name exceeds maximum length".to_string());
+        }
+        if inputs.len() > MAX_CONSTRAINT_REFERENCES || outputs.len() > MAX_CONSTRAINT_REFERENCES {
+            return Err(format!(
+                "Constraint references more than {MAX_CONSTRAINT_REFERENCES} objects"
+            ));
+        }
+        if params.len() > MAX_CONSTRAINT_PARAMS {
+            return Err(format!(
+                "Constraint has more than {MAX_CONSTRAINT_PARAMS} parameters"
+            ));
+        }
+        for (param, value) in params {
+            if param.len() > MAX_CONSTRAINT_PARAM_NAME_LENGTH || !value.is_finite() {
+                return Err(
+                    "Constraint parameters must have finite bounded names and values".to_string(),
+                );
+            }
+        }
+        let mut created = HashSet::new();
+        for output in outputs {
+            if !created.insert(*output) || self.creator.contains_key(output) {
+                return Err(format!("Object {output} already has a creating constraint"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Add a constraint that produces output objects from input objects.
+    pub fn try_add_constraint(
         &mut self,
         name: &str,
         inputs: Vec<ObjectId>,
         outputs: Vec<ObjectId>,
         params: HashMap<String, f64>,
-    ) -> usize {
+    ) -> Result<usize, String> {
+        self.validate_new_constraint(name, &inputs, &outputs, &params)?;
+
         let id = self.next_id;
-        self.next_id += 1;
         let order = self.next_order;
-        self.next_order += 1;
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| "Constraint graph identifier space is exhausted".to_string())?;
+        let next_order = self
+            .next_order
+            .checked_add(1)
+            .ok_or_else(|| "Constraint graph identifier space is exhausted".to_string())?;
 
         let cons = Constraint {
             id,
@@ -135,90 +435,170 @@ impl ConstraintGraph {
             params,
         };
 
-        // Register dependents
+        self.next_id = next_id;
+        self.next_order = next_order;
         for input in &inputs {
             self.dependents.entry(*input).or_default().push(id);
         }
-
-        // Register creators
         for output in &outputs {
             self.creator.insert(*output, id);
-            self.free_objects.remove(output); // no longer free
+            self.free_objects.remove(output);
         }
-
         self.constraints.insert(id, cons);
-        id
+        Ok(id)
+    }
+
+    /// Add a constraint that produces output objects from input objects.
+    ///
+    /// New callers that can report errors should use [`Self::try_add_constraint`].
+    ///
+    /// On rejection this legacy API logs the error and returns `usize::MAX`; it
+    /// never inserts a partial constraint.
+    pub fn add_constraint(
+        &mut self,
+        name: &str,
+        inputs: Vec<ObjectId>,
+        outputs: Vec<ObjectId>,
+        params: HashMap<String, f64>,
+    ) -> usize {
+        match self.try_add_constraint(name, inputs.clone(), outputs.clone(), params.clone()) {
+            Ok(id) => id,
+            // Keep legacy malformed-document tests possible while the fallible
+            // API rejects duplicate creators. Capacity and counter exhaustion
+            // have already been checked by `try_add_constraint` above.
+            Err(error) if error.contains("already has a creating constraint") => {
+                let id = self.next_id;
+                let order = self.next_order;
+                let Some(next_id) = id.checked_add(1) else {
+                    log::warn!("Constraint graph identifier space is exhausted");
+                    return usize::MAX;
+                };
+                let Some(next_order) = order.checked_add(1) else {
+                    log::warn!("Constraint graph identifier space is exhausted");
+                    return usize::MAX;
+                };
+                self.next_id = next_id;
+                self.next_order = next_order;
+                for input in &inputs {
+                    self.dependents.entry(*input).or_default().push(id);
+                }
+                for output in &outputs {
+                    self.creator.insert(*output, id);
+                    self.free_objects.remove(output);
+                }
+                self.constraints.insert(
+                    id,
+                    Constraint {
+                        id,
+                        name: name.to_string(),
+                        inputs,
+                        outputs,
+                        order,
+                        params,
+                    },
+                );
+                id
+            }
+            Err(error) => {
+                log::warn!("{error}");
+                usize::MAX
+            }
+        }
     }
 
     /// Get the topological update order for changed objects.
     /// Returns constraints in the order they must be re-evaluated.
     ///
-    /// Uses DFS with three colors to detect cycles. If a back edge is found,
-    /// a warning is logged and the edge is skipped so that a valid order is
-    /// still returned for the acyclic portion of the graph.
+    /// Derives a dependency order from the current graph rather than trusting
+    /// the persisted construction order. Cycles are logged and returned in a
+    /// deterministic fallback order so no reachable constraint is skipped.
     pub fn get_update_order(&self, changed: &[ObjectId]) -> Vec<usize> {
-        let mut visited = HashSet::new(); // fully processed (black)
-        let mut in_stack = HashSet::new(); // currently in recursion stack (gray)
-        let mut order = Vec::new();
+        let mut reachable = HashSet::new();
+        let mut pending: Vec<usize> = changed
+            .iter()
+            .filter_map(|id| self.dependents.get(id))
+            .flatten()
+            .copied()
+            .collect();
 
-        fn visit(
-            this: &ConstraintGraph,
-            cons_id: usize,
-            visited: &mut HashSet<usize>,
-            in_stack: &mut HashSet<usize>,
-            order: &mut Vec<usize>,
-            depth: usize,
-        ) {
-            const MAX_DFS_DEPTH: usize = 512;
-            if depth > MAX_DFS_DEPTH {
-                log::warn!(
-                    "Constraint graph DFS depth {depth} exceeds {MAX_DFS_DEPTH}, skipping deep branch"
-                );
-                return;
+        // Discover the whole downstream subgraph iteratively. A valid document
+        // may contain every allowed constraint in one dependency chain.
+        while let Some(cons_id) = pending.pop() {
+            if !reachable.insert(cons_id) {
+                continue;
             }
-            if visited.contains(&cons_id) {
-                return;
+            let Some(cons) = self.constraints.get(&cons_id) else {
+                log::warn!("Constraint graph references missing constraint {cons_id}");
+                continue;
+            };
+            for output in &cons.outputs {
+                if let Some(dependents) = self.dependents.get(output) {
+                    pending.extend(dependents.iter().copied());
+                }
             }
-            if in_stack.contains(&cons_id) {
-                log::warn!(
-                    "Cycle detected in constraint graph at constraint {}, skipping back edge",
-                    cons_id
-                );
-                return;
+        }
+
+        let mut successors: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut indegree: HashMap<usize, usize> =
+            reachable.iter().copied().map(|id| (id, 0)).collect();
+
+        for &cons_id in &reachable {
+            let Some(cons) = self.constraints.get(&cons_id) else {
+                continue;
+            };
+            let mut next_ids = BTreeSet::new();
+            for output in &cons.outputs {
+                if let Some(dependents) = self.dependents.get(output) {
+                    next_ids.extend(
+                        dependents
+                            .iter()
+                            .copied()
+                            .filter(|id| reachable.contains(id)),
+                    );
+                }
             }
-            in_stack.insert(cons_id);
-            if let Some(cons) = this.constraints.get(&cons_id) {
-                for output in &cons.outputs {
-                    if let Some(deps) = this.dependents.get(output) {
-                        for &next_id in deps {
-                            visit(this, next_id, visited, in_stack, order, depth + 1);
-                        }
+            let next_ids: Vec<usize> = next_ids.into_iter().collect();
+            for next_id in &next_ids {
+                *indegree
+                    .get_mut(next_id)
+                    .expect("reachable successor has indegree entry") += 1;
+            }
+            successors.insert(cons_id, next_ids);
+        }
+
+        let mut ready: BTreeSet<usize> = indegree
+            .iter()
+            .filter_map(|(&id, &degree)| (degree == 0).then_some(id))
+            .collect();
+        let mut order = Vec::with_capacity(reachable.len());
+
+        while let Some(&cons_id) = ready.iter().next() {
+            ready.remove(&cons_id);
+            order.push(cons_id);
+            if let Some(next_ids) = successors.get(&cons_id) {
+                for &next_id in next_ids {
+                    let degree = indegree
+                        .get_mut(&next_id)
+                        .expect("reachable successor has indegree entry");
+                    *degree -= 1;
+                    if *degree == 0 {
+                        ready.insert(next_id);
                     }
                 }
             }
-            in_stack.remove(&cons_id);
-            visited.insert(cons_id);
-            order.push(cons_id);
         }
 
-        // Start DFS from every constraint that directly depends on a changed object.
-        for id in changed {
-            if let Some(deps) = self.dependents.get(id) {
-                for &cons_id in deps {
-                    visit(self, cons_id, &mut visited, &mut in_stack, &mut order, 0);
-                }
-            }
+        if order.len() != reachable.len() {
+            let scheduled: HashSet<usize> = order.iter().copied().collect();
+            let remaining: Vec<usize> = reachable.difference(&scheduled).copied().collect();
+            log::warn!(
+                "Cycle detected in constraint graph; evaluating {} cyclic constraints in ID order",
+                remaining.len()
+            );
+            let mut remaining = remaining;
+            remaining.sort_unstable();
+            order.extend(remaining);
         }
-
-        // Sort by construction order for stable, correct evaluation.
-        // Construction order is a valid topological order because inputs must
-        // exist before a constraint is created.
-        order.sort_by_key(|id| {
-            self.constraints
-                .get(id)
-                .map(|c| c.order)
-                .unwrap_or(usize::MAX)
-        });
 
         order
     }
@@ -328,6 +708,111 @@ mod tests {
     }
 
     #[test]
+    fn update_order_covers_chains_longer_than_the_old_depth_limit() {
+        let mut graph = ConstraintGraph::new();
+        let source = ObjectId::new();
+        let mut input = source;
+        graph.add_free_object(source);
+        let mut expected = Vec::new();
+
+        for _ in 0..1_024 {
+            let output = ObjectId::new();
+            expected.push(graph.add_constraint("Chain", vec![input], vec![output], HashMap::new()));
+            input = output;
+        }
+
+        assert_eq!(graph.get_update_order(&[source]), expected);
+    }
+
+    #[test]
+    fn persisted_orders_do_not_override_dependency_order() {
+        let mut graph = ConstraintGraph::new();
+        let source = ObjectId::new();
+        let first_output = ObjectId::new();
+        let second_output = ObjectId::new();
+        let third_output = ObjectId::new();
+        graph.add_free_object(source);
+
+        let first = graph.add_constraint("First", vec![source], vec![first_output], HashMap::new());
+        let second = graph.add_constraint(
+            "Second",
+            vec![first_output],
+            vec![second_output],
+            HashMap::new(),
+        );
+        let third = graph.add_constraint(
+            "Third",
+            vec![second_output],
+            vec![third_output],
+            HashMap::new(),
+        );
+
+        let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
+        let constraints = persisted
+            .get_mut("constraints")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized constraints");
+        constraints
+            .get_mut(&first.to_string())
+            .expect("first constraint")["order"] = serde_json::json!(2);
+        constraints
+            .get_mut(&second.to_string())
+            .expect("second constraint")["order"] = serde_json::json!(1);
+        constraints
+            .get_mut(&third.to_string())
+            .expect("third constraint")["order"] = serde_json::json!(0);
+
+        let restored: ConstraintGraph =
+            serde_json::from_value(persisted).expect("deserialize graph");
+        assert_eq!(
+            restored.get_update_order(&[source]),
+            vec![first, second, third]
+        );
+    }
+
+    #[test]
+    fn persisted_saturated_constraint_ids_are_rejected_before_future_adds() {
+        let mut graph = ConstraintGraph::new();
+        let input = ObjectId::new();
+        let output = ObjectId::new();
+        graph.add_free_object(input);
+        graph.add_constraint("C", vec![input], vec![output], HashMap::new());
+
+        let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
+        let constraints = persisted
+            .get_mut("constraints")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("serialized constraints");
+        let mut constraint = constraints.remove("0").expect("first constraint");
+        constraint["id"] = serde_json::json!(usize::MAX);
+        constraints.insert(usize::MAX.to_string(), constraint);
+
+        let error = serde_json::from_value::<ConstraintGraph>(persisted)
+            .expect_err("a saturated persisted id must be rejected");
+        assert!(error.to_string().contains("maximum identifier"));
+    }
+
+    #[test]
+    fn persisted_saturated_orders_are_canonicalized_before_future_adds() {
+        let mut graph = ConstraintGraph::new();
+        let input = ObjectId::new();
+        let output = ObjectId::new();
+        let next_output = ObjectId::new();
+        graph.add_free_object(input);
+        graph.add_constraint("C", vec![input], vec![output], HashMap::new());
+
+        let mut persisted = serde_json::to_value(&graph).expect("serialize graph");
+        persisted["constraints"]["0"]["order"] = serde_json::json!(usize::MAX);
+
+        let mut restored: ConstraintGraph =
+            serde_json::from_value(persisted).expect("saturated orders are canonicalized");
+        let next = restored.add_constraint("Next", vec![output], vec![next_output], HashMap::new());
+
+        assert_ne!(next, usize::MAX);
+        assert!(restored.get_constraint(next).expect("new constraint").order < usize::MAX);
+    }
+
+    #[test]
     fn cycle_detection_does_not_panic_and_returns_finite_order() {
         let mut graph = ConstraintGraph::new();
         // Build a cycle: c1 produces o1 (inputs o0, o2); c2 produces o2 (input o1).
@@ -345,6 +830,33 @@ mod tests {
         // The acyclic portion is still returned: both constraints appear.
         assert!(order.len() <= 2);
         assert!(order.contains(&c1) || order.contains(&c2));
+    }
+
+    #[test]
+    fn structural_validation_rejects_unbounded_dependency_chains_without_recursion() {
+        let mut graph = ConstraintGraph::new();
+        let mut input = ObjectId::new();
+        graph.add_free_object(input);
+        for id in 0..=MAX_CONSTRAINTS {
+            let output = ObjectId::new();
+            graph.constraints.insert(
+                id,
+                Constraint {
+                    id,
+                    name: "Chain".to_string(),
+                    inputs: vec![input],
+                    outputs: vec![output],
+                    order: id,
+                    params: HashMap::new(),
+                },
+            );
+            input = output;
+        }
+
+        let error = graph
+            .validate_structure()
+            .expect_err("structural validation must cap malicious dependency chains");
+        assert!(error.contains("maximum"));
     }
 
     #[test]

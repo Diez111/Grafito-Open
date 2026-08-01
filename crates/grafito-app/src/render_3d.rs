@@ -1,10 +1,760 @@
 use egui::{Color32, Rect, Stroke, Vec2};
-use glam::Vec3;
-use grafito_core::{Cube3DObj, GeoObject, Point3DObj, Pyramid3DObj, Segment3DObj, Sphere3DObj};
-use grafito_geometry::{Camera3D, Point3D};
+use glam::{DVec3, Vec3};
+use grafito_core::{
+    ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, Line3DObj,
+    MoebiusStripObj, ObjectId, ParametricCurve3DObj, Plane3DObj, Point3DObj, Pyramid3DObj,
+    RegularPolychoron4DObj, RegularPolytopeNDObj, Segment3DObj, Sphere3DObj, Surface3DObj,
+    Torus3DObj, VectorField3DObj,
+};
+use grafito_geometry::{
+    curve_3d_segment_is_continuous, Aabb3D, Camera3D, Point3D, Ray3D, RegularPolychoron,
+    RegularPolytopeFamily,
+};
+use grafito_render::depth_3d::{
+    project_regular_polychoron, project_regular_polytope_nd, ProjectedRegularPolytope,
+};
 use grafito_ui::Tool;
 
 use crate::{to_color32, GrafitoApp};
+
+/// La superficie 4D histórica no entra en el `WorldMesh` y conserva su
+/// proyección CPU cuando el callback GPU está activo.
+pub(crate) fn requires_cpu_3d_overlay(object: &GeoObject) -> bool {
+    matches!(object, GeoObject::HyperSurface4D(_))
+}
+
+pub(crate) fn should_draw_cpu_3d_geometry(object: &GeoObject, overlay_only: bool) -> bool {
+    !overlay_only || requires_cpu_3d_overlay(object)
+}
+
+/// Indica si un objeto tipado debe adquirir una proyección CPU en este frame.
+///
+/// Cuando el callback GPU ya compone su geometría, una proyección solo se necesita
+/// para posicionar una etiqueta CPU; los objetos sin etiqueta no tocan la cache.
+pub(crate) fn typed_cpu_projection_is_needed(object: &GeoObject, overlay_only: bool) -> bool {
+    match object {
+        GeoObject::RegularPolychoron4D(polychoron) => !overlay_only || !polychoron.label.is_empty(),
+        GeoObject::RegularPolytopeND(polytope) => !overlay_only || !polytope.label.is_empty(),
+        _ => false,
+    }
+}
+
+/// Limita una fase transitoria a las proyecciones tipadas que realmente viven en R4.
+/// La aplicación conserva la fase al pausar para mantener la proyección visible inmóvil.
+pub(crate) fn typed_four_d_phase_for_object(
+    object: &GeoObject,
+    transient_phase: Option<f64>,
+) -> Option<f64> {
+    let phase = transient_phase.filter(|phase| phase.is_finite())?;
+    match object {
+        GeoObject::RegularPolychoron4D(_) => Some(phase),
+        GeoObject::RegularPolytopeND(polytope) if polytope.dimension == 4 => Some(phase),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Cpu3dRenderOptions {
+    pub(crate) overlay_only: bool,
+    pub(crate) motion_preview: bool,
+    pub(crate) typed_four_d_phase: Option<f64>,
+}
+
+fn camera_view_depth(camera: &Camera3D, point: Vec3) -> f32 {
+    -(camera.view_matrix() * point.extend(1.0)).z
+}
+
+const PICK_RADIUS_PIXELS: f64 = 8.0;
+const DEFAULT_CREATION_RADIUS_PIXELS: f64 = 40.0;
+const PLANE_RENDER_EXTENT: f64 = 8.0;
+const LINE_RENDER_HALF_EXTENT: f64 = 40.0;
+const FALLBACK_CURVE_SAMPLES: usize = 500;
+const FALLBACK_ATTRACTOR_STEPS: usize = 4_096;
+const MOTION_PREVIEW_MAX_3D_SAMPLES: usize = 1_024;
+pub(crate) const MAX_MOTION_PREVIEW_POLYTOPE_EDGES: usize = 1_024;
+
+fn motion_preview_sample_stride(sample_count: usize, motion_preview: bool) -> usize {
+    if !motion_preview || sample_count <= MOTION_PREVIEW_MAX_3D_SAMPLES {
+        return 1;
+    }
+    sample_count.div_ceil(MOTION_PREVIEW_MAX_3D_SAMPLES)
+}
+
+fn motion_preview_surface_resolution(resolution: usize, motion_preview: bool) -> usize {
+    if motion_preview {
+        resolution.min(16)
+    } else {
+        resolution
+    }
+}
+
+pub(crate) fn motion_preview_polytope_edge_stride(
+    edge_count: usize,
+    motion_preview: bool,
+) -> usize {
+    if !motion_preview || edge_count <= MAX_MOTION_PREVIEW_POLYTOPE_EDGES {
+        return 1;
+    }
+    edge_count.div_ceil(MAX_MOTION_PREVIEW_POLYTOPE_EDGES)
+}
+
+fn effective_four_d_angles(base_angles: &[f64], phase: f64) -> [f64; 3] {
+    let base = [
+        base_angles.first().copied().unwrap_or(0.3),
+        base_angles.get(1).copied().unwrap_or(0.5),
+        base_angles.get(2).copied().unwrap_or(0.7),
+    ];
+    if !phase.is_finite() {
+        return base;
+    }
+    [
+        base[0] + phase,
+        base[1] + phase * 2.0,
+        base[2] + phase * 3.0,
+    ]
+}
+
+/// Compone una fase transitoria únicamente sobre las seis rotaciones tipadas
+/// de R4. Los multiplicadores enteros conservan continuidad al envolver en TAU.
+pub(crate) fn effective_typed_four_d_angles(base_angles: [f64; 6], phase: Option<f64>) -> [f64; 6] {
+    let Some(phase) = phase.filter(|phase| phase.is_finite()) else {
+        return base_angles;
+    };
+
+    let mut effective = base_angles;
+    for (index, angle) in effective.iter_mut().enumerate() {
+        let offset = phase * (index + 1) as f64;
+        let next = *angle + offset;
+        if !next.is_finite() {
+            return base_angles;
+        }
+        *angle = next;
+    }
+    effective
+}
+
+fn color_is_renderable(color: grafito_geometry::Color) -> bool {
+    color
+        .to_array()
+        .iter()
+        .all(|component| component.is_finite())
+}
+
+fn regular_polychoron_is_renderable(object: &RegularPolychoron4DObj) -> bool {
+    object.scale.is_finite()
+        && object.scale > 0.0
+        && object.rotation_angles.iter().all(|angle| angle.is_finite())
+        && object.width.is_finite()
+        && object.width > 0.0
+        && color_is_renderable(object.color)
+        && object.fill_color.map_or(true, color_is_renderable)
+}
+
+fn regular_polytope_is_renderable(object: &RegularPolytopeNDObj) -> bool {
+    let Some(expected_rotation_count) =
+        RegularPolytopeNDObj::expected_rotation_angle_count(object.dimension)
+    else {
+        return false;
+    };
+
+    object.scale.is_finite()
+        && object.scale > 0.0
+        && object.rotation_angles.len() == expected_rotation_count
+        && object.rotation_angles.iter().all(|angle| angle.is_finite())
+        && object.width.is_finite()
+        && object.width > 0.0
+        && color_is_renderable(object.color)
+        && object.fill_color.map_or(true, color_is_renderable)
+}
+
+pub(crate) fn project_regular_polychoron_cpu(
+    object: &RegularPolychoron4DObj,
+    transient_phase: Option<f64>,
+) -> Option<ProjectedRegularPolytope> {
+    if !regular_polychoron_is_renderable(object) {
+        return None;
+    }
+    let angles = effective_typed_four_d_angles(object.rotation_angles, transient_phase);
+    project_regular_polychoron(object, angles)
+}
+
+pub(crate) fn project_regular_polytope_nd_cpu(
+    object: &RegularPolytopeNDObj,
+    transient_phase: Option<f64>,
+) -> Option<ProjectedRegularPolytope> {
+    if !regular_polytope_is_renderable(object) {
+        return None;
+    }
+    if object.dimension == 4 {
+        let base_angles: [f64; 6] = object.rotation_angles.as_slice().try_into().ok()?;
+        let angles = effective_typed_four_d_angles(base_angles, transient_phase);
+        project_regular_polytope_nd(object, &angles)
+    } else {
+        project_regular_polytope_nd(object, &object.rotation_angles)
+    }
+}
+
+pub(crate) fn should_draw_polychoron_faces(has_fill: bool, motion_preview: bool) -> bool {
+    has_fill && !motion_preview
+}
+
+pub(crate) fn projected_polychoron_faces(
+    camera: &Camera3D,
+    geometry: &ProjectedRegularPolytope,
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<(f32, [(f32, f32); 3])> {
+    let mut triangles = Vec::new();
+    for face in geometry.faces() {
+        let Some(&first) = face.first() else {
+            continue;
+        };
+        for index in 1..face.len().saturating_sub(1) {
+            let Some((&second, &third)) = face.get(index).zip(face.get(index + 1)) else {
+                continue;
+            };
+            let Some((a, b, c)) = geometry
+                .vertices()
+                .get(first)
+                .zip(geometry.vertices().get(second))
+                .zip(geometry.vertices().get(third))
+                .map(|((a, b), c)| (*a, *b, *c))
+            else {
+                continue;
+            };
+            let (Some(a2), Some(b2), Some(c2)) = (
+                camera.project(&a, screen_w, screen_h),
+                camera.project(&b, screen_w, screen_h),
+                camera.project(&c, screen_w, screen_h),
+            ) else {
+                continue;
+            };
+            let depth = (camera_view_depth(camera, a.to_vec3())
+                + camera_view_depth(camera, b.to_vec3())
+                + camera_view_depth(camera, c.to_vec3()))
+                / 3.0;
+            if depth.is_finite() {
+                triangles.push((depth, [a2, b2, c2]));
+            }
+        }
+    }
+    triangles.sort_by(|left, right| right.0.total_cmp(&left.0));
+    triangles
+}
+
+fn projected_polytope_center(geometry: &ProjectedRegularPolytope) -> Option<Vec3> {
+    let count = geometry.vertices().len() as f64;
+    if count <= 0.0 || !count.is_finite() {
+        return None;
+    }
+    let sum = geometry
+        .vertices()
+        .iter()
+        .fold(DVec3::ZERO, |sum, point| sum + point.to_dvec3());
+    if !sum.is_finite() {
+        return None;
+    }
+    let center = Point3D::from_dvec3(sum / count);
+    grafito_render::depth_3d::point_is_renderable(center).then_some(center.to_vec3())
+}
+
+/// Intersects a canvas-local pointer ray with the camera-facing plane through
+/// `camera.target`. The plane basis remains available from `Camera3D` for
+/// future axis-constrained dragging.
+pub(crate) fn construction_point_from_canvas(
+    camera: &Camera3D,
+    local_pointer: Vec2,
+    canvas_size: Vec2,
+) -> Option<Point3D> {
+    if !local_pointer.is_finite() || !canvas_size.is_finite() {
+        return None;
+    }
+    let ray = camera.screen_ray(
+        local_pointer.x,
+        local_pointer.y,
+        canvas_size.x,
+        canvas_size.y,
+    )?;
+    camera.construction_plane()?.intersect_ray(&ray)
+}
+
+fn world_pick_radius(
+    camera: &Camera3D,
+    ray: &Ray3D,
+    distance: f64,
+    canvas_height: f32,
+    pixel_radius: f64,
+) -> Option<f64> {
+    if !canvas_height.is_finite()
+        || canvas_height <= 0.0
+        || !pixel_radius.is_finite()
+        || pixel_radius <= 0.0
+    {
+        return None;
+    }
+    let point = ray.point_at(distance)?.to_vec3();
+    if !point.is_finite() {
+        return None;
+    }
+    let depth = camera_view_depth(camera, point) as f64;
+    let half_fov = (camera.fov as f64).to_radians() * 0.5;
+    let radius = 2.0 * depth * half_fov.tan() * pixel_radius / canvas_height as f64;
+    (depth >= camera.near as f64
+        && depth <= camera.far as f64
+        && radius.is_finite()
+        && radius > 0.0)
+        .then_some(radius)
+}
+
+fn segment_overlaps_visible_depth(camera: &Camera3D, a: Point3D, b: Point3D) -> bool {
+    let a = a.to_vec3();
+    let b = b.to_vec3();
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
+    let a_depth = camera_view_depth(camera, a);
+    let b_depth = camera_view_depth(camera, b);
+    a_depth.is_finite()
+        && b_depth.is_finite()
+        && a_depth.max(b_depth) >= camera.near
+        && a_depth.min(b_depth) <= camera.far
+}
+
+fn proximity_hit(
+    camera: &Camera3D,
+    ray: &Ray3D,
+    a: Point3D,
+    b: Point3D,
+    canvas_height: f32,
+    pixel_radius: f64,
+) -> Option<f64> {
+    if !segment_overlaps_visible_depth(camera, a, b) {
+        return None;
+    }
+    let proximity = ray.closest_to_segment(a, b)?;
+    let tolerance = world_pick_radius(
+        camera,
+        ray,
+        proximity.distance_along_ray,
+        canvas_height,
+        pixel_radius,
+    )?;
+    (proximity.separation <= tolerance).then_some(proximity.distance_along_ray)
+}
+
+fn center_extent_bounds(center: Point3D, extent: f64) -> Option<Aabb3D> {
+    if !center.is_finite() || !extent.is_finite() || extent < 0.0 {
+        return None;
+    }
+    let center = center.to_dvec3();
+    let extent = DVec3::splat(extent);
+    Aabb3D::new(
+        Point3D::from_dvec3(center - extent),
+        Point3D::from_dvec3(center + extent),
+    )
+}
+
+fn endpoints_radius_bounds(a: Point3D, b: Point3D, radius: f64) -> Option<Aabb3D> {
+    if !a.is_finite() || !b.is_finite() || !radius.is_finite() || radius < 0.0 {
+        return None;
+    }
+    let min = a.to_dvec3().min(b.to_dvec3()) - DVec3::splat(radius);
+    let max = a.to_dvec3().max(b.to_dvec3()) + DVec3::splat(radius);
+    Aabb3D::new(Point3D::from_dvec3(min), Point3D::from_dvec3(max))
+}
+
+fn surface_bounds(
+    surface: &Surface3DObj,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Option<Aabb3D> {
+    if let Ok(grid) = surface.cached_grid.try_read() {
+        if let Some(bounds) = Aabb3D::from_points(grid.iter().flatten().copied()) {
+            return Some(bounds);
+        }
+    }
+    Aabb3D::from_points(
+        grafito_core::parametric_sampling::evaluate_surface_3d(
+            surface,
+            surface.mesh_res.clamp(8, 50),
+            variables,
+        )
+        .into_iter()
+        .flatten(),
+    )
+}
+
+fn curve_bounds(
+    curve: &ParametricCurve3DObj,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Option<Aabb3D> {
+    if let Ok(samples) = curve.cached_samples.try_read() {
+        if let Some(bounds) =
+            Aabb3D::from_points(samples.iter().map(|&(x, y, z)| Point3D::new(x, y, z)))
+        {
+            return Some(bounds);
+        }
+    }
+    Aabb3D::from_points(
+        grafito_core::parametric_sampling::evaluate_parametric_curve_3d(
+            curve,
+            FALLBACK_CURVE_SAMPLES,
+            variables,
+        )
+        .into_iter()
+        .map(|(x, y, z)| Point3D::new(x, y, z)),
+    )
+}
+
+fn fallback_bounds_hit(
+    bounds: Aabb3D,
+    camera: &Camera3D,
+    ray: &Ray3D,
+    canvas_height: f32,
+) -> Option<f64> {
+    let mut min_depth = f32::INFINITY;
+    let mut max_depth = f32::NEG_INFINITY;
+    for x in [bounds.min.x, bounds.max.x] {
+        for y in [bounds.min.y, bounds.max.y] {
+            for z in [bounds.min.z, bounds.max.z] {
+                let point = Point3D::new(x, y, z).to_vec3();
+                if !point.is_finite() {
+                    return None;
+                }
+                let depth = camera_view_depth(camera, point);
+                if !depth.is_finite() {
+                    return None;
+                }
+                min_depth = min_depth.min(depth);
+                max_depth = max_depth.max(depth);
+            }
+        }
+    }
+    if max_depth < camera.near || min_depth > camera.far {
+        return None;
+    }
+
+    let min = bounds.min.to_dvec3();
+    let max = bounds.max.to_dvec3();
+    let center = min + (max - min) * 0.5;
+    if !center.is_finite() {
+        return None;
+    }
+    let center_distance = (center - ray.origin.to_dvec3())
+        .dot(ray.direction.to_dvec3())
+        .clamp(ray.min_distance, ray.max_distance);
+    let padding = world_pick_radius(
+        camera,
+        ray,
+        center_distance,
+        canvas_height,
+        PICK_RADIUS_PIXELS,
+    )?;
+    let padding = DVec3::splat(padding.max(1.0e-9));
+    let padded = Aabb3D::new(
+        Point3D::from_dvec3(min - padding),
+        Point3D::from_dvec3(max + padding),
+    )?;
+    ray.intersect_aabb(padded)
+}
+
+fn fallback_object_bounds(
+    object: &GeoObject,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Option<Aabb3D> {
+    fallback_object_bounds_with_typed_four_d_phase(object, variables, None)
+}
+
+/// Obtiene los límites CPU de selección con la misma fase tipada que la proyección dibujada.
+pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
+    object: &GeoObject,
+    variables: &std::collections::HashMap<String, f64>,
+    typed_four_d_phase: Option<f64>,
+) -> Option<Aabb3D> {
+    match object {
+        GeoObject::Pyramid3D(pyramid) => {
+            let geometry = grafito_geometry::Pyramid3D::new(
+                pyramid.base_center,
+                pyramid.apex,
+                pyramid.base_size,
+            );
+            Aabb3D::from_points(
+                geometry
+                    .base_vertices()
+                    .into_iter()
+                    .chain(std::iter::once(pyramid.apex)),
+            )
+        }
+        GeoObject::Tetrahedron3D(tetrahedron) => Aabb3D::from_points(
+            grafito_geometry::Tetrahedron3D::new(tetrahedron.center, tetrahedron.edge_length)
+                .vertices(),
+        ),
+        GeoObject::Cone3D(cone) => {
+            endpoints_radius_bounds(cone.base_center, cone.apex, cone.radius)
+        }
+        GeoObject::Cylinder3D(cylinder) => {
+            endpoints_radius_bounds(cylinder.base_center, cylinder.top_center, cylinder.radius)
+        }
+        GeoObject::Torus3D(torus) => {
+            center_extent_bounds(torus.center, torus.r_major.abs() + torus.r_minor.abs())
+        }
+        GeoObject::MoebiusStrip(strip) => {
+            center_extent_bounds(strip.center, strip.radius.abs() + strip.width_r.abs() * 0.5)
+        }
+        GeoObject::Surface3D(surface) => surface_bounds(surface, variables),
+        GeoObject::ParametricCurve3D(curve) => curve_bounds(curve, variables),
+        GeoObject::Attractor3D(attractor) => {
+            let steps = attractor.steps.min(FALLBACK_ATTRACTOR_STEPS);
+            let skip = attractor.skip.min(steps.saturating_sub(1));
+            let points = grafito_geometry::attractors::integrate_attractor(
+                &attractor.model(),
+                attractor.x0,
+                attractor.y0,
+                attractor.z0,
+                attractor.dt,
+                steps,
+                skip,
+            )
+            .into_iter()
+            .map(|point| Point3D::new(point.x * 0.2, point.y * 0.2, point.z * 0.2));
+            Aabb3D::from_points(points)
+        }
+        GeoObject::RegularPolychoron4D(polychoron) => project_regular_polychoron_cpu(
+            polychoron,
+            typed_four_d_phase_for_object(object, typed_four_d_phase),
+        )
+        .and_then(|geometry| Aabb3D::from_points(geometry.vertices().iter().copied())),
+        GeoObject::RegularPolytopeND(polytope) => project_regular_polytope_nd_cpu(
+            polytope,
+            typed_four_d_phase_for_object(object, typed_four_d_phase),
+        )
+        .and_then(|geometry| Aabb3D::from_points(geometry.vertices().iter().copied())),
+        GeoObject::HyperSurface4D(surface) => {
+            let extent = surface.params.first().copied().unwrap_or(3.0).abs() * 2.0;
+            center_extent_bounds(Point3D::new(0.0, 0.0, 0.0), extent)
+        }
+        GeoObject::VectorField3D(field) => Aabb3D::new(
+            Point3D::new(field.x_min, field.y_min, field.z_min),
+            Point3D::new(field.x_max, field.y_max, field.z_max),
+        ),
+        _ => None,
+    }
+}
+
+fn object_ray_hit(
+    object: &GeoObject,
+    variables: &std::collections::HashMap<String, f64>,
+    camera: &Camera3D,
+    ray: &Ray3D,
+    canvas_height: f32,
+    typed_four_d_phase: Option<f64>,
+) -> Option<PickHit> {
+    match object {
+        GeoObject::Point3D(point) => proximity_hit(
+            camera,
+            ray,
+            point.position,
+            point.position,
+            canvas_height,
+            PICK_RADIUS_PIXELS.max(point.size.min(5.0) as f64),
+        )
+        .map(PickHit::exact),
+        GeoObject::Segment3D(segment) => proximity_hit(
+            camera,
+            ray,
+            segment.a,
+            segment.b,
+            canvas_height,
+            PICK_RADIUS_PIXELS.max(segment.width as f64 * 0.5 + 4.0),
+        )
+        .map(PickHit::exact),
+        GeoObject::Line3D(line) => {
+            let direction = line.direction.to_dvec3();
+            let length = direction.length();
+            if !length.is_finite() || length <= 1.0e-12 || !line.point.is_finite() {
+                return None;
+            }
+            let extent = direction / length * LINE_RENDER_HALF_EXTENT;
+            proximity_hit(
+                camera,
+                ray,
+                Point3D::from_dvec3(line.point.to_dvec3() - extent),
+                Point3D::from_dvec3(line.point.to_dvec3() + extent),
+                canvas_height,
+                PICK_RADIUS_PIXELS.max(line.width as f64 * 0.5 + 4.0),
+            )
+            .map(PickHit::exact)
+        }
+        GeoObject::Sphere3D(sphere) => ray
+            .intersect_sphere(sphere.center, sphere.radius)
+            .map(PickHit::exact),
+        GeoObject::Cube3D(cube) => center_extent_bounds(cube.center, cube.size * 0.5)
+            .and_then(|bounds| ray.intersect_aabb(bounds))
+            .map(PickHit::exact),
+        GeoObject::Plane3D(plane) => {
+            let (center, axis_u, axis_v) =
+                plane_point_and_basis(plane.a, plane.b, plane.c, plane.d)?;
+            let normal = Point3D::from_vec3(axis_u.cross(axis_v).normalize_or_zero());
+            let (distance, hit) = ray.intersect_plane(center, normal)?;
+            let offset = hit.to_dvec3() - center.to_dvec3();
+            let u = offset.dot(axis_u.as_dvec3());
+            let v = offset.dot(axis_v.as_dvec3());
+            (u.is_finite()
+                && v.is_finite()
+                && u.abs() <= PLANE_RENDER_EXTENT
+                && v.abs() <= PLANE_RENDER_EXTENT)
+                .then_some(distance)
+                .map(PickHit::exact)
+        }
+        _ => {
+            let bounds = match typed_four_d_phase {
+                Some(phase) => {
+                    fallback_object_bounds_with_typed_four_d_phase(object, variables, Some(phase))
+                }
+                None => fallback_object_bounds(object, variables),
+            };
+            bounds
+                .and_then(|bounds| fallback_bounds_hit(bounds, camera, ray, canvas_height))
+                .map(PickHit::coarse)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PickConfidence {
+    CoarseBounds,
+    ExactGeometry,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PickHit {
+    distance: f64,
+    confidence: PickConfidence,
+}
+
+impl PickHit {
+    fn exact(distance: f64) -> Self {
+        Self {
+            distance,
+            confidence: PickConfidence::ExactGeometry,
+        }
+    }
+
+    fn coarse(distance: f64) -> Self {
+        Self {
+            distance,
+            confidence: PickConfidence::CoarseBounds,
+        }
+    }
+}
+
+/// Picks the highest-confidence visible 3D hit under a canvas-local pointer.
+/// Exact hits outrank coarse bounds; distance and stable `ObjectId` break ties.
+pub(crate) fn pick_3d_object(
+    document: &Document,
+    camera: &Camera3D,
+    local_pointer: Vec2,
+    canvas_size: Vec2,
+) -> Option<ObjectId> {
+    pick_3d_object_with_typed_four_d_phase(document, camera, local_pointer, canvas_size, None)
+}
+
+/// Picks using the phase snapshot captured for the current 3D frame.
+pub(crate) fn pick_3d_object_with_typed_four_d_phase(
+    document: &Document,
+    camera: &Camera3D,
+    local_pointer: Vec2,
+    canvas_size: Vec2,
+    typed_four_d_phase: Option<f64>,
+) -> Option<ObjectId> {
+    if !local_pointer.is_finite() || !canvas_size.is_finite() {
+        return None;
+    }
+    let ray = camera.screen_ray(
+        local_pointer.x,
+        local_pointer.y,
+        canvas_size.x,
+        canvas_size.y,
+    )?;
+    let mut best: Option<(PickHit, ObjectId)> = None;
+    for (id, object) in document.objects_iter() {
+        if !object.is_visible() || !object.is_3d() {
+            continue;
+        }
+        let Some(hit) = object_ray_hit(
+            object,
+            &document.variables,
+            camera,
+            &ray,
+            canvas_size.y,
+            typed_four_d_phase,
+        ) else {
+            continue;
+        };
+        if !hit.distance.is_finite() {
+            continue;
+        }
+        let candidate = (hit, *id);
+        if best
+            .as_ref()
+            .map(|current| {
+                candidate.0.confidence > current.0.confidence
+                    || (candidate.0.confidence == current.0.confidence
+                        && (candidate.0.distance.total_cmp(&current.0.distance).is_lt()
+                            || (candidate.0.distance.total_cmp(&current.0.distance).is_eq()
+                                && candidate.1 < current.1)))
+            })
+            .unwrap_or(true)
+        {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// Applies the same single-selection and empty-click clearing policy as 2D.
+pub(crate) fn select_3d_object_at_pointer(
+    document: &mut Document,
+    selected_object: &mut Option<ObjectId>,
+    camera: &Camera3D,
+    local_pointer: Vec2,
+    canvas_size: Vec2,
+) -> Option<ObjectId> {
+    select_3d_object_at_pointer_with_typed_four_d_phase(
+        document,
+        selected_object,
+        camera,
+        local_pointer,
+        canvas_size,
+        None,
+    )
+}
+
+/// Applies 3D selection using the per-frame typed-4D phase snapshot.
+pub(crate) fn select_3d_object_at_pointer_with_typed_four_d_phase(
+    document: &mut Document,
+    selected_object: &mut Option<ObjectId>,
+    camera: &Camera3D,
+    local_pointer: Vec2,
+    canvas_size: Vec2,
+    typed_four_d_phase: Option<f64>,
+) -> Option<ObjectId> {
+    let picked = match typed_four_d_phase {
+        Some(phase) => pick_3d_object_with_typed_four_d_phase(
+            document,
+            camera,
+            local_pointer,
+            canvas_size,
+            Some(phase),
+        ),
+        None => pick_3d_object(document, camera, local_pointer, canvas_size),
+    };
+    document.clear_selection();
+    if let Some(id) = picked {
+        document.select(id);
+    }
+    *selected_object = picked;
+    picked
+}
 
 fn project_segment(
     camera: &Camera3D,
@@ -13,9 +763,32 @@ fn project_segment(
     screen_w: f32,
     screen_h: f32,
 ) -> Option<((f32, f32), (f32, f32))> {
+    if !a.x.is_finite()
+        || !a.y.is_finite()
+        || !a.z.is_finite()
+        || !b.x.is_finite()
+        || !b.y.is_finite()
+        || !b.z.is_finite()
+        || !screen_w.is_finite()
+        || !screen_h.is_finite()
+        || screen_w <= 0.0
+        || screen_h <= 0.0
+        || !camera.near.is_finite()
+        || camera.near <= 0.0
+    {
+        return None;
+    }
     let mvp = camera.mvp();
-    let mut clip_a = mvp * a.to_vec3().extend(1.0);
-    let mut clip_b = mvp * b.to_vec3().extend(1.0);
+    let a = a.to_vec3();
+    let b = b.to_vec3();
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let mut clip_a = mvp * a.extend(1.0);
+    let mut clip_b = mvp * b.extend(1.0);
+    if !clip_a.is_finite() || !clip_b.is_finite() {
+        return None;
+    }
 
     let near = camera.near;
 
@@ -25,16 +798,28 @@ fn project_segment(
 
     if clip_a.w < near {
         let t = (near - clip_a.w) / (clip_b.w - clip_a.w);
+        if !t.is_finite() {
+            return None;
+        }
         clip_a = clip_a + t * (clip_b - clip_a);
     } else if clip_b.w < near {
         let t = (near - clip_b.w) / (clip_a.w - clip_b.w);
+        if !t.is_finite() {
+            return None;
+        }
         clip_b = clip_b + t * (clip_a - clip_b);
+    }
+    if !clip_a.is_finite() || !clip_b.is_finite() {
+        return None;
     }
 
     let ndc_ax = clip_a.x / clip_a.w;
     let ndc_ay = clip_a.y / clip_a.w;
     let ndc_bx = clip_b.x / clip_b.w;
     let ndc_by = clip_b.y / clip_b.w;
+    if !ndc_ax.is_finite() || !ndc_ay.is_finite() || !ndc_bx.is_finite() || !ndc_by.is_finite() {
+        return None;
+    }
 
     if ndc_ax.abs() > 5.0 && ndc_bx.abs() > 5.0 && ndc_ax.signum() == ndc_bx.signum() {
         return None;
@@ -48,12 +833,57 @@ fn project_segment(
     let sbx = (ndc_bx + 1.0) * 0.5 * screen_w;
     let sby = (1.0 - ndc_by) * 0.5 * screen_h;
 
-    Some(((sax, say), (sbx, sby)))
+    (sax.is_finite() && say.is_finite() && sbx.is_finite() && sby.is_finite())
+        .then_some(((sax, say), (sbx, sby)))
+}
+
+pub(crate) fn projected_tetrahedron_faces(
+    camera: &Camera3D,
+    tetrahedron: &grafito_geometry::Tetrahedron3D,
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<(f32, [(f32, f32); 3])> {
+    let vertices = tetrahedron.vertices();
+    let mut faces = tetrahedron
+        .faces()
+        .into_iter()
+        .filter_map(|[a, b, c]| {
+            let (a2, b2, c2) = (
+                camera.project(&vertices[a], screen_w, screen_h)?,
+                camera.project(&vertices[b], screen_w, screen_h)?,
+                camera.project(&vertices[c], screen_w, screen_h)?,
+            );
+            let depth = (camera_view_depth(camera, vertices[a].to_vec3())
+                + camera_view_depth(camera, vertices[b].to_vec3())
+                + camera_view_depth(camera, vertices[c].to_vec3()))
+                / 3.0;
+            depth.is_finite().then_some((depth, [a2, b2, c2]))
+        })
+        .collect::<Vec<_>>();
+    faces.sort_by(|left, right| right.0.total_cmp(&left.0));
+    faces
+}
+
+pub(crate) fn projected_point_position(
+    camera: &Camera3D,
+    point: Point3D,
+    canvas_size: Vec2,
+) -> Option<Vec2> {
+    camera
+        .project(&point, canvas_size.x, canvas_size.y)
+        .map(|(x, y)| Vec2::new(x, y))
 }
 
 fn plane_point_and_basis(a: f64, b: f64, c: f64, d: f64) -> Option<(Point3D, Vec3, Vec3)> {
-    let normal = Vec3::new(a as f32, b as f32, c as f32);
-    if normal.length_squared() < 1e-12 {
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() || !d.is_finite() {
+        return None;
+    }
+    let scale = a.abs().max(b.abs()).max(c.abs());
+    if !scale.is_finite() || scale <= 1.0e-15 {
+        return None;
+    }
+    let normal = DVec3::new(a / scale, b / scale, c / scale).normalize_or_zero();
+    if !normal.is_finite() || normal.length_squared() < 1.0e-24 {
         return None;
     }
     let point = if a.abs() >= b.abs() && a.abs() >= c.abs() {
@@ -63,11 +893,15 @@ fn plane_point_and_basis(a: f64, b: f64, c: f64, d: f64) -> Option<(Point3D, Vec
     } else {
         Point3D::new(0.0, 0.0, -d / c)
     };
-    let n = normal.normalize();
+    if !point.is_finite() {
+        return None;
+    }
+    let n = normal.as_vec3();
     let seed = if n.x.abs() < 0.8 { Vec3::X } else { Vec3::Y };
-    let u = n.cross(seed).normalize();
-    let v = n.cross(u).normalize();
-    Some((point, u, v))
+    let u = n.cross(seed).normalize_or_zero();
+    let v = n.cross(u).normalize_or_zero();
+    (u.is_finite() && v.is_finite() && u.length_squared() > 1.0e-12 && v.length_squared() > 1.0e-12)
+        .then_some((point, u, v))
 }
 
 fn offset_point(base: Point3D, u: Vec3, v: Vec3, du: f32, dv: f32) -> Point3D {
@@ -78,41 +912,113 @@ fn offset_point(base: Point3D, u: Vec3, v: Vec3, du: f32, dv: f32) -> Point3D {
     )
 }
 
+fn centered_four_d_tool_default(tool: Tool) -> Option<(GeoObject, &'static str)> {
+    match tool {
+        Tool::Tesseract4D => Some((
+            GeoObject::RegularPolychoron4D(RegularPolychoron4DObj::new(
+                RegularPolychoron::Tesseract,
+            )),
+            "Tesseract4D",
+        )),
+        Tool::Hypercube5D => Some((
+            GeoObject::RegularPolytopeND(RegularPolytopeNDObj::new(
+                RegularPolytopeFamily::Hypercube,
+                5,
+            )),
+            "Hypercube5D",
+        )),
+        _ => None,
+    }
+}
+
+/// Inserta el selector tipado por defecto para una herramienta 4D y lo deja
+/// seleccionado. La construcción no consume el puntero: ambas proyecciones
+/// nacen centradas en el origen canónico.
+pub(crate) fn create_centered_four_d_tool_object(
+    current_tool: &mut Tool,
+    document: &mut Document,
+    selected_object: &mut Option<ObjectId>,
+    undo_stack: &mut Vec<Document>,
+    redo_stack: &mut Vec<ChangeSet>,
+) -> Result<Option<(ObjectId, &'static str)>, String> {
+    let Some((object, action)) = centered_four_d_tool_default(*current_tool) else {
+        return Ok(None);
+    };
+    let id = crate::app::commit_object_insertions(document, undo_stack, redo_stack, vec![object])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "La inserción 4D no devolvió un identificador".to_string())?;
+
+    document.clear_selection();
+    document.select(id);
+    *selected_object = Some(id);
+    *current_tool = Tool::Select;
+    Ok(Some((id, action)))
+}
+
 impl GrafitoApp {
-    pub fn handle_3d_click(
-        &mut self,
-        ui: &egui::Ui,
-        _response: &egui::Response,
-        _canvas: Rect,
-        w: f32,
-        h: f32,
-    ) {
-        let origin = self.camera.project(&Point3D::new(0.0, 0.0, 0.0), w, h);
-        let u = self.camera.project(&Point3D::new(1.0, 0.0, 0.0), w, h);
-        let approx_scale = if let (Some(o), Some(u)) = (origin, u) {
-            1.0 / ((u.0 - o.0).powi(2) + (u.1 - o.1).powi(2)).sqrt().max(0.01) as f64
-        } else {
-            0.5
+    pub fn handle_3d_click(&mut self, ui: &egui::Ui, local_pointer: Vec2, canvas_size: Vec2) {
+        if matches!(self.current_tool, Tool::Tesseract4D | Tool::Hypercube5D) {
+            let tool_name = self.current_tool.name();
+            let time = ui.ctx().input(|input| input.time);
+            match create_centered_four_d_tool_object(
+                &mut self.current_tool,
+                &mut self.document,
+                &mut self.selected_object,
+                &mut self.undo_stack,
+                &mut self.redo_stack,
+            ) {
+                Ok(Some((id, action))) => {
+                    let output = self
+                        .document
+                        .get_object(id)
+                        .map(|object| object.label().to_string())
+                        .unwrap_or_default();
+                    self.record_construction_step(action, Vec::new(), &output);
+                    self.tool_ghost = None;
+                    self.reset_tool_input();
+                }
+                Ok(None) => {}
+                Err(error) => self.handle_command_outcome(
+                    grafito_command::commands::CommandOutcome::Error(error),
+                    time,
+                    tool_name,
+                ),
+            }
+            return;
+        }
+
+        let Some(c) = construction_point_from_canvas(&self.camera, local_pointer, canvas_size)
+        else {
+            return;
         };
+        let h = canvas_size.y;
+        let approx_scale = (2.0
+            * self.camera.distance as f64
+            * ((self.camera.fov as f64).to_radians() * 0.5).tan()
+            / h as f64
+            * DEFAULT_CREATION_RADIUS_PIXELS)
+            .max(1.0e-6);
         let time = ui.ctx().input(|i| i.time);
 
-        // Place objects at a point on the XZ plane (y=0), near camera target
-        let t = self.camera.target;
-        let c = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
         match self.current_tool {
             Tool::Point => {
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Point3D(Point3DObj::new(c)));
+                self.insert_object_from_tool(
+                    GeoObject::Point3D(Point3DObj::new(c)),
+                    "Point3D",
+                    time,
+                );
             }
             Tool::Line => {
                 self.pending_points_3d.push(c);
                 if self.pending_points_3d.len() == 2 {
                     let a = self.pending_points_3d[0];
                     let b = self.pending_points_3d[1];
-                    self.save_state();
-                    self.document
-                        .add_object(GeoObject::Segment3D(Segment3DObj::new(a, b)));
+                    self.insert_object_from_tool(
+                        GeoObject::Segment3D(Segment3DObj::new(a, b)),
+                        "Segment3D",
+                        time,
+                    );
                     self.pending_points_3d.clear();
                 }
             }
@@ -122,116 +1028,164 @@ impl GrafitoApp {
                     let center = self.pending_points_3d[0];
                     let edge = self.pending_points_3d[1];
                     let radius = center.distance(&edge);
-                    self.save_state();
-                    self.document
-                        .add_object(GeoObject::Sphere3D(Sphere3DObj::new(center, radius)));
+                    self.insert_object_from_tool(
+                        GeoObject::Sphere3D(Sphere3DObj::new(center, radius)),
+                        "Sphere3D",
+                        time,
+                    );
                     self.pending_points_3d.clear();
                 }
             }
             Tool::Polygon => {
                 // Cube via polygon tool
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)));
+                self.insert_object_from_tool(
+                    GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)),
+                    "Cube3D",
+                    time,
+                );
             }
             Tool::Function => {
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Pyramid3D(Pyramid3DObj::new(
+                self.insert_object_from_tool(
+                    GeoObject::Pyramid3D(Pyramid3DObj::new(
                         Point3D::new(c.x, c.y - approx_scale, c.z),
                         c,
                         approx_scale * 2.0,
-                    )));
+                    )),
+                    "Pyramid3D",
+                    time,
+                );
             }
             Tool::Point3D => {
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Point3D(Point3DObj::new(c)));
+                self.insert_object_from_tool(
+                    GeoObject::Point3D(Point3DObj::new(c)),
+                    "Point3D",
+                    time,
+                );
             }
             Tool::Segment3D => {
                 let s = approx_scale * 2.0;
-                self.execute_command_and_record(
-                    &format!(
-                        "Segment3D[{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}]",
-                        c.x - s,
-                        c.y,
-                        c.z,
-                        c.x + s,
-                        c.y,
-                        c.z
-                    ),
+                self.insert_object_from_tool(
+                    GeoObject::Segment3D(Segment3DObj::new(
+                        Point3D::new(c.x - s, c.y, c.z),
+                        Point3D::new(c.x + s, c.y, c.z),
+                    )),
+                    "Segment3D",
                     time,
                 );
             }
             Tool::Line3D => {
-                self.execute_command_and_record(
-                    &format!("Line3D[{:.6},{:.6},{:.6},1,0,0]", c.x, c.y, c.z),
+                let direction = self
+                    .camera
+                    .construction_plane()
+                    .map(|plane| plane.axis_u)
+                    .unwrap_or(Point3D::new(1.0, 0.0, 0.0));
+                self.insert_object_from_tool(
+                    GeoObject::Line3D(Line3DObj::from_point_and_direction(c, direction)),
+                    "Line3D",
                     time,
                 );
             }
             Tool::Plane3D => {
-                self.execute_command_and_record(&format!("Plane3D[0,0,1,{:.6}]", -c.z), time);
+                if let Some(plane) = self.camera.construction_plane() {
+                    let normal = plane.normal;
+                    let d = -(normal.x * c.x + normal.y * c.y + normal.z * c.z);
+                    self.insert_object_from_tool(
+                        GeoObject::Plane3D(Plane3DObj::from_equation(
+                            normal.x, normal.y, normal.z, d,
+                        )),
+                        "Plane3D",
+                        time,
+                    );
+                }
             }
             Tool::Sphere3D => {
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Sphere3D(Sphere3DObj::new(c, approx_scale * 1.5)));
+                self.insert_object_from_tool(
+                    GeoObject::Sphere3D(Sphere3DObj::new(c, approx_scale * 1.5)),
+                    "Sphere3D",
+                    time,
+                );
             }
             Tool::Cube3D => {
-                self.save_state();
-                self.document
-                    .add_object(GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)));
+                self.insert_object_from_tool(
+                    GeoObject::Cube3D(Cube3DObj::new(c, approx_scale * 2.0)),
+                    "Cube3D",
+                    time,
+                );
             }
             Tool::Cylinder3D => {
-                self.execute_command_and_record(
-                    &format!(
-                        "Cylinder[{:.6},{:.6},{:.6},{:.6},{:.6}]",
-                        c.x,
-                        c.y,
-                        c.z,
+                self.insert_object_from_tool(
+                    GeoObject::Cylinder3D(Cylinder3DObj::new(
+                        c,
+                        Point3D::new(c.x, c.y + approx_scale * 3.0, c.z),
                         approx_scale,
-                        approx_scale * 3.0
-                    ),
+                    )),
+                    "Cylinder3D",
                     time,
                 );
             }
             Tool::Cone3D => {
-                self.execute_command_and_record(
-                    &format!(
-                        "Cone[{:.6},{:.6},{:.6},{:.6},{:.6}]",
-                        c.x,
-                        c.y,
-                        c.z,
+                self.insert_object_from_tool(
+                    GeoObject::Cone3D(Cone3DObj::new(
+                        c,
+                        Point3D::new(c.x, c.y + approx_scale * 3.0, c.z),
                         approx_scale,
-                        approx_scale * 3.0
-                    ),
+                    )),
+                    "Cone3D",
                     time,
                 );
             }
             Tool::Torus3D => {
-                self.execute_command_and_record(
-                    &format!(
-                        "Torus[{:.6},{:.6},{:.6},{:.6},{:.6}]",
-                        c.x,
-                        c.y,
-                        c.z,
-                        approx_scale * 1.5,
-                        approx_scale * 0.4
-                    ),
+                self.insert_object_from_tool(
+                    GeoObject::Torus3D(Torus3DObj::new(c, approx_scale * 1.5, approx_scale * 0.4)),
+                    "Torus3D",
                     time,
                 );
             }
             Tool::MoebiusStrip => {
-                self.execute_command_and_record("Moebius[2,0.5]", time);
+                self.insert_object_from_tool(
+                    GeoObject::MoebiusStrip(MoebiusStripObj::new(c, 2.0, 0.5)),
+                    "MoebiusStrip",
+                    time,
+                );
             }
             Tool::Surface3D => {
-                self.execute_command_and_record("Surface3D[x^2 + y^2, -2, 2, -2, 2]", time);
+                let expression = format!(
+                    "(x - ({:.12}))^2 + (y - ({:.12}))^2 + ({:.12})",
+                    c.x, c.y, c.z
+                );
+                self.insert_object_from_tool(
+                    GeoObject::Surface3D(Surface3DObj::new(
+                        expression,
+                        (c.x - 2.0, c.x + 2.0),
+                        (c.y - 2.0, c.y + 2.0),
+                    )),
+                    "Surface3D",
+                    time,
+                );
             }
             Tool::ParametricCurve3D => {
-                self.execute_command_and_record("Curve3D[(cos(t), sin(t), t/4), 0, 12.566]", time);
+                self.insert_object_from_tool(
+                    GeoObject::ParametricCurve3D(ParametricCurve3DObj::new(
+                        &format!("({:.12}) + cos(t)", c.x),
+                        &format!("({:.12}) + sin(t)", c.y),
+                        &format!("({:.12}) + t/4", c.z),
+                        0.0,
+                        12.566,
+                    )),
+                    "ParametricCurve3D",
+                    time,
+                );
             }
             Tool::VectorField3D => {
-                self.execute_command_and_record("VectorField3D[-y, x, z/3]", time);
+                self.insert_object_from_tool(
+                    GeoObject::VectorField3D(VectorField3DObj::new("-y", "x", "z/3").with_bounds(
+                        (c.x - 3.0, c.x + 3.0),
+                        (c.y - 3.0, c.y + 3.0),
+                        (c.z - 3.0, c.z + 3.0),
+                    )),
+                    "VectorField3D",
+                    time,
+                );
             }
             Tool::HyperSurface4D => {
                 self.execute_command_and_record("Hypercube[]", time);
@@ -253,6 +1207,7 @@ impl GrafitoApp {
         w: f32,
         h: f32,
         overlay_only: bool,
+        canvas_resize_preview: bool,
     ) {
         let origin = canvas.min;
 
@@ -414,6 +1369,10 @@ impl GrafitoApp {
                 label_font.clone(),
                 blue_stroke.color,
             );
+        }
+
+        if canvas_resize_preview {
+            return;
         }
 
         // Draw Axis Numbers
@@ -626,14 +1585,19 @@ impl GrafitoApp {
         }
     }
 
-    pub fn draw_3d_objects(
+    pub(crate) fn draw_3d_objects(
         &mut self,
         painter: &egui::Painter,
         canvas: Rect,
         w: f32,
         h: f32,
-        overlay_only: bool,
+        options: Cpu3dRenderOptions,
     ) {
+        let Cpu3dRenderOptions {
+            overlay_only,
+            motion_preview,
+            typed_four_d_phase,
+        } = options;
         let origin = canvas.min;
         let label_color = if self.dark_mode {
             Color32::WHITE
@@ -641,102 +1605,115 @@ impl GrafitoApp {
             Color32::BLACK
         };
 
-        // Depth sorting: collect objects with their distance to camera
-        let camera_pos = self.camera.position();
-        let mut objects_with_depth: Vec<(f32, &GeoObject)> = Vec::new();
+        // The CPU fallback has no depth buffer, so use camera-space depth for
+        // painter ordering. Radial distance is incorrect for off-axis objects.
+        let mut objects_with_depth: Vec<(f32, &GeoObject, Option<ProjectedRegularPolytope>)> =
+            Vec::new();
 
         for (_, obj) in self.document.objects_iter() {
             if !obj.is_visible() {
                 continue;
             }
 
-            // Calculate distance from camera to object center
-            let distance = match obj {
-                GeoObject::Point3D(p) => (p.position.to_vec3() - camera_pos).length(),
-                GeoObject::Segment3D(l) => {
-                    let center = (l.a.to_vec3() + l.b.to_vec3()) * 0.5;
-                    (center - camera_pos).length()
-                }
-                GeoObject::Plane3D(p) => {
-                    if let Some((point, _, _)) = plane_point_and_basis(p.a, p.b, p.c, p.d) {
-                        (point.to_vec3() - camera_pos).length()
-                    } else {
-                        1000.0
+            // Keep the one typed projection used for both depth sorting and drawing.
+            // GPU-composited, unlabeled typed objects do not need a CPU projection at all.
+            let typed_projection = match obj {
+                GeoObject::RegularPolychoron4D(polychoron) => {
+                    if !typed_cpu_projection_is_needed(obj, overlay_only) {
+                        continue;
                     }
+                    project_regular_polychoron_cpu(
+                        polychoron,
+                        typed_four_d_phase_for_object(obj, typed_four_d_phase),
+                    )
                 }
-                GeoObject::Line3D(l) => (l.point.to_vec3() - camera_pos).length(),
-                GeoObject::Sphere3D(s) => (s.center.to_vec3() - camera_pos).length(),
-                GeoObject::Cube3D(c) => (c.center.to_vec3() - camera_pos).length(),
-                GeoObject::Pyramid3D(p) => {
-                    let center = (p.base_center.to_vec3() + p.apex.to_vec3()) * 0.5;
-                    (center - camera_pos).length()
+                GeoObject::RegularPolytopeND(polytope) => {
+                    if !typed_cpu_projection_is_needed(obj, overlay_only) {
+                        continue;
+                    }
+                    project_regular_polytope_nd_cpu(
+                        polytope,
+                        typed_four_d_phase_for_object(obj, typed_four_d_phase),
+                    )
                 }
-                GeoObject::Cone3D(c) => {
-                    let center = (c.base_center.to_vec3() + c.apex.to_vec3()) * 0.5;
-                    (center - camera_pos).length()
-                }
+                _ => None,
+            };
+
+            let center = match obj {
+                GeoObject::Point3D(p) => p.position.to_vec3(),
+                GeoObject::Segment3D(l) => (l.a.to_vec3() + l.b.to_vec3()) * 0.5,
+                GeoObject::Plane3D(p) => plane_point_and_basis(p.a, p.b, p.c, p.d)
+                    .map(|(point, _, _)| point.to_vec3())
+                    .unwrap_or(Vec3::ZERO),
+                GeoObject::Line3D(l) => l.point.to_vec3(),
+                GeoObject::Sphere3D(s) => s.center.to_vec3(),
+                GeoObject::Cube3D(c) => c.center.to_vec3(),
+                GeoObject::Tetrahedron3D(t) => t.center.to_vec3(),
+                GeoObject::Pyramid3D(p) => (p.base_center.to_vec3() + p.apex.to_vec3()) * 0.5,
+                GeoObject::Cone3D(c) => (c.base_center.to_vec3() + c.apex.to_vec3()) * 0.5,
                 GeoObject::Cylinder3D(c) => {
-                    let center = (c.base_center.to_vec3() + c.top_center.to_vec3()) * 0.5;
-                    (center - camera_pos).length()
+                    (c.base_center.to_vec3() + c.top_center.to_vec3()) * 0.5
                 }
-                GeoObject::Torus3D(t) => (t.center.to_vec3() - camera_pos).length(),
-                GeoObject::MoebiusStrip(m) => (m.center.to_vec3() - camera_pos).length(),
-                GeoObject::Surface3D(s) => {
-                    let center = Vec3::new(
-                        (s.x_min + s.x_max) as f32 * 0.5,
-                        0.0,
-                        (s.y_min + s.y_max) as f32 * 0.5,
-                    );
-                    (center - camera_pos).length()
+                GeoObject::Torus3D(t) => t.center.to_vec3(),
+                GeoObject::MoebiusStrip(m) => m.center.to_vec3(),
+                GeoObject::Surface3D(surface) => {
+                    grafito_core::parametric_sampling::evaluate_surface_3d(
+                        surface,
+                        2,
+                        &self.document.variables,
+                    )
+                    .get(1)
+                    .and_then(|row| row.get(1))
+                    .map(|point| point.to_vec3())
+                    .unwrap_or(Vec3::ZERO)
                 }
                 GeoObject::ParametricCurve3D(c) => {
-                    // Use midpoint of parameter range as approximation
-                    let t_mid = (c.t_min + c.t_max) * 0.5;
-                    if let (Ok(x), Ok(y), Ok(z)) = (
-                        grafito_geometry::expr::evaluate(&c.expr_x, &[("t".to_string(), t_mid)]),
-                        grafito_geometry::expr::evaluate(&c.expr_y, &[("t".to_string(), t_mid)]),
-                        grafito_geometry::expr::evaluate(&c.expr_z, &[("t".to_string(), t_mid)]),
-                    ) {
-                        let center = Vec3::new(x as f32, z as f32, y as f32);
-                        (center - camera_pos).length()
-                    } else {
-                        1000.0 // Fallback distance
-                    }
+                    grafito_core::parametric_sampling::evaluate_parametric_curve_3d(
+                        c,
+                        2,
+                        &self.document.variables,
+                    )
+                    .get(1)
+                    .map(|&(x, y, z)| Vec3::new(x as f32, y as f32, z as f32))
+                    .unwrap_or(Vec3::ZERO)
                 }
-                GeoObject::Attractor3D(a) => {
-                    // Use first point as approximation
-                    let center = Vec3::new(a.x0 as f32, a.z0 as f32, a.y0 as f32);
-                    (center - camera_pos).length()
-                }
-                GeoObject::HyperSurface4D(_h) => {
-                    // Use origin as approximation
-                    Vec3::new(0.0, 0.0, 0.0).distance(camera_pos)
-                }
-                GeoObject::VectorField3D(v) => {
-                    let center = Vec3::new(
-                        (v.x_min + v.x_max) as f32 * 0.5,
-                        (v.z_min + v.z_max) as f32 * 0.5,
-                        (v.y_min + v.y_max) as f32 * 0.5,
-                    );
-                    (center - camera_pos).length()
-                }
+                GeoObject::Attractor3D(a) => Vec3::new(a.x0 as f32, a.y0 as f32, a.z0 as f32) * 0.2,
+                GeoObject::RegularPolychoron4D(_) => typed_projection
+                    .as_ref()
+                    .and_then(projected_polytope_center)
+                    .unwrap_or(Vec3::ZERO),
+                GeoObject::RegularPolytopeND(_) => typed_projection
+                    .as_ref()
+                    .and_then(projected_polytope_center)
+                    .unwrap_or(Vec3::ZERO),
+                GeoObject::HyperSurface4D(_) => Vec3::ZERO,
+                GeoObject::VectorField3D(v) => Vec3::new(
+                    (v.x_min + v.x_max) as f32 * 0.5,
+                    (v.y_min + v.y_max) as f32 * 0.5,
+                    (v.z_min + v.z_max) as f32 * 0.5,
+                ),
                 _ => continue, // Skip non-3D objects
             };
 
-            objects_with_depth.push((distance, obj));
+            let depth = camera_view_depth(&self.camera, center);
+            if depth.is_finite() {
+                objects_with_depth.push((depth, obj, typed_projection));
+            }
         }
 
-        // Sort by distance (far to near - painter's algorithm)
-        objects_with_depth
-            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        objects_with_depth.sort_by(|a, b| b.0.total_cmp(&a.0));
 
         // Render objects in sorted order
-        for (_, obj) in objects_with_depth {
+        for (_, obj, typed_projection) in objects_with_depth {
             match obj {
                 GeoObject::Point3D(p) => {
-                    if let Some(pt) = self.camera.project(&p.position, w, h) {
-                        let pos = origin + Vec2::new(pt.0, pt.1);
-                        painter.circle_filled(pos, p.size.min(5.0), to_color32(p.color));
+                    if let Some(pt) =
+                        projected_point_position(&self.camera, p.position, Vec2::new(w, h))
+                    {
+                        let pos = origin + pt;
+                        if should_draw_cpu_3d_geometry(obj, overlay_only) {
+                            painter.circle_filled(pos, p.size.min(5.0), to_color32(p.color));
+                        }
                         if !p.label.is_empty() {
                             painter.text(
                                 pos + Vec2::new(6.0, -6.0),
@@ -960,6 +1937,54 @@ impl GrafitoApp {
                                 origin + Vec2::new(pt.0, pt.1),
                                 egui::Align2::CENTER_BOTTOM,
                                 &cube.label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
+                        }
+                    }
+                }
+                GeoObject::Tetrahedron3D(tetrahedron) => {
+                    let geometry = grafito_geometry::Tetrahedron3D::new(
+                        tetrahedron.center,
+                        tetrahedron.edge_length,
+                    );
+                    let vertices = geometry.vertices();
+                    if !overlay_only {
+                        if let Some(fill) = tetrahedron.fill_color {
+                            for (_, face) in
+                                projected_tetrahedron_faces(&self.camera, &geometry, w, h)
+                            {
+                                painter.add(egui::Shape::convex_polygon(
+                                    face.into_iter()
+                                        .map(|(x, y)| origin + Vec2::new(x, y))
+                                        .collect(),
+                                    to_color32(fill),
+                                    Stroke::NONE,
+                                ));
+                            }
+                        }
+                        let stroke = Stroke::new(tetrahedron.width, to_color32(tetrahedron.color));
+                        for [start, end] in geometry.edges() {
+                            if let Some((a, b)) = project_segment(
+                                &self.camera,
+                                &vertices[start],
+                                &vertices[end],
+                                w,
+                                h,
+                            ) {
+                                painter.line_segment(
+                                    [origin + Vec2::new(a.0, a.1), origin + Vec2::new(b.0, b.1)],
+                                    stroke,
+                                );
+                            }
+                        }
+                    }
+                    if !tetrahedron.label.is_empty() {
+                        if let Some(point) = self.camera.project(&vertices[0], w, h) {
+                            painter.text(
+                                origin + Vec2::new(point.0, point.1 - 8.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                &tetrahedron.label,
                                 egui::FontId::proportional(12.0),
                                 label_color,
                             );
@@ -1317,9 +2342,68 @@ impl GrafitoApp {
                     }
                 }
                 GeoObject::Surface3D(surf) => {
-                    if surf.solid {
+                    if surf.is_parametric {
+                        // Parametric surfaces must remain visible while the GPU callback is
+                        // compiling, unavailable, or recovering from a failed scene upload.
+                        let grid = grafito_core::parametric_sampling::samples_or_compute_surface(
+                            surf,
+                            motion_preview_surface_resolution(
+                                surf.mesh_res.clamp(8, 50),
+                                motion_preview,
+                            ),
+                            &self.document.variables,
+                        );
+                        let color = to_color32(surf.color);
+                        let stroke = Stroke::new(surf.width, color);
+                        let project = |point: Point3D| {
+                            self.camera
+                                .project(&point, w, h)
+                                .map(|(x, y)| origin + Vec2::new(x, y))
+                        };
+                        for rows in grid.windows(2) {
+                            for column in 0..rows[0].len().saturating_sub(1) {
+                                let p00 = rows[0][column];
+                                let p10 = rows[1][column];
+                                let p01 = rows[0][column + 1];
+                                let p11 = rows[1][column + 1];
+                                if surf.solid && !overlay_only {
+                                    if let (Some(a), Some(b), Some(c)) =
+                                        (project(p00), project(p10), project(p11))
+                                    {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            vec![a, b, c],
+                                            color,
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                    if let (Some(a), Some(b), Some(c)) =
+                                        (project(p00), project(p11), project(p01))
+                                    {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            vec![a, b, c],
+                                            color,
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                                if !overlay_only {
+                                    if let (Some(a), Some(b)) = (project(p00), project(p10)) {
+                                        painter.line_segment([a, b], stroke);
+                                    }
+                                    if let (Some(a), Some(b)) = (project(p00), project(p01)) {
+                                        painter.line_segment([a, b], stroke);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    if surf.solid && !overlay_only {
                         // Solid Gouraud-shaded surface
-                        let res = surf.mesh_res.clamp(8, 50);
+                        let res = motion_preview_surface_resolution(
+                            surf.mesh_res.clamp(8, 50),
+                            motion_preview,
+                        );
                         let xs = surf.x_min;
                         let xe = surf.x_max;
                         let ys = surf.y_min;
@@ -1372,10 +2456,10 @@ impl GrafitoApp {
                                     }
 
                                     // Compute two triangle normals
-                                    let v00 = glam::Vec3::new(x0 as f32, z0 as f32, y0 as f32);
-                                    let v10 = glam::Vec3::new(x1 as f32, z1 as f32, y1 as f32);
-                                    let v01 = glam::Vec3::new(x2 as f32, z2 as f32, y2 as f32);
-                                    let v11 = glam::Vec3::new(x3 as f32, z3 as f32, y3 as f32);
+                                    let v00 = surf.explicit_sample_point(x0, y0, z0).to_vec3();
+                                    let v10 = surf.explicit_sample_point(x1, y1, z1).to_vec3();
+                                    let v01 = surf.explicit_sample_point(x2, y2, z2).to_vec3();
+                                    let v11 = surf.explicit_sample_point(x3, y3, z3).to_vec3();
 
                                     let n1 = (v10 - v00).cross(v01 - v00).normalize();
                                     let n2 = (v11 - v10).cross(v01 - v10).normalize();
@@ -1402,9 +2486,21 @@ impl GrafitoApp {
 
                                     // Project and draw triangle 1
                                     if let (Some(p0), Some(p1), Some(p2)) = (
-                                        self.camera.project(&Point3D::new(x0, z0, y0), w, h),
-                                        self.camera.project(&Point3D::new(x1, z1, y1), w, h),
-                                        self.camera.project(&Point3D::new(x2, z2, y2), w, h),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x0, y0, z0),
+                                            w,
+                                            h,
+                                        ),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x1, y1, z1),
+                                            w,
+                                            h,
+                                        ),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x2, y2, z2),
+                                            w,
+                                            h,
+                                        ),
                                     ) {
                                         let pts1 = vec![
                                             origin + Vec2::new(p0.0, p0.1),
@@ -1419,9 +2515,21 @@ impl GrafitoApp {
                                     }
                                     // Project and draw triangle 2
                                     if let (Some(p1), Some(p2), Some(p3)) = (
-                                        self.camera.project(&Point3D::new(x1, z1, y1), w, h),
-                                        self.camera.project(&Point3D::new(x2, z2, y2), w, h),
-                                        self.camera.project(&Point3D::new(x3, z3, y3), w, h),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x1, y1, z1),
+                                            w,
+                                            h,
+                                        ),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x2, y2, z2),
+                                            w,
+                                            h,
+                                        ),
+                                        self.camera.project(
+                                            &surf.explicit_sample_point(x3, y3, z3),
+                                            w,
+                                            h,
+                                        ),
                                     ) {
                                         let pts2 = vec![
                                             origin + Vec2::new(p1.0, p1.1),
@@ -1439,10 +2547,10 @@ impl GrafitoApp {
                         }
                         if !surf.label.is_empty() {
                             if let Some(pt) = self.camera.project(
-                                &Point3D::new(
+                                &surf.explicit_sample_point(
                                     (surf.x_min + surf.x_max) * 0.5,
-                                    1.0,
                                     (surf.y_min + surf.y_max) * 0.5,
+                                    1.0,
                                 ),
                                 w,
                                 h,
@@ -1456,7 +2564,7 @@ impl GrafitoApp {
                                 );
                             }
                         }
-                        return;
+                        continue;
                     }
                     // Original wireframe rendering
                     let stroke = Stroke::new(surf.width, to_color32(surf.color));
@@ -1489,9 +2597,11 @@ impl GrafitoApp {
                                 let (x, y) = pts_x[idx];
                                 if let Some(z) = z_vals[idx] {
                                     if z.is_finite() && z.abs() < 100.0 {
-                                        if let Some(pt) =
-                                            self.camera.project(&Point3D::new(x, z, y), w, h)
-                                        {
+                                        if let Some(pt) = self.camera.project(
+                                            &surf.explicit_sample_point(x, y, z),
+                                            w,
+                                            h,
+                                        ) {
                                             if let Some(pp) = prev {
                                                 if !overlay_only {
                                                     painter.line_segment(
@@ -1535,9 +2645,11 @@ impl GrafitoApp {
                                 let (x, y) = pts_y[idx];
                                 if let Some(z) = z_vals[idx] {
                                     if z.is_finite() && z.abs() < 100.0 {
-                                        if let Some(pt) =
-                                            self.camera.project(&Point3D::new(x, z, y), w, h)
-                                        {
+                                        if let Some(pt) = self.camera.project(
+                                            &surf.explicit_sample_point(x, y, z),
+                                            w,
+                                            h,
+                                        ) {
                                             if let Some(pp) = prev {
                                                 if !overlay_only {
                                                     painter.line_segment(
@@ -1561,53 +2673,36 @@ impl GrafitoApp {
                 }
                 GeoObject::ParametricCurve3D(curve) => {
                     let stroke = Stroke::new(curve.width, to_color32(curve.color));
-                    let variables = &self.document.variables;
-                    let steps = 500;
-                    let dt = (curve.t_max - curve.t_min) / steps as f64;
-                    let ts = (0..=steps).map(|i| curve.t_min + i as f64 * dt);
-
-                    let xs = grafito_geometry::expr::eval_batch_1d(
-                        &curve.expr_x,
-                        "t",
-                        ts.clone(),
-                        variables,
-                    )
-                    .unwrap_or_default();
-                    let ys = grafito_geometry::expr::eval_batch_1d(
-                        &curve.expr_y,
-                        "t",
-                        ts.clone(),
-                        variables,
-                    )
-                    .unwrap_or_default();
-                    let zs = grafito_geometry::expr::eval_batch_1d(
-                        &curve.expr_z,
-                        "t",
-                        ts.clone(),
-                        variables,
-                    )
-                    .unwrap_or_default();
-
-                    let mut prev: Option<(f32, f32)> = None;
-                    for i in 0..=steps {
-                        if let (Some(Some(x)), Some(Some(y)), Some(Some(z))) =
-                            (xs.get(i), ys.get(i), zs.get(i))
-                        {
-                            if let Some(pt) = self.camera.project(&Point3D::new(*x, *z, *y), w, h) {
-                                if let Some(pp) = prev {
-                                    if !overlay_only {
-                                        painter.line_segment(
-                                            [
-                                                origin + Vec2::new(pp.0, pp.1),
-                                                origin + Vec2::new(pt.0, pt.1),
-                                            ],
-                                            stroke,
-                                        );
-                                    }
+                    let mut prev: Option<(Point3D, (f32, f32))> = None;
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_curve_3d(
+                        curve,
+                        500,
+                        &self.document.variables,
+                    );
+                    let stride = motion_preview_sample_stride(samples.len(), motion_preview);
+                    for point in samples.iter().step_by(stride) {
+                        let (x, y, z) = *point;
+                        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        let point = Point3D::new(x, y, z);
+                        if let Some(pt) = self.camera.project(&point, w, h) {
+                            if let Some((_, pp)) = prev.filter(|(previous, _)| {
+                                curve_3d_segment_is_continuous(*previous, point, &self.camera)
+                            }) {
+                                if !overlay_only {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(pp.0, pp.1),
+                                            origin + Vec2::new(pt.0, pt.1),
+                                        ],
+                                        stroke,
+                                    );
                                 }
-                                prev = Some(pt);
-                                continue;
                             }
+                            prev = Some((point, pt));
+                            continue;
                         }
                         prev = None;
                     }
@@ -1632,33 +2727,25 @@ impl GrafitoApp {
                     let param_hash = hasher.finish();
 
                     // Check cache or compute new points
-                    let pts = if let Some((cached_hash, cached_pts)) =
-                        self.attractor_cache.get(&att.id)
-                    {
-                        if *cached_hash == param_hash {
-                            cached_pts.clone()
-                        } else {
-                            let atype = att.model();
-                            let new_pts = integrate_attractor(
-                                &atype, att.x0, att.y0, att.z0, att.dt, att.steps, att.skip,
-                            );
-                            self.attractor_cache
-                                .insert(att.id, (param_hash, new_pts.clone()));
-                            new_pts
-                        }
-                    } else {
+                    let needs_refresh = self
+                        .attractor_cache
+                        .get(&att.id)
+                        .map_or(true, |(cached_hash, _)| *cached_hash != param_hash);
+                    if needs_refresh {
                         let atype = att.model();
                         let new_pts = integrate_attractor(
                             &atype, att.x0, att.y0, att.z0, att.dt, att.steps, att.skip,
                         );
-                        self.attractor_cache
-                            .insert(att.id, (param_hash, new_pts.clone()));
-                        new_pts
+                        self.attractor_cache.insert(att.id, (param_hash, new_pts));
+                    }
+                    let Some((_, pts)) = self.attractor_cache.get(&att.id) else {
+                        continue;
                     };
 
                     let stroke = Stroke::new(att.width, to_color32(att.color));
                     let mut prev: Option<(f32, f32)> = None;
-                    for pt in &pts {
+                    let stride = motion_preview_sample_stride(pts.len(), motion_preview);
+                    for pt in pts.iter().step_by(stride) {
                         let scaled_pt = Point3D::new(pt.x * 0.2, pt.y * 0.2, pt.z * 0.2);
                         if let Some(sp) = self.camera.project(&scaled_pt, w, h) {
                             if let Some(pp) = prev {
@@ -1680,7 +2767,8 @@ impl GrafitoApp {
 
                     if !att.label.is_empty() {
                         if let Some(first) = pts.first() {
-                            if let Some(pt) = self.camera.project(first, w, h) {
+                            let first = Point3D::new(first.x * 0.2, first.y * 0.2, first.z * 0.2);
+                            if let Some(pt) = self.camera.project(&first, w, h) {
                                 painter.text(
                                     origin + Vec2::new(pt.0, pt.1 - 10.0),
                                     egui::Align2::CENTER_BOTTOM,
@@ -1692,12 +2780,129 @@ impl GrafitoApp {
                         }
                     }
                 }
+                GeoObject::RegularPolychoron4D(polychoron) => {
+                    let draw_cpu_geometry = should_draw_cpu_3d_geometry(obj, overlay_only);
+                    if let Some(geometry) = typed_projection {
+                        if draw_cpu_geometry {
+                            if should_draw_polychoron_faces(
+                                polychoron.fill_color.is_some(),
+                                motion_preview,
+                            ) {
+                                if let Some(fill) = polychoron.fill_color {
+                                    for (_, face) in
+                                        projected_polychoron_faces(&self.camera, &geometry, w, h)
+                                    {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            face.into_iter()
+                                                .map(|(x, y)| origin + Vec2::new(x, y))
+                                                .collect(),
+                                            to_color32(fill),
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+
+                            let stroke =
+                                Stroke::new(polychoron.width, to_color32(polychoron.color));
+                            let stride = motion_preview_polytope_edge_stride(
+                                geometry.edges().len(),
+                                motion_preview,
+                            );
+                            for &[first, second] in geometry.edges().iter().step_by(stride) {
+                                let Some((start, end)) = geometry
+                                    .vertices()
+                                    .get(first)
+                                    .zip(geometry.vertices().get(second))
+                                else {
+                                    continue;
+                                };
+                                if let Some((a, b)) =
+                                    project_segment(&self.camera, start, end, w, h)
+                                {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(a.0, a.1),
+                                            origin + Vec2::new(b.0, b.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                            }
+                        }
+
+                        if !polychoron.label.is_empty() {
+                            if let Some(point) = geometry
+                                .vertices()
+                                .first()
+                                .and_then(|point| self.camera.project(point, w, h))
+                            {
+                                painter.text(
+                                    origin + Vec2::new(point.0, point.1 - 10.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &polychoron.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::RegularPolytopeND(polytope) => {
+                    let draw_cpu_geometry = should_draw_cpu_3d_geometry(obj, overlay_only);
+                    if let Some(geometry) = typed_projection {
+                        if draw_cpu_geometry {
+                            let stroke = Stroke::new(polytope.width, to_color32(polytope.color));
+                            let stride = motion_preview_polytope_edge_stride(
+                                geometry.edges().len(),
+                                motion_preview,
+                            );
+                            for &[first, second] in geometry.edges().iter().step_by(stride) {
+                                let Some((start, end)) = geometry
+                                    .vertices()
+                                    .get(first)
+                                    .zip(geometry.vertices().get(second))
+                                else {
+                                    continue;
+                                };
+                                if let Some((a, b)) =
+                                    project_segment(&self.camera, start, end, w, h)
+                                {
+                                    painter.line_segment(
+                                        [
+                                            origin + Vec2::new(a.0, a.1),
+                                            origin + Vec2::new(b.0, b.1),
+                                        ],
+                                        stroke,
+                                    );
+                                }
+                            }
+                        }
+
+                        if !polytope.label.is_empty() {
+                            if let Some(point) = geometry
+                                .vertices()
+                                .first()
+                                .and_then(|point| self.camera.project(point, w, h))
+                            {
+                                painter.text(
+                                    origin + Vec2::new(point.0, point.1 - 10.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &polytope.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
                 GeoObject::HyperSurface4D(hs) => {
+                    let draw_cpu_geometry = should_draw_cpu_3d_geometry(obj, overlay_only);
                     let stroke = Stroke::new(hs.width, to_color32(hs.color));
-                    let angles = &hs.rotation_angles;
-                    let a_xy = angles.first().copied().unwrap_or(0.3);
-                    let a_xz = angles.get(1).copied().unwrap_or(0.5);
-                    let a_xw = angles.get(2).copied().unwrap_or(0.7);
+                    let [a_xy, a_xz, a_xw] = effective_four_d_angles(
+                        &hs.rotation_angles,
+                        self.transient_render_state.four_d_phase(),
+                    );
                     let scale = hs.params.first().copied().unwrap_or(1.0);
                     match hs.surface_type.as_str() {
                         "hypercube" => {
@@ -1748,7 +2953,7 @@ impl GrafitoApp {
                                     self.camera.project(&projected[a], w, h),
                                     self.camera.project(&projected[b], w, h),
                                 ) {
-                                    if !overlay_only {
+                                    if draw_cpu_geometry {
                                         painter.line_segment(
                                             [
                                                 origin + Vec2::new(pa.0, pa.1),
@@ -1774,6 +2979,12 @@ impl GrafitoApp {
                         "hypersphere" => {
                             let res = hs.resolution.clamp(8, 30);
                             let mut pts_3d: Vec<Vec<Point3D>> = Vec::new();
+                            let cos_xy = a_xy.cos();
+                            let sin_xy = a_xy.sin();
+                            let cos_xz = a_xz.cos();
+                            let sin_xz = a_xz.sin();
+                            let cos_xw = a_xw.cos();
+                            let sin_xw = a_xw.sin();
                             for i in 0..=res {
                                 let phi = std::f64::consts::PI * i as f64 / res as f64;
                                 let mut ring = Vec::new();
@@ -1785,17 +2996,17 @@ impl GrafitoApp {
                                         scale * phi.cos(),
                                         0.0,
                                     ];
-                                    let cos_xy = a_xy.cos();
-                                    let sin_xy = a_xy.sin();
                                     let nx = p[0] * cos_xy - p[1] * sin_xy;
                                     let ny = p[0] * sin_xy + p[1] * cos_xy;
                                     p[0] = nx;
                                     p[1] = ny;
-                                    let cos_xw = a_xw.cos();
-                                    let sin_xw = a_xw.sin();
-                                    let nx2 = p[0] * cos_xw - p[3] * sin_xw;
+                                    let nx = p[0] * cos_xz - p[2] * sin_xz;
+                                    let nz = p[0] * sin_xz + p[2] * cos_xz;
+                                    p[0] = nx;
+                                    p[2] = nz;
+                                    let nx = p[0] * cos_xw - p[3] * sin_xw;
                                     let nw = p[0] * sin_xw + p[3] * cos_xw;
-                                    p[0] = nx2;
+                                    p[0] = nx;
                                     p[3] = nw;
                                     let w_factor = 1.0 / (3.0 - p[3] / scale);
                                     ring.push(Point3D::new(
@@ -1811,7 +3022,7 @@ impl GrafitoApp {
                                 for pt in ring {
                                     if let Some(sp) = self.camera.project(pt, w, h) {
                                         if let Some(pp) = prev {
-                                            if !overlay_only {
+                                            if draw_cpu_geometry {
                                                 painter.line_segment(
                                                     [
                                                         origin + Vec2::new(pp.0, pp.1),
@@ -1833,7 +3044,7 @@ impl GrafitoApp {
                                     if let Some(pt) = ring.get(j) {
                                         if let Some(sp) = self.camera.project(pt, w, h) {
                                             if let Some(pp) = prev {
-                                                if !overlay_only {
+                                                if draw_cpu_geometry {
                                                     painter.line_segment(
                                                         [
                                                             origin + Vec2::new(pp.0, pp.1),
@@ -1854,65 +3065,71 @@ impl GrafitoApp {
                         _ => {}
                     }
                 }
-                GeoObject::VectorField3D(vf) => {
-                    let stroke = Stroke::new(1.0, to_color32(vf.color));
-                    let variables = &self.document.variables;
-                    let n = vf.density.clamp(2, 10);
-                    let dx = (vf.x_max - vf.x_min) / n as f64;
-                    let dy = (vf.y_max - vf.y_min) / n as f64;
-                    let dz = (vf.z_max - vf.z_min) / n as f64;
-                    let arrow_scale = dx.min(dy.min(dz)) * 0.4;
-                    let vars: Vec<(String, f64)> =
-                        variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    for i in 0..=n {
-                        for j in 0..=n {
-                            for k in 0..=n {
-                                let x = vf.x_min + i as f64 * dx;
-                                let y = vf.y_min + j as f64 * dy;
-                                let z = vf.z_min + k as f64 * dz;
-                                let mut local_vars = vars.clone();
-                                local_vars.push(("x".into(), x));
-                                local_vars.push(("y".into(), y));
-                                local_vars.push(("z".into(), z));
-                                let u = grafito_geometry::expr::evaluate(&vf.expr_u, &local_vars)
-                                    .unwrap_or(0.0);
-                                let v = grafito_geometry::expr::evaluate(&vf.expr_v, &local_vars)
-                                    .unwrap_or(0.0);
-                                let w_val =
-                                    grafito_geometry::expr::evaluate(&vf.expr_w, &local_vars)
-                                        .unwrap_or(0.0);
-                                if !u.is_finite() || !v.is_finite() || !w_val.is_finite() {
-                                    continue;
-                                }
-                                let mag = (u * u + v * v + w_val * w_val).sqrt();
-                                if mag < 1e-10 {
-                                    continue;
-                                }
-                                let nu = u / mag * arrow_scale;
-                                let nv = v / mag * arrow_scale;
-                                let nw = w_val / mag * arrow_scale;
-                                let start = Point3D::new(x, z, y);
-                                let end = Point3D::new(x + nu, z + nw, y + nv);
-                                if let (Some(pa), Some(pb)) = (
-                                    self.camera.project(&start, w, h),
-                                    self.camera.project(&end, w, h),
-                                ) {
-                                    if !overlay_only {
-                                        painter.line_segment(
-                                            [
-                                                origin + Vec2::new(pa.0, pa.1),
-                                                origin + Vec2::new(pb.0, pb.1),
-                                            ],
-                                            stroke,
-                                        );
-                                    }
-                                }
-                            }
+                GeoObject::VectorField3D(vf) if !overlay_only => {
+                    let stroke = Stroke::new(1.5, to_color32(vf.color));
+                    for (start, end) in
+                        grafito_render::sample_vector_field_3d(vf, &self.document.variables)
+                    {
+                        if let (Some(pa), Some(pb)) = (
+                            self.camera.project(&start, w, h),
+                            self.camera.project(&end, w, h),
+                        ) {
+                            painter.line_segment(
+                                [
+                                    origin + Vec2::new(pa.0, pa.1),
+                                    origin + Vec2::new(pb.0, pb.1),
+                                ],
+                                stroke,
+                            );
                         }
                     }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gpu_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn point_geometry_is_cpu_owned_only_during_fallback() {
+        let point = GeoObject::Point3D(Point3DObj::new(Point3D::new(1.0, 2.0, 3.0)));
+
+        assert!(should_draw_cpu_3d_geometry(&point, false));
+        assert!(!should_draw_cpu_3d_geometry(&point, true));
+    }
+
+    #[test]
+    fn four_d_motion_offsets_all_projection_planes_without_changing_base_angles() {
+        let base = [0.3, 0.5, 0.7];
+
+        assert_eq!(effective_four_d_angles(&base, 0.0), base);
+        let animated = effective_four_d_angles(&base, 1.0);
+        assert_ne!(animated, base);
+        assert!(animated[0] > base[0]);
+        assert!(animated[1] > base[1]);
+        assert!(animated[2] > base[2]);
+    }
+
+    #[test]
+    fn four_d_rotation_is_continuous_across_the_phase_wrap() {
+        let base = [0.3, 0.5, 0.7];
+        let before = effective_four_d_angles(&base, std::f64::consts::TAU - 1e-6);
+        let after = effective_four_d_angles(&base, 0.0);
+
+        for (left, right) in before.into_iter().zip(after) {
+            assert!((left.sin() - right.sin()).abs() < 1e-5);
+            assert!((left.cos() - right.cos()).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn motion_preview_downsamples_dense_cpu_3d_paths() {
+        assert_eq!(motion_preview_sample_stride(512, true), 1);
+        assert_eq!(motion_preview_sample_stride(4_096, true), 4);
+        assert_eq!(motion_preview_sample_stride(4_096, false), 1);
     }
 }

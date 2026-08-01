@@ -5,9 +5,9 @@
 <h1 align="center">Grafito</h1>
 
 <p align="center">
-  <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?include_prereleases&label=versi%C3%B3n&color=blue" /></a>
+  <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?label=versi%C3%B3n&color=blue" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-GPLv3%2B-blue" /></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.78%2B-orange" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.81%2B-orange" /></a>
   <a href="https://github.com/Diez111/Grafito/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito?style=social" /></a>
 </p>
 
@@ -34,29 +34,41 @@
 
 ## Instalación
 
-<p><details><summary><b>Linux &mdash; Debian / Ubuntu (.deb)</b></summary>
+<p><details><summary><b>Linux x86_64 (.tar.gz)</b></summary>
+
+El archivo se construye y prueba en Ubuntu 22.04 x86_64 (glibc 2.35); requiere
+glibc 2.35 o posterior, una sesión gráfica y un driver Vulkan u OpenGL
+compatible con wgpu. En Debian/Ubuntu, instalá el runtime D-Bus antes de
+ejecutarlo. La CI comprueba que el archivo extraído resuelva sus bibliotecas y
+acepte `--help`; no prueba una sesión gráfica real:
 
 ```bash
-wget https://github.com/Diez111/Grafito/releases/latest/download/grafito_amd64.deb
-sudo dpkg -i grafito_amd64.deb
+sudo apt install libdbus-1-3
+wget https://github.com/Diez111/Grafito/releases/latest/download/grafito-linux-x64.tar.gz
+tar -xzf grafito-linux-x64.tar.gz
+./grafito
 ```
 </details></p>
 
-<p><details><summary><b>Windows &mdash; .exe portátil</b></summary>
+Los enlaces `releases/latest` de esta sección apuntan solamente a la última
+versión estable. Las versiones beta/alpha se publican marcadas como
+*pre-release* y deben elegirse explícitamente desde [Releases](https://github.com/Diez111/Grafito/releases).
 
-1. Descargá el `.exe` desde [Releases](https://github.com/Diez111/Grafito/releases)
-2. Ejecutalo directamente. No requiere instalación.
+<p><details><summary><b>Windows x86_64 (.zip portátil)</b></summary>
+
+1. Descargá [`grafito-windows-x64.zip`](https://github.com/Diez111/Grafito/releases/latest/download/grafito-windows-x64.zip).
+2. Extraelo y ejecutá `grafito.exe`. No requiere instalación.
 </details></p>
 
 <p><details><summary><b>Compilar desde el código fuente</b></summary>
 
 ```bash
-sudo apt install libgmp-dev libmpfr-dev libmpc-dev m4
+sudo apt install build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
 git clone https://github.com/Diez111/Grafito.git
 cd grafito
 cargo run -p grafito-app --release
 ```
-> Requiere Rust &ge; 1.78. Los compute shaders GPU necesitan Vulkan, Metal o DX12.
+> Requiere Rust &ge; 1.81 y un compilador C (incluido en `build-essential` en Debian/Ubuntu). Los compute shaders GPU necesitan Vulkan, Metal o DX12.
 </details></p>
 
 ---
@@ -313,10 +325,10 @@ permitiendo hasta 500×500 = **250 000 celdas evaluadas en un solo dispatch GPU*
 con fallback automático a CPU si la GPU no está disponible.
 
 ```text
-DomainColoring[1/z, -2, 2, -2, 2, 400]   # inversión con domain coloring
-DomainColoring[z^6+1, -1.5, 1.5, -1.5, 1.5, 400]
-DomainColoring[exp(z), -3, 3, -3, 3, 400]
-DomainColoring[gamma(z), -3, 3, -3, 3, 400]   # ceros y polos de Γ(z)
+DomainColoring[1/z, -2, 2, -2, 2, 200]   # inversión con domain coloring
+DomainColoring[z^6+1, -1.5, 1.5, -1.5, 1.5, 200]
+DomainColoring[exp(z), -3, 3, -3, 3, 200]
+DomainColoring[gamma(z), -3, 3, -3, 3, 200]   # ceros y polos de Γ(z)
 ```
 
 #### Funciones complejas especiales
@@ -395,7 +407,7 @@ El visor 3D se activa automáticamente cuando creás objetos 3D. Podés orbitar 
 
 ### Objetos 3D
 
-Puntos, segmentos, esferas, cubos, pirámides, conos, cilindros, toros, cintas de Moebius, superficies paramétricas, curvas 3D, atractores extraños, hipercubos 4D (proyectados), hiperesferas 4D (proyectadas), campos vectoriales 3D.
+Puntos, segmentos, esferas, cubos, pirámides, conos, cilindros, toros, cintas de Moebius, superficies paramétricas, curvas 3D, atractores extraños, campos vectoriales 3D y proyecciones multidimensionales. Incluye los seis politopos regulares 4D (pentácoron, teseracto, 16-celdas, 24-celdas, 120-celdas y 600-celdas) y las familias simplex, hipercubo y politopo cruzado entre 3 y 10 dimensiones.
 
 ### Ejemplos
 
@@ -405,11 +417,14 @@ Cube[l]                             # cubo de lado l
 ParametricCurve3D[cos(t), sin(t), t/5, 0, 20]    # hélice
 Lorenz[]                            # atractor de Lorenz en 3D
 Hypercube[angle1, angle2, angle3]   # teseracto proyectado
+Tesseract4D[]                       # teseracto regular 4D con caras y aristas
+SixHundredCell4D[0.8]               # 600-celdas proyectado a 3D
+HypercubeND[5, 1.0]                 # hipercubo regular en R^5, wireframe
 ```
 
 ### Renderizado GPU
 
-El canvas 2D y 3D se renderizan con `wgpu` (WebGPU) usando compute shaders que compilan las expresiones del usuario a bytecode WGSL en tiempo de ejecución. Si la GPU no está disponible, Grafito usa automáticamente el camino de CPU. Esto acelera la evaluación de funciones, curvas implícitas y superficies paramétricas en órdenes de magnitud comparado con la CPU.
+El canvas 2D y 3D se renderizan con `wgpu` (WebGPU) usando compute shaders que compilan las expresiones del usuario a bytecode WGSL en tiempo de ejecución. Los politopos 4D se proyectan con precisión `f64` y se agrupan en los streams GPU 3D existentes para caras con profundidad y aristas; si la GPU no está disponible o hay rotación multidimensional activa, Grafito usa automáticamente un camino CPU acotado. Esto acelera la evaluación de funciones, curvas implícitas y superficies paramétricas en órdenes de magnitud comparado con la CPU.
 
 Pipelines de cómputo disponibles (`crates/grafito-render/src/`):
 

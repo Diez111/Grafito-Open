@@ -1,3 +1,7 @@
+use std::collections::VecDeque;
+use std::fmt;
+use std::sync::{Mutex, OnceLock};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FractalType {
     Mandelbrot { max_iter: u32 },
@@ -51,6 +55,201 @@ pub struct FractalPixel {
     pub max_iter: u32,
     pub escaped: bool,
     pub smooth_value: f64,
+}
+
+/// Máximo de píxeles que una evaluación de fractal puede materializar.
+pub const MAX_FRACTAL_PIXELS: usize = 160_000;
+/// Máximo de iteraciones acumuladas que una evaluación de fractal puede ejecutar.
+pub const MAX_FRACTAL_WORK_UNITS: usize = 64_000_000;
+/// Máximo de iteraciones por píxel aceptado por las rutas interactivas.
+pub const MAX_FRACTAL_ITER: u32 = 10_000;
+
+const MAX_CACHED_FRACTAL_PIXELS: usize = MAX_FRACTAL_PIXELS * 2;
+const MAX_CACHED_FRACTALS: usize = 4;
+
+/// Error de validación de una petición de fractal antes de reservar o iterar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FractalError {
+    InvalidBounds,
+    IterationLimitExceeded { requested: u32, maximum: u32 },
+    PixelBudgetExceeded { requested: usize, maximum: usize },
+    WorkBudgetExceeded { requested: usize, maximum: usize },
+}
+
+impl fmt::Display for FractalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBounds => write!(f, "fractal bounds must be finite and ordered"),
+            Self::IterationLimitExceeded { requested, maximum } => {
+                write!(f, "fractal max_iter {requested} exceeds maximum {maximum}")
+            }
+            Self::PixelBudgetExceeded { requested, maximum } => write!(
+                f,
+                "fractal pixel request {requested} exceeds maximum {maximum}"
+            ),
+            Self::WorkBudgetExceeded { requested, maximum } => write!(
+                f,
+                "fractal work request {requested} exceeds maximum {maximum}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FractalError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FractalCacheKind {
+    Mandelbrot { max_iter: u32 },
+    Julia { cr: u64, ci: u64, max_iter: u32 },
+    BurningShip { max_iter: u32 },
+    Tricorn { max_iter: u32 },
+    Newton { max_iter: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FractalCacheKey {
+    kind: FractalCacheKind,
+    x_min: u64,
+    x_max: u64,
+    y_min: u64,
+    y_max: u64,
+    width: usize,
+    height: usize,
+}
+
+struct FractalCacheEntry {
+    key: FractalCacheKey,
+    pixels: Vec<FractalPixel>,
+}
+
+fn fractal_cache() -> &'static Mutex<VecDeque<FractalCacheEntry>> {
+    static CACHE: OnceLock<Mutex<VecDeque<FractalCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn cache_key(
+    fractal: &FractalType,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
+) -> FractalCacheKey {
+    let kind = match fractal {
+        FractalType::Mandelbrot { max_iter } => FractalCacheKind::Mandelbrot {
+            max_iter: *max_iter,
+        },
+        FractalType::Julia { cr, ci, max_iter } => FractalCacheKind::Julia {
+            cr: cr.to_bits(),
+            ci: ci.to_bits(),
+            max_iter: *max_iter,
+        },
+        FractalType::BurningShip { max_iter } => FractalCacheKind::BurningShip {
+            max_iter: *max_iter,
+        },
+        FractalType::Tricorn { max_iter } => FractalCacheKind::Tricorn {
+            max_iter: *max_iter,
+        },
+        FractalType::Newton { max_iter } => FractalCacheKind::Newton {
+            max_iter: *max_iter,
+        },
+    };
+    FractalCacheKey {
+        kind,
+        x_min: x_min.to_bits(),
+        x_max: x_max.to_bits(),
+        y_min: y_min.to_bits(),
+        y_max: y_max.to_bits(),
+        width,
+        height,
+    }
+}
+
+fn cached_pixels(key: FractalCacheKey) -> Option<Vec<FractalPixel>> {
+    let mut cache = fractal_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let index = cache.iter().position(|entry| entry.key == key)?;
+    let entry = cache.remove(index)?;
+    let pixels = entry.pixels.clone();
+    cache.push_back(entry);
+    Some(pixels)
+}
+
+fn cache_pixels(key: FractalCacheKey, pixels: Vec<FractalPixel>) {
+    if pixels.len() > MAX_CACHED_FRACTAL_PIXELS {
+        return;
+    }
+
+    let mut cache = fractal_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.iter().any(|entry| entry.key == key) {
+        return;
+    }
+
+    let mut cached_pixels = cache.iter().map(|entry| entry.pixels.len()).sum::<usize>();
+    while !cache.is_empty()
+        && (cache.len() >= MAX_CACHED_FRACTALS
+            || cached_pixels.saturating_add(pixels.len()) > MAX_CACHED_FRACTAL_PIXELS)
+    {
+        if let Some(entry) = cache.pop_front() {
+            cached_pixels -= entry.pixels.len();
+        }
+    }
+    cache.push_back(FractalCacheEntry { key, pixels });
+}
+
+fn max_iter(fractal: &FractalType) -> u32 {
+    match fractal {
+        FractalType::Mandelbrot { max_iter }
+        | FractalType::Julia { max_iter, .. }
+        | FractalType::BurningShip { max_iter }
+        | FractalType::Tricorn { max_iter }
+        | FractalType::Newton { max_iter } => *max_iter,
+    }
+}
+
+/// Verifica los presupuestos globales de píxeles y trabajo antes de computar.
+pub fn validate_fractal_budget(
+    width: usize,
+    height: usize,
+    max_iter: u32,
+) -> Result<(), FractalError> {
+    if max_iter > MAX_FRACTAL_ITER {
+        return Err(FractalError::IterationLimitExceeded {
+            requested: max_iter,
+            maximum: MAX_FRACTAL_ITER,
+        });
+    }
+
+    let pixels = width
+        .checked_mul(height)
+        .ok_or(FractalError::PixelBudgetExceeded {
+            requested: usize::MAX,
+            maximum: MAX_FRACTAL_PIXELS,
+        })?;
+    if pixels > MAX_FRACTAL_PIXELS {
+        return Err(FractalError::PixelBudgetExceeded {
+            requested: pixels,
+            maximum: MAX_FRACTAL_PIXELS,
+        });
+    }
+
+    let work = pixels
+        .checked_mul(max_iter as usize)
+        .ok_or(FractalError::WorkBudgetExceeded {
+            requested: usize::MAX,
+            maximum: MAX_FRACTAL_WORK_UNITS,
+        })?;
+    if work > MAX_FRACTAL_WORK_UNITS {
+        return Err(FractalError::WorkBudgetExceeded {
+            requested: work,
+            maximum: MAX_FRACTAL_WORK_UNITS,
+        });
+    }
+    Ok(())
 }
 
 fn mandelbrot_iter(cr: f64, ci: f64, max_iter: u32) -> (u32, f64) {
@@ -167,7 +366,8 @@ fn newton_iter(zr0: f64, zi0: f64, max_iter: u32) -> (u32, f64) {
     (i, i as f64)
 }
 
-pub fn compute_fractal(
+/// Calcula un fractal con límites de recursos y caché LRU acotada para escenas estáticas.
+pub fn try_compute_fractal(
     fractal: &FractalType,
     x_min: f64,
     x_max: f64,
@@ -175,24 +375,33 @@ pub fn compute_fractal(
     y_max: f64,
     width: usize,
     height: usize,
-) -> Vec<FractalPixel> {
+) -> Result<Vec<FractalPixel>, FractalError> {
     use rayon::prelude::*;
 
     if width == 0 || height == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    if !x_min.is_finite()
+        || !x_max.is_finite()
+        || !y_min.is_finite()
+        || !y_max.is_finite()
+        || x_min >= x_max
+        || y_min >= y_max
+    {
+        return Err(FractalError::InvalidBounds);
+    }
+    let max_iter = max_iter(fractal);
+    validate_fractal_budget(width, height, max_iter)?;
+
+    let key = cache_key(fractal, x_min, x_max, y_min, y_max, width, height);
+    if let Some(pixels) = cached_pixels(key) {
+        return Ok(pixels);
+    }
+
     let dx = (x_max - x_min) / width as f64;
     let dy = (y_max - y_min) / height as f64;
 
-    let max_iter = match fractal {
-        FractalType::Mandelbrot { max_iter }
-        | FractalType::Julia { max_iter, .. }
-        | FractalType::BurningShip { max_iter }
-        | FractalType::Tricorn { max_iter }
-        | FractalType::Newton { max_iter } => *max_iter,
-    };
-
-    (0..height)
+    let pixels: Vec<_> = (0..height)
         .into_par_iter()
         .flat_map(|j| {
             let y = y_min + j as f64 * dy;
@@ -200,13 +409,11 @@ pub fn compute_fractal(
                 .map(move |i| {
                     let x = x_min + i as f64 * dx;
                     let (iter, smooth) = match fractal {
-                        FractalType::Mandelbrot { max_iter } => mandelbrot_iter(x, y, *max_iter),
-                        FractalType::Julia { cr, ci, max_iter } => {
-                            julia_iter(x, y, *cr, *ci, *max_iter)
-                        }
-                        FractalType::BurningShip { max_iter } => burning_ship_iter(x, y, *max_iter),
-                        FractalType::Tricorn { max_iter } => tricorn_iter(x, y, *max_iter),
-                        FractalType::Newton { max_iter } => newton_iter(x, y, *max_iter),
+                        FractalType::Mandelbrot { .. } => mandelbrot_iter(x, y, max_iter),
+                        FractalType::Julia { cr, ci, .. } => julia_iter(x, y, *cr, *ci, max_iter),
+                        FractalType::BurningShip { .. } => burning_ship_iter(x, y, max_iter),
+                        FractalType::Tricorn { .. } => tricorn_iter(x, y, max_iter),
+                        FractalType::Newton { .. } => newton_iter(x, y, max_iter),
                     };
                     FractalPixel {
                         x,
@@ -219,7 +426,23 @@ pub fn compute_fractal(
                 })
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    cache_pixels(key, pixels.clone());
+    Ok(pixels)
+}
+
+/// Compatibilidad para los renderizadores existentes: entradas que exceden el
+/// presupuesto producen una imagen vacía en vez de reservar o iterar sin límite.
+pub fn compute_fractal(
+    fractal: &FractalType,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
+) -> Vec<FractalPixel> {
+    try_compute_fractal(fractal, x_min, x_max, y_min, y_max, width, height).unwrap_or_default()
 }
 
 pub fn fractal_color_hsv(iter: u32, max_iter: u32, smooth: f64) -> (f32, f32, f32, f32) {
@@ -256,6 +479,48 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f32, f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractal_request_limits_pixels_work_and_iterations_before_computation() {
+        assert!(validate_fractal_budget(MAX_FRACTAL_PIXELS - 1, 1, 1).is_ok());
+        assert!(validate_fractal_budget(MAX_FRACTAL_PIXELS, 1, 1).is_ok());
+        assert!(matches!(
+            validate_fractal_budget(MAX_FRACTAL_PIXELS + 1, 1, 1),
+            Err(FractalError::PixelBudgetExceeded { .. })
+        ));
+
+        let max_iter_at_work_limit = (MAX_FRACTAL_WORK_UNITS / MAX_FRACTAL_PIXELS) as u32;
+        assert!(validate_fractal_budget(MAX_FRACTAL_PIXELS, 1, max_iter_at_work_limit).is_ok());
+        assert!(matches!(
+            validate_fractal_budget(MAX_FRACTAL_PIXELS, 1, max_iter_at_work_limit + 1),
+            Err(FractalError::WorkBudgetExceeded { .. })
+        ));
+
+        for max_iter in [MAX_FRACTAL_ITER - 1, MAX_FRACTAL_ITER] {
+            let fractal = FractalType::Mandelbrot { max_iter };
+            assert!(try_compute_fractal(&fractal, -0.5, 0.5, -0.5, 0.5, 1, 1).is_ok());
+        }
+        let excessive = FractalType::Mandelbrot {
+            max_iter: MAX_FRACTAL_ITER + 1,
+        };
+        assert!(matches!(
+            try_compute_fractal(&excessive, -0.5, 0.5, -0.5, 0.5, 1, 1),
+            Err(FractalError::IterationLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn identical_valid_requests_are_retained_in_the_bounded_static_cache() {
+        let fractal = FractalType::mandelbrot();
+        let key = cache_key(&fractal, -0.5, 0.5, -0.5, 0.5, 8, 8);
+
+        let first = try_compute_fractal(&fractal, -0.5, 0.5, -0.5, 0.5, 8, 8).unwrap();
+        assert!(cached_pixels(key).is_some());
+        let second = try_compute_fractal(&fractal, -0.5, 0.5, -0.5, 0.5, 8, 8).unwrap();
+
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first[0].iter, second[0].iter);
+    }
 
     #[test]
     fn test_mandelbrot_center() {

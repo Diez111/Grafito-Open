@@ -1,4 +1,65 @@
 use crate::types3d::Point3D;
+use std::fmt;
+
+/// Máximo de pasos RK4 aceptados por una integración pública de atractor.
+pub const MAX_ATTRACTOR_STEPS: usize = 50_000;
+/// Máximo de puntos materializados por una integración pública de atractor.
+pub const MAX_ATTRACTOR_POINTS: usize = 50_000;
+
+/// Error de validación de recursos para una integración de atractor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttractorIntegrationError {
+    StepLimitExceeded { requested: usize, maximum: usize },
+    SkipExceedsSteps { skip: usize, steps: usize },
+    PointLimitExceeded { requested: usize, maximum: usize },
+    NonFiniteInitialState,
+}
+
+impl fmt::Display for AttractorIntegrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StepLimitExceeded { requested, maximum } => {
+                write!(f, "attractor steps {requested} exceeds maximum {maximum}")
+            }
+            Self::SkipExceedsSteps { skip, steps } => {
+                write!(f, "attractor skip {skip} exceeds steps {steps}")
+            }
+            Self::PointLimitExceeded { requested, maximum } => write!(
+                f,
+                "attractor output points {requested} exceeds maximum {maximum}"
+            ),
+            Self::NonFiniteInitialState => {
+                write!(f, "attractor initial state and dt must be finite")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttractorIntegrationError {}
+
+/// Verifica pasos, descarte inicial y puntos de salida antes de reservar memoria.
+pub fn validate_attractor_integration(
+    steps: usize,
+    skip: usize,
+) -> Result<(), AttractorIntegrationError> {
+    if steps > MAX_ATTRACTOR_STEPS {
+        return Err(AttractorIntegrationError::StepLimitExceeded {
+            requested: steps,
+            maximum: MAX_ATTRACTOR_STEPS,
+        });
+    }
+    if skip > steps {
+        return Err(AttractorIntegrationError::SkipExceedsSteps { skip, steps });
+    }
+    let points = steps - skip;
+    if points > MAX_ATTRACTOR_POINTS {
+        return Err(AttractorIntegrationError::PointLimitExceeded {
+            requested: points,
+            maximum: MAX_ATTRACTOR_POINTS,
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttractorType {
@@ -181,7 +242,8 @@ fn deriv(attractor: &AttractorType, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
     }
 }
 
-pub fn integrate_attractor(
+/// Integra un atractor con límites validados antes de reservar memoria o iterar.
+pub fn try_integrate_attractor(
     attractor: &AttractorType,
     x0: f64,
     y0: f64,
@@ -189,8 +251,13 @@ pub fn integrate_attractor(
     dt: f64,
     steps: usize,
     skip: usize,
-) -> Vec<Point3D> {
-    let mut pts = Vec::with_capacity(steps.saturating_sub(skip));
+) -> Result<Vec<Point3D>, AttractorIntegrationError> {
+    validate_attractor_integration(steps, skip)?;
+    if !x0.is_finite() || !y0.is_finite() || !z0.is_finite() || !dt.is_finite() {
+        return Err(AttractorIntegrationError::NonFiniteInitialState);
+    }
+
+    let mut pts = Vec::with_capacity(steps - skip);
     let mut x = x0;
     let mut y = y0;
     let mut z = z0;
@@ -212,14 +279,28 @@ pub fn integrate_attractor(
         x += dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
         y += dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
         z += dt / 6.0 * (k1z + 2.0 * k2z + 2.0 * k3z + k4z);
-        if x.is_nan() || y.is_nan() || z.is_nan() {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
             break;
         }
         if i >= skip {
             pts.push(Point3D::new(x, y, z));
         }
     }
-    pts
+    Ok(pts)
+}
+
+/// Compatibilidad para los renderizadores existentes: una configuración fuera
+/// de presupuesto no reserva memoria ni ejecuta pasos, y produce una trayectoria vacía.
+pub fn integrate_attractor(
+    attractor: &AttractorType,
+    x0: f64,
+    y0: f64,
+    z0: f64,
+    dt: f64,
+    steps: usize,
+    skip: usize,
+) -> Vec<Point3D> {
+    try_integrate_attractor(attractor, x0, y0, z0, dt, steps, skip).unwrap_or_default()
 }
 
 pub fn default_initial_conditions(attractor: &AttractorType) -> (f64, f64, f64) {
@@ -270,6 +351,27 @@ pub fn default_steps(attractor: &AttractorType) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integration_limits_steps_and_skip_before_allocation() {
+        for steps in [MAX_ATTRACTOR_STEPS - 1, MAX_ATTRACTOR_STEPS] {
+            assert!(validate_attractor_integration(steps, steps).is_ok());
+        }
+        assert!(matches!(
+            validate_attractor_integration(MAX_ATTRACTOR_STEPS + 1, 0),
+            Err(AttractorIntegrationError::StepLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            validate_attractor_integration(10, 11),
+            Err(AttractorIntegrationError::SkipExceedsSteps { .. })
+        ));
+
+        let attractor = AttractorType::lorenz();
+        assert!(
+            integrate_attractor(&attractor, 0.1, 0.0, 0.0, 0.005, MAX_ATTRACTOR_STEPS + 1, 0,)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn test_lorenz_produces_points() {

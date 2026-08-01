@@ -4,7 +4,7 @@ use crate::numeric_constraints::{
     AngleEq, CoincidentEq, DistanceEq, EqualLengthEq, HorizontalEq, SymmetryEq, TangentEq,
     VarOrConst, VerticalEq,
 };
-use crate::numeric_solver::ConstraintEquation;
+use crate::numeric_solver::{ConstraintEquation, NumericSolver, SolveError};
 use crate::*;
 use grafito_geometry::Point2;
 
@@ -29,7 +29,7 @@ fn jacobian_to_dense(triples: &[(usize, usize, f64)], m: usize, n: usize) -> Vec
     let mut j = vec![vec![0.0; n]; m];
     for &(row, col, val) in triples {
         if row < m && col < n {
-            j[row][col] = val;
+            j[row][col] += val;
         }
     }
     j
@@ -70,12 +70,76 @@ fn test_angle_eq_jacobian() {
 }
 
 #[test]
+fn angle_residual_wraps_maximal_finite_targets() {
+    let vars = vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+    for target in [f64::MAX, -f64::MAX] {
+        let residual = AngleEq::new(0, 2, 4, 6, target).residual(&vars)[0];
+
+        assert!(residual.is_finite());
+        assert!(residual > -std::f64::consts::PI);
+        assert!(residual <= std::f64::consts::PI);
+    }
+
+    for target in [180.0, -180.0] {
+        let residual = AngleEq::new(0, 2, 4, 6, target).residual(&vars)[0];
+        assert!((residual - std::f64::consts::PI).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn malformed_angle_indices_return_a_typed_solver_error() {
+    let equations: Vec<Box<dyn ConstraintEquation>> =
+        vec![Box::new(AngleEq::new(0, 2, 4, 6, 45.0))];
+    let mut vars = vec![0.0];
+
+    let error = NumericSolver::default()
+        .solve(&mut vars, &equations)
+        .expect_err("too-short variable input must not panic");
+
+    assert!(matches!(
+        error,
+        SolveError::VariableIndexOutOfBounds {
+            equation: 0,
+            index: 1,
+            variables: 1,
+        }
+    ));
+}
+
+#[test]
 fn test_tangent_eq_jacobian() {
     let eq = TangentEq::new(0, Point2::new(0.0, 0.0), 1, 3);
     let vars = vec![1.0, 0.0, 0.0, 1.0, 0.0];
     let analytic = jacobian_to_dense(&eq.jacobian(&vars), eq.dimension(), vars.len());
     let finite = finite_difference_jacobian(&eq, &vars);
     assert_mat_close(&analytic, &finite, 1e-6);
+}
+
+#[test]
+fn degenerate_tangent_reports_a_solver_diagnostic_without_nan_jacobian() {
+    let eq = TangentEq::new(0, Point2::new(0.0, 0.0), 1, 3);
+    let mut vars = vec![1.0, 0.0, 0.0, 0.0, 0.0];
+
+    assert!(
+        eq.jacobian(&vars)
+            .iter()
+            .all(|(_, _, value)| value.is_finite()),
+        "a degenerate line must not produce a NaN Jacobian"
+    );
+
+    let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(eq)];
+    let error = NumericSolver::default()
+        .solve(&mut vars, &equations)
+        .expect_err("a tangent to a zero-length line is undefined");
+
+    assert!(matches!(
+        error,
+        SolveError::NonFiniteResidual {
+            equation: 0,
+            row: 0,
+        }
+    ));
 }
 
 #[test]
@@ -90,6 +154,40 @@ fn test_coincident_eq_jacobian() {
     let analytic = jacobian_to_dense(&eq.jacobian(&vars), eq.dimension(), vars.len());
     let finite = finite_difference_jacobian(&eq, &vars);
     assert_mat_close(&analytic, &finite, 1e-6);
+}
+
+#[test]
+fn same_object_coincident_has_zero_jacobian() {
+    let x = VarOrConst::new(Some(0), 0.0);
+    let y = VarOrConst::new(Some(1), 0.0);
+    let eq = CoincidentEq::new(x, y, x, y);
+    let vars = vec![3.0, -2.0];
+
+    let analytic = jacobian_to_dense(&eq.jacobian(&vars), eq.dimension(), vars.len());
+    let finite = finite_difference_jacobian(&eq, &vars);
+
+    assert_eq!(analytic, vec![vec![0.0, 0.0], vec![0.0, 0.0]]);
+    assert_mat_close(&analytic, &finite, 1e-12);
+}
+
+#[test]
+fn meaningless_same_object_constraints_are_not_constructed() {
+    let mut doc = Document::new();
+    let point = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+    let line = doc.add_object(GeoObject::Line(LineObj::new(
+        Point2::new(0.0, 0.0),
+        Point2::new(1.0, 0.0),
+    )));
+    let var_index = std::collections::HashMap::new();
+
+    assert!(DistanceEq::from_inputs(&doc, point, point, 0.0, &var_index).is_none());
+    assert!(AngleEq::from_inputs(&doc, &[line, line], 0.0, &var_index).is_none());
+    assert!(CoincidentEq::from_inputs(&doc, point, point, &var_index).is_none());
+    assert!(EqualLengthEq::from_inputs(&doc, line, line, &var_index).is_none());
+    assert!(
+        SymmetryEq::from_inputs(&doc, point, point, line, &var_index).is_some(),
+        "reflecting a point onto itself is a meaningful point-on-line constraint"
+    );
 }
 
 #[test]

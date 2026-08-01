@@ -5,29 +5,47 @@ use std::fmt;
 // Symbolic Expression AST for Grafito calculus engine.
 // Supports differentiation, simplification, display and numeric evaluation.
 
-// Reduce a large angle to the [0, 2π) range to avoid precision loss in sin/cos/tan.
-fn reduce_angle(a: f64) -> f64 {
-    if a.is_finite() {
-        a.rem_euclid(std::f64::consts::TAU)
+fn safe_sinh(a: f64) -> f64 {
+    a.sinh()
+}
+
+fn safe_cosh(a: f64) -> f64 {
+    a.cosh()
+}
+
+fn safe_tanh(a: f64) -> f64 {
+    if a > 20.0 {
+        1.0
+    } else if a < -20.0 {
+        -1.0
     } else {
-        a
+        a.tanh()
     }
 }
 
-/// Convierte un f64 a orden de Bessel (i32) de forma segura.
-/// Redondea al entero más cercano, y devuelve 0 para NaN/Infinito.
-pub fn bessel_order(f: f64) -> i32 {
-    if !f.is_finite() {
-        return 0;
+/// Aplica un clamp solo cuando sus límites definen un intervalo finito y ordenado.
+///
+/// Los evaluadores del AST usan `NaN` para representar dominios inválidos; las
+/// capas que devuelven `Result` convierten ese valor en un error para el usuario.
+pub(crate) fn checked_clamp(value: f64, lower: f64, upper: f64) -> Option<f64> {
+    (lower.is_finite() && upper.is_finite() && lower <= upper).then(|| value.clamp(lower, upper))
+}
+
+/// Convierte un orden de Bessel a un entero evaluable, si pertenece al dominio.
+pub fn bessel_order(f: f64) -> Option<i32> {
+    crate::special_functions::parse_bessel_order(f)
+}
+
+fn dd_bessel_order(value: DD) -> Option<i32> {
+    let order = bessel_order(value.to_f64())?;
+    (value.hi == f64::from(order) && value.lo == 0.0).then_some(order)
+}
+
+fn dd_comparison(left: DD, right: DD, comparison: impl FnOnce(DD, DD) -> bool) -> DD {
+    if !left.is_finite() || !right.is_finite() {
+        return DD::from_f64(f64::NAN);
     }
-    let rounded = f.round();
-    if rounded > 1000.0 {
-        1000
-    } else if rounded < -1000.0 {
-        -1000
-    } else {
-        rounded as i32
-    }
+    DD::from_f64(if comparison(left, right) { 1.0 } else { 0.0 })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +105,7 @@ pub enum Expr {
     Gamma(Box<Expr>),
     LnGamma(Box<Expr>),
     Digamma(Box<Expr>),
+    Trigamma(Box<Expr>),
     // Special functions (2-arg)
     Beta(Box<Expr>, Box<Expr>),
     BesselJ(Box<Expr>, Box<Expr>),
@@ -107,6 +126,150 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub(crate) fn structurally_eq(&self, other: &Self) -> bool {
+        use Expr::*;
+        match (self, other) {
+            (Const(left), Const(right)) => left.to_bits() == right.to_bits(),
+            (Var(left), Var(right)) => left == right,
+            (Neg(left), Neg(right))
+            | (Sin(left), Sin(right))
+            | (Cos(left), Cos(right))
+            | (Tan(left), Tan(right))
+            | (Asin(left), Asin(right))
+            | (Acos(left), Acos(right))
+            | (Atan(left), Atan(right))
+            | (Exp(left), Exp(right))
+            | (Ln(left), Ln(right))
+            | (Log(left), Log(right))
+            | (Sqrt(left), Sqrt(right))
+            | (Abs(left), Abs(right))
+            | (Sinh(left), Sinh(right))
+            | (Cosh(left), Cosh(right))
+            | (Tanh(left), Tanh(right))
+            | (Floor(left), Floor(right))
+            | (Ceil(left), Ceil(right))
+            | (Round(left), Round(right))
+            | (Sec(left), Sec(right))
+            | (Csc(left), Csc(right))
+            | (Cot(left), Cot(right))
+            | (Asinh(left), Asinh(right))
+            | (Acosh(left), Acosh(right))
+            | (Atanh(left), Atanh(right))
+            | (Sign(left), Sign(right))
+            | (Heaviside(left), Heaviside(right))
+            | (Cbrt(left), Cbrt(right))
+            | (Re(left), Re(right))
+            | (Im(left), Im(right))
+            | (Arg(left), Arg(right))
+            | (Conj(left), Conj(right))
+            | (Erf(left), Erf(right))
+            | (Erfc(left), Erfc(right))
+            | (Gamma(left), Gamma(right))
+            | (LnGamma(left), LnGamma(right))
+            | (Digamma(left), Digamma(right))
+            | (Trigamma(left), Trigamma(right)) => left.structurally_eq(right),
+            (Add(left_a, left_b), Add(right_a, right_b))
+            | (Sub(left_a, left_b), Sub(right_a, right_b))
+            | (Mul(left_a, left_b), Mul(right_a, right_b))
+            | (Div(left_a, left_b), Div(right_a, right_b))
+            | (Pow(left_a, left_b), Pow(right_a, right_b))
+            | (Atan2(left_a, left_b), Atan2(right_a, right_b))
+            | (Modulo(left_a, left_b), Modulo(right_a, right_b))
+            | (Min(left_a, left_b), Min(right_a, right_b))
+            | (Max(left_a, left_b), Max(right_a, right_b))
+            | (Beta(left_a, left_b), Beta(right_a, right_b))
+            | (BesselJ(left_a, left_b), BesselJ(right_a, right_b))
+            | (BesselY(left_a, left_b), BesselY(right_a, right_b))
+            | (BesselI(left_a, left_b), BesselI(right_a, right_b))
+            | (Lt(left_a, left_b), Lt(right_a, right_b))
+            | (Gt(left_a, left_b), Gt(right_a, right_b))
+            | (Le(left_a, left_b), Le(right_a, right_b))
+            | (Ge(left_a, left_b), Ge(right_a, right_b))
+            | (Eq(left_a, left_b), Eq(right_a, right_b))
+            | (Ne(left_a, left_b), Ne(right_a, right_b)) => {
+                left_a.structurally_eq(right_a) && left_b.structurally_eq(right_b)
+            }
+            (Clamp(left_x, left_lo, left_hi), Clamp(right_x, right_lo, right_hi)) => {
+                left_x.structurally_eq(right_x)
+                    && left_lo.structurally_eq(right_lo)
+                    && left_hi.structurally_eq(right_hi)
+            }
+            (
+                Sum(left_body, left_var, left_start, left_end),
+                Sum(right_body, right_var, right_start, right_end),
+            )
+            | (
+                Product(left_body, left_var, left_start, left_end),
+                Product(right_body, right_var, right_start, right_end),
+            ) => {
+                left_var == right_var
+                    && left_body.structurally_eq(right_body)
+                    && left_start.structurally_eq(right_start)
+                    && left_end.structurally_eq(right_end)
+            }
+            (Piecewise(left_pieces, left_default), Piecewise(right_pieces, right_default)) => {
+                left_pieces.len() == right_pieces.len()
+                    && left_pieces.iter().zip(right_pieces).all(
+                        |((left_condition, left_value), (right_condition, right_value))| {
+                            left_condition.structurally_eq(right_condition)
+                                && left_value.structurally_eq(right_value)
+                        },
+                    )
+                    && left_default.structurally_eq(right_default)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_guaranteed_finite(&self) -> bool {
+        use Expr::*;
+        match self {
+            Const(value) => value.is_finite(),
+            Var(_) => true,
+            Neg(value) | Sin(value) | Cos(value) | Atan(value) | Abs(value) | Tanh(value)
+            | Floor(value) | Ceil(value) | Round(value) | Sign(value) | Heaviside(value)
+            | Cbrt(value) | Asinh(value) => value.is_guaranteed_finite(),
+            Min(left, right)
+            | Max(left, right)
+            | Lt(left, right)
+            | Gt(left, right)
+            | Le(left, right)
+            | Ge(left, right)
+            | Eq(left, right)
+            | Ne(left, right) => left.is_guaranteed_finite() && right.is_guaranteed_finite(),
+            Piecewise(pieces, default) => {
+                pieces.iter().all(|(condition, value)| {
+                    condition.is_guaranteed_finite() && value.is_guaranteed_finite()
+                }) && default.is_guaranteed_finite()
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_everywhere_differentiable(&self) -> bool {
+        use Expr::*;
+        match self {
+            Const(value) => value.is_finite(),
+            Var(_) => true,
+            Neg(value) | Sin(value) | Cos(value) | Atan(value) | Exp(value) | Sinh(value)
+            | Cosh(value) | Tanh(value) | Asinh(value) | Erf(value) | Erfc(value) => {
+                value.is_everywhere_differentiable()
+            }
+            Add(left, right) | Sub(left, right) | Mul(left, right) => {
+                left.is_everywhere_differentiable() && right.is_everywhere_differentiable()
+            }
+            Div(numerator, denominator) => {
+                numerator.is_everywhere_differentiable()
+                    && matches!(denominator.as_ref(), Const(value) if value.is_finite() && *value != 0.0)
+            }
+            Pow(base, exponent) => {
+                base.is_everywhere_differentiable()
+                    && matches!(exponent.as_ref(), Const(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+            }
+            _ => false,
+        }
+    }
+
     pub fn get_variables(&self, vars: &mut std::collections::HashSet<String>) {
         use Expr::*;
         match self {
@@ -118,7 +281,7 @@ impl Expr {
             | Log(u) | Sqrt(u) | Abs(u) | Sinh(u) | Cosh(u) | Tanh(u) | Floor(u) | Ceil(u)
             | Round(u) | Sec(u) | Csc(u) | Cot(u) | Asinh(u) | Acosh(u) | Atanh(u) | Sign(u)
             | Heaviside(u) | Cbrt(u) | Re(u) | Im(u) | Arg(u) | Conj(u) | Erf(u) | Erfc(u)
-            | Gamma(u) | LnGamma(u) | Digamma(u) => {
+            | Gamma(u) | LnGamma(u) | Digamma(u) | Trigamma(u) => {
                 u.get_variables(vars);
             }
             Add(a, b)
@@ -162,6 +325,143 @@ impl Expr {
                     v.get_variables(vars);
                 }
                 default.get_variables(vars);
+            }
+        }
+    }
+
+    /// Rechaza órdenes Bessel constantes que no pertenecen al dominio entero
+    /// acotado. Los órdenes con variables permanecen válidos porque sólo se
+    /// pueden comprobar al evaluar sus valores de ejecución.
+    pub fn validate_static_bessel_orders(&self) -> Result<(), String> {
+        use Expr::*;
+        match self {
+            Const(_) | Var(_) => Ok(()),
+            Neg(value) | Sin(value) | Cos(value) | Tan(value) | Asin(value) | Acos(value)
+            | Atan(value) | Exp(value) | Ln(value) | Log(value) | Sqrt(value) | Abs(value)
+            | Sinh(value) | Cosh(value) | Tanh(value) | Floor(value) | Ceil(value)
+            | Round(value) | Sec(value) | Csc(value) | Cot(value) | Asinh(value) | Acosh(value)
+            | Atanh(value) | Sign(value) | Heaviside(value) | Cbrt(value) | Re(value)
+            | Im(value) | Arg(value) | Conj(value) | Erf(value) | Erfc(value) | Gamma(value)
+            | LnGamma(value) | Digamma(value) | Trigamma(value) => {
+                value.validate_static_bessel_orders()
+            }
+            Add(left, right)
+            | Sub(left, right)
+            | Mul(left, right)
+            | Div(left, right)
+            | Pow(left, right)
+            | Atan2(left, right)
+            | Modulo(left, right)
+            | Min(left, right)
+            | Max(left, right)
+            | Beta(left, right)
+            | Lt(left, right)
+            | Gt(left, right)
+            | Le(left, right)
+            | Ge(left, right)
+            | Eq(left, right)
+            | Ne(left, right) => {
+                left.validate_static_bessel_orders()?;
+                right.validate_static_bessel_orders()
+            }
+            BesselJ(order, argument) | BesselY(order, argument) | BesselI(order, argument) => {
+                order.validate_static_bessel_orders()?;
+                argument.validate_static_bessel_orders()?;
+
+                let mut variables = std::collections::HashSet::new();
+                order.get_variables(&mut variables);
+                if variables.is_empty() && bessel_order(order.eval_at("", 0.0)).is_none() {
+                    return Err(format!(
+                        "orden Bessel constante inválido: {}",
+                        order.to_expr_string()
+                    ));
+                }
+                Ok(())
+            }
+            Clamp(value, lower, upper) => {
+                value.validate_static_bessel_orders()?;
+                lower.validate_static_bessel_orders()?;
+                upper.validate_static_bessel_orders()
+            }
+            Sum(body, _, start, end) | Product(body, _, start, end) => {
+                body.validate_static_bessel_orders()?;
+                start.validate_static_bessel_orders()?;
+                end.validate_static_bessel_orders()
+            }
+            Piecewise(parts, default) => {
+                for (condition, value) in parts {
+                    condition.validate_static_bessel_orders()?;
+                    value.validate_static_bessel_orders()?;
+                }
+                default.validate_static_bessel_orders()
+            }
+        }
+    }
+
+    /// Detecta órdenes Bessel dinámicos que son finitos en DD pero no enteros
+    /// exactos. Los órdenes DD no evaluables quedan para el fallback f64.
+    pub fn has_invalid_bessel_order_dd(&self, vars: &HashMap<String, DD>) -> bool {
+        use Expr::*;
+        match self {
+            Const(_) | Var(_) => false,
+            Neg(value) | Sin(value) | Cos(value) | Tan(value) | Asin(value) | Acos(value)
+            | Atan(value) | Exp(value) | Ln(value) | Log(value) | Sqrt(value) | Abs(value)
+            | Sinh(value) | Cosh(value) | Tanh(value) | Floor(value) | Ceil(value)
+            | Round(value) | Sec(value) | Csc(value) | Cot(value) | Asinh(value) | Acosh(value)
+            | Atanh(value) | Sign(value) | Heaviside(value) | Cbrt(value) | Re(value)
+            | Im(value) | Arg(value) | Conj(value) | Erf(value) | Erfc(value) | Gamma(value)
+            | LnGamma(value) | Digamma(value) | Trigamma(value) => {
+                value.has_invalid_bessel_order_dd(vars)
+            }
+            Add(left, right)
+            | Sub(left, right)
+            | Mul(left, right)
+            | Div(left, right)
+            | Pow(left, right)
+            | Atan2(left, right)
+            | Modulo(left, right)
+            | Min(left, right)
+            | Max(left, right)
+            | Beta(left, right)
+            | Lt(left, right)
+            | Gt(left, right)
+            | Le(left, right)
+            | Ge(left, right)
+            | Eq(left, right)
+            | Ne(left, right) => {
+                left.has_invalid_bessel_order_dd(vars) || right.has_invalid_bessel_order_dd(vars)
+            }
+            BesselJ(order, argument) | BesselY(order, argument) | BesselI(order, argument) => {
+                let order_value = order.eval_dd(vars);
+                order.has_invalid_bessel_order_dd(vars)
+                    || argument.has_invalid_bessel_order_dd(vars)
+                    || (order_value.is_finite() && dd_bessel_order(order_value).is_none())
+            }
+            Clamp(value, lower, upper) => {
+                value.has_invalid_bessel_order_dd(vars)
+                    || lower.has_invalid_bessel_order_dd(vars)
+                    || upper.has_invalid_bessel_order_dd(vars)
+            }
+            Sum(body, _, start, end) | Product(body, _, start, end) => {
+                body.has_invalid_bessel_order_dd(vars)
+                    || start.has_invalid_bessel_order_dd(vars)
+                    || end.has_invalid_bessel_order_dd(vars)
+            }
+            Piecewise(parts, default) => {
+                for (condition, value) in parts {
+                    if condition.has_invalid_bessel_order_dd(vars) {
+                        return true;
+                    }
+                    let condition_value = condition.eval_dd(vars);
+                    if !condition_value.is_finite() {
+                        // Preserve the f64 fallback when DD cannot select a branch.
+                        return false;
+                    }
+                    if condition_value.to_f64() != 0.0 {
+                        return value.has_invalid_bessel_order_dd(vars);
+                    }
+                }
+                default.has_invalid_bessel_order_dd(vars)
             }
         }
     }
@@ -408,7 +708,7 @@ impl Expr {
                 let da = a.diff_depth(var, depth + 1);
                 let db = b.diff_depth(var, depth + 1);
                 Expr::Piecewise(
-                    vec![(Box::new(Expr::Sub(a.clone(), b.clone())), Box::new(da))],
+                    vec![(Box::new(Expr::Lt(a.clone(), b.clone())), Box::new(da))],
                     Box::new(db),
                 )
             }
@@ -416,22 +716,18 @@ impl Expr {
                 let da = a.diff_depth(var, depth + 1);
                 let db = b.diff_depth(var, depth + 1);
                 Expr::Piecewise(
-                    vec![(Box::new(Expr::Sub(b.clone(), a.clone())), Box::new(db))],
-                    Box::new(da),
+                    vec![(Box::new(Expr::Gt(a.clone(), b.clone())), Box::new(da))],
+                    Box::new(db),
                 )
             }
             Clamp(x, lo, hi) => {
                 let dx = x.diff_depth(var, depth + 1);
+                let dlo = lo.diff_depth(var, depth + 1);
+                let dhi = hi.diff_depth(var, depth + 1);
                 Expr::Piecewise(
                     vec![
-                        (
-                            Box::new(Expr::Sub(hi.clone(), x.clone())),
-                            Box::new(Const(0.0)),
-                        ),
-                        (
-                            Box::new(Expr::Sub(lo.clone(), x.clone())),
-                            Box::new(Const(0.0)),
-                        ),
+                        (Box::new(Expr::Lt(x.clone(), lo.clone())), Box::new(dlo)),
+                        (Box::new(Expr::Gt(x.clone(), hi.clone())), Box::new(dhi)),
                     ],
                     Box::new(dx),
                 )
@@ -474,18 +770,34 @@ impl Expr {
                 Box::new(Digamma(u.clone())),
                 Box::new(u.diff_depth(var, depth + 1)),
             ),
-            Digamma(_) => Const(0.0), // polygamma would be needed
+            Digamma(u) => Mul(
+                Box::new(Trigamma(u.clone())),
+                Box::new(u.diff_depth(var, depth + 1)),
+            ),
+            // The next derivative is tetragamma. Until higher-order
+            // polygamma is represented, preserve the unsupported result
+            // instead of fabricating a zero derivative.
+            Trigamma(_) => Const(f64::NAN),
             Beta(a, b) => {
                 let da = a.diff_depth(var, depth + 1);
                 let db = b.diff_depth(var, depth + 1);
-                // beta'(a,b) = beta(a,b)*(digamma(a)*a' - digamma(a+b)*(a'+b'))
+                // beta'(a,b) = beta(a,b)*((ψ(a)-ψ(a+b))*a' + (ψ(b)-ψ(a+b))*b')
                 Mul(
                     Box::new(Beta(a.clone(), b.clone())),
-                    Box::new(Sub(
-                        Box::new(Mul(Box::new(Digamma(a.clone())), Box::new(da.clone()))),
+                    Box::new(Add(
                         Box::new(Mul(
-                            Box::new(Digamma(Box::new(Add(a.clone(), b.clone())))),
-                            Box::new(Add(Box::new(da), Box::new(db))),
+                            Box::new(Sub(
+                                Box::new(Digamma(a.clone())),
+                                Box::new(Digamma(Box::new(Add(a.clone(), b.clone())))),
+                            )),
+                            Box::new(da),
+                        )),
+                        Box::new(Mul(
+                            Box::new(Sub(
+                                Box::new(Digamma(b.clone())),
+                                Box::new(Digamma(Box::new(Add(a.clone(), b.clone())))),
+                            )),
+                            Box::new(db),
                         )),
                     )),
                 )
@@ -686,6 +998,7 @@ impl Expr {
             Gamma(u) => Gamma(Box::new(u.substitute_vars(vars, ignore))),
             LnGamma(u) => LnGamma(Box::new(u.substitute_vars(vars, ignore))),
             Digamma(u) => Digamma(Box::new(u.substitute_vars(vars, ignore))),
+            Trigamma(u) => Trigamma(Box::new(u.substitute_vars(vars, ignore))),
             Beta(a, b) => Beta(
                 Box::new(a.substitute_vars(vars, ignore)),
                 Box::new(b.substitute_vars(vars, ignore)),
@@ -786,9 +1099,9 @@ impl Expr {
                     a_val.powf(b_val)
                 }
             }
-            Sin(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).sin(),
-            Cos(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).cos(),
-            Tan(u) => reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).tan(),
+            Sin(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).sin(),
+            Cos(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).cos(),
+            Tan(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).tan(),
             Asin(u) => {
                 let v = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
                 if v.abs() > 1.0 {
@@ -834,33 +1147,21 @@ impl Expr {
             Abs(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).abs(),
             Sinh(u) => {
                 let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.sinh()
-                }
+                safe_sinh(a)
             }
             Cosh(u) => {
                 let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.cosh()
-                }
+                safe_cosh(a)
             }
             Tanh(u) => {
                 let a = u.eval_2d_depth(var1, val1, var2, val2, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.tanh()
-                }
+                safe_tanh(a)
             }
             Floor(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).floor(),
             Ceil(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).ceil(),
             Round(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1).round(),
             Sec(u) => {
-                let c = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).cos();
+                let c = u.eval_2d_depth(var1, val1, var2, val2, depth + 1).cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -868,7 +1169,7 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).sin();
+                let s = u.eval_2d_depth(var1, val1, var2, val2, depth + 1).sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -876,7 +1177,7 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t = reduce_angle(u.eval_2d_depth(var1, val1, var2, val2, depth + 1)).tan();
+                let t = u.eval_2d_depth(var1, val1, var2, val2, depth + 1).tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -908,10 +1209,12 @@ impl Expr {
             Max(a, b) => a
                 .eval_2d_depth(var1, val1, var2, val2, depth + 1)
                 .max(b.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
-            Clamp(x, lo, hi) => x.eval_2d_depth(var1, val1, var2, val2, depth + 1).clamp(
+            Clamp(x, lo, hi) => checked_clamp(
+                x.eval_2d_depth(var1, val1, var2, val2, depth + 1),
                 lo.eval_2d_depth(var1, val1, var2, val2, depth + 1),
                 hi.eval_2d_depth(var1, val1, var2, val2, depth + 1),
-            ),
+            )
+            .unwrap_or(f64::NAN),
             Re(u) => u.eval_2d_depth(var1, val1, var2, val2, depth + 1), // re(x) = x for real
             Im(_) => 0.0,                                                // im(x) = 0 for real
             Arg(u) => {
@@ -945,22 +1248,38 @@ impl Expr {
                 val2,
                 depth + 1,
             )),
+            Trigamma(u) => crate::special_functions::trigamma(u.eval_2d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                depth + 1,
+            )),
             Beta(a, b) => crate::special_functions::beta(
                 a.eval_2d_depth(var1, val1, var2, val2, depth + 1),
                 b.eval_2d_depth(var1, val1, var2, val2, depth + 1),
             ),
-            BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
-                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
-            ),
-            BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
-                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
-            ),
-            BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1)),
-                u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
-            ),
+            BesselJ(n, u) => bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+                .map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_j(
+                        order,
+                        u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+                    )
+                }),
+            BesselY(n, u) => bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+                .map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_y(
+                        order,
+                        u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+                    )
+                }),
+            BesselI(n, u) => bessel_order(n.eval_2d_depth(var1, val1, var2, val2, depth + 1))
+                .map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_i(
+                        order,
+                        u.eval_2d_depth(var1, val1, var2, val2, depth + 1),
+                    )
+                }),
             Sum(_, _, _, _) => f64::NAN, // expanded by preprocess_expr before AST eval
             Product(_, _, _, _) => f64::NAN,
             Piecewise(pieces, default) => {
@@ -1097,15 +1416,15 @@ impl Expr {
             Pow(a, b) => a
                 .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 .powf(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
-            Sin(u) => {
-                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).sin()
-            }
-            Cos(u) => {
-                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).cos()
-            }
-            Tan(u) => {
-                reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).tan()
-            }
+            Sin(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .sin(),
+            Cos(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .cos(),
+            Tan(u) => u
+                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                .tan(),
             Asin(u) => u
                 .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 .asin(),
@@ -1132,27 +1451,15 @@ impl Expr {
                 .abs(),
             Sinh(u) => {
                 let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.sinh()
-                }
+                safe_sinh(a)
             }
             Cosh(u) => {
                 let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.cosh()
-                }
+                safe_cosh(a)
             }
             Tanh(u) => {
                 let a = u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.tanh()
-                }
+                safe_tanh(a)
             }
             Floor(u) => u
                 .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
@@ -1164,9 +1471,9 @@ impl Expr {
                 .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 .round(),
             Sec(u) => {
-                let c =
-                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
-                        .cos();
+                let c = u
+                    .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    .cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1174,9 +1481,9 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s =
-                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
-                        .sin();
+                let s = u
+                    .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    .sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1184,9 +1491,9 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t =
-                    reduce_angle(u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1))
-                        .tan();
+                let t = u
+                    .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
+                    .tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1228,12 +1535,12 @@ impl Expr {
             Max(a, b) => a
                 .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                 .max(b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
-            Clamp(x, lo, hi) => x
-                .eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
-                .clamp(
-                    lo.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
-                    hi.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
-                ),
+            Clamp(x, lo, hi) => checked_clamp(
+                x.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                lo.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                hi.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+            )
+            .unwrap_or(f64::NAN),
             Re(u) => u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1), // re(x) = x for real
             Im(_) => 0.0, // im(x) = 0 for real
             Arg(u) => {
@@ -1289,22 +1596,52 @@ impl Expr {
                 val3,
                 depth + 1,
             )),
+            Trigamma(u) => crate::special_functions::trigamma(u.eval_3d_depth(
+                var1,
+                val1,
+                var2,
+                val2,
+                var3,
+                val3,
+                depth + 1,
+            )),
             Beta(a, b) => crate::special_functions::beta(
                 a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
                 b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
             ),
-            BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
-                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
-            ),
-            BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
-                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
-            ),
-            BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)),
-                u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
-            ),
+            BesselJ(n, u) => {
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).map_or(
+                    f64::NAN,
+                    |order| {
+                        crate::special_functions::bessel_j(
+                            order,
+                            u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                        )
+                    },
+                )
+            }
+            BesselY(n, u) => {
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).map_or(
+                    f64::NAN,
+                    |order| {
+                        crate::special_functions::bessel_y(
+                            order,
+                            u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                        )
+                    },
+                )
+            }
+            BesselI(n, u) => {
+                bessel_order(n.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)).map_or(
+                    f64::NAN,
+                    |order| {
+                        crate::special_functions::bessel_i(
+                            order,
+                            u.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1),
+                        )
+                    },
+                )
+            }
             Lt(a, b) => {
                 if a.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
                     < b.eval_3d_depth(var1, val1, var2, val2, var3, val3, depth + 1)
@@ -1417,9 +1754,9 @@ impl Expr {
                 a.eval_at_depth(var, value, depth + 1)
                     .powf(b.eval_at_depth(var, value, depth + 1))
             }
-            Sin(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).sin(),
-            Cos(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).cos(),
-            Tan(u) => reduce_angle(u.eval_at_depth(var, value, depth + 1)).tan(),
+            Sin(u) => u.eval_at_depth(var, value, depth + 1).sin(),
+            Cos(u) => u.eval_at_depth(var, value, depth + 1).cos(),
+            Tan(u) => u.eval_at_depth(var, value, depth + 1).tan(),
             Asin(u) => u.eval_at_depth(var, value, depth + 1).asin(),
             Acos(u) => u.eval_at_depth(var, value, depth + 1).acos(),
             Atan(u) => u.eval_at_depth(var, value, depth + 1).atan(),
@@ -1430,33 +1767,21 @@ impl Expr {
             Abs(u) => u.eval_at_depth(var, value, depth + 1).abs(),
             Sinh(u) => {
                 let a = u.eval_at_depth(var, value, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.sinh()
-                }
+                safe_sinh(a)
             }
             Cosh(u) => {
                 let a = u.eval_at_depth(var, value, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.cosh()
-                }
+                safe_cosh(a)
             }
             Tanh(u) => {
                 let a = u.eval_at_depth(var, value, depth + 1);
-                if a.abs() > 1e9 {
-                    0.0
-                } else {
-                    a.tanh()
-                }
+                safe_tanh(a)
             }
             Floor(u) => u.eval_at_depth(var, value, depth + 1).floor(),
             Ceil(u) => u.eval_at_depth(var, value, depth + 1).ceil(),
             Round(u) => u.eval_at_depth(var, value, depth + 1).round(),
             Sec(u) => {
-                let c = reduce_angle(u.eval_at_depth(var, value, depth + 1)).cos();
+                let c = u.eval_at_depth(var, value, depth + 1).cos();
                 if c.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1464,7 +1789,7 @@ impl Expr {
                 }
             }
             Csc(u) => {
-                let s = reduce_angle(u.eval_at_depth(var, value, depth + 1)).sin();
+                let s = u.eval_at_depth(var, value, depth + 1).sin();
                 if s.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1472,7 +1797,7 @@ impl Expr {
                 }
             }
             Cot(u) => {
-                let t = reduce_angle(u.eval_at_depth(var, value, depth + 1)).tan();
+                let t = u.eval_at_depth(var, value, depth + 1).tan();
                 if t.abs() < 1e-15 {
                     f64::NAN
                 } else {
@@ -1505,10 +1830,12 @@ impl Expr {
                 a.eval_at_depth(var, value, depth + 1)
                     .max(b.eval_at_depth(var, value, depth + 1))
             }
-            Clamp(x, lo, hi) => x.eval_at_depth(var, value, depth + 1).clamp(
+            Clamp(x, lo, hi) => checked_clamp(
+                x.eval_at_depth(var, value, depth + 1),
                 lo.eval_at_depth(var, value, depth + 1),
                 hi.eval_at_depth(var, value, depth + 1),
-            ),
+            )
+            .unwrap_or(f64::NAN),
             Re(u) => u.eval_at_depth(var, value, depth + 1),
             Im(_) => 0.0,
             Arg(u) => {
@@ -1526,22 +1853,37 @@ impl Expr {
                 crate::special_functions::ln_gamma(u.eval_at_depth(var, value, depth + 1))
             }
             Digamma(u) => crate::special_functions::digamma(u.eval_at_depth(var, value, depth + 1)),
+            Trigamma(u) => {
+                crate::special_functions::trigamma(u.eval_at_depth(var, value, depth + 1))
+            }
             Beta(a, b) => crate::special_functions::beta(
                 a.eval_at_depth(var, value, depth + 1),
                 b.eval_at_depth(var, value, depth + 1),
             ),
-            BesselJ(n, u) => crate::special_functions::bessel_j(
-                bessel_order(n.eval_at_depth(var, value, depth + 1)),
-                u.eval_at_depth(var, value, depth + 1),
-            ),
-            BesselY(n, u) => crate::special_functions::bessel_y(
-                bessel_order(n.eval_at_depth(var, value, depth + 1)),
-                u.eval_at_depth(var, value, depth + 1),
-            ),
-            BesselI(n, u) => crate::special_functions::bessel_i(
-                bessel_order(n.eval_at_depth(var, value, depth + 1)),
-                u.eval_at_depth(var, value, depth + 1),
-            ),
+            BesselJ(n, u) => {
+                bessel_order(n.eval_at_depth(var, value, depth + 1)).map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_j(
+                        order,
+                        u.eval_at_depth(var, value, depth + 1),
+                    )
+                })
+            }
+            BesselY(n, u) => {
+                bessel_order(n.eval_at_depth(var, value, depth + 1)).map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_y(
+                        order,
+                        u.eval_at_depth(var, value, depth + 1),
+                    )
+                })
+            }
+            BesselI(n, u) => {
+                bessel_order(n.eval_at_depth(var, value, depth + 1)).map_or(f64::NAN, |order| {
+                    crate::special_functions::bessel_i(
+                        order,
+                        u.eval_at_depth(var, value, depth + 1),
+                    )
+                })
+            }
             Lt(a, b) => {
                 if a.eval_at_depth(var, value, depth + 1) < b.eval_at_depth(var, value, depth + 1) {
                     1.0
@@ -1645,8 +1987,71 @@ impl Expr {
             Ln(u) => u.eval_dd_depth(vars, depth + 1).ln(),
             Sqrt(u) => u.eval_dd_depth(vars, depth + 1).sqrt(),
             Abs(u) => u.eval_dd_depth(vars, depth + 1).abs(),
+            BesselJ(order, argument) => dd_bessel_order(order.eval_dd_depth(vars, depth + 1))
+                .map_or(DD::from_f64(f64::NAN), |order| {
+                    DD::from_f64(crate::special_functions::bessel_j(
+                        order,
+                        argument.eval_dd_depth(vars, depth + 1).to_f64(),
+                    ))
+                }),
+            BesselY(order, argument) => dd_bessel_order(order.eval_dd_depth(vars, depth + 1))
+                .map_or(DD::from_f64(f64::NAN), |order| {
+                    DD::from_f64(crate::special_functions::bessel_y(
+                        order,
+                        argument.eval_dd_depth(vars, depth + 1).to_f64(),
+                    ))
+                }),
+            BesselI(order, argument) => dd_bessel_order(order.eval_dd_depth(vars, depth + 1))
+                .map_or(DD::from_f64(f64::NAN), |order| {
+                    DD::from_f64(crate::special_functions::bessel_i(
+                        order,
+                        argument.eval_dd_depth(vars, depth + 1).to_f64(),
+                    ))
+                }),
+            Lt(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| left < right,
+            ),
+            Gt(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| left > right,
+            ),
+            Le(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| left <= right,
+            ),
+            Ge(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| left >= right,
+            ),
+            Eq(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| (left - right).abs().to_f64() < 1e-12,
+            ),
+            Ne(left, right) => dd_comparison(
+                left.eval_dd_depth(vars, depth + 1),
+                right.eval_dd_depth(vars, depth + 1),
+                |left, right| (left - right).abs().to_f64() >= 1e-12,
+            ),
+            Piecewise(pieces, default) => {
+                for (condition, value) in pieces {
+                    let condition_value = condition.eval_dd_depth(vars, depth + 1);
+                    if !condition_value.is_finite() {
+                        return DD::from_f64(f64::NAN);
+                    }
+                    if condition_value.to_f64() != 0.0 {
+                        return value.eval_dd_depth(vars, depth + 1);
+                    }
+                }
+                default.eval_dd_depth(vars, depth + 1)
+            }
             other => {
-                // Fallback to f64 evaluation for complex mathematical functions or comparisons
+                // Fallback to f64 evaluation for complex mathematical functions.
                 let val = other.eval_3d_depth("", 0.0, "", 0.0, "", 0.0, depth + 1);
                 DD::from_f64(val)
             }
@@ -1672,7 +2077,7 @@ impl Expr {
             | Log(a) | Sqrt(a) | Abs(a) | Sinh(a) | Cosh(a) | Tanh(a) | Asinh(a) | Acosh(a)
             | Atanh(a) | Sec(a) | Csc(a) | Cot(a) | Floor(a) | Ceil(a) | Round(a) | Sign(a)
             | Heaviside(a) | Cbrt(a) | Re(a) | Im(a) | Arg(a) | Conj(a) | Erf(a) | Erfc(a)
-            | Gamma(a) | LnGamma(a) | Digamma(a) => 1 + a.node_count(),
+            | Gamma(a) | LnGamma(a) | Digamma(a) | Trigamma(a) => 1 + a.node_count(),
             // Binarios
             Add(a, b)
             | Sub(a, b)
@@ -1698,14 +2103,14 @@ impl Expr {
                     if let (Sin(inner1), Const(2.0), Cos(inner2), Const(2.0)) =
                         (base1.as_ref(), exp1.as_ref(), base2.as_ref(), exp2.as_ref())
                     {
-                        if inner1.to_expr_string() == inner2.to_expr_string() {
+                        if inner1.structurally_eq(inner2) && inner1.is_guaranteed_finite() {
                             return Const(1.0);
                         }
                     }
                     if let (Cos(inner1), Const(2.0), Sin(inner2), Const(2.0)) =
                         (base1.as_ref(), exp1.as_ref(), base2.as_ref(), exp2.as_ref())
                     {
-                        if inner1.to_expr_string() == inner2.to_expr_string() {
+                        if inner1.structurally_eq(inner2) && inner1.is_guaranteed_finite() {
                             return Const(1.0);
                         }
                     }
@@ -1776,7 +2181,6 @@ impl Expr {
                 let sb = b.simplify_once();
                 match (&sa, &sb) {
                     (Const(ca), Const(cb)) if cb.abs() > 1e-300 => Const(ca / cb),
-                    (Const(ca), _) if *ca == 0.0 => Const(0.0),
                     (_, Const(cb)) if *cb == 1.0 => sa,
                     _ => Div(Box::new(sa), Box::new(sb)),
                 }
@@ -1785,22 +2189,15 @@ impl Expr {
                 let sa = a.simplify_once();
                 let sb = b.simplify_once();
                 match (&sa, &sb) {
-                    (Const(ca), Const(cb)) => Const(ca.powf(*cb)),
-                    (_, Const(cb)) if *cb == 0.0 => Const(1.0),
+                    (Const(ca), Const(cb)) if *ca != 0.0 || *cb > 0.0 => Const(ca.powf(*cb)),
                     (_, Const(cb)) if *cb == 1.0 => sa,
-                    (Const(ca), _) if *ca == 1.0 => Const(1.0),
-                    (Const(ca), _) if *ca == 0.0 => Const(0.0),
                     _ => Pow(Box::new(sa), Box::new(sb)),
                 }
             }
             Sin(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.sin())
-                    }
+                    Const(c.sin())
                 } else {
                     Sin(Box::new(sa))
                 }
@@ -1808,11 +2205,7 @@ impl Expr {
             Cos(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.cos())
-                    }
+                    Const(c.cos())
                 } else {
                     Cos(Box::new(sa))
                 }
@@ -1820,11 +2213,7 @@ impl Expr {
             Tan(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.tan())
-                    }
+                    Const(c.tan())
                 } else {
                     Tan(Box::new(sa))
                 }
@@ -1896,11 +2285,7 @@ impl Expr {
             Sinh(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.sinh())
-                    }
+                    Const(safe_sinh(c))
                 } else {
                     Sinh(Box::new(sa))
                 }
@@ -1908,11 +2293,7 @@ impl Expr {
             Cosh(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.cosh())
-                    }
+                    Const(safe_cosh(c))
                 } else {
                     Cosh(Box::new(sa))
                 }
@@ -1920,11 +2301,7 @@ impl Expr {
             Tanh(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(c.tanh())
-                    }
+                    Const(safe_tanh(c))
                 } else {
                     Tanh(Box::new(sa))
                 }
@@ -1956,11 +2333,7 @@ impl Expr {
             Sec(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(1.0 / c.cos())
-                    }
+                    Const(1.0 / c.cos())
                 } else {
                     Sec(Box::new(sa))
                 }
@@ -1968,11 +2341,7 @@ impl Expr {
             Csc(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(1.0 / c.sin())
-                    }
+                    Const(1.0 / c.sin())
                 } else {
                     Csc(Box::new(sa))
                 }
@@ -1980,11 +2349,7 @@ impl Expr {
             Cot(a) => {
                 let sa = a.simplify_once();
                 if let Const(c) = sa {
-                    if c.abs() > 1e9 {
-                        Const(0.0)
-                    } else {
-                        Const(1.0 / c.tan())
-                    }
+                    Const(1.0 / c.tan())
                 } else {
                     Cot(Box::new(sa))
                 }
@@ -2074,7 +2439,9 @@ impl Expr {
                 let sl = lo.simplify_once();
                 let sh = hi.simplify_once();
                 match (&sx, &sl, &sh) {
-                    (Const(cx), Const(cl), Const(ch)) => Const(cx.clamp(*cl, *ch)),
+                    (Const(cx), Const(cl), Const(ch)) => checked_clamp(*cx, *cl, *ch)
+                        .map(Const)
+                        .unwrap_or_else(|| Clamp(Box::new(sx), Box::new(sl), Box::new(sh))),
                     _ => Clamp(Box::new(sx), Box::new(sl), Box::new(sh)),
                 }
             }
@@ -2143,6 +2510,14 @@ impl Expr {
                     Digamma(Box::new(sa))
                 }
             }
+            Trigamma(a) => {
+                let sa = a.simplify_once();
+                if let Const(c) = sa {
+                    Const(crate::special_functions::trigamma(c))
+                } else {
+                    Trigamma(Box::new(sa))
+                }
+            }
             Beta(a, b) => {
                 let sa = a.simplify_once();
                 let sb = b.simplify_once();
@@ -2155,9 +2530,9 @@ impl Expr {
                 let sn = n.simplify_once();
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
-                    (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_j(bessel_order(*cn), *ca))
-                    }
+                    (Const(cn), Const(ca)) => Const(bessel_order(*cn).map_or(f64::NAN, |order| {
+                        crate::special_functions::bessel_j(order, *ca)
+                    })),
                     _ => BesselJ(Box::new(sn), Box::new(sa)),
                 }
             }
@@ -2165,9 +2540,9 @@ impl Expr {
                 let sn = n.simplify_once();
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
-                    (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_y(bessel_order(*cn), *ca))
-                    }
+                    (Const(cn), Const(ca)) => Const(bessel_order(*cn).map_or(f64::NAN, |order| {
+                        crate::special_functions::bessel_y(order, *ca)
+                    })),
                     _ => BesselY(Box::new(sn), Box::new(sa)),
                 }
             }
@@ -2175,9 +2550,9 @@ impl Expr {
                 let sn = n.simplify_once();
                 let sa = a.simplify_once();
                 match (&sn, &sa) {
-                    (Const(cn), Const(ca)) => {
-                        Const(crate::special_functions::bessel_i(bessel_order(*cn), *ca))
-                    }
+                    (Const(cn), Const(ca)) => Const(bessel_order(*cn).map_or(f64::NAN, |order| {
+                        crate::special_functions::bessel_i(order, *ca)
+                    })),
                     _ => BesselI(Box::new(sn), Box::new(sa)),
                 }
             }
@@ -2218,14 +2593,12 @@ impl Expr {
         use Expr::*;
         match self {
             Const(c) => {
-                // Show as integer if possible
-                if (c.fract()).abs() < 1e-10 && c.abs() < 1e15 {
-                    format!("{}", *c as i64)
+                if *c == 0.0 && c.is_sign_negative() {
+                    "-0.0".to_string()
+                } else if c.is_finite() && c.fract() == 0.0 && c.abs() < 1e15 {
+                    format!("{c:.0}")
                 } else {
-                    format!("{:.6}", c)
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string()
+                    format!("{c:?}")
                 }
             }
             Var(v) => v.clone(),
@@ -2233,7 +2606,7 @@ impl Expr {
             Add(a, b) => format!(
                 "{} + {}",
                 a.to_expr_string_paren(1),
-                b.to_expr_string_paren(1)
+                b.to_expr_string_paren(2)
             ),
             Sub(a, b) => format!(
                 "{} - {}",
@@ -2252,38 +2625,38 @@ impl Expr {
             ),
             Pow(a, b) => format!(
                 "{} ^ {}",
-                a.to_expr_string_paren(3),
+                a.to_expr_string_paren(5),
                 b.to_expr_string_paren(4)
             ),
             Lt(a, b) => format!(
                 "{} < {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Gt(a, b) => format!(
                 "{} > {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Le(a, b) => format!(
                 "{} <= {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Ge(a, b) => format!(
                 "{} >= {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Eq(a, b) => format!(
                 "{} == {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Ne(a, b) => format!(
                 "{} != {}",
                 a.to_expr_string_paren(0),
-                b.to_expr_string_paren(0)
+                b.to_expr_string_paren(1)
             ),
             Sin(u) => format!("sin({})", u.to_expr_string()),
             Cos(u) => format!("cos({})", u.to_expr_string()),
@@ -2330,6 +2703,7 @@ impl Expr {
             Gamma(u) => format!("gamma({})", u.to_expr_string()),
             LnGamma(u) => format!("lngamma({})", u.to_expr_string()),
             Digamma(u) => format!("digamma({})", u.to_expr_string()),
+            Trigamma(u) => format!("trigamma({})", u.to_expr_string()),
             Beta(a, b) => format!("beta({}, {})", a.to_expr_string(), b.to_expr_string()),
             BesselJ(n, u) => format!("besselj({}, {})", n.to_expr_string(), u.to_expr_string()),
             BesselY(n, u) => format!("bessely({}, {})", n.to_expr_string(), u.to_expr_string()),
@@ -2349,19 +2723,13 @@ impl Expr {
                 end.to_expr_string()
             ),
             Piecewise(pieces, default) => {
-                let mut s = "piecewise(".to_string();
-                for (i, (cond, val)) in pieces.iter().enumerate() {
-                    if i > 0 {
-                        s.push_str(", ");
-                    }
-                    s.push_str(&format!(
-                        "{} if {}",
-                        val.to_expr_string(),
-                        cond.to_expr_string()
-                    ));
+                let mut args = Vec::with_capacity(pieces.len() * 2 + 1);
+                for (cond, val) in pieces {
+                    args.push(cond.to_expr_string());
+                    args.push(val.to_expr_string());
                 }
-                s.push_str(&format!(", {})", default.to_expr_string()));
-                s
+                args.push(default.to_expr_string());
+                format!("piecewise({})", args.join(", "))
             }
         }
     }
@@ -2370,6 +2738,7 @@ impl Expr {
     fn to_expr_string_paren(&self, min_prec: u8) -> String {
         use Expr::*;
         let prec = match self {
+            Const(c) if c.is_sign_negative() => 3u8,
             Const(_) | Var(_) => 10u8,
             Sin(_)
             | Cos(_)
@@ -2406,6 +2775,7 @@ impl Expr {
             | Gamma(_)
             | LnGamma(_)
             | Digamma(_)
+            | Trigamma(_)
             | Atan2(_, _)
             | Modulo(_, _)
             | Min(_, _)
@@ -2433,6 +2803,9 @@ impl Expr {
 
     pub fn integrate(&self, var: &str) -> Option<Expr> {
         use Expr::*;
+        if !self.contains_var(var) {
+            return Some(Mul(Box::new(self.clone()), Box::new(Var(var.to_string()))));
+        }
         Some(
             match self {
                 Const(c) => {
@@ -2559,7 +2932,11 @@ impl Expr {
                     }
                     if arg.is_linear_in(var) {
                         let (a, _) = arg.linear_coeff(var);
-                        Mul(Box::new(Const(-1.0 / a)), Box::new(Cos(arg.clone())))
+                        if a.abs() > 1e-12 {
+                            Mul(Box::new(Const(-1.0 / a)), Box::new(Cos(arg.clone())))
+                        } else {
+                            return None;
+                        }
                     } else {
                         integrate_parts(self, var)?
                     }
@@ -2577,7 +2954,11 @@ impl Expr {
                     }
                     if arg.is_linear_in(var) {
                         let (a, _) = arg.linear_coeff(var);
-                        Mul(Box::new(Const(1.0 / a)), Box::new(Sin(arg.clone())))
+                        if a.abs() > 1e-12 {
+                            Mul(Box::new(Const(1.0 / a)), Box::new(Sin(arg.clone())))
+                        } else {
+                            return None;
+                        }
                     } else {
                         integrate_parts(self, var)?
                     }
@@ -2585,10 +2966,14 @@ impl Expr {
                 Tan(arg) => {
                     if arg.is_linear_in(var) {
                         let (a, _) = arg.linear_coeff(var);
-                        Mul(
-                            Box::new(Const(-1.0 / a)),
-                            Box::new(Ln(Box::new(Abs(Box::new(Cos(arg.clone())))))),
-                        )
+                        if a.abs() > 1e-12 {
+                            Mul(
+                                Box::new(Const(-1.0 / a)),
+                                Box::new(Ln(Box::new(Abs(Box::new(Cos(arg.clone())))))),
+                            )
+                        } else {
+                            return None;
+                        }
                     } else {
                         integrate_parts(self, var)?
                     }
@@ -2601,7 +2986,9 @@ impl Expr {
                     }
                     if arg.is_linear_in(var) {
                         let (a, _) = arg.linear_coeff(var);
-                        if (a - 1.0).abs() < 1e-12 {
+                        if a.abs() < 1e-12 {
+                            return None;
+                        } else if (a - 1.0).abs() < 1e-12 {
                             Exp(arg.clone())
                         } else {
                             Mul(Box::new(Const(1.0 / a)), Box::new(Exp(arg.clone())))
@@ -2639,7 +3026,7 @@ impl Expr {
             | Log(a) | Sqrt(a) | Abs(a) | Sinh(a) | Cosh(a) | Tanh(a) | Asinh(a) | Acosh(a)
             | Atanh(a) | Sec(a) | Csc(a) | Cot(a) | Floor(a) | Ceil(a) | Round(a) | Sign(a)
             | Heaviside(a) | Cbrt(a) | Re(a) | Im(a) | Arg(a) | Conj(a) | Erf(a) | Erfc(a)
-            | Gamma(a) | LnGamma(a) | Digamma(a) => a.contains_var(var),
+            | Gamma(a) | LnGamma(a) | Digamma(a) | Trigamma(a) => a.contains_var(var),
             Add(a, b)
             | Sub(a, b)
             | Mul(a, b)
@@ -2791,16 +3178,47 @@ impl fmt::Display for Expr {
 // ============================================================
 
 const MAX_AST_DEPTH: usize = 256;
+const MAX_AST_INPUT_BYTES: usize = 65_536;
+const MAX_AST_TOKENS: usize = 4_096;
 
 pub fn parse_ast(expr: &str) -> Result<Expr, String> {
+    if expr.len() > MAX_AST_INPUT_BYTES {
+        return Err(format!(
+            "Expression exceeds maximum {MAX_AST_INPUT_BYTES} bytes"
+        ));
+    }
+    validate_source_characters(expr)?;
+    validate_numeric_literals(expr)?;
     // Preprocess: replace common math notations
     let expr = preprocess(expr);
-    let mut tokens = tokenize(&expr);
+    let mut tokens = tokenize(&expr)?;
+    if tokens.len() > MAX_AST_TOKENS {
+        return Err(format!(
+            "Expression exceeds maximum {MAX_AST_TOKENS} tokens"
+        ));
+    }
     let result = parse_cmp(&mut tokens, 0)?;
     if !tokens.is_empty() {
         return Err(format!("Unexpected tokens remaining: {:?}", tokens));
     }
     Ok(result)
+}
+
+fn validate_source_characters(expr: &str) -> Result<(), String> {
+    for (byte_offset, c) in expr.char_indices() {
+        if c.is_whitespace()
+            || c.is_alphanumeric()
+            || c == '_'
+            || c == '.'
+            || "+-*/^(),<>=!".contains(c)
+        {
+            continue;
+        }
+        return Err(format!(
+            "Unexpected character '{c}' at byte offset {byte_offset}"
+        ));
+    }
+    Ok(())
 }
 
 fn check_depth(depth: usize) -> Result<(), String> {
@@ -2817,9 +3235,8 @@ fn preprocess(expr: &str) -> String {
     let expr = expr.replace("π", "3.141592653589793");
     let expr = replace_standalone(&expr, "pi", "3.141592653589793");
     let expr = replace_standalone(&expr, "tau", "6.283185307179586");
-    let expr = replace_standalone(&expr, "e", "2.718281828459045");
     // Handle implicit multiplication: 2x -> 2*x, x2 -> x^2? No, keep simple
-    expr
+    replace_standalone(&expr, "e", "2.718281828459045")
 }
 
 /// Replace `pattern` with `replacement` only when it's a standalone token
@@ -2848,7 +3265,8 @@ fn replace_standalone(expr: &str, pattern: &str, replacement: &str) -> String {
                 .map(|c| c.is_alphanumeric() || c == '_')
                 .unwrap_or(false);
 
-            if !prev_is_ident && !next_is_ident {
+            let numeric_exponent = pattern == "e" && is_scientific_exponent_at(expr, byte_offset);
+            if !numeric_exponent && !prev_is_ident && !next_is_ident {
                 result.push_str(replacement);
                 let pattern_char_count = pattern.chars().count();
                 // Skip remaining pattern chars (first char was already consumed by outer loop)
@@ -2872,51 +3290,60 @@ fn replace_standalone(expr: &str, pattern: &str, replacement: &str) -> String {
     result
 }
 
-fn tokenize(expr: &str) -> Vec<String> {
+fn is_scientific_exponent_at(expr: &str, offset: usize) -> bool {
+    let bytes = expr.as_bytes();
+    if bytes.get(offset) != Some(&b'e') {
+        return false;
+    }
+    let follows_mantissa = bytes
+        .get(offset.wrapping_sub(1))
+        .is_some_and(u8::is_ascii_digit)
+        || (bytes.get(offset.wrapping_sub(1)) == Some(&b'.')
+            && bytes
+                .get(offset.wrapping_sub(2))
+                .is_some_and(u8::is_ascii_digit));
+    if !follows_mantissa {
+        return false;
+    }
+    let mut digit_offset = offset + 1;
+    if matches!(bytes.get(digit_offset), Some(b'+' | b'-')) {
+        digit_offset += 1;
+    }
+    bytes.get(digit_offset).is_some_and(u8::is_ascii_digit)
+}
+
+fn tokenize(expr: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
-    let mut current = String::new();
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         if c.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push(current.clone());
-                current.clear();
-            }
             i += 1;
             continue;
         }
         if "+-*/^(),<>=!".contains(c) {
-            if !current.is_empty() {
-                tokens.push(current.clone());
-                current.clear();
-            }
             tokens.push(c.to_string());
             i += 1;
+        } else if c.is_ascii_digit()
+            || (c == '.' && chars.get(i + 1).is_some_and(|next| next.is_ascii_digit()))
+        {
+            let end = scan_numeric_literal(&chars, i)?;
+            tokens.push(chars[i..end].iter().collect());
+            i = end;
         } else if c.is_alphabetic() || c == '_' {
-            // If we're mid-number (pure digits), push number first
-            if !current.is_empty() && !current.chars().any(|ch| ch.is_alphabetic() || ch == '_') {
-                tokens.push(current.clone());
-                current.clear();
+            let start = i;
+            i += 1;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
             }
-            current.push(c);
-            i += 1;
-        } else if c.is_numeric() || c == '.' {
-            // If we're mid-identifier (contains letters), stay in same token
-            // Only break if current is empty or we're not in an identifier
-            current.push(c);
-            i += 1;
+            tokens.push(chars[start..i].iter().collect());
         } else {
-            if !current.is_empty() {
-                tokens.push(current.clone());
-                current.clear();
-            }
-            i += 1;
+            let byte_offset = char_byte_offset(&chars, i);
+            return Err(format!(
+                "Unexpected character '{c}' at byte offset {byte_offset}"
+            ));
         }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
     }
     // Combine two-character operators: <=, >=, ==, !=
     // Also discard standalone "=" tokens (assignment, not a valid expression operator).
@@ -2940,7 +3367,87 @@ fn tokenize(expr: &str) -> Vec<String> {
         }
         j += 1;
     }
-    combined
+    Ok(combined)
+}
+
+fn char_byte_offset(chars: &[char], index: usize) -> usize {
+    chars[..index].iter().map(|ch| ch.len_utf8()).sum()
+}
+
+pub(crate) fn validate_numeric_literals(expr: &str) -> Result<(), String> {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character.is_ascii_digit()
+            || (character == '.'
+                && chars
+                    .get(index + 1)
+                    .is_some_and(|next| next.is_ascii_digit()))
+        {
+            let end = scan_numeric_literal(&chars, index)?;
+            let literal: String = chars[index..end].iter().collect();
+            parse_numeric_literal(&literal)?;
+            index = end;
+        } else if character.is_alphabetic() || character == '_' {
+            index += 1;
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn parse_numeric_literal(literal: &str) -> Result<f64, String> {
+    let value = literal
+        .parse::<f64>()
+        .map_err(|_| format!("Invalid numeric literal: '{literal}'"))?;
+    if !value.is_finite() {
+        return Err(format!("Numeric literal is not finite: '{literal}'"));
+    }
+    let significand = literal.split(['e', 'E']).next().unwrap_or(literal);
+    if value == 0.0 && significand.chars().any(|c| matches!(c, '1'..='9')) {
+        return Err(format!("Numeric literal underflows f64: '{literal}'"));
+    }
+    Ok(value)
+}
+
+fn scan_numeric_literal(chars: &[char], start: usize) -> Result<usize, String> {
+    let mut end = start;
+    while end < chars.len() && chars[end].is_ascii_digit() {
+        end += 1;
+    }
+    if end < chars.len() && chars[end] == '.' {
+        end += 1;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+    }
+    if end < chars.len() && matches!(chars[end], 'e' | 'E') {
+        let exponent_offset = end;
+        let mut exponent_end = end + 1;
+        let has_sign = exponent_end < chars.len() && matches!(chars[exponent_end], '+' | '-');
+        if has_sign {
+            exponent_end += 1;
+        }
+        let exponent_start = exponent_end;
+        while exponent_end < chars.len() && chars[exponent_end].is_ascii_digit() {
+            exponent_end += 1;
+        }
+        if exponent_end == exponent_start && has_sign && exponent_end == chars.len() {
+            return Err(format!(
+                "Invalid numeric exponent at byte offset {}",
+                char_byte_offset(chars, exponent_offset)
+            ));
+        }
+        if exponent_end > exponent_start {
+            end = exponent_end;
+        }
+    }
+    Ok(end)
 }
 
 fn parse_cmp(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
@@ -3030,6 +3537,25 @@ fn parse_pow(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
     Ok(base)
 }
 
+fn exact_function_arity(name: &str) -> Option<usize> {
+    match name {
+        "sin" | "cos" | "tan" | "asin" | "arcsin" | "acos" | "arccos" | "atan" | "arctan"
+        | "sinh" | "cosh" | "tanh" | "asinh" | "arcsinh" | "acosh" | "arccosh" | "atanh"
+        | "arctanh" | "sec" | "csc" | "cosec" | "cot" | "cotan" | "asec" | "arcsec" | "acsc"
+        | "arccsc" | "acot" | "arccot" | "exp" | "ln" | "log" | "log10" | "log2" | "sqrt"
+        | "cbrt" | "abs" | "sign" | "signum" | "heaviside" | "step" | "floor" | "ceil"
+        | "ceiling" | "round" | "re" | "real" | "im" | "imag" | "imaginary" | "arg"
+        | "argument" | "phase" | "conj" | "conjugate" | "erf" | "erfc" | "gamma" | "lngamma"
+        | "lgamma" | "digamma" | "trigamma" => Some(1),
+        "atan2" | "mod" | "modulo" | "min" | "max" | "beta" | "besselj" | "bessely" | "besseli" => {
+            Some(2)
+        }
+        "clamp" => Some(3),
+        "sum" | "product" | "prod" => Some(4),
+        _ => None,
+    }
+}
+
 fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String> {
     if tokens.is_empty() {
         return Err("Unexpected end of expression".into());
@@ -3045,8 +3571,15 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
         return Ok(inner);
     }
     // Numeric constant
-    if let Ok(val) = token.parse::<f64>() {
-        return Ok(Expr::Const(val));
+    if token
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '.')
+    {
+        return parse_numeric_literal(&token).map(Expr::Const);
+    }
+    if let Ok(value) = token.parse::<f64>() {
+        return Ok(Expr::Const(value));
     }
     // Named constant or function or variable
     if token.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -3065,7 +3598,16 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
                 ));
             }
             tokens.remove(0);
-            return Ok(match token.to_lowercase().as_str() {
+            let function_name = token.to_lowercase();
+            if let Some(expected) = exact_function_arity(&function_name) {
+                if args.len() != expected {
+                    return Err(format!(
+                        "{token} requires exactly {expected} arguments, got {}",
+                        args.len()
+                    ));
+                }
+            }
+            return Ok(match function_name.as_str() {
                 // Trig
                 "sin" => Expr::Sin(Box::new(args.remove(0))),
                 "cos" => Expr::Cos(Box::new(args.remove(0))),
@@ -3162,6 +3704,7 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
                 "gamma" => Expr::Gamma(Box::new(args.remove(0))),
                 "lngamma" | "lgamma" => Expr::LnGamma(Box::new(args.remove(0))),
                 "digamma" => Expr::Digamma(Box::new(args.remove(0))),
+                "trigamma" => Expr::Trigamma(Box::new(args.remove(0))),
                 // Special functions (2-arg)
                 "beta" => {
                     if args.len() < 2 {
@@ -3253,6 +3796,9 @@ fn parse_primary(tokens: &mut Vec<String>, depth: usize) -> Result<Expr, String>
 // Calculus Helpers: Numerical integration, limits
 // ============================================================
 
+/// Máxima profundidad de partición para la integración adaptativa pública.
+pub const MAX_ADAPTIVE_INTEGRATION_DEPTH: u32 = 12;
+
 /// Numerical definite integral using adaptive Gauss-Legendre 5-point quadrature.
 pub fn integrate_numeric(expr: &str, var: &str, a: f64, b: f64) -> f64 {
     // Gauss-Legendre 5-point nodes and weights on [-1,1]
@@ -3286,12 +3832,16 @@ pub fn integrate_numeric(expr: &str, var: &str, a: f64, b: f64) -> f64 {
 
 /// Adaptive integration: subdivide interval for better precision.
 pub fn integrate_adaptive(expr: &str, var: &str, a: f64, b: f64, depth: u32) -> f64 {
-    if depth == 0 {
-        return integrate_numeric(expr, var, a, b);
+    let subdivisions = 1usize << depth.min(MAX_ADAPTIVE_INTEGRATION_DEPTH);
+    let width = (b - a) / subdivisions as f64;
+    let mut result = 0.0;
+
+    for index in 0..subdivisions {
+        let start = a + index as f64 * width;
+        result += integrate_numeric(expr, var, start, start + width);
     }
-    let mid = (a + b) / 2.0;
-    integrate_adaptive(expr, var, a, mid, depth - 1)
-        + integrate_adaptive(expr, var, mid, b, depth - 1)
+
+    result
 }
 
 /// Compute limit numerically by approaching from left and right.
@@ -3380,6 +3930,12 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_integration_caps_untrusted_subdivision_depth() {
+        let result = integrate_adaptive("sin(x)", "x", 0.0, std::f64::consts::PI, u32::MAX);
+        assert!((result - 2.0).abs() < 1e-6, "Expected 2, got {result}");
+    }
+
+    #[test]
     fn test_limit_sinc() {
         // lim x->0 sin(x)/x = 1
         let result = compute_limit("sin(x)/x", "x", 0.0);
@@ -3432,6 +3988,28 @@ mod tests {
     }
 
     #[test]
+    fn ast_integration_keeps_variable_independent_expressions_finite() {
+        let y_squared = parse_ast("y^2").unwrap().integrate("x").unwrap();
+        assert!(y_squared.to_expr_string().contains("y ^ 2"));
+        assert!(y_squared.to_expr_string().contains('x'));
+
+        let sine_constant = parse_ast("sin(y)").unwrap().integrate("x").unwrap();
+        assert!(!sine_constant.to_expr_string().contains("inf"));
+    }
+
+    #[test]
+    fn ast_simplification_preserves_possible_domain_failures() {
+        assert_eq!(
+            parse_ast("0/x").unwrap().simplify().to_expr_string(),
+            "0 / x"
+        );
+        assert_eq!(
+            parse_ast("x^0").unwrap().simplify().to_expr_string(),
+            "x ^ 0"
+        );
+    }
+
+    #[test]
     fn test_trig_simplify_pythagorean() {
         let expr = parse_ast("sin(x)^2 + cos(x)^2").unwrap();
         let simplified = expr.simplify();
@@ -3467,6 +4045,132 @@ mod tests {
     }
 
     #[test]
+    fn bessel_ast_rejects_invalid_orders_instead_of_evaluating_order_zero() {
+        for expression in [
+            "besselj(0/0, 1)",
+            "bessely(1.5, 1)",
+            "besseli(1/0, 1)",
+            "besselj(1001, 1)",
+            "bessely(-2147483648, 1)",
+        ] {
+            let value = parse_ast(expression).unwrap().eval_at("x", 0.0);
+            assert!(value.is_nan(), "{expression} evaluated to {value}");
+        }
+
+        let valid = parse_ast("besselj(2, x)").unwrap().eval_at("x", 1.0);
+        assert_eq!(valid, crate::special_functions::bessel_j(2, 1.0));
+    }
+
+    #[test]
+    fn hyperbolic_functions_have_correct_large_argument_limits() {
+        let tanh_expr = parse_ast("tanh(x)").unwrap();
+        assert_eq!(tanh_expr.eval_at("x", 1.0e10), 1.0);
+        assert_eq!(tanh_expr.eval_at("x", -1.0e10), -1.0);
+
+        let sinh_expr = parse_ast("sinh(x)").unwrap();
+        assert!(sinh_expr.eval_at("x", 1.0e10).is_infinite());
+        assert!(sinh_expr.eval_at("x", -1.0e10).is_infinite());
+        assert!(sinh_expr.eval_at("x", -1.0e10).is_sign_negative());
+
+        let cosh_expr = parse_ast("cosh(x)").unwrap();
+        assert!(cosh_expr.eval_at("x", 1.0e10).is_infinite());
+        assert!(cosh_expr.eval_at("x", -1.0e10).is_infinite());
+        assert!(cosh_expr.eval_at("x", -1.0e10).is_sign_positive());
+    }
+
+    #[test]
+    fn transcendental_evaluation_keeps_libm_accuracy_and_finite_boundary_values() {
+        let angle: f64 = 1.0e20;
+        for (source, expected) in [
+            ("sin(x)", angle.sin()),
+            ("cos(x)", angle.cos()),
+            ("tan(x)", angle.tan()),
+        ] {
+            let actual = parse_ast(source).unwrap().eval_at("x", angle);
+            assert_eq!(actual.to_bits(), expected.to_bits(), "{source}");
+        }
+
+        let finite_boundary = 710.1;
+        assert!(parse_ast("sinh(x)")
+            .unwrap()
+            .eval_at("x", finite_boundary)
+            .is_finite());
+        assert!(parse_ast("cosh(x)")
+            .unwrap()
+            .eval_at("x", finite_boundary)
+            .is_finite());
+    }
+
+    #[test]
+    fn simplification_preserves_large_constant_function_values() {
+        for expr in [
+            Expr::Sin(Box::new(Expr::Const(1.0e10))),
+            Expr::Cos(Box::new(Expr::Const(1.0e10))),
+            Expr::Tan(Box::new(Expr::Const(1.0e10))),
+        ] {
+            let expected = expr.eval_at("x", 0.0);
+            let actual = expr.simplify().eval_at("x", 0.0);
+            assert!((actual - expected).abs() < 1.0e-6, "{expr:?}");
+        }
+
+        assert!(Expr::Sinh(Box::new(Expr::Const(1.0e10)))
+            .simplify()
+            .eval_at("x", 0.0)
+            .is_infinite());
+        assert_eq!(
+            Expr::Tanh(Box::new(Expr::Const(-1.0e10)))
+                .simplify()
+                .eval_at("x", 0.0),
+            -1.0
+        );
+    }
+
+    #[test]
+    fn min_max_and_clamp_derivatives_select_the_active_branch() {
+        let min = Expr::Min(Box::new(Expr::Var("x".into())), Box::new(Expr::Const(0.0)))
+            .diff("x")
+            .simplify();
+        assert_eq!(min.eval_at("x", -1.0), 1.0);
+        assert_eq!(min.eval_at("x", 1.0), 0.0);
+
+        let max = Expr::Max(Box::new(Expr::Var("x".into())), Box::new(Expr::Const(0.0)))
+            .diff("x")
+            .simplify();
+        assert_eq!(max.eval_at("x", -1.0), 0.0);
+        assert_eq!(max.eval_at("x", 1.0), 1.0);
+
+        let clamp = Expr::Clamp(
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::Const(0.0)),
+            Box::new(Expr::Const(1.0)),
+        )
+        .diff("x")
+        .simplify();
+        assert_eq!(clamp.eval_at("x", -1.0), 0.0);
+        assert_eq!(clamp.eval_at("x", 0.5), 1.0);
+        assert_eq!(clamp.eval_at("x", 2.0), 0.0);
+    }
+
+    #[test]
+    fn trigamma_parses_prints_evaluates_and_differentiates_digamma() {
+        let trigamma = parse_ast("trigamma(x)").unwrap().simplify();
+        assert_eq!(trigamma.to_expr_string(), "trigamma(x)");
+        assert!((trigamma.eval_at("x", 1.0) - std::f64::consts::PI.powi(2) / 6.0).abs() < 1e-12);
+
+        let derivative = parse_ast("digamma(x)").unwrap().diff("x").simplify();
+        assert!((derivative.eval_at("x", 1.0) - std::f64::consts::PI.powi(2) / 6.0).abs() < 1e-12);
+
+        let chain_rule = parse_ast("digamma(x^2)").unwrap().diff("x").simplify();
+        assert!((chain_rule.eval_at("x", 1.0) - std::f64::consts::PI.powi(2) / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parse_ast_rejects_excessive_input_before_tokenizing() {
+        let expression = "x".repeat(MAX_AST_INPUT_BYTES + 1);
+        assert!(parse_ast(&expression).is_err());
+    }
+
+    #[test]
     fn test_piecewise_with_comparisons() {
         let pw = parse_ast("piecewise(x<0, x^2, x>=0, sqrt(x))").unwrap();
         assert!((pw.eval_at("x", -1.0) - 1.0).abs() < 1e-9);
@@ -3479,9 +4183,9 @@ mod tests {
     fn test_standalone_eq_discarded() {
         // Verify that standalone "=" is discarded during tokenization
         // and == is correctly combined
-        let t1 = tokenize("x = 5");
-        let t2 = tokenize("x == 5");
-        let t3 = tokenize("x <= 5");
+        let t1 = tokenize("x = 5").unwrap();
+        let t2 = tokenize("x == 5").unwrap();
+        let t3 = tokenize("x <= 5").unwrap();
         // Standalone = should be filtered out: ["x", "5"]
         assert_eq!(t1, vec!["x", "5"], "standalone = should be discarded");
         // == should be combined: ["x", "==", "5"]

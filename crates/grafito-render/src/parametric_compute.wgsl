@@ -106,7 +106,7 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
 
     let len = params.code_len;
     for (var pc: u32 = 0u; pc < len; pc = pc + 1u) {
-        if sp < 0 || sp >= STACK_SIZE {
+        if sp < 0 || sp > STACK_SIZE {
             var zero = 0.0;
             return EvalResult(zero / zero, zero / zero, zero / zero);
         }
@@ -116,10 +116,18 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
 
         switch op {
             case OP_PUSH_CONST: {
+                if sp >= STACK_SIZE {
+                    var zero = 0.0;
+                    return EvalResult(zero / zero, zero / zero, zero / zero);
+                }
                 stack[sp] = constants[operand];
                 sp = sp + 1;
             }
             case OP_PUSH_VAR: {
+                if sp >= STACK_SIZE {
+                    var zero = 0.0;
+                    return EvalResult(zero / zero, zero / zero, zero / zero);
+                }
                 if operand == 0u {
                     stack[sp] = x_in;
                 } else {
@@ -145,7 +153,7 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
             case OP_DIV: {
                 sp = sp - 2;
                 let denom = stack[sp + 1];
-                if abs(denom) > 1e-10 {
+                if denom != 0.0 {
                     stack[sp] = stack[sp] / denom;
                 } else {
                     var zero = 0.0;
@@ -247,23 +255,31 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
                 sp = sp + 1;
             }
             case OP_PI: {
+                if sp >= STACK_SIZE {
+                    var zero = 0.0;
+                    return EvalResult(zero / zero, zero / zero, zero / zero);
+                }
                 stack[sp] = 3.14159265358979323846;
                 sp = sp + 1;
             }
             case OP_E: {
+                if sp >= STACK_SIZE {
+                    var zero = 0.0;
+                    return EvalResult(zero / zero, zero / zero, zero / zero);
+                }
                 stack[sp] = 2.71828182845904523536;
                 sp = sp + 1;
             }
             case OP_ASIN: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(asin(clamp(v, -1.0, 1.0)), asin(v), abs(v) <= 1.0);
+                if abs(v) > 1.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = asin(v); }
                 sp = sp + 1;
             }
             case OP_ACOS: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(acos(clamp(v, -1.0, 1.0)), acos(v), abs(v) <= 1.0);
+                if abs(v) > 1.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = acos(v); }
                 sp = sp + 1;
             }
             case OP_ATAN: {
@@ -294,13 +310,13 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
             case OP_ACOSH: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(acosh(max(v, 1.0)), acosh(v), v >= 1.0);
+                if v < 1.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = acosh(v); }
                 sp = sp + 1;
             }
             case OP_ATANH: {
                 sp = sp - 1;
                 let v = stack[sp];
-                stack[sp] = select(atanh(clamp(v, -0.99999994, 0.99999994)), atanh(v), abs(v) < 1.0);
+                if abs(v) > 1.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = atanh(v); }
                 sp = sp + 1;
             }
             case OP_SEC: {
@@ -345,12 +361,13 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
             case OP_MOD: {
                 sp = sp - 2;
                 let b = stack[sp + 1];
-                if abs(b) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = stack[sp] - b * floor(stack[sp] / b); }
+                if b == 0.0 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = stack[sp] % b; }
                 sp = sp + 1;
             }
             case OP_ROUND: {
                 sp = sp - 1;
-                stack[sp] = floor(stack[sp] + 0.5);
+                let v = stack[sp];
+                stack[sp] = select(ceil(v - 0.5), floor(v + 0.5), v >= 0.0);
                 sp = sp + 1;
             }
             case OP_LOG10: {
@@ -417,14 +434,25 @@ fn eval_bytecode(x_in: f32, y_in: f32) -> EvalResult {
     }
 
     var res = EvalResult(0.0, 0.0, 0.0);
-    if sp > 0 {
+    if params.mode == 0u {
+        if sp > 0 {
+            res.v1 = stack[sp - 1];
+        }
+        if sp > 1 {
+            res.v0 = stack[sp - 2];
+        }
+    } else if params.mode == 1u {
+        if sp > 0 {
+            res.v2 = stack[sp - 1];
+        }
+        if sp > 1 {
+            res.v1 = stack[sp - 2];
+        }
+        if sp > 2 {
+            res.v0 = stack[sp - 3];
+        }
+    } else if sp > 0 {
         res.v2 = stack[sp - 1];
-    }
-    if sp > 1 {
-        res.v1 = stack[sp - 2];
-    }
-    if sp > 2 {
-        res.v0 = stack[sp - 3];
     }
     return res;
 }

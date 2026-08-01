@@ -81,5 +81,19 @@ fn test_create_explicit_implicit_curve_via_command() {
             None
         }
     });
-    assert!(ic.is_some());
+    let ic = ic.expect("no se creó la curva implícita explícita");
+    assert_eq!(ic.expr_lhs, "x^2 + y^2");
+    assert_eq!(ic.expr_rhs, "1");
+    assert_eq!(ic.operator, RelationOperator::Less);
+}
+
+#[test]
+fn explicit_implicit_curve_rejects_an_invalid_relation_atomically() {
+    let mut doc = grafito_core::Document::new();
+    let mut input = "ImplicitCurve[x^2 + y^2, 1, !=]".to_string();
+
+    let outcome = process_input(&mut doc, &mut input);
+
+    assert!(matches!(outcome, CommandOutcome::Error(_)), "{outcome:?}");
+    assert_eq!(doc.object_count(), 0);
 }

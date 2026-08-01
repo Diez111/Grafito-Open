@@ -19,9 +19,13 @@
 //! assert!(doc.objects_iter().any(|(_, obj)| obj.label() == "A"));
 //! ```
 
+pub mod assistant_context;
+pub mod assistant_plan;
+pub mod assistant_proposals;
+pub mod command_registry;
 pub mod commands;
 
-pub use commands::{parse_point_str, parse_preview, process_input};
+pub use commands::{parse_point_str, parse_preview, process_cas_worksheet_cell, process_input};
 
 #[cfg(test)]
 mod tests {
@@ -212,9 +216,13 @@ mod tests {
             ));
         }
         let mut input = "ConicByFivePoints[A, B, C, D, E]".to_string();
-        process_input(&mut doc, &mut input);
+        let outcome = process_input(&mut doc, &mut input);
 
-        assert_eq!(doc.constraints.constraint_count(), 1);
+        assert_eq!(
+            doc.constraints.constraint_count(),
+            1,
+            "unexpected command outcome: {outcome:?}"
+        );
         let cons = doc
             .constraints
             .get_constraint(0)

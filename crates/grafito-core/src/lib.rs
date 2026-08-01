@@ -12,11 +12,12 @@
 //! use grafito_geometry::Point2;
 //!
 //! let mut doc = Document::new();
-//! let id = doc.add_object(GeoObject::Point(
+//! let id = doc.try_add_object(GeoObject::Point(
 //!     PointObj::new(Point2::new(1.0, 2.0)).with_label("A"),
-//! ));
+//! ))?;
 //!
 //! assert!(doc.get_object(id).is_some());
+//! # Ok::<(), String>(())
 //! ```
 
 pub mod analyzable;
@@ -29,6 +30,7 @@ pub mod numeric_solver;
 pub mod object;
 pub mod parametric_sampling;
 pub mod pencil;
+pub mod persistence;
 pub mod spatial;
 pub mod validation;
 pub mod vector_field_sampling;
@@ -42,7 +44,8 @@ pub use constraints::*;
 pub use document::*;
 pub use id::*;
 pub use object::*;
-pub use pencil::PencilObj;
+pub use pencil::{LocusBinding, PencilObj};
+pub use persistence::*;
 pub use spatial::*;
 
 /// Indicador de calidad de renderizado usado para intercambiar fidelidad por

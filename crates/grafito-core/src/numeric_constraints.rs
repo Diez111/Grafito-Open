@@ -27,9 +27,9 @@ impl DistanceEq {
     pub fn new(a_idx: VarIndex, b_idx: VarIndex, target: f64) -> Self {
         Self::from_parts(
             VarOrConst::new(Some(a_idx), 0.0),
-            VarOrConst::new(Some(a_idx + 1), 0.0),
+            VarOrConst::new(Some(a_idx.saturating_add(1)), 0.0),
             VarOrConst::new(Some(b_idx), 0.0),
-            VarOrConst::new(Some(b_idx + 1), 0.0),
+            VarOrConst::new(Some(b_idx.saturating_add(1)), 0.0),
             target,
         )
     }
@@ -57,6 +57,9 @@ impl DistanceEq {
         target: f64,
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
+        if a == b {
+            return None;
+        }
         match (doc.get_object(a)?, doc.get_object(b)?) {
             (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self::from_parts(
                 field_or_const(doc, a, ObjField::PointX, var_index),
@@ -73,6 +76,10 @@ impl DistanceEq {
 impl ConstraintEquation for DistanceEq {
     fn dimension(&self) -> usize {
         1
+    }
+
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(vars, [self.ax, self.ay, self.bx, self.by])
     }
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
@@ -118,10 +125,10 @@ impl ConstraintEquation for DistanceEq {
 /// degrees and the angle is the smaller angle between the two direction
 /// vectors (range `-pi..=pi`).
 pub struct AngleEq {
-    line1_start: VarIndex,
-    line1_end: VarIndex,
-    line2_start: VarIndex,
-    line2_end: VarIndex,
+    line1_start: [VarOrConst; 2],
+    line1_end: [VarOrConst; 2],
+    line2_start: [VarOrConst; 2],
+    line2_end: [VarOrConst; 2],
     target_rad: f64,
 }
 
@@ -133,11 +140,17 @@ impl AngleEq {
         line2_end: VarIndex,
         target_deg: f64,
     ) -> Self {
+        let point = |index| {
+            [
+                VarOrConst::new(Some(index), 0.0),
+                VarOrConst::new(Some(index.saturating_add(1)), 0.0),
+            ]
+        };
         Self {
-            line1_start,
-            line1_end,
-            line2_start,
-            line2_end,
+            line1_start: point(line1_start),
+            line1_end: point(line1_end),
+            line2_start: point(line2_start),
+            line2_end: point(line2_end),
             target_rad: target_deg.to_radians(),
         }
     }
@@ -148,7 +161,7 @@ impl AngleEq {
         target_deg: f64,
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
-        if inputs.len() < 2 {
+        if inputs.len() < 2 || inputs[0] == inputs[1] {
             return None;
         }
         let l1 = doc.get_object(inputs[0])?;
@@ -156,17 +169,25 @@ impl AngleEq {
         let (GeoObject::Line(line1), GeoObject::Line(line2)) = (l1, l2) else {
             return None;
         };
-        let line1_start = *var_index.get(&(line1.id, ObjField::LineStartX))?;
-        let line1_end = *var_index.get(&(line1.id, ObjField::LineEndX))?;
-        let line2_start = *var_index.get(&(line2.id, ObjField::LineStartX))?;
-        let line2_end = *var_index.get(&(line2.id, ObjField::LineEndX))?;
-        Some(Self::new(
-            line1_start,
-            line1_end,
-            line2_start,
-            line2_end,
-            target_deg,
-        ))
+        Some(Self {
+            line1_start: [
+                field_or_const(doc, line1.id, ObjField::LineStartX, var_index),
+                field_or_const(doc, line1.id, ObjField::LineStartY, var_index),
+            ],
+            line1_end: [
+                field_or_const(doc, line1.id, ObjField::LineEndX, var_index),
+                field_or_const(doc, line1.id, ObjField::LineEndY, var_index),
+            ],
+            line2_start: [
+                field_or_const(doc, line2.id, ObjField::LineStartX, var_index),
+                field_or_const(doc, line2.id, ObjField::LineStartY, var_index),
+            ],
+            line2_end: [
+                field_or_const(doc, line2.id, ObjField::LineEndX, var_index),
+                field_or_const(doc, line2.id, ObjField::LineEndY, var_index),
+            ],
+            target_rad: target_deg.to_radians(),
+        })
     }
 }
 
@@ -175,43 +196,47 @@ impl ConstraintEquation for AngleEq {
         1
     }
 
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(
+            vars,
+            [
+                self.line1_start[0],
+                self.line1_start[1],
+                self.line1_end[0],
+                self.line1_end[1],
+                self.line2_start[0],
+                self.line2_start[1],
+                self.line2_end[0],
+                self.line2_end[1],
+            ],
+        )
+    }
+
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
-        let s1 = Point2::new(vars[self.line1_start], vars[self.line1_start + 1]);
-        let e1 = Point2::new(vars[self.line1_end], vars[self.line1_end + 1]);
-        let s2 = Point2::new(vars[self.line2_start], vars[self.line2_start + 1]);
-        let e2 = Point2::new(vars[self.line2_end], vars[self.line2_end + 1]);
+        let s1 = Point2::new(self.line1_start[0].get(vars), self.line1_start[1].get(vars));
+        let e1 = Point2::new(self.line1_end[0].get(vars), self.line1_end[1].get(vars));
+        let s2 = Point2::new(self.line2_start[0].get(vars), self.line2_start[1].get(vars));
+        let e2 = Point2::new(self.line2_end[0].get(vars), self.line2_end[1].get(vars));
 
         let d1 = normalized_direction(s1, e1);
         let d2 = normalized_direction(s2, e2);
         let cross = d1.x * d2.y - d1.y * d2.x;
         let dot = d1.x * d2.x + d1.y * d2.y;
-        let mut residual = cross.atan2(dot) - self.target_rad;
-        while residual <= -PI {
-            residual += 2.0 * PI;
-        }
-        while residual > PI {
-            residual -= 2.0 * PI;
-        }
+        let period = 2.0 * PI;
+        let wrapped = (cross.atan2(dot) - self.target_rad).rem_euclid(period);
+        let residual = if wrapped > PI {
+            wrapped - period
+        } else {
+            wrapped
+        };
         vec![residual]
     }
 
     fn jacobian(&self, vars: &[f64]) -> Vec<(usize, usize, f64)> {
-        if vars.is_empty() {
-            return vec![
-                (0, self.line1_start, 1.0),
-                (0, self.line1_start + 1, 1.0),
-                (0, self.line1_end, 1.0),
-                (0, self.line1_end + 1, 1.0),
-                (0, self.line2_start, 1.0),
-                (0, self.line2_start + 1, 1.0),
-                (0, self.line2_end, 1.0),
-                (0, self.line2_end + 1, 1.0),
-            ];
-        }
-        let s1 = Point2::new(vars[self.line1_start], vars[self.line1_start + 1]);
-        let e1 = Point2::new(vars[self.line1_end], vars[self.line1_end + 1]);
-        let s2 = Point2::new(vars[self.line2_start], vars[self.line2_start + 1]);
-        let e2 = Point2::new(vars[self.line2_end], vars[self.line2_end + 1]);
+        let s1 = Point2::new(self.line1_start[0].get(vars), self.line1_start[1].get(vars));
+        let e1 = Point2::new(self.line1_end[0].get(vars), self.line1_end[1].get(vars));
+        let s2 = Point2::new(self.line2_start[0].get(vars), self.line2_start[1].get(vars));
+        let e2 = Point2::new(self.line2_end[0].get(vars), self.line2_end[1].get(vars));
 
         let (u, l1) = normalized_direction_with_length(s1, e1);
         let (v, l2) = normalized_direction_with_length(s2, e2);
@@ -264,16 +289,22 @@ impl ConstraintEquation for AngleEq {
         let de2x = dtheta_dv_x * dv_x_dx4 + dtheta_dv_y * dv_y_dx4;
         let de2y = dtheta_dv_x * dv_x_dy4 + dtheta_dv_y * dv_y_dy4;
 
-        vec![
-            (0, self.line1_start, ds1x),
-            (0, self.line1_start + 1, ds1y),
-            (0, self.line1_end, de1x),
-            (0, self.line1_end + 1, de1y),
-            (0, self.line2_start, ds2x),
-            (0, self.line2_start + 1, ds2y),
-            (0, self.line2_end, de2x),
-            (0, self.line2_end + 1, de2y),
-        ]
+        let mut triples = Vec::with_capacity(8);
+        for (field, value) in [
+            (self.line1_start[0], ds1x),
+            (self.line1_start[1], ds1y),
+            (self.line1_end[0], de1x),
+            (self.line1_end[1], de1y),
+            (self.line2_start[0], ds2x),
+            (self.line2_start[1], ds2y),
+            (self.line2_end[0], de2x),
+            (self.line2_end[1], de2y),
+        ] {
+            if let Some(index) = field.idx {
+                triples.push((0, index, value));
+            }
+        }
+        triples
     }
 }
 
@@ -299,11 +330,11 @@ impl TangentEq {
             center,
             [
                 VarOrConst::new(Some(line_start), 0.0),
-                VarOrConst::new(Some(line_start + 1), 0.0),
+                VarOrConst::new(Some(line_start.saturating_add(1)), 0.0),
             ],
             [
                 VarOrConst::new(Some(line_end), 0.0),
-                VarOrConst::new(Some(line_end + 1), 0.0),
+                VarOrConst::new(Some(line_end.saturating_add(1)), 0.0),
             ],
         )
     }
@@ -353,11 +384,28 @@ impl ConstraintEquation for TangentEq {
         1
     }
 
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(
+            vars,
+            [
+                self.radius,
+                self.line_start[0],
+                self.line_start[1],
+                self.line_end[0],
+                self.line_end[1],
+            ],
+        )
+    }
+
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         let r = self.radius.get(vars);
         let start = Point2::new(self.line_start[0].get(vars), self.line_start[1].get(vars));
         let end = Point2::new(self.line_end[0].get(vars), self.line_end[1].get(vars));
-        let dist = point_to_line_distance(self.center, start, end);
+        let Some(dist) = point_to_line_distance(self.center, start, end) else {
+            // A zero-length line has no tangent direction. The solver turns
+            // this sentinel into a typed diagnostic before it can mutate state.
+            return vec![f64::NAN];
+        };
         vec![dist - r]
     }
 
@@ -368,7 +416,14 @@ impl ConstraintEquation for TangentEq {
         let dx = end.x - start.x;
         let dy = end.y - start.y;
         let len2 = dx * dx + dy * dy;
-        let len = len2.sqrt().max(1e-12);
+        if len2 < 1e-24 {
+            let mut triples = Vec::with_capacity(1);
+            if let Some(idx) = self.radius.idx {
+                triples.push((0, idx, -1.0));
+            }
+            return triples;
+        }
+        let len = len2.sqrt();
 
         let n = dx * (start.y - self.center.y) - dy * (start.x - self.center.x);
         let signed = n / len;
@@ -423,6 +478,20 @@ impl VarOrConst {
     }
 }
 
+fn validate_var_or_consts<const N: usize>(
+    vars: &[f64],
+    values: [VarOrConst; N],
+) -> Result<(), VarIndex> {
+    for value in values {
+        if let Some(index) = value.idx {
+            if index >= vars.len() {
+                return Err(index);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn field_or_const(
     doc: &crate::Document,
     id: ObjectId,
@@ -475,6 +544,9 @@ impl CoincidentEq {
         b: ObjectId,
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
+        if a == b {
+            return None;
+        }
         match (doc.get_object(a)?, doc.get_object(b)?) {
             (GeoObject::Point(_), GeoObject::Point(_)) => Some(Self::new(
                 field_or_const(doc, a, ObjField::PointX, var_index),
@@ -490,6 +562,10 @@ impl CoincidentEq {
 impl ConstraintEquation for CoincidentEq {
     fn dimension(&self) -> usize {
         2
+    }
+
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(vars, [self.ax, self.ay, self.bx, self.by])
     }
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
@@ -551,6 +627,10 @@ impl ConstraintEquation for HorizontalEq {
         1
     }
 
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(vars, [self.sy, self.ey])
+    }
+
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         vec![self.sy.get(vars) - self.ey.get(vars)]
     }
@@ -600,6 +680,10 @@ impl ConstraintEquation for VerticalEq {
         1
     }
 
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(vars, [self.sx, self.ex])
+    }
+
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         vec![self.sx.get(vars) - self.ex.get(vars)]
     }
@@ -642,6 +726,9 @@ impl EqualLengthEq {
         line2: ObjectId,
         var_index: &HashMap<(ObjectId, ObjField), VarIndex>,
     ) -> Option<Self> {
+        if line1 == line2 {
+            return None;
+        }
         let (GeoObject::Line(l1), GeoObject::Line(l2)) =
             (doc.get_object(line1)?, doc.get_object(line2)?)
         else {
@@ -674,6 +761,16 @@ impl EqualLengthEq {
 impl ConstraintEquation for EqualLengthEq {
     fn dimension(&self) -> usize {
         1
+    }
+
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(
+            vars,
+            [
+                self.a[0], self.a[1], self.b[0], self.b[1], self.c[0], self.c[1], self.d[0],
+                self.d[1],
+            ],
+        )
     }
 
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
@@ -826,6 +923,15 @@ impl ConstraintEquation for SymmetryEq {
         2
     }
 
+    fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+        validate_var_or_consts(
+            vars,
+            [
+                self.px, self.py, self.qx, self.qy, self.mx1, self.my1, self.mx2, self.my2,
+            ],
+        )
+    }
+
     fn residual(&self, vars: &[f64]) -> Vec<f64> {
         let px = self.px.get(vars);
         let py = self.py.get(vars);
@@ -947,14 +1053,17 @@ impl ConstraintEquation for SymmetryEq {
     }
 }
 
-fn point_to_line_distance(p: Point2, start: Point2, end: Point2) -> f64 {
+fn point_to_line_distance(p: Point2, start: Point2, end: Point2) -> Option<f64> {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let len2 = dx * dx + dy * dy;
     if len2 < 1e-24 {
-        return p.distance(&start);
+        return None;
     }
-    ((end.x - start.x) * (start.y - p.y) - (start.x - p.x) * (end.y - start.y)).abs() / len2.sqrt()
+    Some(
+        ((end.x - start.x) * (start.y - p.y) - (start.x - p.x) * (end.y - start.y)).abs()
+            / len2.sqrt(),
+    )
 }
 
 fn normalized_direction(start: Point2, end: Point2) -> Point2 {

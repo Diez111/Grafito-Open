@@ -161,7 +161,7 @@ pub fn dispatch_tool(
         }
         Tool::Tangent => handle_tangent(state, document, world),
         Tool::Perpendicular => handle_perpendicular(state, document, world),
-        Tool::Locus => handle_locus(state, world),
+        Tool::Locus => handle_locus(state, document, world),
         Tool::Distance => handle_measure(state, document, world, "Distance"),
         Tool::Angle => handle_measure(state, document, world, "Angle"),
         Tool::Area => handle_measure(state, document, world, "Area"),
@@ -179,57 +179,58 @@ pub fn dispatch_tool(
                 idx += 1;
                 name = format!("v{}", idx);
             }
-            document.set_variable(name.clone(), 0.0);
-            document.variable_meta.insert(
-                name.clone(),
-                grafito_core::VariableMeta {
-                    position: world,
-                    min: -5.0,
-                    max: 5.0,
-                    step: 0.1,
-                    visible: true,
-                    animating: false,
-                    animation_speed: 1.0,
-                },
-            );
+            let metadata = grafito_core::VariableMeta {
+                position: world,
+                min: -5.0,
+                max: 5.0,
+                step: 0.1,
+                visible: true,
+                animating: false,
+                animation_speed: 1.0,
+                animation_mode: grafito_core::AnimationMode::PingPong,
+            };
+            if !metadata.position.x.is_finite() || !metadata.position.y.is_finite() {
+                state.last_outcome = Some(CommandOutcome::Error(
+                    "Slider position must be finite".to_string(),
+                ));
+                return ToolResult {
+                    objects: vec![],
+                    message: None,
+                    reset_tool: true,
+                };
+            }
+            if let Err(error) = document.try_set_variable(name.clone(), 0.0) {
+                state.last_outcome = Some(CommandOutcome::Error(error));
+                return ToolResult {
+                    objects: vec![],
+                    message: None,
+                    reset_tool: true,
+                };
+            }
+            if let Err(error) =
+                document.try_replace_variable_meta_with_previous(&name, metadata)
+            {
+                state.last_outcome = Some(CommandOutcome::Error(error));
+                return ToolResult {
+                    objects: vec![],
+                    message: None,
+                    reset_tool: true,
+                };
+            }
             ToolResult {
                 objects: vec![],
                 message: Some(format!("Slider '{}' created", name)),
                 reset_tool: true,
             }
         }
-        Tool::Button => {
-            let label = format!("btn{}", document.objects_iter().count());
-            let obj = GeoObject::Text(grafito_core::TextObj::new(&label, world));
-            ToolResult {
-                objects: vec![obj],
-                message: None,
-                reset_tool: true,
-            }
-        }
-        Tool::Image => {
-            // Abrimos un file dialog de forma asíncrona (rfd).
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Imagen", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
-                .pick_file()
-            {
-                let path_str = path.to_string_lossy().to_string();
-                let mut c = format!("Image[{}]", path_str);
-                let outcome = grafito_command::commands::process_input(document, &mut c);
-                state.last_outcome = Some(outcome);
-                ToolResult {
-                    objects: vec![],
-                    message: Some(format!("Imagen '{}' cargada", path_str)),
-                    reset_tool: true,
-                }
-            } else {
-                ToolResult {
-                    objects: vec![],
-                    message: Some("Selección cancelada".into()),
-                    reset_tool: false,
-                }
-            }
-        }
+        Tool::Button => unavailable_tool(
+            state,
+            "Button no está disponible: Grafito aún no tiene un modelo persistente de botón interactivo.",
+        ),
+        Tool::Image => unavailable_tool(
+            state,
+            "Image no está disponible: Grafito aún no tiene un modelo persistente de imagen en el documento.",
+        ),
         Tool::DomainColoring | Tool::HeatMap | Tool::ComplexGrid => {
             let cmd = match tool {
                 Tool::DomainColoring => "DomainColoring[z^2+1, -2, 2, -2, 2]".to_string(),
@@ -435,24 +436,78 @@ fn handle_polygon(state: &mut ToolState, document: &mut Document, world: Point2)
     }
 }
 
-fn handle_locus(state: &mut ToolState, _world: Point2) -> ToolResult {
-    if state.driver.is_none() {
-        ToolResult {
+fn unavailable_tool(state: &mut ToolState, message: &str) -> ToolResult {
+    state.clear();
+    state.last_outcome = Some(CommandOutcome::Error(message.to_string()));
+    ToolResult {
+        objects: vec![],
+        message: None,
+        reset_tool: true,
+    }
+}
+
+fn handle_locus(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    let tolerance = 10.0 / document.view().scale;
+    let Some(selected) = document.pick_object(world, tolerance) else {
+        return ToolResult {
             objects: vec![],
-            message: Some("Select moving point".into()),
+            message: Some(
+                if state.driver.is_some() {
+                    "Selecciona el punto objetivo del lugar geometrico"
+                } else {
+                    "Selecciona el punto driver del lugar geometrico"
+                }
+                .to_string(),
+            ),
             reset_tool: false,
-        }
-    } else if state.driven.is_none() {
-        ToolResult {
+        };
+    };
+    if !matches!(document.get_object(selected), Some(GeoObject::Point(_))) {
+        return ToolResult {
             objects: vec![],
-            message: Some("Select dependent point".into()),
+            message: Some("Locus requiere seleccionar puntos".to_string()),
             reset_tool: false,
-        }
-    } else {
-        ToolResult {
+        };
+    }
+    let Some(driver) = state.driver else {
+        state.driver = Some(selected);
+        return ToolResult {
             objects: vec![],
-            message: Some("Locus computed".into()),
-            reset_tool: true,
+            message: Some("Selecciona el punto objetivo del lugar geometrico".to_string()),
+            reset_tool: false,
+        };
+    };
+    if driver == selected {
+        return ToolResult {
+            objects: vec![],
+            message: Some("Locus requiere dos puntos distintos".to_string()),
+            reset_tool: false,
+        };
+    }
+
+    state.driver = None;
+    match document.try_add_locus(driver, selected) {
+        Ok((locus, _)) => {
+            let label = document
+                .get_object(locus)
+                .map(|object| object.label().to_string())
+                .unwrap_or_else(|| "Locus".to_string());
+            state.last_outcome = Some(CommandOutcome::Message(format!(
+                "{label}: lugar geometrico creado"
+            )));
+            ToolResult {
+                objects: vec![],
+                message: Some("Lugar geometrico creado".to_string()),
+                reset_tool: true,
+            }
+        }
+        Err(error) => {
+            state.last_outcome = Some(CommandOutcome::Error(error));
+            ToolResult {
+                objects: vec![],
+                message: None,
+                reset_tool: true,
+            }
         }
     }
 }
@@ -479,12 +534,13 @@ fn handle_measure(
             let mut line = grafito_core::LineObj::new(a, b);
             line.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.9);
             line.width = 1.5;
-            document.add_object(grafito_core::GeoObject::Line(line));
             let txt = grafito_core::TextObj::new(format!("{:.3}", d), mid);
-            document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
             ToolResult {
-                objects: vec![],
+                objects: vec![
+                    grafito_core::GeoObject::Line(line),
+                    grafito_core::GeoObject::Text(txt),
+                ],
                 message: Some(format!(
                     "Distancia = {:.3} (entre puntos{})",
                     d,
@@ -511,7 +567,6 @@ fn handle_measure(
             );
             ray1.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray1.width = 1.5;
-            document.add_object(grafito_core::GeoObject::Line(ray1));
             let mut ray2 = grafito_core::LineObj::new_with_kind(
                 vertex,
                 Point2::new(
@@ -522,7 +577,6 @@ fn handle_measure(
             );
             ray2.color = grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.7);
             ray2.width = 1.5;
-            document.add_object(grafito_core::GeoObject::Line(ray2));
             let v1x = arm1.x - vertex.x;
             let v1y = arm1.y - vertex.y;
             let v2x = arm2.x - vertex.x;
@@ -562,16 +616,19 @@ fn handle_measure(
             arc_poly.width = 1.0;
             arc_poly.fill_color = Some(grafito_geometry::Color::new(0.8, 0.4, 0.0, 0.25));
             arc_poly.label = String::new();
-            document.add_object(grafito_core::GeoObject::Polygon(arc_poly));
             let lbl_pos = Point2::new(
                 vertex.x + arc_r * 0.7 * (theta1 + dt * 0.5).cos(),
                 vertex.y + arc_r * 0.7 * (theta1 + dt * 0.5).sin(),
             );
             let txt = grafito_core::TextObj::new(format!("{:.1}°", angle), lbl_pos);
-            document.add_object(grafito_core::GeoObject::Text(txt));
             state.pending.clear();
             ToolResult {
-                objects: vec![],
+                objects: vec![
+                    grafito_core::GeoObject::Line(ray1),
+                    grafito_core::GeoObject::Line(ray2),
+                    grafito_core::GeoObject::Polygon(arc_poly),
+                    grafito_core::GeoObject::Text(txt),
+                ],
                 message: Some(format!("Ángulo = {:.1}°", angle)),
                 reset_tool: false,
             }
@@ -614,10 +671,17 @@ fn handle_measure(
                                 fill_poly.fill_color =
                                     Some(grafito_geometry::Color::new(0.2, 0.5, 0.9, 0.3));
                                 fill_poly.label = String::new();
-                                document.add_object(grafito_core::GeoObject::Polygon(fill_poly));
                                 let txt =
                                     grafito_core::TextObj::new(label.clone(), Point2::new(cx, cy));
-                                document.add_object(grafito_core::GeoObject::Text(txt));
+                                state.pending.clear();
+                                return ToolResult {
+                                    objects: vec![
+                                        grafito_core::GeoObject::Polygon(fill_poly),
+                                        grafito_core::GeoObject::Text(txt),
+                                    ],
+                                    message: Some(label),
+                                    reset_tool: false,
+                                };
                             }
                             state.pending.clear();
                             return ToolResult {
@@ -678,16 +742,17 @@ fn handle_measure(
                         fill_poly.fill_color =
                             Some(grafito_geometry::Color::new(0.2, 0.5, 0.9, 0.3));
                         fill_poly.label = String::new();
-                        document.add_object(grafito_core::GeoObject::Polygon(fill_poly));
                         let label = format!("A = {:.3}", a);
                         let txt = grafito_core::TextObj::new(
                             label.clone(),
                             Point2::new((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5),
                         );
-                        document.add_object(grafito_core::GeoObject::Text(txt));
                         state.pending.clear();
                         return ToolResult {
-                            objects: vec![],
+                            objects: vec![
+                                grafito_core::GeoObject::Polygon(fill_poly),
+                                grafito_core::GeoObject::Text(txt),
+                            ],
                             message: Some(label),
                             reset_tool: false,
                         };
@@ -727,15 +792,14 @@ fn handle_measure(
                                 (l.start.y + l.end.y) * 0.5 + 0.3,
                             );
                             let s = if slope.is_infinite() {
-                                "∞".to_string()
+                                "inf".to_string()
                             } else {
                                 format!("{:.3}", slope)
                             };
                             let txt = grafito_core::TextObj::new(format!("m = {}", s), mid);
-                            document.add_object(grafito_core::GeoObject::Text(txt));
                             state.pending.clear();
                             return ToolResult {
-                                objects: vec![],
+                                objects: vec![grafito_core::GeoObject::Text(txt)],
                                 message: Some(format!("Pendiente = {}", s)),
                                 reset_tool: true,
                             };
@@ -763,16 +827,15 @@ fn handle_measure(
                             let s = if slope.is_finite() {
                                 format!("{:.3}", slope)
                             } else {
-                                "∞".to_string()
+                                "inf".to_string()
                             };
                             let txt = grafito_core::TextObj::new(
                                 format!("f'({:.2}) = {}", world.x, s),
                                 Point2::new(world.x + 0.3, world.y + 0.3),
                             );
-                            document.add_object(grafito_core::GeoObject::Text(txt));
                             state.pending.clear();
                             return ToolResult {
-                                objects: vec![],
+                                objects: vec![grafito_core::GeoObject::Text(txt)],
                                 message: Some(format!("f'({:.2}) = {}", world.x, s)),
                                 reset_tool: true,
                             };

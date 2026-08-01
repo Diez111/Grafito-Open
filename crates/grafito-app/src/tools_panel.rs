@@ -1,11 +1,11 @@
 use crate::GrafitoApp;
-use egui::{Color32, Ui};
+use egui::Ui;
 use grafito_ui::theme::current_theme;
+use grafito_ui::toolbar::draw_tool_icon;
 use grafito_ui::Tool;
 
 pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
-    let is_dark = app.dark_mode;
     let panel_fill = theme.panel_bg;
 
     egui::SidePanel::left("tools_panel")
@@ -22,17 +22,12 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             });
             ui.add_space(8.0);
 
-            let sep_col = if is_dark {
-                Color32::from_gray(50)
-            } else {
-                Color32::from_gray(220)
-            };
             ui.painter().line_segment(
                 [
                     ui.cursor().min,
                     ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
                 ],
-                egui::Stroke::new(1.0, sep_col),
+                egui::Stroke::new(1.0, theme.separator),
             );
             ui.add_space(12.0);
 
@@ -67,7 +62,6 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             (Tool::Midpoint, "Punto Medio", "Medio o centro"),
                             (Tool::Perpendicular, "Perpendicular", "Recta perpendicular"),
                             (Tool::Tangent, "Tangentes", "Tangentes a una curva"),
-                            (Tool::Locus, "Lugar Geométrico", "Locus de un punto"),
                         ],
                     );
                 }
@@ -135,6 +129,23 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             (Tool::Cube3D, "Cubo", "Centro y radio (aprox)"),
                         ],
                     );
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "4D proyectado",
+                        &[
+                            (
+                                Tool::Tesseract4D,
+                                "Teseracto 4D",
+                                "Crea un teseracto 4D centrado y proyectado",
+                            ),
+                            (
+                                Tool::Hypercube5D,
+                                "Hipercubo 5D",
+                                "Crea un hipercubo 5D centrado y proyectado",
+                            ),
+                        ],
+                    );
                 }
 
                 // ── ANÁLISIS ──
@@ -176,7 +187,7 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
         egui::RichText::new(title)
             .strong()
             .size(14.0)
-            .color(Color32::from_gray(140)),
+            .color(theme.text_secondary),
     );
     ui.add_space(8.0);
 
@@ -191,10 +202,8 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
 
                 let btn_fill = if is_selected {
                     theme.accent_muted
-                } else if app.dark_mode {
-                    Color32::from_gray(38)
                 } else {
-                    Color32::from_rgb(240, 240, 245)
+                    theme.button_bg
                 };
 
                 let border = if is_selected {
@@ -214,98 +223,54 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                         rect,
                         6.0,
                         if resp.hovered() && !is_selected {
-                            Color32::from_gray(if app.dark_mode { 45 } else { 220 })
+                            theme.button_hover
                         } else {
                             btn_fill
                         },
                     );
                     painter.rect_stroke(rect, 6.0, border);
 
-                    let icon = match tool {
-                        Tool::Select => "^",
-                        Tool::Point | Tool::Point3D => ".",
-                        Tool::Slider => "O-",
-                        Tool::Midpoint => "M",
-                        Tool::Perpendicular => "|_",
-                        Tool::Tangent => "/",
-                        Tool::Locus => "~",
-                        Tool::Angle => "<",
-                        Tool::Distance => "|x|",
-                        Tool::Area => "A",
-                        Tool::Slope => "m",
-                        Tool::Segment => "-",
-                        Tool::Line => "<->",
-                        Tool::Ray => "->",
-                        Tool::Vector => "=>",
-                        Tool::Polygon => "P",
-                        Tool::RegularPolygon => "RP",
-                        Tool::Circle => "O",
-                        Tool::EllipseByFoci => "E",
-                        Tool::ParabolaByFocusDirectrix => "U",
-                        Tool::HyperbolaByFoci => ")(",
-                        Tool::ConicByFivePoints => "C5",
-                        Tool::Sphere3D => "(O)",
-                        Tool::Cube3D => "[ ]",
-                        Tool::Root => "Rz",
-                        Tool::Extremum => "Ex",
-                        Tool::Intersect => "X",
-                        Tool::Function => "f(x)",
-                        Tool::PolygonUnion => "U",
-                        Tool::PolygonIntersection => "n",
-                        Tool::PolygonDifference => "\\",
-                        Tool::PolygonXor => "^",
-                        _ => "?",
-                    };
-
-                    // Emular un ícono
                     let icon_rect = egui::Rect::from_center_size(
                         rect.left_center() + egui::vec2(20.0, 0.0),
                         egui::vec2(24.0, 24.0),
                     );
 
-                    painter.circle_filled(
-                        icon_rect.center(),
-                        12.0,
-                        if app.dark_mode {
-                            Color32::from_gray(60)
+                    painter.circle_filled(icon_rect.center(), 12.0, theme.input_bg);
+                    draw_tool_icon(
+                        painter,
+                        icon_rect.shrink(4.0),
+                        *tool,
+                        if is_selected {
+                            theme.accent
                         } else {
-                            Color32::WHITE
-                        },
-                    );
-                    painter.text(
-                        icon_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        icon,
-                        egui::FontId::proportional(14.0),
-                        if app.dark_mode {
-                            Color32::WHITE
-                        } else {
-                            Color32::BLACK
+                            theme.text_primary
                         },
                     );
 
                     // Texto de la herramienta
-                    let text_color = if app.dark_mode {
-                        Color32::WHITE
-                    } else {
-                        Color32::BLACK
-                    };
                     painter.text(
                         rect.left_center() + egui::vec2(44.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         *name,
                         egui::FontId::proportional(13.0),
-                        text_color,
+                        theme.text_primary,
                     );
                 }
 
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("{name}: {desc}"),
+                    )
+                });
                 let resp = resp.on_hover_text(*desc);
 
                 if resp.clicked() {
                     app.current_tool = *tool;
                     app.clear_pending_action();
                     app.tool_ghost = None;
-                    app.pending_points.clear();
+                    app.reset_tool_input();
                 }
 
                 if (i + 1) % num_cols == 0 {

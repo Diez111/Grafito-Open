@@ -7,6 +7,82 @@ use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
 
 const MAX_VERTICES: usize = 65536;
+const MAX_COMPLEX_CONSTANTS: usize = 256;
+const MAX_COMPLEX_CODE: usize = 4096;
+const GPU_COMPLEX_STACK_SIZE: usize = 32;
+
+pub(crate) fn complex_constant_pair_index(operand: u32) -> usize {
+    (operand / 2) as usize
+}
+
+pub(crate) fn pack_complex_constants(constants: &[f64]) -> Option<Vec<[f32; 2]>> {
+    let pair_count = complex_constant_pair_index(u32::try_from(constants.len()).ok()?);
+    if constants.len() % 2 != 0 || pair_count > MAX_COMPLEX_CONSTANTS {
+        return None;
+    }
+
+    constants
+        .chunks_exact(2)
+        .map(|pair| {
+            let re = pair[0] as f32;
+            let im = pair[1] as f32;
+            (re.is_finite() && im.is_finite()).then_some([re, im])
+        })
+        .collect()
+}
+
+pub(crate) fn gpu_program_is_supported(code: &[u32]) -> bool {
+    let mut stack_depth = 0usize;
+    for instruction in code {
+        match instruction & 0xFF {
+            0 => {}
+            1 | 2 => {
+                if stack_depth == GPU_COMPLEX_STACK_SIZE {
+                    return false;
+                }
+                stack_depth += 1;
+            }
+            3..=7 | 16 | 17 => {
+                if stack_depth < 2 {
+                    return false;
+                }
+                stack_depth -= 1;
+            }
+            8..=15 | 18 | 19 | 22..=33 | 102..=105 => {
+                if stack_depth == 0 {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    stack_depth == 1
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn constants_are_addressed_as_complex_pairs() {
+        assert_eq!(super::complex_constant_pair_index(0), 0);
+        assert_eq!(super::complex_constant_pair_index(1), 0);
+        assert_eq!(super::complex_constant_pair_index(2), 1);
+    }
+
+    #[test]
+    fn cpu_only_complex_opcodes_are_rejected_before_gpu_dispatch() {
+        assert!(super::gpu_program_is_supported(&[1, 2, 3, 105]));
+        assert!(!super::gpu_program_is_supported(&[100]));
+        assert!(!super::gpu_program_is_supported(&[109]));
+    }
+
+    #[test]
+    fn programs_deeper_than_the_wgsl_stack_are_rejected_before_dispatch() {
+        let mut code = vec![2; 33];
+        code.extend(vec![3; 32]);
+
+        assert!(!super::gpu_program_is_supported(&code));
+    }
+}
 
 pub struct ComplexComputePipeline {
     pipeline: wgpu::ComputePipeline,
@@ -199,29 +275,37 @@ impl ComplexComputePipeline {
             return None; // Fallback to CPU if compilation fails
         }
 
-        let vertex_count = in_points.len() as u32;
+        // The compiler also accepts CPU-only special functions. Reject their
+        // bytecodes so callers take the established CPU fallback instead of
+        // silently receiving NaN vertices from the shader.
+        if prog.code.len() > MAX_COMPLEX_CODE || !gpu_program_is_supported(&prog.code) {
+            return None;
+        }
+        let f32_constants = pack_complex_constants(&prog.constants)?;
+
         if in_points.len() > self.max_vertices {
             return None;
         }
+        let vertex_count = u32::try_from(in_points.len()).ok()?;
 
         let mut in_data = Vec::with_capacity(in_points.len());
         for p in in_points {
-            in_data.push([p.x as f32, p.y as f32]);
+            let x = p.x as f32;
+            let y = p.y as f32;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+            in_data.push([x, y]);
         }
 
         let vertex_bytes = (in_points.len() * std::mem::size_of::<[f32; 2]>()) as u64;
 
         let params = TransformParamsUniform {
             vertex_count,
-            code_len: prog.code.len() as u32,
+            code_len: u32::try_from(prog.code.len()).ok()?,
             _pad0: 0,
             _pad1: 0,
         };
-
-        let mut f32_constants = Vec::with_capacity(prog.constants.len());
-        for c in prog.constants {
-            f32_constants.push(c as f32);
-        }
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
         queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
@@ -295,6 +379,14 @@ impl ComplexComputePipeline {
 
         let data = slice.get_mapped_range();
         let values_f32: &[[f32; 2]] = bytemuck::cast_slice(&data);
+        if values_f32
+            .iter()
+            .any(|value| !value[0].is_finite() || !value[1].is_finite())
+        {
+            drop(data);
+            self.out_readback.unmap();
+            return None;
+        }
         let mut result = Vec::with_capacity(values_f32.len());
         for v in values_f32 {
             result.push(grafito_geometry::Point2::new(v[0] as f64, v[1] as f64));

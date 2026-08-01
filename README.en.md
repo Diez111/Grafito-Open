@@ -5,9 +5,9 @@
 <h1 align="center">Grafito</h1>
 
 <p align="center">
-  <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?include_prereleases&label=version&color=blue" alt="Version" /></a>
+  <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?label=version&color=blue" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3%2B-blue.svg" alt="License: GPLv3+" /></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.78%2B-orange.svg" alt="Rust 1.78+" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.81%2B-orange.svg" alt="Rust 1.81+" /></a>
   <a href="https://github.com/Diez111/Grafito/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito?style=social" alt="Stars" /></a>
 </p>
 
@@ -41,18 +41,34 @@
 
 ## Installation
 
-**Debian / Ubuntu (`.deb`)**
+**Linux x86_64 (`.tar.gz`)**
+
+The archive is built and tested on Ubuntu 22.04 x86_64 (glibc 2.35); it
+requires glibc 2.35 or newer, a graphical session, and a Vulkan or OpenGL
+driver compatible with wgpu. On Debian/Ubuntu, install its D-Bus runtime
+before running it. CI verifies that the extracted archive resolves its
+libraries and accepts `--help`; it does not test a real graphical session:
 
 ```bash
-wget https://github.com/Diez111/Grafito/releases/latest/download/grafito_amd64.deb
-sudo dpkg -i grafito_amd64.deb
+sudo apt install libdbus-1-3
+wget https://github.com/Diez111/Grafito/releases/latest/download/grafito-linux-x64.tar.gz
+tar -xzf grafito-linux-x64.tar.gz
+./grafito
 ```
+
+**Windows x86_64 (portable `.zip`)**
+
+Download [`grafito-windows-x64.zip`](https://github.com/Diez111/Grafito/releases/latest/download/grafito-windows-x64.zip), extract it, and run `grafito.exe`.
+
+The `releases/latest` links in this section intentionally resolve only to the
+latest stable release. Beta and alpha builds are marked as prereleases and
+must be selected explicitly from [Releases](https://github.com/Diez111/Grafito/releases).
 
 **Build from source**
 
 ```bash
 # Dependencies
-sudo apt install libgmp-dev libmpfr-dev libmpc-dev m4
+sudo apt install build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
 
 # Clone and build
 git clone https://github.com/Diez111/Grafito.git
@@ -60,7 +76,7 @@ cd grafito
 cargo run -p grafito-app --release
 ```
 
-> Requires Rust 1.78+. GPU compute shaders need Vulkan, Metal, or DX12 support.
+> Requires Rust 1.81+ and a C toolchain (`build-essential` on Debian/Ubuntu). GPU compute shaders need Vulkan, Metal, or DX12 support.
 
 ---
 
@@ -71,7 +87,8 @@ cargo run -p grafito-app --release
 | Feature | Description |
 |---------|-------------|
 | **32+ object types** | Points, Lines, Circles, Ellipses, Parabolas, Hyperbolas, Polygons, Regular Polygons, Functions, Parametric Curves, Polar Curves, Implicit Curves |
-| **Constructions** | Tangent, Perpendicular Bisector, Angle Bisector, Midpoint, Vector, Ray, Intersect, Locus |
+| **Constructions** | Tangent, Perpendicular Bisector, Angle Bisector, Midpoint, Vector, Ray, Intersect |
+| **Dynamic locus** | `Locus[driver, target]` stores a bounded local target trace after each valid geometric update; it records no pointer events or timestamps |
 | **Transformations** | Translate, Rotate, Dilate, Reflect (points and whole objects) |
 | **Boolean operations** | Polygon Union, Intersection, Difference, XOR |
 | **Conics** | By foci, focus-directrix, or 5 arbitrary points. All with arbitrary rotation |
@@ -118,7 +135,7 @@ cargo run -p grafito-app --release
 
 **Special functions**: Gamma (Lanczos g=7), Beta, Bessel J/Y/I (series up to 100 terms), Error (Abramowitz & Stegun 7.1.26), Complementary Error, Digamma (recurrence + asymptotic).
 
-**4D objects**: Hypercube (tesseract) and Hypersphere (3-sphere) with rotation and perspective projection.
+**4D and N-D objects**: the six regular convex 4-polytopes (5-cell, tesseract, 16-cell, 24-cell, 120-cell, and 600-cell) with exact topology, six-plane rotation, safe perspective projection, and depth-aware GPU rendering. Simplex, hypercube, and cross-polytope families are also available from 3 through 10 dimensions.
 
 ### Statistics and Probability
 
@@ -144,6 +161,8 @@ cargo run -p grafito-app --release
 | Strange attractor | Cached RK4 polyline | Color by object |
 | Hypercube 4D | 16 vertices, 32 edges, 4D rotation | Perspective projection |
 | Hypersphere 4D | Lat/lon mesh, 4D rotation | Wireframe |
+| Regular 4D polychora | 5-cell through 600-cell, faces and edges | `WorldMesh` GPU depth streams; bounded CPU fallback during motion |
+| Regular N-D families | Simplex, hypercube, cross-polytope in R^3 through R^10 | Deterministic projection; wireframe for generic N-D families |
 
 **Camera**: orbit (right-drag), zoom (scroll), pan (left-drag in Select tool). Painter's algorithm depth sorting with simplified Phong illumination (ambient 0.3 + diffuse 0.7).
 
@@ -168,7 +187,7 @@ All three pipelines compile a WGSL shader with the user's expression embedded at
 | **Properties** | Right panel | Type, editable label, visibility toggle, color picker, real-time measurements |
 | **Spreadsheet** | Tab S | Full grid editor, create points from cell coordinates |
 
-**Tools**: Select, Point, Line, Segment, Ray, Vector, Perpendicular, Circle, Tangent, Polygon, Regular Polygon, Pencil, Eraser, Ellipse by Foci, Parabola (Focus-Directrix), Hyperbola by Foci, Conic by 5 Points, Function, Parametric Curve 2D, Polar Curve, Implicit Curve, Vector Field 2D, Locus, Distance, Area, Angle, Slope, Point 3D, Sphere 3D, Cube 3D, Root, Extremum, Inflection, Y-Intercept, X-Intercept, Intersect, Analyze, Slider, Button, Image.
+**Tools**: Select, Point, Line, Segment, Ray, Vector, Perpendicular, Circle, Tangent, Polygon, Regular Polygon, Pencil, Eraser, Ellipse by Foci, Parabola (Focus-Directrix), Hyperbola by Foci, Conic by 5 Points, Function, Parametric Curve 2D, Polar Curve, Implicit Curve, Vector Field 2D, Distance, Area, Angle, Slope, Point 3D, Sphere 3D, Cube 3D, Root, Extremum, Inflection, Y-Intercept, X-Intercept, Intersect, Analyze, Slider.
 
 **Quality of life**: ghost preview for construction tools, ripple effects on clicks, hierarchical snap (to analysis features, intersections, and curve edges), instant dark/light theme toggle.
 
@@ -212,7 +231,7 @@ grafito/
 
 | Layer | Technology | Version |
 |-------|------------|---------|
-| Language | Rust | 1.78+ |
+| Language | Rust | 1.81+ |
 | GUI | `eframe` / `egui` | 0.29 |
 | GPU | `wgpu` (WebGPU -> Vulkan/Metal/DX12) | 22.0 |
 | Linear Algebra | `glam`, `nalgebra` | 0.29 / 0.33 |

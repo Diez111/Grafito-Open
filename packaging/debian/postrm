@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+case "${1:-}" in
+    remove|purge|disappear|abort-install|abort-upgrade|failed-upgrade)
+        if [[ -x /usr/bin/gtk-update-icon-cache ]]; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+        fi
+
+        if [[ -x /usr/bin/update-desktop-database ]]; then
+            update-desktop-database -q /usr/share/applications/ 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

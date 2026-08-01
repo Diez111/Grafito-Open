@@ -14,11 +14,6 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 /// Split constant for Dekker's product algorithm
 const SPLIT: f64 = 134217729.0; // 2^27 + 1
 
-const PI_DD: DD = DD {
-    hi: 3.141592653589793,
-    lo: 1.2246467991473532e-16,
-};
-
 const TWO_PI_DD: DD = DD {
     hi: 6.283185307179586,
     lo: 2.4492935982947064e-16,
@@ -102,25 +97,40 @@ impl DD {
         half * (x1 + *self / x1)
     }
 
+    /// Reduce an angle to the principal interval when DD arithmetic retains enough precision.
+    fn reduce_trig_argument(&self) -> Option<Self> {
+        if self.hi.abs() <= PI {
+            return Some(*self);
+        }
+
+        let n = (self.hi / (2.0 * PI)).round();
+        if !n.is_finite() {
+            return None;
+        }
+
+        let mut x = *self - TWO_PI_DD * Self::from_f64(n);
+
+        // Nearest-integer reduction needs at most one correction for representable inputs.
+        if x.hi > PI {
+            x = x - TWO_PI_DD;
+        } else if x.hi < -PI {
+            x = x + TWO_PI_DD;
+        }
+
+        // A huge f64 can lose all useful cancellation above. Do not repeatedly subtract a
+        // value smaller than its ULP: the caller will use libm's bounded f64 reduction.
+        (x.hi.abs() <= PI).then_some(x)
+    }
+
     /// Compute sin using Taylor series
     pub fn sin(&self) -> Self {
-        if !self.hi.is_finite() {
+        if !self.is_finite() {
             return Self::new(f64::NAN, f64::NAN);
         }
 
-        let mut x = *self;
-        if x.hi.abs() > PI {
-            let n = (x.hi / (2.0 * PI)).round();
-            x = x - TWO_PI_DD * DD::from_f64(n);
-        }
-
-        // Final minor corrections to ensure x is strictly within [-pi, pi]
-        while x.hi > PI {
-            x = x - TWO_PI_DD;
-        }
-        while x.hi < -PI {
-            x = x + TWO_PI_DD;
-        }
+        let Some(x) = self.reduce_trig_argument() else {
+            return Self::from_f64(libm::sin(self.to_f64()));
+        };
 
         // Taylor series: sin(x) = x - x^3/3! + x^5/5! - x^7/7! + ...
         let x2 = x * x;
@@ -147,9 +157,35 @@ impl DD {
 
     /// Compute cos using Taylor series
     pub fn cos(&self) -> Self {
-        // cos(x) = sin(x + pi/2)
-        let pi_over_2 = PI_DD / Self::from_f64(2.0);
-        (*self + pi_over_2).sin()
+        if !self.is_finite() {
+            return Self::new(f64::NAN, f64::NAN);
+        }
+
+        let Some(x) = self.reduce_trig_argument() else {
+            return Self::from_f64(libm::cos(self.to_f64()));
+        };
+
+        // Taylor series: cos(x) = 1 - x^2/2! + x^4/4! - x^6/6! + ...
+        let x2 = x * x;
+        let mut term = Self::from_f64(1.0);
+        let mut sum = term;
+        let mut sign = -1.0;
+
+        for i in 1..=12 {
+            let denom = (2 * i - 1) as f64 * (2 * i) as f64;
+            term = term * x2 / Self::from_f64(denom);
+            if sign > 0.0 {
+                sum = sum + term;
+            } else {
+                sum = sum - term;
+            }
+            sign = -sign;
+            if term.abs().to_f64() < 1e-32 {
+                break;
+            }
+        }
+
+        sum
     }
 
     /// Compute exp using Taylor series and range reduction
@@ -370,11 +406,28 @@ mod tests {
         let expected = (PI / 4.0).sin();
         assert!((sin_val - expected).abs() < 1e-14);
 
+        let cos_val = pi_over_4.cos().to_f64();
+        let expected_cos = (PI / 4.0).cos();
+        assert!((cos_val - expected_cos).abs() < 1e-14);
+
         // Test huge input (range reduction check)
         let huge = DD::from_f64(1e6);
         let huge_sin = huge.sin().to_f64();
         let expected_huge = 1e6_f64.sin();
         assert!((huge_sin - expected_huge).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_trig_extreme_finite_input_terminates() {
+        let huge = DD::from_f64(1e290);
+
+        let sin = huge.sin().to_f64();
+        let cos = huge.cos().to_f64();
+
+        assert!(sin.is_finite());
+        assert!(cos.is_finite());
+        assert!((sin - 1e290_f64.sin()).abs() < 1e-12);
+        assert!((cos - 1e290_f64.cos()).abs() < 1e-12);
     }
 
     #[test]

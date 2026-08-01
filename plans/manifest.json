@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "plans": {
+    "foundation": {
+      "path": "docs/Plans.md",
+      "description": "Roadmap de confiabilidad matemática, núcleo transaccional y expansión por etapas"
+    }
+  },
+  "default": "foundation"
+}

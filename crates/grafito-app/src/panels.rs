@@ -2,11 +2,856 @@
 
 use crate::{commands, GrafitoApp};
 use egui::Color32;
-use grafito_core::{GeoObject, ObjectId, PointObj};
-use grafito_geometry::Point2;
+use grafito_core::{
+    CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId, PointObj,
+    RegularPolytopeNDObj, ScatterPlotObj,
+};
+use grafito_geometry::{Color, Point2, RegularPolychoron, RegularPolytopeFamily};
+use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
+use grafito_ui::tokens::{RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, TYPE_BASE, TYPE_SM};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
+const MAX_VALUE_TABLE_POINTS: usize = 10_000;
+const MAX_VALUE_TABLE_DISPLAY_ROWS: usize = 500;
+const SPREADSHEET_CELL_WIDTH: f32 = 60.0;
+const SPREADSHEET_CELL_HEIGHT: f32 = 24.0;
+const SPREADSHEET_ROW_HEADER_WIDTH: f32 = 32.0;
+const SPREADSHEET_COLUMN_HEADER_HEIGHT: f32 = 24.0;
+const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LocalXYTable {
+    pub x_name: String,
+    pub y_name: String,
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+}
+
+pub(crate) fn spreadsheet_column_label(mut column: usize) -> String {
+    let mut label = String::new();
+    loop {
+        label.push(char::from(b'A' + (column % 26) as u8));
+        if column < 26 {
+            break;
+        }
+        column = column / 26 - 1;
+    }
+    label.chars().rev().collect()
+}
+
+fn spreadsheet_cell_label(row: usize, column: usize) -> String {
+    format!("{}{}", spreadsheet_column_label(column), row + 1)
+}
+
+/// A coordinate cell retains partial tuple syntax after it loses focus. Other
+/// cell text is committed normally so formulas can still be edited freely.
+pub(crate) fn spreadsheet_edit_is_committable(
+    document: &mut grafito_core::Document,
+    row: usize,
+    column: usize,
+    value: &str,
+) -> bool {
+    let label = spreadsheet_cell_label(row, column);
+    let owns_coordinate_point = document.spreadsheet_coordinate_point(&label).is_some();
+    !owns_coordinate_point
+        || !value.trim_start().starts_with('(')
+        || commands::parse_point_str(value)
+            .ok()
+            .is_some_and(|(x, y)| x.is_finite() && y.is_finite())
+}
+
+pub(crate) fn spreadsheet_visible_window(
+    viewport: egui::Rect,
+    rows: usize,
+    columns: usize,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    fn visible_axis(
+        visible_min: f32,
+        visible_max: f32,
+        content_offset: f32,
+        item_size: f32,
+        item_count: usize,
+    ) -> std::ops::Range<usize> {
+        let first = ((visible_min - content_offset) / item_size)
+            .floor()
+            .max(0.0) as usize;
+        let last = ((visible_max - content_offset) / item_size).ceil().max(0.0) as usize;
+        first.saturating_sub(1).min(item_count)..last.saturating_add(1).min(item_count)
+    }
+
+    (
+        visible_axis(
+            viewport.min.y,
+            viewport.max.y,
+            SPREADSHEET_COLUMN_HEADER_HEIGHT,
+            SPREADSHEET_CELL_HEIGHT,
+            rows,
+        ),
+        visible_axis(
+            viewport.min.x,
+            viewport.max.x,
+            SPREADSHEET_ROW_HEADER_WIDTH,
+            SPREADSHEET_CELL_WIDTH,
+            columns,
+        ),
+    )
+}
+
+fn draw_virtual_spreadsheet(
+    ui: &mut egui::Ui,
+    scroll_id: &'static str,
+    rows: usize,
+    columns: usize,
+    header_color: Color32,
+    row_label_color: Color32,
+    mut draw_cell: impl FnMut(&mut egui::Ui, usize, usize),
+) {
+    let content_size = egui::vec2(
+        SPREADSHEET_ROW_HEADER_WIDTH + columns as f32 * SPREADSHEET_CELL_WIDTH,
+        SPREADSHEET_COLUMN_HEADER_HEIGHT + rows as f32 * SPREADSHEET_CELL_HEIGHT,
+    );
+
+    egui::ScrollArea::both()
+        .id_salt(scroll_id)
+        .auto_shrink([false; 2])
+        .show_viewport(ui, |ui, viewport| {
+            // Reserve the complete logical sheet while instantiating only the visible widgets.
+            ui.set_min_size(content_size);
+            let origin = ui.max_rect().min;
+            let (visible_rows, visible_columns) =
+                spreadsheet_visible_window(viewport, rows, columns);
+
+            if viewport.min.y < SPREADSHEET_COLUMN_HEADER_HEIGHT {
+                for column in visible_columns.clone() {
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            origin.x
+                                + SPREADSHEET_ROW_HEADER_WIDTH
+                                + column as f32 * SPREADSHEET_CELL_WIDTH,
+                            origin.y,
+                        ),
+                        egui::vec2(SPREADSHEET_CELL_WIDTH, SPREADSHEET_COLUMN_HEADER_HEIGHT),
+                    );
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new()
+                            .id_salt(("spreadsheet_column", column))
+                            .max_rect(rect),
+                        |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new(spreadsheet_column_label(column))
+                                        .size(12.0)
+                                        .strong()
+                                        .color(header_color),
+                                );
+                            });
+                        },
+                    );
+                }
+            }
+
+            for row in visible_rows {
+                let y = origin.y
+                    + SPREADSHEET_COLUMN_HEADER_HEIGHT
+                    + row as f32 * SPREADSHEET_CELL_HEIGHT;
+                if viewport.min.x < SPREADSHEET_ROW_HEADER_WIDTH {
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x, y),
+                        egui::vec2(SPREADSHEET_ROW_HEADER_WIDTH, SPREADSHEET_CELL_HEIGHT),
+                    );
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new()
+                            .id_salt(("spreadsheet_row", row))
+                            .max_rect(rect),
+                        |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    egui::RichText::new((row + 1).to_string())
+                                        .size(11.0)
+                                        .color(row_label_color),
+                                );
+                            });
+                        },
+                    );
+                }
+
+                for column in visible_columns.clone() {
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            origin.x
+                                + SPREADSHEET_ROW_HEADER_WIDTH
+                                + column as f32 * SPREADSHEET_CELL_WIDTH,
+                            y,
+                        ),
+                        egui::vec2(SPREADSHEET_CELL_WIDTH, SPREADSHEET_CELL_HEIGHT),
+                    );
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new()
+                            .id_salt(("spreadsheet_cell", row, column))
+                            .max_rect(rect),
+                        |ui| draw_cell(ui, row, column),
+                    );
+                }
+            }
+        });
+}
+
+pub(crate) fn apply_spreadsheet_cell_edit(
+    document: &mut grafito_core::Document,
+    row: usize,
+    column: usize,
+    value: String,
+) -> Result<(), String> {
+    let staged = document.stage_spreadsheet_cell_edits(&[(row, column, value)])?;
+    *document = staged;
+    Ok(())
+}
+
+pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    input
+        .split([',', '\n'])
+        .enumerate()
+        .map(|(index, token)| {
+            let token = token.trim();
+            if token.is_empty() {
+                return Err(format!("Dato {}: falta un valor", index + 1));
+            }
+            let value = token
+                .parse::<f64>()
+                .map_err(|_| format!("Dato {}: '{token}' no es un número válido", index + 1))?;
+            if !value.is_finite() {
+                return Err(format!("Dato {}: el valor debe ser finito", index + 1));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+/// Parses an explicitly selected local two-column CSV/TSV payload. The result
+/// deliberately carries no file path, timestamps, or other source metadata.
+pub(crate) fn parse_local_xy_table(input: &str, delimiter: u8) -> Result<LocalXYTable, String> {
+    let delimiter = char::from(delimiter);
+    let mut rows = input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| (!line.trim().is_empty()).then_some((index + 1, line)))
+        .map(|(line_number, line)| {
+            parse_delimited_row(line, delimiter)
+                .map_err(|error| format!("Fila {line_number}: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Err("El archivo no contiene filas de datos".to_string());
+    }
+
+    let first = rows.remove(0);
+    if first.len() != 2 {
+        return Err("Cada fila debe tener exactamente dos columnas".to_string());
+    }
+    let first_values = parse_local_xy_values(&first);
+    let (x_name, y_name, mut xs, mut ys) = match first_values {
+        Ok((x, y)) => ("x".to_string(), "y".to_string(), vec![x], vec![y]),
+        Err(error) => {
+            if first.iter().any(|cell| cell.parse::<f64>().is_ok()) {
+                return Err(format!("Fila 1: {error}"));
+            }
+            if first[0].is_empty() || first[1].is_empty() {
+                return Err("Los encabezados de columna no pueden estar vacíos".to_string());
+            }
+            (first[0].clone(), first[1].clone(), Vec::new(), Vec::new())
+        }
+    };
+
+    for (index, row) in rows.into_iter().enumerate() {
+        if row.len() != 2 {
+            return Err(format!(
+                "Fila {}: se esperaban exactamente dos columnas",
+                index + 2
+            ));
+        }
+        let (x, y) =
+            parse_local_xy_values(&row).map_err(|error| format!("Fila {}: {error}", index + 2))?;
+        xs.push(x);
+        ys.push(y);
+        if xs.len() > grafito_core::validation::MAX_DATA_TABLE_ROWS {
+            return Err(format!(
+                "El archivo supera el máximo de {} filas",
+                grafito_core::validation::MAX_DATA_TABLE_ROWS
+            ));
+        }
+    }
+    if xs.len() < 2 {
+        return Err("Se necesitan al menos dos pares numéricos finitos".to_string());
+    }
+
+    Ok(LocalXYTable {
+        x_name,
+        y_name,
+        xs,
+        ys,
+    })
+}
+
+fn parse_delimited_row(line: &str, delimiter: char) -> Result<Vec<String>, String> {
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(character) = chars.next() {
+        if in_quotes {
+            if character == '"' {
+                if chars.peek() == Some(&'"') {
+                    current.push('"');
+                    let _ = chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                current.push(character);
+            }
+        } else if character == '"' {
+            if !current.trim().is_empty() {
+                return Err("las comillas deben iniciar una celda".to_string());
+            }
+            current.clear();
+            in_quotes = true;
+        } else if character == delimiter {
+            cells.push(current.trim().to_string());
+            current.clear();
+        } else {
+            current.push(character);
+        }
+    }
+    if in_quotes {
+        return Err("comillas sin cerrar".to_string());
+    }
+    cells.push(current.trim().to_string());
+    if let Some(first) = cells.first_mut() {
+        *first = first.trim_start_matches('\u{feff}').to_string();
+    }
+    Ok(cells)
+}
+
+fn parse_local_xy_values(row: &[String]) -> Result<(f64, f64), String> {
+    if row.len() != 2 {
+        return Err("se esperaban exactamente dos columnas".to_string());
+    }
+    let x = row[0]
+        .parse::<f64>()
+        .map_err(|_| format!("'{}' no es un número válido", row[0]))?;
+    let y = row[1]
+        .parse::<f64>()
+        .map_err(|_| format!("'{}' no es un número válido", row[1]))?;
+    if !x.is_finite() || !y.is_finite() {
+        return Err("los valores deben ser finitos".to_string());
+    }
+    Ok((x, y))
+}
+
+fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("No se pudo inspeccionar el archivo: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("La fuente seleccionada debe ser un archivo regular".to_string());
+    }
+
+    let mut bytes = Vec::new();
+    let file = open_local_data_file(path)?;
+    if !file
+        .metadata()
+        .map_err(|error| format!("No se pudo verificar el archivo abierto: {error}"))?
+        .file_type()
+        .is_file()
+    {
+        return Err("La fuente seleccionada debe ser un archivo regular".to_string());
+    }
+    file.take(MAX_LOCAL_DATA_IMPORT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("No se pudo leer el archivo: {error}"))?;
+    if bytes.len() > MAX_LOCAL_DATA_IMPORT_BYTES {
+        return Err(format!(
+            "El archivo supera el máximo de {MAX_LOCAL_DATA_IMPORT_BYTES} bytes"
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| "El archivo debe estar codificado como UTF-8".to_string())?;
+    let is_tsv = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("tsv"));
+    parse_local_xy_table(&text, if is_tsv { b'\t' } else { b',' })
+}
+
+fn open_local_data_file(path: &Path) -> Result<File, String> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Do not follow a path swapped to a symlink, and never block the UI
+        // thread on a FIFO substituted after the native file selection.
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|error| format!("No se pudo abrir el archivo: {error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(path).map_err(|error| format!("No se pudo abrir el archivo: {error}"))
+    }
+}
+
+fn commit_local_xy_table(
+    document: &mut Document,
+    undo_stack: &mut Vec<Document>,
+    redo_stack: &mut Vec<ChangeSet>,
+    table: LocalXYTable,
+) -> Result<ObjectId, String> {
+    let data_table = DataTableObj::new(
+        table.x_name,
+        table.y_name,
+        table.xs.clone(),
+        table.ys.clone(),
+    );
+    let data_id = data_table.id;
+    let scatter = ScatterPlotObj::new(table.xs, table.ys).linked_to(data_id);
+    crate::app::commit_object_insertions(
+        document,
+        undo_stack,
+        redo_stack,
+        vec![
+            GeoObject::DataTable(data_table),
+            GeoObject::ScatterPlot(scatter),
+        ],
+    )?;
+    Ok(data_id)
+}
+
+fn import_local_xy_table(app: &mut GrafitoApp) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Datos CSV o TSV", &["csv", "tsv", "txt"])
+        .pick_file()
+    else {
+        return;
+    };
+    let table = match load_local_xy_table(&path) {
+        Ok(table) => table,
+        Err(error) => {
+            app.cas_result = format!("No se pudo importar la tabla: {error}");
+            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+            return;
+        }
+    };
+
+    let row_count = table.xs.len();
+    match commit_local_xy_table(
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+        table,
+    ) {
+        Ok(data_id) => {
+            let label = app
+                .document
+                .get_object(data_id)
+                .map(|object| object.label().to_string())
+                .unwrap_or_else(|| "tabla".to_string());
+            app.cas_result = format!(
+                "Tabla local '{label}' importada con {row_count} pares; la ruta no se guardó."
+            );
+            app.notify(
+                app.cas_result.clone(),
+                grafito_ui::toast::ToastKind::Success,
+            );
+        }
+        Err(error) => {
+            app.cas_result = format!("No se pudo guardar la tabla local: {error}");
+            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+        }
+    }
+}
+
+#[cfg(test)]
+mod local_data_import_tests {
+    use super::{
+        commit_local_xy_table, load_local_xy_table, parse_local_xy_table, LocalXYTable,
+        MAX_LOCAL_DATA_IMPORT_BYTES,
+    };
+    use grafito_core::{Document, GeoObject};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_IMPORT_TEST_FILE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn csv_and_tsv_imports_accept_optional_headers_without_retaining_a_path() {
+        let csv = parse_local_xy_table("\"time\",\"distance\"\n0,1\n1,3\n2,5\n", b',')
+            .expect("CSV data with a header should parse");
+        assert_eq!(csv.x_name, "time");
+        assert_eq!(csv.y_name, "distance");
+        assert_eq!(csv.xs, vec![0.0, 1.0, 2.0]);
+        assert_eq!(csv.ys, vec![1.0, 3.0, 5.0]);
+
+        let tsv = parse_local_xy_table("0\t1\n1\t3\n", b'\t')
+            .expect("TSV data without a header should parse");
+        assert_eq!(tsv.x_name, "x");
+        assert_eq!(tsv.y_name, "y");
+        assert_eq!(tsv.xs, vec![0.0, 1.0]);
+        assert_eq!(tsv.ys, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn local_data_import_rejects_malformed_or_non_finite_rows() {
+        for input in ["x,y\n0,1\n1\n", "x,y\n0,NaN\n", "x,y\n0,1\n"] {
+            let error = parse_local_xy_table(input, b',')
+                .expect_err("invalid local input must be rejected before mutation");
+            assert!(!error.is_empty());
+        }
+    }
+
+    #[test]
+    fn local_data_import_enforces_bounds_and_commits_table_and_scatter_once() {
+        let path = std::env::temp_dir().join(format!(
+            "grafito-local-data-{}-{}.csv",
+            std::process::id(),
+            NEXT_IMPORT_TEST_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, vec![b'x'; MAX_LOCAL_DATA_IMPORT_BYTES + 1])
+            .expect("oversized fixture writes");
+        let error = load_local_xy_table(&path).expect_err("oversized file must be rejected");
+        let _ = std::fs::remove_file(&path);
+        assert!(error.contains("máximo"));
+
+        let mut too_many_rows = String::from("x,y\n");
+        for index in 0..=grafito_core::validation::MAX_DATA_TABLE_ROWS {
+            too_many_rows.push_str(&format!("{index},{}\n", index + 1));
+        }
+        assert!(parse_local_xy_table(&too_many_rows, b',').is_err());
+
+        let mut document = Document::new();
+        let mut undo_stack = Vec::new();
+        let mut redo_stack = Vec::new();
+        let data_id = commit_local_xy_table(
+            &mut document,
+            &mut undo_stack,
+            &mut redo_stack,
+            LocalXYTable {
+                x_name: "time".to_string(),
+                y_name: "distance".to_string(),
+                xs: vec![0.0, 1.0, 2.0],
+                ys: vec![1.0, 3.0, 5.0],
+            },
+        )
+        .expect("valid local data commits");
+
+        assert_eq!(undo_stack.len(), 1);
+        assert!(redo_stack.is_empty());
+        assert!(matches!(
+            document.get_object(data_id),
+            Some(GeoObject::DataTable(_))
+        ));
+        assert!(document.objects_iter().any(|(_, object)| {
+            matches!(object, GeoObject::ScatterPlot(scatter) if scatter.source_data == Some(data_id))
+        }));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StatisticsSummary {
+    pub sum: Option<f64>,
+    pub mean: f64,
+    pub median: f64,
+    pub variance: f64,
+    pub standard_deviation: f64,
+    pub minimum: f64,
+    pub maximum: f64,
+    pub range: f64,
+    pub q1: f64,
+    pub q3: f64,
+    pub iqr: f64,
+}
+
+fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
+    if fraction <= 0.0 || a == b {
+        return a;
+    }
+    if fraction >= 1.0 {
+        return b;
+    }
+
+    let delta = b - a;
+    if delta.is_finite() {
+        fraction.mul_add(delta, a)
+    } else {
+        // Opposite-sign extremes need the weighted form to avoid overflow.
+        (1.0 - fraction).mul_add(a, fraction * b)
+    }
+}
+
+pub(crate) fn statistics_summary(data: &[f64]) -> Result<StatisticsSummary, String> {
+    if data.is_empty() {
+        return Err("Estadística: se requiere al menos un dato".to_string());
+    }
+    if data.iter().any(|value| !value.is_finite()) {
+        return Err("Estadística: todos los datos deben ser finitos".to_string());
+    }
+
+    let count = data.len() as f64;
+    let scale = data.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let (sum, mean, variance, standard_deviation) = if scale == 0.0 {
+        (Some(0.0), 0.0, 0.0, 0.0)
+    } else {
+        let mut normalized_sum = 0.0;
+        let mut compensation = 0.0;
+        let mut running_mean = 0.0;
+        let mut m2 = 0.0;
+
+        for (index, value) in data.iter().enumerate() {
+            let normalized = *value / scale;
+
+            let corrected = normalized - compensation;
+            let next_sum = normalized_sum + corrected;
+            compensation = (next_sum - normalized_sum) - corrected;
+            normalized_sum = next_sum;
+
+            let sample_count = (index + 1) as f64;
+            let delta = normalized - running_mean;
+            running_mean += delta / sample_count;
+            let delta_after = normalized - running_mean;
+            m2 += delta * delta_after;
+        }
+
+        let mean = (normalized_sum / count) * scale;
+        if !mean.is_finite() {
+            return Err("Estadística: la media no es representable en f64".to_string());
+        }
+
+        let normalized_variance = (m2 / count).clamp(0.0, 1.0);
+        let standard_deviation = normalized_variance.sqrt() * scale;
+        if !standard_deviation.is_finite() {
+            return Err("Estadística: el desvío no es representable en f64".to_string());
+        }
+        let variance = standard_deviation * standard_deviation;
+        if normalized_variance > 0.0 && (!variance.is_finite() || variance == 0.0) {
+            return Err(
+                "Estadística: la varianza verdadera no es representable en f64".to_string(),
+            );
+        }
+
+        let unscaled_sum = normalized_sum * scale;
+        (
+            unscaled_sum.is_finite().then_some(unscaled_sum),
+            mean,
+            variance,
+            standard_deviation,
+        )
+    };
+
+    let mut sorted = data.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let minimum = sorted[0];
+    let maximum = sorted[sorted.len() - 1];
+    let range = maximum - minimum;
+    if !range.is_finite() {
+        return Err("Estadística: el rango verdadero no es representable en f64".to_string());
+    }
+
+    let quantile = |probability: f64| -> Result<f64, String> {
+        let position = probability * (sorted.len() as f64 - 1.0);
+        let lower = position.floor() as usize;
+        let upper = (lower + 1).min(sorted.len() - 1);
+        let value = stable_interpolate(sorted[lower], sorted[upper], position - lower as f64);
+        value
+            .is_finite()
+            .then_some(value)
+            .ok_or_else(|| "Estadística: un cuantil no es representable en f64".to_string())
+    };
+
+    let median = quantile(0.5)?;
+    let q1 = quantile(0.25)?;
+    let q3 = quantile(0.75)?;
+    let iqr = q3 - q1;
+    if !iqr.is_finite() {
+        return Err("Estadística: el IQR verdadero no es representable en f64".to_string());
+    }
+
+    Ok(StatisticsSummary {
+        sum,
+        mean,
+        median,
+        variance,
+        standard_deviation,
+        minimum,
+        maximum,
+        range,
+        q1,
+        q3,
+        iqr,
+    })
+}
+
+fn format_statistic(value: f64) -> String {
+    let magnitude = value.abs();
+    if magnitude >= 1.0e6 || (magnitude > 0.0 && magnitude < 1.0e-4) {
+        format!("{value:.3e}")
+    } else {
+        format!("{value:.3}")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn apply_object_panel_edit(
+    document: &mut grafito_core::Document,
+    id: ObjectId,
+    changed: bool,
+    edit: impl FnOnce(&mut GeoObject),
+) -> Result<bool, String> {
+    Ok(apply_object_panel_edit_with_previous(document, id, changed, edit)?.is_some())
+}
+
+pub(crate) fn apply_object_panel_edit_with_previous(
+    document: &mut grafito_core::Document,
+    id: ObjectId,
+    changed: bool,
+    edit: impl FnOnce(&mut GeoObject),
+) -> Result<Option<grafito_core::Document>, String> {
+    if !changed {
+        return Ok(None);
+    }
+    let Some(object) = document.get_object(id) else {
+        return Ok(None);
+    };
+    let mut edited = object.clone();
+    edit(&mut edited);
+    document.try_replace_object_with_previous(id, edited)
+}
+
+fn color_picker_swatch(ui: &mut egui::Ui, color: Color, label: &str) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let color = Color32::from_rgba_unmultiplied(
+        (color.r * 255.0).clamp(0.0, 255.0) as u8,
+        (color.g * 255.0).clamp(0.0, 255.0) as u8,
+        (color.b * 255.0).clamp(0.0, 255.0) as u8,
+        (color.a * 255.0).clamp(0.0, 255.0) as u8,
+    );
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let border = if response.hovered() {
+        theme.accent
+    } else {
+        theme.separator
+    };
+    ui.painter().rect_filled(rect.shrink(3.0), RADIUS_MD, color);
+    ui.painter()
+        .rect_stroke(rect.shrink(3.0), RADIUS_MD, egui::Stroke::new(1.0, border));
+    response.on_hover_text(label)
+}
+
+pub(crate) fn validate_value_table_range(
+    x_min_text: &str,
+    x_max_text: &str,
+    step_text: &str,
+) -> Result<(f64, f64, f64, usize), String> {
+    let x_min = x_min_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Tabla: 'Desde' debe ser un número válido".to_string())?;
+    let x_max = x_max_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Tabla: 'Hasta' debe ser un número válido".to_string())?;
+    let step = step_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Tabla: 'Paso' debe ser un número válido".to_string())?;
+
+    if !x_min.is_finite() || !x_max.is_finite() || !step.is_finite() {
+        return Err("Tabla: los valores deben ser finitos".to_string());
+    }
+    if x_max < x_min {
+        return Err("Tabla: 'Hasta' debe ser mayor o igual que 'Desde'".to_string());
+    }
+    if step <= 0.0 {
+        return Err("Tabla: 'Paso' debe ser mayor que 0".to_string());
+    }
+
+    let intervals = (x_max - x_min) / step;
+    if !intervals.is_finite() || intervals >= MAX_VALUE_TABLE_POINTS as f64 {
+        return Err(format!(
+            "Tabla: demasiados puntos; máximo {MAX_VALUE_TABLE_POINTS}"
+        ));
+    }
+    let point_count = intervals.floor() as usize + 1;
+    if point_count > MAX_VALUE_TABLE_POINTS {
+        return Err(format!(
+            "Tabla: demasiados puntos ({point_count}); máximo {MAX_VALUE_TABLE_POINTS}"
+        ));
+    }
+
+    Ok((x_min, x_max, step, point_count))
+}
+
+pub(crate) fn value_table_display_count(point_count: usize) -> usize {
+    point_count.min(MAX_VALUE_TABLE_DISPLAY_ROWS)
+}
+
+pub(crate) struct ValueTablePointSpec<'a> {
+    pub expression: &'a str,
+    pub variable: &'a str,
+    pub x_min: f64,
+    pub step: f64,
+    pub point_count: usize,
+    pub is_polar: bool,
+}
+
+pub(crate) fn commit_value_table_points(
+    document: &mut Document,
+    undo_stack: &mut Vec<Document>,
+    redo_stack: &mut Vec<ChangeSet>,
+    spec: ValueTablePointSpec<'_>,
+) -> Result<usize, String> {
+    if !spec.x_min.is_finite() || !spec.step.is_finite() || spec.step <= 0.0 {
+        return Err("Tabla: el rango y el paso deben ser finitos, con paso mayor que 0".into());
+    }
+    if spec.point_count > MAX_VALUE_TABLE_POINTS {
+        return Err(format!(
+            "Tabla: demasiados puntos ({}); máximo {MAX_VALUE_TABLE_POINTS}",
+            spec.point_count
+        ));
+    }
+
+    let mut objects = Vec::with_capacity(spec.point_count);
+    for index in 0..spec.point_count {
+        let x = spec.x_min + spec.step * index as f64;
+        if !x.is_finite() {
+            return Err("Tabla: un valor generado no es representable".into());
+        }
+        let variables = [(spec.variable.to_string(), x)];
+        if let Ok(y) = grafito_geometry::expr::evaluate(spec.expression, &variables) {
+            if y.is_finite() {
+                let point = if spec.is_polar {
+                    Point2::new(y * x.cos(), y * x.sin())
+                } else {
+                    Point2::new(x, y)
+                };
+                objects.push(GeoObject::Point(PointObj::new(point)));
+            }
+        }
+    }
+
+    crate::app::commit_object_insertions(document, undo_stack, redo_stack, objects)
+        .map(|ids| ids.len())
+}
 
 /// Helper de retrocompatibilidad. Devuelve la tupla histórica
 /// `(is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col)`
@@ -26,6 +871,283 @@ fn panel_theme_local(
         t.text_tertiary,
         t.text_secondary,
     )
+}
+
+fn draw_right_drawer_header(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str, accent: Color32) {
+    let theme = current_theme(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).color(accent).size(14.0).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if action_icon_button(
+                ui,
+                Icon::Close,
+                theme.text_secondary,
+                "Cerrar panel contextual",
+            )
+            .clicked()
+            {
+                app.right_drawer_open = false;
+            }
+        });
+    });
+}
+
+fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, visible: bool) {
+    let theme = current_theme(ui.ctx());
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(egui::Rounding::same(RADIUS_LG))
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Identidad del objeto")
+                    .color(theme.text_tertiary)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(object_name)
+                        .color(theme.text_primary)
+                        .size(TYPE_BASE)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(if visible { "Visible" } else { "Oculto" })
+                            .color(if visible {
+                                theme.success
+                            } else {
+                                theme.text_tertiary
+                            })
+                            .size(TYPE_SM),
+                    );
+                });
+            });
+            if !label.is_empty() {
+                ui.label(
+                    egui::RichText::new(label)
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                );
+            }
+        });
+}
+
+fn draw_inspector_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let theme = current_theme(ui.ctx());
+    egui::Frame::none()
+        .fill(theme.panel_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(egui::Rounding::same(RADIUS_LG))
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .color(theme.text_primary)
+                    .size(TYPE_BASE)
+                    .strong(),
+            );
+            if !description.is_empty() {
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(description)
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                );
+            }
+            ui.add_space(SPACE_SM);
+            contents(ui);
+        });
+}
+
+fn draw_inspector_empty_state(ui: &mut egui::Ui) {
+    let theme = current_theme(ui.ctx());
+    ui.add_space((ui.available_height() * 0.2).clamp(SPACE_MD, 72.0));
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(egui::Rounding::same(RADIUS_LG))
+        .inner_margin(egui::Margin::same(SPACE_MD))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Inspector listo")
+                    .color(theme.text_primary)
+                    .size(TYPE_BASE)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Seleccioná un objeto del canvas para ajustar su geometría, apariencia y controles avanzados.",
+                )
+                .color(theme.text_secondary)
+                .size(TYPE_SM),
+            );
+        });
+}
+
+fn draw_multidimensional_motion_card(
+    ui: &mut egui::Ui,
+    app: &mut GrafitoApp,
+    title: &str,
+    description: &str,
+    can_animate: bool,
+) {
+    let theme = current_theme(ui.ctx());
+    let mut is_moving = can_animate && app.multidimensional_motion_enabled;
+    let card_fill = if is_moving {
+        theme.accent_muted
+    } else {
+        theme.input_bg
+    };
+    let card_stroke = if is_moving {
+        theme.accent
+    } else {
+        theme.separator
+    };
+
+    egui::Frame::none()
+        .fill(card_fill)
+        .stroke(egui::Stroke::new(1.0, card_stroke))
+        .rounding(egui::Rounding::same(RADIUS_LG))
+        .inner_margin(egui::Margin::same(SPACE_MD))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .color(theme.text_primary)
+                        .size(TYPE_BASE)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(description)
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                );
+            });
+            ui.add_space(SPACE_SM);
+
+            let action_label = if is_moving {
+                "Pausar animación"
+            } else {
+                "Iniciar animación"
+            };
+            let action_button = egui::Button::new(
+                egui::RichText::new(action_label)
+                    .color(if is_moving {
+                        theme.text_primary
+                    } else {
+                        theme.keyboard_enter_text
+                    })
+                    .strong(),
+            )
+            .fill(if is_moving {
+                theme.button_bg
+            } else {
+                theme.keyboard_enter_bg
+            })
+            .stroke(egui::Stroke::new(1.0, card_stroke));
+            let response = ui
+                .add_enabled_ui(can_animate, |ui| {
+                    ui.add_sized([ui.available_width(), 30.0], action_button)
+                })
+                .inner;
+            if response.clicked() {
+                is_moving = crate::app::toggle_default_multidimensional_motion(
+                    &mut app.multidimensional_motion_enabled,
+                );
+                app.notify(
+                    if is_moving {
+                        "Animación espacial iniciada."
+                    } else {
+                        "Animación espacial pausada."
+                    },
+                    grafito_ui::toast::ToastKind::Info,
+                );
+                ui.ctx().request_repaint();
+            }
+
+            ui.add_space(SPACE_SM);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(if is_moving {
+                        "En reproducción"
+                    } else if can_animate {
+                        "En pausa"
+                    } else {
+                        "No disponible"
+                    })
+                    .color(if is_moving {
+                        theme.success
+                    } else {
+                        theme.text_secondary
+                    })
+                    .size(TYPE_SM)
+                    .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.2}x", app.multidimensional_motion_speed))
+                            .color(theme.text_primary)
+                            .size(TYPE_SM)
+                            .monospace(),
+                    );
+                    ui.label(
+                        egui::RichText::new("Velocidad")
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                    );
+                });
+            });
+
+            let mut speed = app.multidimensional_motion_speed;
+            if ui
+                .add(
+                    egui::Slider::new(
+                        &mut speed,
+                        crate::app::MIN_MULTIDIMENSIONAL_MOTION_SPEED
+                            ..=crate::app::MAX_MULTIDIMENSIONAL_MOTION_SPEED,
+                    )
+                    .text("Velocidad de animación")
+                    .show_value(false)
+                    .step_by(0.25)
+                    .trailing_fill(true),
+                )
+                .changed()
+            {
+                app.set_multidimensional_motion_speed(speed);
+                ui.ctx().request_repaint();
+            }
+            if ui
+                .small_button("Restablecer velocidad")
+                .on_hover_text("Volver a la velocidad normal (1.00x)")
+                .clicked()
+            {
+                app.set_multidimensional_motion_speed(
+                    crate::app::DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
+                );
+                ui.ctx().request_repaint();
+            }
+
+            if !can_animate {
+                ui.add_space(SPACE_SM);
+                ui.label(
+                    egui::RichText::new(
+                        "Mostrá el objeto en la vista 3D para activar la animación.",
+                    )
+                    .color(theme.text_tertiary)
+                    .size(TYPE_SM),
+                );
+            }
+        });
 }
 
 fn draw_object_cards_where(
@@ -66,7 +1188,6 @@ fn draw_object_cards_where(
 }
 
 pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let _ = app;
     let theme = current_theme(ctx);
     let accent = theme.accent;
     let alg_fill = theme.panel_bg;
@@ -84,6 +1205,14 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new("Cálculo Simbólico (CAS)").color(accent).strong().size(16.0));
+                if !app.document.cas_worksheet().is_empty()
+                    && ui
+                        .small_button("Limpiar")
+                        .on_hover_text("Eliminar las celdas CAS guardadas")
+                        .clicked()
+                {
+                    app.clear_cas_worksheet(ui.ctx().input(|input| input.time));
+                }
             });
             ui.add_space(4.0);
             ui.separator();
@@ -101,43 +1230,61 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.label(egui::RichText::new("Entrada CAS:").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut execute_cas = false;
-                if ui.add_sized([28.0, 24.0], egui::Button::new("▶")).clicked() {
+                if action_icon_button(ui, Icon::Play, accent, "Ejecutar entrada CAS").clicked() {
                     execute_cas = true;
                 }
 
-                let r = ui.add_sized(
+                let response = crate::ui::draw_command_input(
+                    ui,
+                    app,
+                    "cas_panel",
                     [ui.available_width(), 24.0],
-                    egui::TextEdit::singleline(&mut app.input_text)
-                        .hint_text("Comando CAS...")
+                    "Comando CAS...",
+                    true,
                 );
 
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if response.submitted {
                     execute_cas = true;
                 }
 
                 if execute_cas && !app.input_text.is_empty() {
                     let time = ui.ctx().input(|i| i.time);
-                    app.submit_input_text(time);
+                    app.submit_cas_worksheet_cell(time);
                 }
             });
 
-            // Show CAS history
+            // Show persisted CAS worksheet cells rather than transient feedback.
             egui::ScrollArea::vertical().max_height(ui.available_height() - 8.0).show(ui, |ui| {
                 egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                    if app.cas_history.is_empty() {
-                        ui.label(egui::RichText::new("Escribe comandos CAS...\n\nEj: Derivative[x², x]\nEj: Integral[sin(x), x]\nEj: Solve[x²-4, x]\nEj: Limit[sin(x)/x, x, 0]").size(12.0).color(txt_dim));
+                    if app.document.cas_worksheet().is_empty() {
+                        ui.label(egui::RichText::new("Escribe comandos CAS...\n\nEj: Derivative[x^2, x]\nEj: Integral[sin(x), x]\nEj: Solve[x^2-4, x]\nEj: Limit[sin(x)/x, x, 0]").size(12.0).color(txt_dim));
                     } else {
-                        for (i, entry) in app.cas_history.iter().enumerate() {
+                        for (i, entry) in app.document.cas_worksheet().iter().enumerate() {
+                            let output_color = match entry.status {
+                                CasWorksheetStatus::Success => txt_col,
+                                CasWorksheetStatus::Error => Color32::from_rgb(210, 85, 75),
+                            };
                             egui::Frame::none()
-                                .fill(if app.dark_mode { Color32::from_rgb(45, 45, 50) } else { Color32::from_rgb(240, 240, 245) })
+                                .fill(theme.button_bg)
                                 .rounding(6.0)
                                 .inner_margin(8.0)
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(format!("{}", i+1)).color(accent).strong());
                                         ui.add_space(4.0);
-                                        ui.label(egui::RichText::new(entry).size(13.0).color(txt_col));
+                                        ui.label(
+                                            egui::RichText::new(format!("> {}", entry.input))
+                                                .size(13.0)
+                                                .monospace()
+                                                .color(txt_col),
+                                        );
                                     });
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        egui::RichText::new(&entry.output)
+                                            .size(13.0)
+                                            .color(output_color),
+                                    );
                                 });
                             ui.add_space(6.0);
                         }
@@ -195,6 +1342,23 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
                 ui.checkbox(&mut app.exam_mode, "Modo examen");
 
+                if app.current_view == crate::ViewMode::D3
+                    && app.has_visible_multidimensional_object()
+                {
+                    ui.add_space(12.0);
+                    draw_multidimensional_motion_card(
+                        ui,
+                        app,
+                        "Movimiento espacial",
+                        if app.has_visible_four_d_projection() {
+                            "La cámara y la proyección 4D se sincronizan."
+                        } else {
+                            "La cámara orbita suavemente alrededor de la escena."
+                        },
+                        true,
+                    );
+                }
+
                 let mut high_prec = grafito_geometry::precision::is_high_precision_mode();
                 if ui
                     .checkbox(&mut high_prec, "Alta Precisión (Double-Double)")
@@ -236,10 +1400,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 );
                 ui.add_space(4.0);
                 if ui.button("Exportar SVG").clicked() {
-                    let svg = crate::export::export_svg(&app.document, 800.0, 600.0);
-                    let path = "grafito_export.svg";
-                    let _ = std::fs::write(path, svg);
-                    app.cas_result = format!("SVG saved to {}", path);
+                    app.export_with_dialog(crate::export::ExportFormat::Svg);
                 }
             });
         });
@@ -276,93 +1437,61 @@ pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
             rows = rows.max(15);
             cols = cols.max(6);
 
-            egui::ScrollArea::both().show(ui, |ui| {
-                egui::Frame::none()
-                    .stroke(egui::Stroke::new(1.0, sep_col))
-                    .show(ui, |ui| {
-                        egui::Grid::new("mini_sheet")
-                            .striped(true)
-                            .min_col_width(60.0)
-                            .spacing(egui::vec2(0.0, 0.0))
-                            .show(ui, |ui| {
-                                // Header row
-                                ui.add_sized([28.0, 28.0], egui::Label::new(""));
-                                for c in 0..cols {
-                                    ui.horizontal_centered(|ui| {
-                                        ui.add_space(8.0);
-                                        let col_name = if c < 26 {
-                                            format!("{}", (b'A' + c as u8) as char)
-                                        } else {
-                                            format!(
-                                                "{}{}",
-                                                (b'A' + (c / 26 - 1) as u8) as char,
-                                                (b'A' + (c % 26) as u8) as char
-                                            )
-                                        };
-                                        ui.label(
-                                            egui::RichText::new(col_name)
-                                                .size(12.0)
-                                                .strong()
-                                                .color(accent),
-                                        );
-                                    });
-                                }
-                                ui.end_row();
-
-                                // Data rows
-                                for r in 0..rows {
-                                    ui.horizontal_centered(|ui| {
-                                        ui.add_space(8.0);
-                                        ui.label(
-                                            egui::RichText::new(format!("{}", r + 1))
-                                                .size(11.0)
-                                                .color(txt_dim),
-                                        );
-                                    });
-                                    for c in 0..cols {
-                                        let mut val = app.document.get_spreadsheet_cell(r, c);
-
-                                        let cell_frame = egui::Frame::none()
-                                            .stroke(egui::Stroke::new(0.5, sep_col))
-                                            .inner_margin(egui::Margin::symmetric(4.0, 4.0));
-
-                                        cell_frame.show(ui, |ui| {
-                                            let r2 = ui.add_sized(
-                                                [60.0, 20.0],
-                                                egui::TextEdit::singleline(&mut val)
-                                                    .font(egui::FontId::proportional(12.0))
-                                                    .frame(false),
-                                            ); // No pill frame!
-
-                                            if r2.changed() {
-                                                if let Err(e) =
-                                                    app.document.set_spreadsheet_cell(r, c, val)
-                                                {
-                                                    log::warn!("set_spreadsheet_cell: {}", e);
-                                                }
-                                                if let Some(ev) =
-                                                    app.document.eval_spreadsheet_cell(r, c)
-                                                {
-                                                    app.document.set_variable(
-                                                        format!(
-                                                            "{}{}",
-                                                            (b'A' + c as u8) as char,
-                                                            r + 1
-                                                        ),
-                                                        ev,
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    }
-                                    ui.end_row();
+            egui::Frame::none()
+                .stroke(egui::Stroke::new(1.0, sep_col))
+                .show(ui, |ui| {
+                    draw_virtual_spreadsheet(
+                        ui,
+                        "mini_sheet",
+                        rows,
+                        cols,
+                        accent,
+                        txt_dim,
+                        |ui, row, column| {
+                            let key = (row, column);
+                            let current_value = app.document.get_spreadsheet_cell(row, column);
+                            let mut value = app
+                                .spreadsheet_edit_buffers
+                                .remove(&key)
+                                .unwrap_or_else(|| current_value.clone());
+                            let cell_frame = egui::Frame::none()
+                                .stroke(egui::Stroke::new(0.5, sep_col))
+                                .inner_margin(egui::Margin::symmetric(2.0, 2.0));
+                            cell_frame.show(ui, |ui| {
+                                let response = ui.add_sized(
+                                    [SPREADSHEET_CELL_WIDTH - 4.0, SPREADSHEET_CELL_HEIGHT - 4.0],
+                                    egui::TextEdit::singleline(&mut value)
+                                        .font(egui::FontId::proportional(12.0))
+                                        .frame(false),
+                                );
+                                let explicit_submit = response.has_focus()
+                                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                                let commit = response.lost_focus() || explicit_submit;
+                                if let Err(error) = crate::app::commit_spreadsheet_edit(
+                                    &mut app.document,
+                                    crate::app::SpreadsheetEditState {
+                                        undo_stack: &mut app.undo_stack,
+                                        redo_stack: &mut app.redo_stack,
+                                        edit_buffers: &mut app.spreadsheet_edit_buffers,
+                                    },
+                                    row,
+                                    column,
+                                    value,
+                                    commit,
+                                ) {
+                                    log::warn!("set_spreadsheet_cell: {error}");
+                                    app.notify(
+                                        format!("No se pudo editar la hoja: {error}"),
+                                        grafito_ui::toast::ToastKind::Error,
+                                    );
                                 }
                             });
-                    });
-            });
+                        },
+                    );
+                });
 
             ui.add_space(8.0);
-            if ui.button("Abrir hoja completa →").clicked() {
+            if ui.button("Abrir hoja completa ->").clicked() {
                 app.show_spreadsheet = !app.show_spreadsheet;
             }
         });
@@ -403,7 +1532,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .small_button("×")
+                                .small_button("x")
                                 .on_hover_text("Cerrar animación")
                                 .clicked()
                             {
@@ -452,13 +1581,17 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                     let spec = GrafitoApp::trig_spec(app.trig_function);
 
                     ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .button(if app.trig_animating {
-                                "Pausar"
+                        if action_icon_button(
+                            ui,
+                            if app.trig_animating { Icon::Pause } else { Icon::Play },
+                            if app.trig_animating { accent } else { txt_dim },
+                            if app.trig_animating {
+                                "Pausar animación"
                             } else {
-                                "Iniciar"
-                            })
-                            .clicked()
+                                "Iniciar animación"
+                            },
+                        )
+                        .clicked()
                         {
                             app.trig_animating = !app.trig_animating;
                         }
@@ -698,31 +1831,42 @@ pub(crate) fn draw_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         .font(egui::FontId::proportional(12.0)),
                                 );
                                 if ui
-                                    .button("📍")
+                                    .button("Go")
                                     .on_hover_text("Agregar puntos al canvas")
                                     .clicked()
                                 {
-                                    let x_min: f64 = app.table_x_min.parse().unwrap_or(-5.0);
-                                    let x_max: f64 = app.table_x_max.parse().unwrap_or(5.0);
-                                    let step: f64 = app.table_step.parse().unwrap_or(1.0);
-                                    let is_polar = ftype == "r(θ)";
-                                    let mut x = x_min;
-                                    while x <= x_max + 1e-9 {
-                                        let vars = vec![(var.to_string(), x)];
-                                        if let Ok(y) = grafito_geometry::expr::evaluate(expr, &vars)
-                                        {
-                                            if y.is_finite() {
-                                                let pt = if is_polar {
-                                                    Point2::new(y * x.cos(), y * x.sin())
-                                                } else {
-                                                    Point2::new(x, y)
-                                                };
-                                                app.document.add_object(GeoObject::Point(
-                                                    PointObj::new(pt),
-                                                ));
+                                    match validate_value_table_range(
+                                        &app.table_x_min,
+                                        &app.table_x_max,
+                                        &app.table_step,
+                                    ) {
+                                        Ok((x_min, _x_max, step, point_count)) => {
+                                            let is_polar = ftype == "r(θ)";
+                                            if let Err(error) = commit_value_table_points(
+                                                &mut app.document,
+                                                &mut app.undo_stack,
+                                                &mut app.redo_stack,
+                                                ValueTablePointSpec {
+                                                    expression: expr,
+                                                    variable: var,
+                                                    x_min,
+                                                    step,
+                                                    point_count,
+                                                    is_polar,
+                                                },
+                                            ) {
+                                                app.handle_command_outcome(
+                                                    grafito_command::commands::CommandOutcome::Error(
+                                                        error,
+                                                    ),
+                                                    ui.ctx().input(|input| input.time),
+                                                    "Tabla de valores",
+                                                );
                                             }
                                         }
-                                        x += step;
+                                        Err(message) => {
+                                            app.notify(message, grafito_ui::toast::ToastKind::Error)
+                                        }
                                     }
                                 }
                             });
@@ -818,219 +1962,225 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::new(1.0, sep_col)),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Estadística")
-                    .color(accent)
-                    .size(15.0)
-                    .strong(),
-            );
-            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .id_salt("stats_panel_content")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Estadística")
+                            .color(accent)
+                            .size(15.0)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
 
-            draw_object_cards_where(
-                ui,
-                app,
-                "Objetos estadísticos",
-                "Sin gráficos estadísticos.\nProbá Histogram[...] o ScatterPlot[...].",
-                |obj| {
-                    matches!(
-                        obj,
-                        GeoObject::Histogram(_)
-                            | GeoObject::ScatterPlot(_)
-                            | GeoObject::BoxPlot(_)
-                            | GeoObject::RegressionLine(_)
-                            | GeoObject::Function(_)
-                    )
-                },
-            );
-            ui.add_space(8.0);
+                    draw_object_cards_where(
+                        ui,
+                        app,
+                        "Objetos estadísticos",
+                        "Sin gráficos estadísticos.\nProbá Histogram[...] o ScatterPlot[...].",
+                        |obj| {
+                            matches!(
+                                obj,
+                                GeoObject::Histogram(_)
+                                    | GeoObject::ScatterPlot(_)
+                                    | GeoObject::BoxPlot(_)
+                                    | GeoObject::RegressionLine(_)
+                                    | GeoObject::Function(_)
+                            )
+                        },
+                    );
+                    ui.add_space(8.0);
 
-            // ── Datos: TextEdit vinculado al buffer persistente ──
-            // El buffer sólo se parsea al perder foco o al apretar "Aplicar"
-            // — antes, el editor reconstruí el string cada frame desde los
-            // valores parseados y destruía la entrada del usuario por cada
-            // coma en blanco o no-número temporal.
-            ui.label(
-                egui::RichText::new("Datos (uno por línea o coma):")
-                    .color(hdr_col)
-                    .size(12.0),
-            );
-            let te_resp = ui.add_sized(
-                [ui.available_width(), 80.0],
-                egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
-            );
+                    // ── Datos: TextEdit vinculado al buffer persistente ──
+                    // El buffer sólo se parsea al perder foco o al apretar "Aplicar"
+                    // — antes, el editor reconstruí el string cada frame desde los
+                    // valores parseados y destruía la entrada del usuario por cada
+                    // coma en blanco o no-número temporal.
+                    ui.label(
+                        egui::RichText::new("Datos (uno por línea o coma):")
+                            .color(hdr_col)
+                            .size(12.0),
+                    );
+                    let te_resp = ui.add_sized(
+                        [ui.available_width(), 80.0],
+                        egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
+                    );
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let apply_clicked = ui.button("Aplicar").clicked();
-                let lost_focus =
-                    te_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if apply_clicked || lost_focus {
-                    let parsed: Vec<f64> = app
-                        .statistics_input_buf
-                        .split([',', '\n'])
-                        .filter_map(|s| s.trim().parse::<f64>().ok())
-                        .collect();
-                    if parsed != app.statistics_data {
-                        app.statistics_data = parsed;
-                        app.document.bump_version();
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let apply_clicked = ui.button("Aplicar").clicked();
+                        let lost_focus =
+                            te_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if apply_clicked || lost_focus {
+                            match parse_statistics_input(&app.statistics_input_buf) {
+                                Ok(parsed) => {
+                                    app.statistics_input_error = None;
+                                    if parsed != app.statistics_data {
+                                        app.statistics_data = parsed;
+                                        app.document.bump_version();
+                                    }
+                                }
+                                Err(error) => app.statistics_input_error = Some(error),
+                            }
+                        }
+                        if ui.button("Limpiar").clicked() {
+                            app.statistics_input_buf.clear();
+                            app.statistics_data.clear();
+                            app.statistics_input_error = None;
+                            app.document.bump_version();
+                        }
+                    });
+
+                    if let Some(error) = &app.statistics_input_error {
+                        ui.label(
+                            egui::RichText::new(error)
+                                .color(current_theme(ctx).danger)
+                                .size(11.0),
+                        );
                     }
-                }
-                if ui.button("Limpiar").clicked() {
-                    app.statistics_input_buf.clear();
-                    app.statistics_data.clear();
-                    app.document.bump_version();
-                }
-            });
 
-            ui.add_space(8.0);
-            if app.statistics_data.is_empty() {
-                // Empty-state
-                ui.label(
-                    egui::RichText::new(
-                        "Ingresá datos arriba (uno por línea o comas)\n\
+                    ui.add_space(8.0);
+                    if app.statistics_data.is_empty() {
+                        // Empty-state
+                        ui.label(
+                            egui::RichText::new(
+                                "Ingresá datos arriba (uno por línea o comas)\n\
                          y pulsá «Aplicar» para ver el resumen y el\n\
                          histograma.\n\
                          Ejemplo: 1, 2, 3, 5, 4, 6",
-                    )
-                    .color(txt_dim)
-                    .size(11.0),
-                );
-            } else {
-                let data = &app.statistics_data;
-                let n = data.len() as f64;
-                let sum: f64 = data.iter().sum();
-                let mean = sum / n;
-                let var = data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
-                let std = var.sqrt();
-                let mut sorted = data.clone();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = if sorted.len() % 2 == 0 {
-                    let m = sorted.len() / 2;
-                    (sorted[m - 1] + sorted[m]) / 2.0
-                } else {
-                    sorted[sorted.len() / 2]
-                };
-                let mn = data.iter().cloned().fold(f64::INFINITY, f64::min);
-                let mx = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let range = mx - mn;
-                // Cuartiles por interpolación lineal.
-                let q = |p: f64| -> f64 {
-                    let pos = p * (sorted.len() as f64 - 1.0);
-                    let lo = pos.floor() as usize;
-                    let hi = (lo + 1).min(sorted.len() - 1);
-                    let frac = pos - lo as f64;
-                    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
-                };
-                let q1 = q(0.25);
-                let q3 = q(0.75);
-                let iqr = q3 - q1;
-
-                ui.label(
-                    egui::RichText::new("Resumen")
-                        .color(hdr_col)
-                        .size(12.0)
-                        .strong(),
-                );
-                ui.add_space(4.0);
-                egui::Grid::new("stats_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .spacing([10.0, 4.0])
-                    .show(ui, |ui| {
-                        let mut row = |k: &str, v: String| {
-                            ui.label(egui::RichText::new(k).color(txt_dim).size(12.0));
-                            ui.label(egui::RichText::new(v).color(txt_col).size(12.0).strong());
-                            ui.end_row();
-                        };
-                        row("N", format!("{}", data.len()));
-                        row("Suma", format!("{:.3}", sum));
-                        row("Media", format!("{:.3}", mean));
-                        row("Mediana", format!("{:.3}", median));
-                        row("Desvío", format!("{:.3}", std));
-                        row("Varianza", format!("{:.3}", var));
-                        row("Mín", format!("{:.3}", mn));
-                        row("Máx", format!("{:.3}", mx));
-                        row("Rango", format!("{:.3}", range));
-                        row("Q1", format!("{:.3}", q1));
-                        row("Q3", format!("{:.3}", q3));
-                        row("IQR", format!("{:.3}", iqr));
-                    });
-
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Histograma")
-                        .color(hdr_col)
-                        .size(12.0)
-                        .strong(),
-                );
-                ui.add_space(2.0);
-                let bins = 10usize;
-                let bw = range.max(1e-9) / bins as f64;
-                let mut counts = vec![0u32; bins];
-                for v in data {
-                    let idx = (((v - mn) / bw).floor() as usize).min(bins - 1);
-                    counts[idx] += 1;
-                }
-                let max_c = (*counts.iter().max().unwrap_or(&1)).max(1) as f32;
-                let hist_h = 90.0;
-                let (hist_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), hist_h + 14.0),
-                    egui::Sense::hover(),
-                );
-                if ui.is_rect_visible(hist_rect) {
-                    let painter = ui.painter();
-                    let plot = hist_rect.shrink2(egui::vec2(2.0, 2.0));
-                    // Plot area interna
-                    let plot_top = plot.min.y;
-                    let plot_bot = plot.max.y - 14.0;
-                    let plot_h = plot_bot - plot_top;
-                    let plot_w = plot.width();
-                    // Ejes: línea base
-                    painter.line_segment(
-                        [
-                            egui::pos2(plot.min.x, plot_bot),
-                            egui::pos2(plot.max.x, plot_bot),
-                        ],
-                        egui::Stroke::new(1.0, sep_col),
-                    );
-                    // Barras
-                    let bar_w = plot_w / bins as f32;
-                    for (i, c) in counts.iter().enumerate() {
-                        let h = (*c as f32 / max_c) * plot_h;
-                        let bar = egui::Rect::from_min_size(
-                            egui::pos2(plot.min.x + i as f32 * bar_w + 2.0, plot_bot - h),
-                            egui::vec2(bar_w - 4.0, h),
+                            )
+                            .color(txt_dim)
+                            .size(11.0),
                         );
-                        painter.rect_filled(bar, 2.0, accent);
-                        // count label encima si > 0
-                        if *c > 0 {
+                    } else {
+                        let data = &app.statistics_data;
+                        let summary = match statistics_summary(data) {
+                            Ok(summary) => summary,
+                            Err(error) => {
+                                ui.label(
+                                    egui::RichText::new(error)
+                                        .color(current_theme(ctx).danger)
+                                        .size(11.0),
+                                );
+                                return;
+                            }
+                        };
+
+                        ui.label(
+                            egui::RichText::new("Resumen")
+                                .color(hdr_col)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        egui::Grid::new("stats_grid")
+                            .num_columns(2)
+                            .striped(true)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                let mut row = |k: &str, v: String| {
+                                    ui.label(egui::RichText::new(k).color(txt_dim).size(12.0));
+                                    ui.label(
+                                        egui::RichText::new(v).color(txt_col).size(12.0).strong(),
+                                    );
+                                    ui.end_row();
+                                };
+                                row("N", format!("{}", data.len()));
+                                row(
+                                    "Suma",
+                                    summary.sum.map(format_statistic).unwrap_or_else(|| {
+                                        "No representable (desbordamiento)".to_string()
+                                    }),
+                                );
+                                row("Media", format_statistic(summary.mean));
+                                row("Mediana", format_statistic(summary.median));
+                                row("Desvío", format_statistic(summary.standard_deviation));
+                                row("Varianza", format_statistic(summary.variance));
+                                row("Mín", format_statistic(summary.minimum));
+                                row("Máx", format_statistic(summary.maximum));
+                                row("Rango", format_statistic(summary.range));
+                                row("Q1", format_statistic(summary.q1));
+                                row("Q3", format_statistic(summary.q3));
+                                row("IQR", format_statistic(summary.iqr));
+                            });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Histograma")
+                                .color(hdr_col)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        ui.add_space(2.0);
+                        let bins = 10usize;
+                        let bw = summary.range.max(1e-9) / bins as f64;
+                        let mut counts = vec![0u32; bins];
+                        for v in data {
+                            let idx = (((v - summary.minimum) / bw).floor() as usize).min(bins - 1);
+                            counts[idx] += 1;
+                        }
+                        let max_c = (*counts.iter().max().unwrap_or(&1)).max(1) as f32;
+                        let hist_h = 90.0;
+                        let (hist_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), hist_h + 14.0),
+                            egui::Sense::hover(),
+                        );
+                        if ui.is_rect_visible(hist_rect) {
+                            let painter = ui.painter();
+                            let plot = hist_rect.shrink2(egui::vec2(2.0, 2.0));
+                            // Plot area interna
+                            let plot_top = plot.min.y;
+                            let plot_bot = plot.max.y - 14.0;
+                            let plot_h = plot_bot - plot_top;
+                            let plot_w = plot.width();
+                            // Ejes: línea base
+                            painter.line_segment(
+                                [
+                                    egui::pos2(plot.min.x, plot_bot),
+                                    egui::pos2(plot.max.x, plot_bot),
+                                ],
+                                egui::Stroke::new(1.0, sep_col),
+                            );
+                            // Barras
+                            let bar_w = plot_w / bins as f32;
+                            for (i, c) in counts.iter().enumerate() {
+                                let h = (*c as f32 / max_c) * plot_h;
+                                let bar = egui::Rect::from_min_size(
+                                    egui::pos2(plot.min.x + i as f32 * bar_w + 2.0, plot_bot - h),
+                                    egui::vec2(bar_w - 4.0, h),
+                                );
+                                painter.rect_filled(bar, 2.0, accent);
+                                // count label encima si > 0
+                                if *c > 0 {
+                                    painter.text(
+                                        egui::pos2(bar.center().x, bar.min.y - 6.0),
+                                        egui::Align2::CENTER_BOTTOM,
+                                        c.to_string(),
+                                        egui::FontId::proportional(9.0),
+                                        txt_dim,
+                                    );
+                                }
+                            }
+                            // Etiquetas min/max en el eje
                             painter.text(
-                                egui::pos2(bar.center().x, bar.min.y - 6.0),
-                                egui::Align2::CENTER_BOTTOM,
-                                c.to_string(),
+                                egui::pos2(plot.min.x, plot_bot + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                format_statistic(summary.minimum),
+                                egui::FontId::proportional(9.0),
+                                txt_dim,
+                            );
+                            painter.text(
+                                egui::pos2(plot.max.x, plot_bot + 2.0),
+                                egui::Align2::RIGHT_TOP,
+                                format_statistic(summary.maximum),
                                 egui::FontId::proportional(9.0),
                                 txt_dim,
                             );
                         }
                     }
-                    // Etiquetas min/max en el eje
-                    painter.text(
-                        egui::pos2(plot.min.x, plot_bot + 2.0),
-                        egui::Align2::LEFT_TOP,
-                        format!("{:.2}", mn),
-                        egui::FontId::proportional(9.0),
-                        txt_dim,
-                    );
-                    painter.text(
-                        egui::pos2(plot.max.x, plot_bot + 2.0),
-                        egui::Align2::RIGHT_TOP,
-                        format!("{:.2}", mx),
-                        egui::FontId::proportional(9.0),
-                        txt_dim,
-                    );
-                }
-            }
+                });
         });
 }
 
@@ -1038,6 +2188,8 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 /// el símbolo base.
 pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
+    let before = app.document.clone();
+    let undo_depth = app.undo_stack.len();
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("complex_panel")
@@ -1072,17 +2224,15 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
                         ui.add_space(3.0);
-                        let r = ui.add_sized(
+                        let response = crate::ui::draw_command_input(
+                            ui,
+                            app,
+                            "complex_panel",
                             [ui.available_width(), 22.0],
-                            egui::TextEdit::singleline(&mut app.input_text)
-                                .hint_text("ComplexGrid[1/z]...")
-                                .frame(false)
-                                .text_color(txt_col),
+                            "DomainColoring[1/z, -2, 2, -2, 2, 160]",
+                            false,
                         );
-                        if r.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            && !app.input_text.is_empty()
-                        {
+                        if response.submitted && !app.input_text.is_empty() {
                             let time = ui.ctx().input(|i| i.time);
                             app.submit_input_text(time);
                         }
@@ -1112,80 +2262,104 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             }
 
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Objetos")
-                    .color(hdr_col)
-                    .size(12.0)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            let ids: Vec<ObjectId> = app.document.objects_iter().map(|(id, _)| *id).collect();
-            let mut any_object = false;
-            for id in &ids {
-                let Some(obj) = app.document.get_object(*id) else {
-                    continue;
-                };
-                if !matches!(
-                    obj,
-                    GeoObject::Function(_)
-                        | GeoObject::ImplicitCurve(_)
-                        | GeoObject::ParametricCurve2D(_)
-                        | GeoObject::PolarCurve(_)
-                        | GeoObject::VectorField2D(_)
-                        | GeoObject::ComplexGrid(_)
-                        | GeoObject::ComplexMapping(_)
-                        | GeoObject::Point(_)
-                        | GeoObject::Line(_)
-                        | GeoObject::Circle(_)
-                        | GeoObject::Polygon(_)
-                        | GeoObject::Ellipse(_)
-                        | GeoObject::Parabola(_)
-                        | GeoObject::Hyperbola(_)
-                ) {
-                    continue;
-                }
-                any_object = true;
-                crate::algebra::draw_object_card(ui, app, *id);
-            }
-            if !any_object {
-                ui.label(
-                    egui::RichText::new("Sin objetos.\nProbá: x^2 + y^2 < 1\no: ComplexGrid[1/z]")
-                        .color(txt_dim)
-                        .size(11.0),
-                );
-            }
+            let content_height = ui.available_height();
+            egui::ScrollArea::vertical()
+                .id_salt("complex_panel_content")
+                .max_height(content_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Objetos")
+                            .color(hdr_col)
+                            .size(12.0)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    let ids: Vec<ObjectId> =
+                        app.document.objects_iter().map(|(id, _)| *id).collect();
+                    let mut any_object = false;
+                    for id in &ids {
+                        let Some(obj) = app.document.get_object(*id) else {
+                            continue;
+                        };
+                        if !matches!(
+                            obj,
+                            GeoObject::Function(_)
+                                | GeoObject::ImplicitCurve(_)
+                                | GeoObject::ParametricCurve2D(_)
+                                | GeoObject::PolarCurve(_)
+                                | GeoObject::VectorField2D(_)
+                                | GeoObject::ComplexGrid(_)
+                                | GeoObject::ComplexMapping(_)
+                                | GeoObject::Point(_)
+                                | GeoObject::Line(_)
+                                | GeoObject::Circle(_)
+                                | GeoObject::Polygon(_)
+                                | GeoObject::Ellipse(_)
+                                | GeoObject::Parabola(_)
+                                | GeoObject::Hyperbola(_)
+                        ) {
+                            continue;
+                        }
+                        any_object = true;
+                        crate::algebra::draw_object_card(ui, app, *id);
+                    }
+                    if !any_object {
+                        ui.label(
+                            egui::RichText::new(
+                                "Sin objetos.\nProbá: x^2 + y^2 < 1\no: DomainColoring[1/z, -2, 2, -2, 2, 160]",
+                            )
+                            .color(txt_dim)
+                            .size(11.0),
+                        );
+                    }
 
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Comandos rápidos")
-                    .color(hdr_col)
-                    .size(12.0)
-                    .strong(),
-            );
-            ui.add_space(2.0);
-            // Hints clickeables que rellenan la barra de entrada del panel.
-            let hints: &[(&str, &str)] = &[
-                ("ComplexGrid[1/z]", "ComplexGrid[1/z]"),
-                ("ComplexMapping[1/z, I]", "ComplexMapping[1/z, I]"),
-                ("ComplexGrid[exp(z)]", "ComplexGrid[exp(z)]"),
-                ("ComplexSymbol[w]", "ComplexSymbol[w]"),
-            ];
-            for (label, payload) in hints {
-                let b = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new(*label)
-                            .monospace()
-                            .size(11.0)
-                            .color(txt_col),
-                    )
-                    .frame(false),
-                );
-                if b.clicked() {
-                    app.input_text = payload.to_string();
-                }
-                b.on_hover_text(format!("Click para cargar: {}", payload));
-            }
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Comandos rápidos")
+                            .color(hdr_col)
+                            .size(12.0)
+                            .strong(),
+                    );
+                    ui.add_space(2.0);
+                    // Atajos ejecutables: cada uno crea una visualización cuya
+                    // semántica coincide con su etiqueta.
+                    let hints: &[(&str, &str)] = &[
+                        (
+                            "Coloración de dominio: 1/z",
+                            "DomainColoring[1/z, -2, 2, -2, 2, 160]",
+                        ),
+                        (
+                            "Rejilla transformada: 1/z",
+                            "ComplexGrid[1/z, -2, 2, -2, 2, 16]",
+                        ),
+                        ("ComplexMapping[1/z, I]", "ComplexMapping[1/z, I]"),
+                        (
+                            "Coloración de dominio: exp(z)",
+                            "DomainColoring[exp(z), -2, 2, -2, 2, 160]",
+                        ),
+                        ("ComplexSymbol[w]", "ComplexSymbol[w]"),
+                    ];
+                    for (label, payload) in hints {
+                        let b = ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(*label)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(txt_col),
+                            )
+                            .frame(false),
+                        );
+                        if b.clicked() {
+                            app.input_text = payload.to_string();
+                            let time = ui.ctx().input(|input| input.time);
+                            app.submit_input_text(time);
+                        }
+                        b.on_hover_text(format!("Click para ejecutar: {}", payload));
+                    }
+                });
         });
+    app.save_snapshot_if_semantically_changed(before, undo_depth);
 }
 
 /// Panel izquierdo de Atractores y Dinámica.
@@ -1244,9 +2418,9 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     let sigma = a.params.first().copied().unwrap_or(0.0);
                     let rho = a.params.get(1).copied().unwrap_or(0.0);
                     let beta = a.params.get(2).copied().unwrap_or(0.0);
-                    ui.label(format!("σ = {:.3}", sigma));
-                    ui.label(format!("ρ = {:.3}", rho));
-                    ui.label(format!("β = {:.3}", beta));
+                    ui.label(format!("sigma = {:.3}", sigma));
+                    ui.label(format!("rho = {:.3}", rho));
+                    ui.label(format!("beta = {:.3}", beta));
                     ui.label(format!("dt = {:.4}", a.dt));
                     ui.label(format!("pasos = {}", a.steps));
                 }
@@ -1270,7 +2444,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
             ui.add_space(10.0);
             ui.label(egui::RichText::new("Comandos").color(hdr_col).size(12.0).strong());
-            ui.label(egui::RichText::new("• Lorenz: Attractor[σ, ρ, β]").color(txt_dim).size(11.0).monospace());
+            ui.label(egui::RichText::new("- Lorenz: Attractor[sigma, rho, beta]").color(txt_dim).size(11.0).monospace());
             let _ = txt_col;
         });
 }
@@ -1281,72 +2455,87 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
 /// Panel derecho: Propiedades del objeto seleccionado (Geometry3D).
 pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    use grafito_core::GeoObject;
-    let (is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
-
+    let theme = current_theme(ctx);
     egui::SidePanel::right("right_properties")
-        .default_width(280.0)
-        .min_width(200.0)
+        .default_width(340.0)
+        .min_width(292.0)
         .resizable(true)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Propiedades")
-                    .color(accent)
-                    .size(14.0)
-                    .strong(),
-            );
-            ui.add_space(6.0);
+            ui.add_space(SPACE_SM);
+            draw_right_drawer_header(ui, app, "Inspector", theme.accent);
+            ui.add_space(SPACE_SM);
+            draw_right_properties_contents(app, ui);
+        });
+}
 
-            let Some(id) = app.selected_object else {
-                ui.label(
-                    egui::RichText::new(
-                        "Seleccioná un objeto del canvas para ver/editar sus propiedades.",
-                    )
-                    .color(txt_dim)
-                    .size(11.0),
-                );
-                return;
-            };
-            let Some(obj) = app.document.get_object_mut(id) else {
-                ui.label(egui::RichText::new("Objeto inexistente.").color(txt_dim));
-                return;
-            };
+/// Contenido reutilizable del Inspector de propiedades para un dock anfitrión.
+pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui::Ui) {
+    let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
+    use grafito_core::GeoObject;
+    let (is_dark, _accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) =
+        panel_theme_local(ui.ctx());
 
-            let label_col = if is_dark {
-                Color32::from_gray(180)
-            } else {
-                Color32::from_gray(60)
-            };
-            match obj {
+    egui::ScrollArea::vertical()
+                .id_salt("right_properties_scroll")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    let Some(id) = app.selected_object else {
+                        draw_inspector_empty_state(ui);
+                        return;
+                    };
+                    let Some(mut edited_object) = app.document.get_object(id).cloned() else {
+                        ui.label(egui::RichText::new("Objeto inexistente.").color(txt_dim));
+                        return;
+                    };
+                    let object_name = edited_object.name().to_string();
+                    let object_label = edited_object.label().to_string();
+                    let object_visible = edited_object.is_visible();
+                    draw_inspector_identity(ui, &object_name, &object_label, object_visible);
+                    ui.add_space(SPACE_MD);
+                    let mut changed = false;
+
+                    let label_col = if is_dark {
+                        Color32::from_gray(180)
+                    } else {
+                        Color32::from_gray(60)
+                    };
+                    match &mut edited_object {
                 GeoObject::Cube3D(c) => {
                     ui.label(egui::RichText::new("Cubo 3D").color(label_col).strong());
                     ui.label(egui::RichText::new(format!("Etiqueta: {}", c.label)).color(txt_col));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Centro").color(txt_dim));
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut c.center.x)
-                                .speed(0.1)
-                                .prefix("x="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut c.center.y)
-                                .speed(0.1)
-                                .prefix("y="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut c.center.z)
-                                .speed(0.1)
-                                .prefix("z="),
-                        );
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut c.center.x)
+                                    .speed(0.1)
+                                    .prefix("x="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut c.center.y)
+                                    .speed(0.1)
+                                    .prefix("y="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut c.center.z)
+                                    .speed(0.1)
+                                    .prefix("z="),
+                            )
+                            .changed();
                     });
-                    ui.add(egui::Slider::new(&mut c.size, 0.1..=10.0).text("tamaño"));
+                    changed |= ui
+                        .add(egui::Slider::new(&mut c.size, 0.1..=10.0).text("tamaño"))
+                        .changed();
                 }
                 GeoObject::Sphere3D(s) => {
                     ui.label(egui::RichText::new("Esfera 3D").color(label_col).strong());
@@ -1354,46 +2543,402 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Centro").color(txt_dim));
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut s.center.x)
-                                .speed(0.1)
-                                .prefix("x="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut s.center.y)
-                                .speed(0.1)
-                                .prefix("y="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut s.center.z)
-                                .speed(0.1)
-                                .prefix("z="),
-                        );
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.center.x)
+                                    .speed(0.1)
+                                    .prefix("x="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.center.y)
+                                    .speed(0.1)
+                                    .prefix("y="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut s.center.z)
+                                    .speed(0.1)
+                                    .prefix("z="),
+                            )
+                            .changed();
                     });
-                    ui.add(egui::Slider::new(&mut s.radius, 0.1..=10.0).text("radio"));
+                    changed |= ui
+                        .add(egui::Slider::new(&mut s.radius, 0.1..=10.0).text("radio"))
+                        .changed();
                 }
                 GeoObject::Point3D(p) => {
                     ui.label(egui::RichText::new("Punto 3D").color(label_col).strong());
                     ui.label(egui::RichText::new(format!("Etiqueta: {}", p.label)).color(txt_col));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut p.position.x)
-                                .speed(0.1)
-                                .prefix("x="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut p.position.y)
-                                .speed(0.1)
-                                .prefix("y="),
-                        );
-                        ui.add(
-                            egui::DragValue::new(&mut p.position.z)
-                                .speed(0.1)
-                                .prefix("z="),
-                        );
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut p.position.x)
+                                    .speed(0.1)
+                                    .prefix("x="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut p.position.y)
+                                    .speed(0.1)
+                                    .prefix("y="),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut p.position.z)
+                                    .speed(0.1)
+                                    .prefix("z="),
+                            )
+                            .changed();
                     });
-                    ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).text("tamaño"));
+                    changed |= ui
+                        .add(egui::Slider::new(&mut p.size, 1.0..=20.0).text("tamaño"))
+                        .changed();
+                }
+                GeoObject::RegularPolychoron4D(polychoron) => {
+                    ui.push_id(("regular_polychoron_4d", id), |ui| {
+                        draw_inspector_section(
+                            ui,
+                            "Proyección",
+                            "Controlá la vista dinámica sin alterar la construcción.",
+                            |ui| {
+                                draw_multidimensional_motion_card(
+                                    ui,
+                                    app,
+                                    "Animación de proyección",
+                                    "La cámara y el politopo 4D giran sin alterar el documento.",
+                                    polychoron.visible && app.current_view == crate::ViewMode::D3,
+                                );
+                            },
+                        );
+                        ui.add_space(SPACE_MD);
+                        draw_inspector_section(ui, "Geometría", "Forma y escala", |ui| {
+                        let mut kind = polychoron.kind;
+                        let combo_width = ui.available_width();
+                        egui::ComboBox::from_id_salt("regular_polychoron_kind")
+                            .width(combo_width)
+                            .selected_text(match kind {
+                                RegularPolychoron::Pentachoron => "Pentácoron (5-celda)",
+                                RegularPolychoron::Tesseract => "Teseracto",
+                                RegularPolychoron::SixteenCell => "16-celda",
+                                RegularPolychoron::TwentyFourCell => "24-celda",
+                                RegularPolychoron::OneTwentyCell => "120-celda",
+                                RegularPolychoron::SixHundredCell => "600-celda",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::Pentachoron,
+                                    "Pentácoron (5-celda)",
+                                );
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::Tesseract,
+                                    "Teseracto",
+                                );
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::SixteenCell,
+                                    "16-celda",
+                                );
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::TwentyFourCell,
+                                    "24-celda",
+                                );
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::OneTwentyCell,
+                                    "120-celda",
+                                );
+                                ui.selectable_value(
+                                    &mut kind,
+                                    RegularPolychoron::SixHundredCell,
+                                    "600-celda",
+                                );
+                            });
+                        if kind != polychoron.kind {
+                            polychoron.kind = kind;
+                            changed = true;
+                        }
+
+                        changed |= ui
+                            .add(egui::Slider::new(&mut polychoron.scale, 0.01..=10.0).text("Escala"))
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut polychoron.width, 0.5..=10.0)
+                                    .text("Grosor de aristas"),
+                            )
+                            .changed();
+                        });
+
+                        ui.add_space(SPACE_MD);
+                        draw_inspector_section(ui, "Apariencia", "Estilo de aristas y relleno", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Color de aristas");
+                            if color_picker_swatch(
+                                ui,
+                                polychoron.color,
+                                "Cambiar color de aristas",
+                            )
+                            .clicked()
+                            {
+                                app.open_object_color_picker(id);
+                            }
+                        });
+
+                        let mut fill_enabled = polychoron.fill_color.is_some();
+                        if ui.checkbox(&mut fill_enabled, "Relleno habilitado").changed() {
+                            polychoron.fill_color = fill_enabled.then(|| {
+                                polychoron
+                                    .fill_color
+                                    .unwrap_or(Color::new(0.2, 0.5, 0.9, 0.55))
+                            });
+                            changed = true;
+                        }
+                        if let Some(fill_color) = polychoron.fill_color {
+                            ui.horizontal(|ui| {
+                                ui.label("Color de relleno");
+                                if color_picker_swatch(
+                                    ui,
+                                    fill_color,
+                                    "Cambiar color de relleno",
+                                )
+                                .clicked()
+                                {
+                                    app.open_regular_polychoron_fill_color_picker(id);
+                                }
+                            });
+                        }
+                        ui.label(
+                            egui::RichText::new(
+                                "El relleno se omite en Vista previa y durante el movimiento.",
+                            )
+                            .color(txt_dim)
+                            .size(11.0),
+                        );
+                        });
+
+                        ui.add_space(SPACE_MD);
+                        egui::CollapsingHeader::new("Rotación manual")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Ajustá los seis planos sólo cuando necesites una vista específica.",
+                                    )
+                                    .color(txt_dim)
+                                    .size(TYPE_SM),
+                                );
+                                ui.add_space(SPACE_SM);
+                                if ui.button("Restablecer rotaciones").clicked()
+                                    && polychoron.rotation_angles != [0.0; 6]
+                                {
+                                    polychoron.rotation_angles = [0.0; 6];
+                                    changed = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new("Planos de rotación")
+                                        .color(txt_dim)
+                                        .size(TYPE_SM),
+                                );
+                                egui::Grid::new("regular_polychoron_rotation_planes").show(ui, |ui| {
+                                    for (angle, plane) in polychoron.rotation_angles.iter_mut().zip([
+                                        "xy (rad)",
+                                        "xz (rad)",
+                                        "xw (rad)",
+                                        "yz (rad)",
+                                        "yw (rad)",
+                                        "zw (rad)",
+                                    ]) {
+                                        ui.label(egui::RichText::new(plane).monospace().size(TYPE_SM));
+                                        changed |= ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    angle,
+                                                    -std::f64::consts::PI..=std::f64::consts::PI,
+                                                )
+                                                .show_value(false)
+                                                .trailing_fill(true),
+                                            )
+                                            .changed();
+                                        changed |= ui
+                                            .add(
+                                                egui::DragValue::new(angle)
+                                                    .speed(0.01)
+                                                    .range(
+                                                        -std::f64::consts::PI
+                                                            ..=std::f64::consts::PI,
+                                                    )
+                                                    .fixed_decimals(2),
+                                            )
+                                            .changed();
+                                        ui.end_row();
+                                    }
+                                });
+                            });
+                    });
+                }
+                GeoObject::RegularPolytopeND(polytope) => {
+                    ui.push_id(("regular_polytope_nd", id), |ui| {
+                        draw_inspector_section(ui, "Geometría", "Familia, dimensión y escala", |ui| {
+                        let mut family = polytope.family;
+                        let combo_width = ui.available_width();
+                        egui::ComboBox::from_id_salt("regular_polytope_nd_family")
+                            .width(combo_width)
+                            .selected_text(match family {
+                                RegularPolytopeFamily::Simplex => "Símplex",
+                                RegularPolytopeFamily::Hypercube => "Hipercubo",
+                                RegularPolytopeFamily::CrossPolytope => "Politopo cruzado",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut family,
+                                    RegularPolytopeFamily::Simplex,
+                                    "Símplex",
+                                );
+                                ui.selectable_value(
+                                    &mut family,
+                                    RegularPolytopeFamily::Hypercube,
+                                    "Hipercubo",
+                                );
+                                ui.selectable_value(
+                                    &mut family,
+                                    RegularPolytopeFamily::CrossPolytope,
+                                    "Politopo cruzado",
+                                );
+                            });
+                        if family != polytope.family {
+                            polytope.family = family;
+                            changed = true;
+                        }
+
+                        let mut dimension = polytope.dimension;
+                        if ui
+                            .add(egui::Slider::new(&mut dimension, 3..=10).text("Dimensión"))
+                            .changed()
+                        {
+                            if let Some(rotation_count) =
+                                RegularPolytopeNDObj::expected_rotation_angle_count(dimension)
+                            {
+                                polytope.dimension = dimension;
+                                polytope.rotation_angles = vec![0.0; rotation_count];
+                                changed = true;
+                            }
+                        }
+                        changed |= ui
+                            .add(egui::Slider::new(&mut polytope.scale, 0.01..=10.0).text("Escala"))
+                            .changed();
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut polytope.width, 0.5..=10.0)
+                                    .text("Grosor de aristas"),
+                            )
+                            .changed();
+                        });
+
+                        if polytope.dimension == 4 {
+                            ui.add_space(SPACE_MD);
+                            draw_inspector_section(
+                                ui,
+                                "Proyección",
+                                "La cámara y la proyección 4D comparten velocidad.",
+                                |ui| {
+                                    draw_multidimensional_motion_card(
+                                        ui,
+                                        app,
+                                        "Animación de proyección",
+                                        "La cámara y la proyección 4D usan la misma velocidad.",
+                                        polytope.visible && app.current_view == crate::ViewMode::D3,
+                                    );
+                                },
+                            );
+                        }
+
+                        ui.add_space(SPACE_MD);
+                        draw_inspector_section(ui, "Apariencia", "Estilo de aristas", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Color de aristas");
+                            if color_picker_swatch(
+                                ui,
+                                polytope.color,
+                                "Cambiar color de aristas",
+                            )
+                            .clicked()
+                            {
+                                app.open_object_color_picker(id);
+                            }
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "Los politopos N-D genéricos se muestran solo como aristas; el relleno se omite en Vista previa y durante el movimiento.",
+                            )
+                            .color(txt_dim)
+                            .size(11.0),
+                        );
+                        });
+
+                        ui.add_space(SPACE_MD);
+                        egui::CollapsingHeader::new("Rotación manual")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Los ajustes avanzados permanecen separados de los controles principales.",
+                                    )
+                                    .color(txt_dim)
+                                    .size(TYPE_SM),
+                                );
+                                ui.add_space(SPACE_SM);
+                                if ui.button("Restablecer rotaciones").clicked()
+                                    && polytope.rotation_angles.iter().any(|angle| *angle != 0.0)
+                                {
+                                    polytope.rotation_angles.fill(0.0);
+                                    changed = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new("Planos de rotación")
+                                        .color(txt_dim)
+                                        .size(TYPE_SM),
+                                );
+                                let rotation_planes: Vec<_> = (0..polytope.dimension)
+                                    .flat_map(|first| {
+                                        ((first + 1)..polytope.dimension)
+                                            .map(move |second| (first, second))
+                                    })
+                                    .collect();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("regular_polytope_nd_rotation_planes")
+                                    .max_height(260.0)
+                                    .show(ui, |ui| {
+                                        for ((first, second), angle) in rotation_planes
+                                            .into_iter()
+                                            .zip(polytope.rotation_angles.iter_mut())
+                                        {
+                                            changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        angle,
+                                                        -std::f64::consts::PI
+                                                            ..=std::f64::consts::PI,
+                                                    )
+                                                    .text(format!(
+                                                        "x{}/x{} (rad)",
+                                                        first + 1,
+                                                        second + 1
+                                                    )),
+                                                )
+                                                .changed();
+                                        }
+                                    });
+                            });
+                    });
                 }
                 other => {
                     ui.label(format!("Tipo: {}", other.name()));
@@ -1403,9 +2948,29 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                             .size(11.0),
                     );
                 }
-            }
-            app.document.bump_version();
-        });
+                    }
+                    match apply_object_panel_edit_with_previous(&mut app.document, id, changed, move |object| {
+                        *object = edited_object;
+                    }) {
+                        Ok(Some(before)) => snapshot.capture_successful_replacement(before),
+                        Ok(None) => {}
+                        Err(error) => {
+                            let message = format!("Propiedades: {error}");
+                            ui.label(
+                                egui::RichText::new(&message)
+                                    .color(current_theme(ui.ctx()).danger)
+                                    .size(11.0),
+                            );
+                            app.cas_result = message.clone();
+                            app.notify(message, grafito_ui::toast::ToastKind::Error);
+                        }
+                    }
+                });
+    let _ = snapshot.save_if_semantically_changed(
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+    );
 }
 
 /// Panel derecho: Tabla de valores x|f(x) (AlgebraCas, Calculus).
@@ -1423,12 +2988,7 @@ pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Tabla de valores")
-                    .color(accent)
-                    .size(14.0)
-                    .strong(),
-            );
+            draw_right_drawer_header(ui, app, "Tabla de valores", accent);
             ui.add_space(6.0);
 
             let funcs: Vec<_> = app
@@ -1475,16 +3035,28 @@ pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
             });
             ui.add_space(6.0);
 
-            let x_min: f64 = app.table_x_min.trim().parse().unwrap_or(-5.0);
-            let x_max: f64 = app.table_x_max.trim().parse().unwrap_or(5.0);
-            let step: f64 = app.table_step.trim().parse().unwrap_or(0.5);
-
-            if x_max <= x_min || step <= 0.0 {
-                ui.label(egui::RichText::new("Rango/step inválidos.").color(txt_dim));
-                return;
-            }
+            let (x_min, _x_max, step, point_count) = match validate_value_table_range(
+                &app.table_x_min,
+                &app.table_x_max,
+                &app.table_step,
+            ) {
+                Ok(range) => range,
+                Err(message) => {
+                    ui.label(egui::RichText::new(message).color(txt_dim));
+                    return;
+                }
+            };
+            let display_count = value_table_display_count(point_count);
 
             let expr = funcs[app.table_func_idx].1.clone();
+            if display_count < point_count {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Mostrando las primeras {display_count} de {point_count} filas."
+                    ))
+                    .color(txt_dim),
+                );
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 egui::Grid::new("right_table_values")
                     .striped(true)
@@ -1492,8 +3064,8 @@ pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
                         ui.label(egui::RichText::new("x").strong().color(txt_col));
                         ui.label(egui::RichText::new("f(x)").strong().color(txt_col));
                         ui.end_row();
-                        let mut x = x_min;
-                        while x <= x_max + 1e-9 {
+                        for index in 0..display_count {
+                            let x = x_min + index as f64 * step;
                             let y =
                                 grafito_geometry::expr::evaluate(&expr, &[("x".to_string(), x)])
                                     .ok();
@@ -1503,11 +3075,50 @@ pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) 
                                 None => "—".to_string(),
                             });
                             ui.end_row();
-                            x += step;
                         }
                     });
             });
         });
+}
+
+fn set_domain_coloring_mode(document: &mut Document, id: ObjectId, mode: u8) -> bool {
+    let needs_update = matches!(
+        document.get_object(id),
+        Some(GeoObject::ComplexGrid(grid)) if grid.domain_coloring_mode != mode
+    );
+    if !needs_update {
+        return false;
+    }
+    if let Some(GeoObject::ComplexGrid(grid)) = document.get_object_mut(id) {
+        grid.domain_coloring_mode = mode;
+        true
+    } else {
+        false
+    }
+}
+
+fn set_complex_mapping_animation(
+    document: &mut Document,
+    id: ObjectId,
+    animate_homotopy: bool,
+    homotopy_speed: f32,
+) -> bool {
+    let needs_update = matches!(
+        document.get_object(id),
+        Some(GeoObject::ComplexMapping(mapping))
+            if mapping.animate_homotopy != animate_homotopy
+                || mapping.homotopy_speed != homotopy_speed
+    );
+    if !needs_update {
+        return false;
+    }
+    if let Some(GeoObject::ComplexMapping(mapping)) = document.get_object_mut(id) {
+        mapping.animate_homotopy = animate_homotopy;
+        mapping.homotopy_speed = homotopy_speed;
+        true
+    } else {
+        false
+    }
 }
 
 /// Panel derecho: Coloración de dominio (Complejos).
@@ -1526,28 +3137,23 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Coloración de dominio")
-                    .color(accent)
-                    .size(14.0)
-                    .strong(),
-            );
+            draw_right_drawer_header(ui, app, "Coloración de dominio", accent);
             ui.add_space(6.0);
 
-            let mut has_grid = false;
+            let mut has_domain_coloring = false;
             let mut grid_id = None;
             for (id, obj) in app.document.objects_iter() {
-                if matches!(obj, GeoObject::ComplexGrid(_)) {
-                    has_grid = true;
+                if matches!(obj, GeoObject::ComplexGrid(grid) if grid.render_mode == 1) {
+                    has_domain_coloring = true;
                     grid_id = Some(*id);
                     break;
                 }
             }
 
-            if !has_grid {
+            if !has_domain_coloring {
                 ui.label(
                     egui::RichText::new(
-                        "Sin ComplexGrid. Creá uno con:\n  ComplexGrid[1/z]\nColoración por fase de f(z).",
+                        "Sin coloración de dominio. Creá una con:\n  DomainColoring[1/z, -2, 2, -2, 2, 160]\nFase y módulo de f(z).",
                     )
                     .color(txt_dim)
                     .size(11.0),
@@ -1556,12 +3162,30 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                 ui.label(egui::RichText::new("Coloración por fase habilitada").color(hdr_col).strong());
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Tono = arg(f(z)).").color(txt_dim).size(11.0));
+
+                ui.add_space(6.0);
+                ui.collapsing("Guia de Interpretacion", |ui| {
+                    let theme = current_theme(ui.ctx());
+                    egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(8.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new("Colores y Magnitud:").strong().color(hdr_col).size(11.0));
+                                ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(10.5));
+
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new("Derivabilidad y Wirtinger:").strong().color(hdr_col).size(11.0));
+                                ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(10.5));
+                            });
+                        });
+                });
             }
 
             // Selector de modo de coloreado de dominio
-            let mut grid_bump = false;
             if let Some(id) = grid_id {
-                if let Some(GeoObject::ComplexGrid(cg)) = app.document.get_object_mut(id) {
+                if let Some(GeoObject::ComplexGrid(cg)) = app.document.get_object(id) {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Modo de coloración").color(hdr_col).size(12.0).strong());
                     let mut mode = cg.domain_coloring_mode;
@@ -1580,14 +3204,8 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                             ui.selectable_value(&mut mode, 3, "Rejilla Cartesiana Conforme");
                         });
 
-                    if mode != cg.domain_coloring_mode {
-                        cg.domain_coloring_mode = mode;
-                        grid_bump = true;
-                    }
+                    let _ = set_domain_coloring_mode(&mut app.document, id, mode);
                 }
-            }
-            if grid_bump {
-                app.document.bump_version();
             }
 
             ui.add_space(10.0);
@@ -1615,9 +3233,8 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                 }
             }
 
-            let mut mapping_bump = false;
             if let Some(id) = mapping_id {
-                if let Some(GeoObject::ComplexMapping(cm)) = app.document.get_object_mut(id) {
+                if let Some(GeoObject::ComplexMapping(cm)) = app.document.get_object(id) {
                     ui.add_space(14.0);
                     ui.separator();
                     ui.add_space(8.0);
@@ -1629,21 +3246,12 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                     ui.add_space(4.0);
 
                     let mut anim = cm.animate_homotopy;
-                    if ui.checkbox(&mut anim, "Animar deformación (homotopía)").changed() {
-                        cm.animate_homotopy = anim;
-                        mapping_bump = true;
-                    }
+                    ui.checkbox(&mut anim, "Animar deformación (homotopía)");
 
                     let mut speed = cm.homotopy_speed;
                     ui.add(egui::Slider::new(&mut speed, 0.2..=3.0).text("Velocidad"));
-                    if speed != cm.homotopy_speed {
-                        cm.homotopy_speed = speed;
-                        mapping_bump = true;
-                    }
+                    let _ = set_complex_mapping_animation(&mut app.document, id, anim, speed);
                 }
-            }
-            if mapping_bump {
-                app.document.bump_version();
             }
         });
 }
@@ -1651,6 +3259,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
 /// Panel derecho: Parámetros del attractor activo (Dynamics).
 pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
+    let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_parameters")
@@ -1664,12 +3273,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Parámetros dinámicos")
-                    .color(accent)
-                    .size(14.0)
-                    .strong(),
-            );
+            draw_right_drawer_header(ui, app, "Parámetros dinámicos", accent);
             ui.add_space(6.0);
 
             let mut attractor_id: Option<ObjectId> = None;
@@ -1691,74 +3295,292 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                 return;
             };
 
-            let Some(obj) = app.document.get_object_mut(id) else {
+            let Some(GeoObject::Attractor3D(attractor)) = app.document.get_object(id).cloned()
+            else {
                 return;
             };
-            if let GeoObject::Attractor3D(a) = obj {
-                // params: [sigma, rho, beta] para Lorenz. Lo dejamos genérico.
-                while a.params.len() < 3 {
-                    a.params.push(0.0);
-                }
-                let mut sigma = a.params[0];
-                let mut rho = a.params[1];
-                let mut beta = a.params[2];
-                ui.label(
-                    egui::RichText::new("Lorenz σ, ρ, β")
-                        .color(hdr_col)
-                        .size(12.0)
-                        .strong(),
-                );
-                ui.add_space(4.0);
-                ui.add(
+            let mut sigma = attractor.params.first().copied().unwrap_or(0.0);
+            let mut rho = attractor.params.get(1).copied().unwrap_or(0.0);
+            let mut beta = attractor.params.get(2).copied().unwrap_or(0.0);
+            let mut dt = attractor.dt;
+            let mut steps = attractor.steps;
+            let mut changed = false;
+
+            ui.label(
+                egui::RichText::new("Lorenz sigma, rho, beta")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            changed |= ui
+                .add(
                     egui::Slider::new(&mut sigma, 0.1..=30.0)
                         .text("σ")
                         .trailing_fill(true),
-                );
-                ui.add(
+                )
+                .changed();
+            changed |= ui
+                .add(
                     egui::Slider::new(&mut rho, 0.1..=60.0)
                         .text("ρ")
                         .trailing_fill(true),
-                );
-                ui.add(
+                )
+                .changed();
+            changed |= ui
+                .add(
                     egui::Slider::new(&mut beta, 0.1..=10.0)
                         .text("β")
                         .trailing_fill(true),
-                );
-                a.params[0] = sigma;
-                a.params[1] = rho;
-                a.params[2] = beta;
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Integración")
-                        .color(hdr_col)
-                        .size(12.0)
-                        .strong(),
-                );
-                ui.add(
-                    egui::Slider::new(&mut a.dt, 0.001..=0.05)
+                )
+                .changed();
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Integración")
+                    .color(hdr_col)
+                    .size(12.0)
+                    .strong(),
+            );
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut dt, 0.001..=0.05)
                         .text("dt")
                         .trailing_fill(true),
-                );
-                ui.add(
-                    egui::Slider::new(&mut a.steps, 100..=20000)
+                )
+                .changed();
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut steps, 100..=20000)
                         .text("pasos")
                         .trailing_fill(true)
                         .integer(),
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("El canvas se regenera cada cambio.")
-                        .color(txt_dim)
-                        .size(11.0),
-                );
-                app.document.bump_version();
+                )
+                .changed();
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("El canvas se regenera cada cambio.")
+                    .color(txt_dim)
+                    .size(11.0),
+            );
+
+            match apply_object_panel_edit_with_previous(
+                &mut app.document,
+                id,
+                changed,
+                move |object| {
+                    let GeoObject::Attractor3D(attractor) = object else {
+                        return;
+                    };
+                    attractor.params.resize(3, 0.0);
+                    attractor.params[0] = sigma;
+                    attractor.params[1] = rho;
+                    attractor.params[2] = beta;
+                    attractor.dt = dt;
+                    attractor.steps = steps;
+                },
+            ) {
+                Ok(Some(before)) => snapshot.capture_successful_replacement(before),
+                Ok(None) => {}
+                Err(error) => {
+                    let message = format!("Parámetros: {error}");
+                    ui.label(
+                        egui::RichText::new(&message)
+                            .color(current_theme(ui.ctx()).danger)
+                            .size(11.0),
+                    );
+                    app.cas_result = message.clone();
+                    app.notify(message, grafito_ui::toast::ToastKind::Error);
+                }
             }
+        });
+    let _ = snapshot.save_if_semantically_changed(
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+    );
+}
+
+pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let theme = current_theme(ctx);
+
+    egui::SidePanel::right("regression")
+        .resizable(true)
+        .default_width(280.0)
+        .min_width(200.0)
+        .frame(
+            egui::Frame::none()
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
+        )
+        .show(ctx, |ui| {
+            draw_right_drawer_header(ui, app, "Regresión", theme.accent);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("regression_panel_content")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    draw_object_cards_where(
+                        ui,
+                        app,
+                        "Ajustes del documento",
+                        "Sin ajustes todavía.",
+                        |object| {
+                            matches!(
+                                object,
+                                GeoObject::DataTable(_)
+                                    | GeoObject::ScatterPlot(_)
+                                    | GeoObject::RegressionLine(_)
+                            ) || matches!(object, GeoObject::Function(function) if function.fit.is_some())
+                        },
+                    );
+                    let fits: Vec<_> = app
+                        .document
+                        .objects_iter()
+                        .filter_map(|(_, object)| match object {
+                            GeoObject::Function(function) => function
+                                .fit
+                                .as_ref()
+                                .map(|fit| (function.label.clone(), fit.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    if !fits.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Diagnósticos locales")
+                                .color(theme.text_secondary)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        for (label, fit) in fits {
+                            let source_label = app
+                                .document
+                                .get_object(fit.source)
+                                .map(|object| object.label().to_string())
+                                .unwrap_or_else(|| "tabla eliminada".to_string());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{label}: {} sobre {source_label} · RMSE={:.6} · R²={:.6}",
+                                    fit.kind.display_name(),
+                                    fit.diagnostics.rmse,
+                                    fit.diagnostics.r_squared
+                                ))
+                                .color(theme.text_primary)
+                                .size(11.0),
+                            );
+                            ui.collapsing(
+                                format!("Residuales ({})", fit.diagnostics.residuals.len()),
+                                |ui| {
+                                    let shown = fit.diagnostics.residuals.len().min(24);
+                                    for (index, residual) in
+                                        fit.diagnostics.residuals.iter().take(shown).enumerate()
+                                    {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "r{} = {:.6}",
+                                                index + 1,
+                                                residual
+                                            ))
+                                            .color(theme.text_tertiary)
+                                            .size(11.0),
+                                        );
+                                    }
+                                    if fit.diagnostics.residuals.len() > shown {
+                                        ui.label(
+                                            egui::RichText::new("Se muestran los primeros 24 valores.")
+                                                .color(theme.text_tertiary)
+                                                .size(10.0),
+                                        );
+                                    }
+                                },
+                            );
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("Crear análisis")
+                            .color(theme.text_secondary)
+                            .size(12.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Importá un CSV/TSV de dos columnas o creá una tabla local desde dos listas. La ruta nunca se guarda.",
+                        )
+                        .color(theme.text_tertiary)
+                        .size(11.0),
+                    );
+                    ui.add_space(6.0);
+
+                    if ui.button("Importar CSV/TSV...").clicked() {
+                        import_local_xy_table(app);
+                    }
+
+                    for (label, template) in [
+                        (
+                            "Diagrama de dispersión",
+                            "ScatterPlot[{1, 2, 3}, {1, 4, 9}]",
+                        ),
+                        (
+                            "Regresión lineal",
+                            "LinearRegression[{1, 2, 3}, {1, 4, 9}]",
+                        ),
+                        (
+                            "Tabla local",
+                            "DataTable[{0, 1, 2}, {1, 3, 5}]",
+                        ),
+                    ] {
+                        if ui.button(label).clicked() {
+                            app.input_text = template.to_string();
+                            app.command_input_focus_requested = true;
+                        }
+                    }
+
+                    let selected_table_label = app.selected_object.and_then(|id| {
+                        match app.document.get_object(id) {
+                            Some(GeoObject::DataTable(table)) => Some(table.label.clone()),
+                            _ => None,
+                        }
+                    });
+                    if let Some(table_label) = selected_table_label {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(format!("Ajustar tabla '{table_label}'"))
+                                .color(theme.text_secondary)
+                                .size(12.0)
+                                .strong(),
+                        );
+                        for (label, template) in [
+                            ("Lineal", format!("FitLinear[{table_label}]")),
+                            ("Polinómico grado 2", format!("FitPoly[{table_label}, 2]")),
+                            ("Exponencial", format!("FitExp[{table_label}]")),
+                            ("Logarítmico", format!("FitLog[{table_label}]")),
+                            ("Potencia", format!("FitPow[{table_label}]")),
+                            ("Sinusoidal", format!("FitSin[{table_label}]")),
+                        ] {
+                            if ui.button(label).clicked() {
+                                app.input_text = template;
+                                app.command_input_focus_requested = true;
+                            }
+                        }
+                    } else {
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Seleccioná una tabla local para elegir un modelo de ajuste.",
+                            )
+                            .color(theme.text_tertiary)
+                            .size(11.0),
+                        );
+                    }
+                });
         });
 }
 
 pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
-        panel_theme_local(ctx);
+    let theme = current_theme(ctx);
+    let alg_fill = theme.panel_bg;
+    let sep_col = theme.separator;
 
     // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
     if app.show_spreadsheet {
@@ -1771,88 +3593,56 @@ pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) 
                     .stroke(egui::Stroke::new(1.0, sep_col)),
             )
             .show(ctx, |ui| {
-                ui.heading("Hoja de Cálculo");
+                draw_right_drawer_header(ui, app, "Hoja de Cálculo", theme.accent);
                 ui.separator();
                 let (rows, cols) = app.document.spreadsheet_dim();
-                let text_col = if is_dark {
-                    Color32::WHITE
-                } else {
-                    Color32::BLACK
-                };
-                let hdr_col = if is_dark {
-                    Color32::from_gray(160)
-                } else {
-                    Color32::from_gray(80)
-                };
+                let text_col = theme.input_text;
+                let hdr_col = theme.text_secondary;
 
-                egui::ScrollArea::both()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        egui::Grid::new("sp_grid")
-                            .min_col_width(52.0)
-                            .spacing(egui::vec2(1.0, 1.0))
-                            .striped(true)
-                            .show(ui, |ui| {
-                                // Header row
-                                ui.label(""); // corner
-                                for c in 0..cols {
-                                    let letter = if c < 26 {
-                                        format!("{}", (b'A' + c as u8) as char)
-                                    } else {
-                                        format!("{}", c + 1)
-                                    };
-                                    ui.centered_and_justified(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(letter)
-                                                .monospace()
-                                                .strong()
-                                                .color(hdr_col),
-                                        );
-                                    });
-                                }
-                                ui.end_row();
-
-                                // Data rows
-                                for r in 0..rows {
-                                    ui.label(
-                                        egui::RichText::new(format!("{}", r + 1))
-                                            .monospace()
-                                            .strong()
-                                            .color(hdr_col),
-                                    );
-                                    for c in 0..cols {
-                                        let mut val = app.document.get_spreadsheet_cell(r, c);
-                                        let resp = ui.add_sized(
-                                            [52.0, 18.0],
-                                            egui::TextEdit::singleline(&mut val)
-                                                .font(egui::TextStyle::Monospace)
-                                                .text_color(text_col)
-                                                .horizontal_align(egui::Align::Center),
-                                        );
-                                        if resp.changed() {
-                                            app.save_state();
-                                            if let Err(e) =
-                                                app.document.set_spreadsheet_cell(r, c, val.clone())
-                                            {
-                                                log::warn!("set_spreadsheet_cell: {}", e);
-                                            }
-                                            if let Ok((x, y)) = commands::parse_point_str(&val) {
-                                                app.document.add_object(GeoObject::Point(
-                                                    PointObj::new(Point2::new(x, y)).with_label(
-                                                        format!(
-                                                            "{}{}",
-                                                            (b'A' + c as u8) as char,
-                                                            r + 1
-                                                        ),
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
+                draw_virtual_spreadsheet(
+                    ui,
+                    "right_spreadsheet",
+                    rows,
+                    cols,
+                    hdr_col,
+                    hdr_col,
+                    |ui, row, column| {
+                        let key = (row, column);
+                        let current_value = app.document.get_spreadsheet_cell(row, column);
+                        let mut value = app
+                            .spreadsheet_edit_buffers
+                            .remove(&key)
+                            .unwrap_or_else(|| current_value.clone());
+                        let response = ui.add_sized(
+                            [SPREADSHEET_CELL_WIDTH, SPREADSHEET_CELL_HEIGHT],
+                            egui::TextEdit::singleline(&mut value)
+                                .font(egui::TextStyle::Monospace)
+                                .text_color(text_col)
+                                .horizontal_align(egui::Align::Center),
+                        );
+                        let explicit_submit = response.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        let commit = response.lost_focus() || explicit_submit;
+                        if let Err(error) = crate::app::commit_spreadsheet_edit(
+                            &mut app.document,
+                            crate::app::SpreadsheetEditState {
+                                undo_stack: &mut app.undo_stack,
+                                redo_stack: &mut app.redo_stack,
+                                edit_buffers: &mut app.spreadsheet_edit_buffers,
+                            },
+                            row,
+                            column,
+                            value,
+                            commit,
+                        ) {
+                            log::warn!("set_spreadsheet_cell: {error}");
+                            app.notify(
+                                format!("No se pudo editar la hoja: {error}"),
+                                grafito_ui::toast::ToastKind::Error,
+                            );
+                        }
+                    },
+                );
             });
     }
 }
@@ -1925,12 +3715,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Protocolo de Construcción")
-                        .color(accent)
-                        .strong()
-                        .size(15.0),
-                );
+                draw_right_drawer_header(ui, app, "Protocolo de Construcción", accent);
             });
             ui.add_space(2.0);
             ui.separator();
@@ -1945,17 +3730,21 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                             if let Some(path) =
                                 rfd::FileDialog::new().add_filter("TeX", &["tex"]).save_file()
                             {
-                                if let Err(e) = std::fs::write(&path, latex) {
-                                    app.toasts.push(
+                                if let Err(e) = crate::export::write_text_atomic(&path, &latex) {
+                                    app.cas_result =
+                                        format!("No se pudo exportar el protocolo: {e}");
+                                    app.notify(
                                         format!("Error LaTeX: {}", e),
                                         grafito_ui::toast::ToastKind::Error,
-                                        5.0,
                                     );
                                 } else {
-                                    app.toasts.push(
-                                        "Protocolo exportado a LaTeX".to_string(),
+                                    app.cas_result = format!(
+                                        "Protocolo exportado a LaTeX -> {}",
+                                        path.display()
+                                    );
+                                    app.notify(
+                                        app.cas_result.clone(),
                                         grafito_ui::toast::ToastKind::Success,
-                                        3.0,
                                     );
                                 }
                             }
@@ -1967,9 +3756,9 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                 });
             ui.separator();
 
-            // Lista de pasos con botones up/down y habilitar/deshabilitar.
-            let mut move_idx: Option<(usize, i32)> = None;
-            let mut toggle_idx: Option<usize> = None;
+            // El protocolo es una vista fiel del historial. Reordenar o
+            // desactivar sólo su texto no modifica restricciones reales, por
+            // eso esos controles no se presentan como acciones disponibles.
             egui::ScrollArea::vertical()
                 .max_height(ui.available_height() - 8.0)
                 .show(ui, |ui| {
@@ -2031,44 +3820,13 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                             });
                                             ui.label(
                                                 egui::RichText::new(format!(
-                                                    "{} → {}",
+                                                    "{} -> {}",
                                                     inputs_str, output_str
                                                 ))
                                                 .size(11.0)
                                                 .color(txt_dim),
                                             );
                                         });
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                let up_enabled = i > 0;
-                                                let down_enabled = i + 1 < total;
-                                                if ui
-                                                    .add_enabled(
-                                                        up_enabled,
-                                                        egui::Button::new("↑"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    move_idx = Some((i, -1));
-                                                }
-                                                if ui
-                                                    .add_enabled(
-                                                        down_enabled,
-                                                        egui::Button::new("↓"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    move_idx = Some((i, 1));
-                                                }
-                                                if ui
-                                                    .button(if disabled { "✓" } else { "✕" })
-                                                    .clicked()
-                                                {
-                                                    toggle_idx = Some(i);
-                                                }
-                                            },
-                                        );
                                     });
                                 });
                             ui.add_space(2.0);
@@ -2076,21 +3834,82 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                     }
                 });
 
-            // Aplicar reordenar / toggle tras iterar (no se puede mutar
-            // mientras se itera con borrow inmutable).
-            if let Some((i, dir)) = move_idx {
-                let j = (i as i32 + dir).max(0) as usize;
-                if j < app.construction_log.len() {
-                    app.construction_log.swap(i, j);
-                    for (k, step) in app.construction_log.iter_mut().enumerate() {
-                        step.n = k + 1;
-                    }
-                }
-            }
-            if let Some(i) = toggle_idx {
-                if let Some(step) = app.construction_log.get_mut(i) {
-                    step.disabled = !step.disabled;
-                }
-            }
         });
+}
+
+#[cfg(test)]
+mod statistics_interpolation_tests {
+    use super::stable_interpolate;
+
+    #[test]
+    fn interpolation_preserves_subnormals_and_opposite_sign_extremes() {
+        let minimum_subnormal = f64::from_bits(1);
+
+        assert_eq!(
+            stable_interpolate(minimum_subnormal, minimum_subnormal, 0.5),
+            minimum_subnormal
+        );
+        assert_eq!(
+            stable_interpolate(minimum_subnormal, f64::from_bits(2), 0.5),
+            f64::from_bits(2)
+        );
+        assert_eq!(stable_interpolate(-2.0, 2.0, 0.5), 0.0);
+        assert_eq!(stable_interpolate(-f64::MAX, f64::MAX, 0.5), 0.0);
+        assert_eq!(stable_interpolate(f64::MAX, f64::MAX, 0.5), f64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod domain_coloring_mutation_tests {
+    use super::{set_complex_mapping_animation, set_domain_coloring_mode};
+    use grafito_core::{ComplexGridObj, ComplexMappingObj, Document, GeoObject};
+
+    #[test]
+    fn unchanged_domain_coloring_mode_does_not_dirty_the_document() {
+        let mut document = Document::new();
+        let grid_id = document
+            .try_add_object(GeoObject::ComplexGrid(ComplexGridObj::new(
+                "z", -5.0, 5.0, -5.0, 5.0,
+            )))
+            .unwrap();
+        let revision = document.version;
+
+        assert!(!set_domain_coloring_mode(&mut document, grid_id, 0));
+        assert_eq!(document.version, revision);
+
+        assert!(set_domain_coloring_mode(&mut document, grid_id, 1));
+        assert_eq!(document.version, revision + 1);
+    }
+
+    #[test]
+    fn unchanged_mapping_animation_does_not_dirty_the_document() {
+        let mut document = Document::new();
+        let grid_id = document
+            .try_add_object(GeoObject::ComplexGrid(ComplexGridObj::new(
+                "z", -5.0, 5.0, -5.0, 5.0,
+            )))
+            .unwrap();
+        let mapping_id = document
+            .try_add_object(GeoObject::ComplexMapping(ComplexMappingObj::new(
+                "z^2", grid_id,
+            )))
+            .unwrap();
+        let revision = document.version;
+
+        assert!(!set_complex_mapping_animation(
+            &mut document,
+            mapping_id,
+            false,
+            1.0,
+        ));
+        assert_eq!(document.version, revision);
+
+        assert!(set_complex_mapping_animation(
+            &mut document,
+            mapping_id,
+            true,
+            1.5,
+        ));
+        assert_eq!(document.version, revision + 1);
+    }
 }

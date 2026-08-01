@@ -1,8 +1,9 @@
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
-    Document, GeoObject, ImplicitCurveObj, ParametricCurve2DObj, PolarCurveObj, RelationOperator,
-    VectorField2DObj,
+    Document, GeoObject, ImplicitCurveObj, LineKind, LineObj, ParametricCurve2DObj, PolarCurveObj,
+    RelationOperator, VectorField2DObj,
 };
+use grafito_geometry::Point2;
 
 fn count_points(doc: &Document) -> usize {
     doc.objects_iter()
@@ -126,6 +127,51 @@ fn analysis_on_missing_label_returns_error() {
         "Root on missing label should error, got {:?}",
         outcome
     );
+}
+
+#[test]
+fn intersect_does_not_extend_segments_or_rays() {
+    let mut doc = Document::new();
+    doc.add_object(GeoObject::Line(
+        LineObj::new_with_kind(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            LineKind::Segment,
+        )
+        .with_label("s"),
+    ));
+    doc.add_object(GeoObject::Line(
+        LineObj::new_with_kind(
+            Point2::new(2.0, -1.0),
+            Point2::new(2.0, 1.0),
+            LineKind::Line,
+        )
+        .with_label("l"),
+    ));
+
+    let outcome = process_input(&mut doc, &mut "Intersect[s, l]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(message) if message.contains("no se encontraron"))
+    );
+    assert_eq!(count_points(&doc), 0);
+
+    doc.add_object(GeoObject::Line(
+        LineObj::new_with_kind(Point2::new(1.0, 0.0), Point2::new(2.0, 0.0), LineKind::Ray)
+            .with_label("r"),
+    ));
+    doc.add_object(GeoObject::Line(
+        LineObj::new_with_kind(
+            Point2::new(0.0, -1.0),
+            Point2::new(0.0, 1.0),
+            LineKind::Line,
+        )
+        .with_label("behind"),
+    ));
+    let outcome = process_input(&mut doc, &mut "Intersect[r, behind]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(message) if message.contains("no se encontraron"))
+    );
+    assert_eq!(count_points(&doc), 0);
 }
 
 #[test]

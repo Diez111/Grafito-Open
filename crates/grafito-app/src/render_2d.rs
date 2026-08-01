@@ -4,13 +4,14 @@ use glam::Vec2 as GlamVec2;
 use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::parametric_sampling;
 use grafito_core::vector_field_sampling;
-use grafito_core::{GeoObject, ImplicitCurveObj, RelationOperator};
+use grafito_core::{GeoObject, ImplicitCurveObj, ObjectId, RelationOperator};
 use grafito_geometry::expr::{
     eval_batch_1d, eval_function_with_vars, eval_integral_batch, prepare_function_ast,
 };
 use grafito_geometry::{Color, Point2, ViewTransform};
 use grafito_ui::theme::current_theme;
 use rayon::prelude::*;
+use std::collections::{BTreeSet, HashMap};
 
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -19,6 +20,753 @@ fn to_color32(c: Color) -> Color32 {
         (c.b * 255.0).clamp(0.0, 255.0) as u8,
         (c.a * 255.0).clamp(0.0, 255.0) as u8,
     )
+}
+
+fn should_connect_screen_points(a: Pos2, b: Pos2, canvas_rect: Rect) -> bool {
+    let d = a.distance(b);
+    d.is_finite() && d <= canvas_rect.width().max(canvas_rect.height()) * 0.5
+}
+
+fn split_continuous_screen_runs(points: &[Option<Pos2>], canvas_rect: Rect) -> Vec<Vec<Pos2>> {
+    let mut runs = Vec::new();
+    let mut current = Vec::new();
+    for point in points {
+        let Some(point) = point.filter(|point| point.is_finite()) else {
+            if !current.is_empty() {
+                runs.push(std::mem::take(&mut current));
+            }
+            continue;
+        };
+        if current
+            .last()
+            .is_some_and(|previous| !should_connect_screen_points(*previous, point, canvas_rect))
+        {
+            runs.push(std::mem::take(&mut current));
+        }
+        current.push(point);
+    }
+    if !current.is_empty() {
+        runs.push(current);
+    }
+    runs
+}
+
+fn function_screen_point(view: &ViewTransform, canvas_rect: Rect, x: f64, y: f64) -> Option<Pos2> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !canvas_rect.min.is_finite()
+        || !canvas_rect.max.is_finite()
+    {
+        return None;
+    }
+
+    let screen = view.world_to_screen(Point2::new(x, y));
+    if !screen.is_finite() {
+        return None;
+    }
+
+    let position = canvas_rect.min + Vec2::new(screen.x, screen.y);
+    let draw_bounds = canvas_rect.expand(1.0);
+    (position.is_finite() && draw_bounds.contains(position)).then_some(position)
+}
+
+fn paint_render_geometry(
+    painter: &egui::Painter,
+    canvas_rect: Rect,
+    vertices: &[grafito_render::Vertex],
+    indices: &[u32],
+    style: Option<StyleOverride>,
+) {
+    let mut mesh = egui::Mesh::default();
+    let mut remapped = vec![None; vertices.len()];
+    for (index, vertex) in vertices.iter().enumerate() {
+        let position = Pos2::new(
+            canvas_rect.min.x + vertex.position[0],
+            canvas_rect.min.y + vertex.position[1],
+        );
+        if !position.is_finite() {
+            continue;
+        }
+        let color = get_color(
+            Color::new(
+                vertex.color[0],
+                vertex.color[1],
+                vertex.color[2],
+                vertex.color[3],
+            ),
+            style,
+        );
+        let Ok(new_index) = u32::try_from(mesh.vertices.len()) else {
+            return;
+        };
+        remapped[index] = Some(new_index);
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: position,
+            uv: Pos2::ZERO,
+            color: to_color32(color),
+        });
+    }
+    for triangle in indices.chunks_exact(3) {
+        let mapped = [triangle[0], triangle[1], triangle[2]].map(|index| {
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| remapped.get(index).copied().flatten())
+        });
+        if let [Some(a), Some(b), Some(c)] = mapped {
+            mesh.indices.extend([a, b, c]);
+        }
+    }
+    if !mesh.indices.is_empty() {
+        painter.add(Shape::Mesh(mesh));
+    }
+}
+
+fn is_gpu_base_geometry(document: &grafito_core::Document, obj: &GeoObject) -> bool {
+    grafito_render::gpu_2d_base_owns(document, obj)
+}
+
+fn gpu_overlay_keeps_cpu_decorations(obj: &GeoObject) -> bool {
+    matches!(
+        obj,
+        GeoObject::Function(_) | GeoObject::PolarCurve(_) | GeoObject::PhasePortrait(_)
+    )
+}
+
+fn gpu_base_needs_cpu_backfill(obj: &GeoObject) -> bool {
+    matches!(obj, GeoObject::Function(_) | GeoObject::PolarCurve(_))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BasePaint2D {
+    Cpu(ObjectId),
+    Gpu(ObjectId),
+}
+
+fn base_scene_paint_plan(
+    document: &grafito_core::Document,
+    gpu_base_active: bool,
+) -> Vec<BasePaint2D> {
+    grafito_render::ordered_visible_2d_objects(document)
+        .into_iter()
+        .map(|(id, object)| {
+            if gpu_base_active && is_gpu_base_geometry(document, object) {
+                BasePaint2D::Gpu(id)
+            } else {
+                BasePaint2D::Cpu(id)
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuObjectPass {
+    Full,
+    Supplement,
+    Skip,
+}
+
+fn cpu_object_pass(
+    document: &grafito_core::Document,
+    object: &GeoObject,
+    gpu_base_active: bool,
+) -> CpuObjectPass {
+    if !gpu_base_active || !is_gpu_base_geometry(document, object) {
+        CpuObjectPass::Full
+    } else if gpu_overlay_keeps_cpu_decorations(object) {
+        CpuObjectPass::Supplement
+    } else {
+        CpuObjectPass::Skip
+    }
+}
+
+/// Una sola pasada de dibujo no debe sincronizar más trabajo de curvas
+/// implícitas, incluida la rasterización de fills, que el límite de marching-squares.
+const MAX_CPU_IMPLICIT_FRAME_WORK_UNITS: usize =
+    grafito_core::implicit_curve::MAX_MARCHING_SQUARES_WORK_UNITS;
+
+fn implicit_curve_grid_size(canvas_rect: Rect, quality: grafito_core::RenderQuality) -> usize {
+    grafito_core::implicit_curve::recommended_grid_size_for_quality(
+        canvas_rect.width(),
+        canvas_rect.height(),
+        quality,
+    )
+}
+
+fn complex_grid_cpu_resolution(density: usize, quality: grafito_core::RenderQuality) -> usize {
+    let base = density.clamp(50, 500);
+    if quality == grafito_core::RenderQuality::Preview {
+        base.min(64)
+    } else {
+        base
+    }
+}
+
+fn implicit_curve_view_bounds(view: ViewTransform, canvas_rect: Rect) -> (f64, f64, f64, f64) {
+    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+    let world_br = view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
+    (
+        world_tl.x.min(world_br.x),
+        world_tl.x.max(world_br.x),
+        world_br.y.min(world_tl.y),
+        world_br.y.max(world_tl.y),
+    )
+}
+
+fn implicit_curve_cache_matches_request(
+    curve: &ImplicitCurveObj,
+    view_bounds: (f64, f64, f64, f64),
+    grid_size: usize,
+    variables: &HashMap<String, f64>,
+    quality: grafito_core::RenderQuality,
+) -> bool {
+    let grid_size = match quality {
+        grafito_core::RenderQuality::Preview => grid_size.min(128),
+        grafito_core::RenderQuality::Normal => grid_size.min(512),
+        grafito_core::RenderQuality::High => {
+            grid_size.min(grafito_core::implicit_curve::MAX_IMPLICIT_GRID_SIZE)
+        }
+    };
+    let padded_bounds = grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
+    let requested_key = curve.cache_key(padded_bounds, grid_size, variables);
+    let cached_key = curve.cached_key.read().unwrap_or_else(|poisoned| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        poisoned.into_inner()
+    });
+    if cached_key.as_ref() != Some(&requested_key) {
+        return false;
+    }
+    let cached_region = curve.cached_region.read().unwrap_or_else(|poisoned| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        poisoned.into_inner()
+    });
+    cached_region.is_some_and(|(x_min, x_max, y_min, y_max)| {
+        view_bounds.0 >= x_min
+            && view_bounds.1 <= x_max
+            && view_bounds.2 >= y_min
+            && view_bounds.3 <= y_max
+    })
+}
+
+fn implicit_curve_fill_work(
+    curve: &ImplicitCurveObj,
+    view_bounds: (f64, f64, f64, f64),
+    canvas_rect: Rect,
+    quality: grafito_core::RenderQuality,
+) -> Option<usize> {
+    if curve.fill_color.is_none() || matches!(curve.operator, RelationOperator::Eq) {
+        return Some(0);
+    }
+
+    let padded_bounds = grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
+    let canvas_size = (
+        canvas_rect.width().max(1.0) as u32,
+        canvas_rect.height().max(1.0) as u32,
+    );
+    let (mut texture_width, mut texture_height) =
+        fill_cache_texture_size(view_bounds, padded_bounds, canvas_size);
+    if quality == grafito_core::RenderQuality::Preview {
+        texture_width = (texture_width as f64 * 0.25).ceil().max(1.0) as u32;
+        texture_height = (texture_height as f64 * 0.25).ceil().max(1.0) as u32;
+    }
+    (texture_width as usize).checked_mul(texture_height as usize)
+}
+
+fn implicit_curve_cache_miss_work(
+    curve: &ImplicitCurveObj,
+    grid_size: usize,
+    view_bounds: (f64, f64, f64, f64),
+    canvas_rect: Rect,
+    quality: grafito_core::RenderQuality,
+) -> Option<usize> {
+    let level_count = curve
+        .contour_levels
+        .as_ref()
+        .filter(|levels| !levels.is_empty())
+        .map_or(1, |levels| levels.len())
+        .min(grafito_core::validation::MAX_CONTOUR_LEVELS);
+    let samples_per_axis = grid_size.checked_add(1)?;
+    let field_samples = samples_per_axis.checked_mul(samples_per_axis)?;
+    let marching_cells = grid_size.checked_mul(grid_size)?.checked_mul(level_count)?;
+    field_samples
+        .checked_add(marching_cells)?
+        .checked_add(implicit_curve_fill_work(
+            curve,
+            view_bounds,
+            canvas_rect,
+            quality,
+        )?)
+}
+
+fn visible_implicit_cache_plan(
+    document: &grafito_core::Document,
+    view_bounds: (f64, f64, f64, f64),
+    grid_size: usize,
+    canvas_rect: Rect,
+) -> BTreeSet<grafito_core::ObjectId> {
+    let quality = document.render_quality;
+    let objects = grafito_render::ordered_visible_2d_objects(document);
+
+    let mut remaining_work = MAX_CPU_IMPLICIT_FRAME_WORK_UNITS;
+    let mut admitted = BTreeSet::new();
+    for (id, object) in objects {
+        let GeoObject::ImplicitCurve(curve) = object else {
+            continue;
+        };
+        let cache_matches = implicit_curve_cache_matches_request(
+            curve,
+            view_bounds,
+            grid_size,
+            &document.variables,
+            quality,
+        );
+        let Some(work) = (if cache_matches {
+            implicit_curve_fill_work(curve, view_bounds, canvas_rect, quality)
+        } else {
+            implicit_curve_cache_miss_work(curve, grid_size, view_bounds, canvas_rect, quality)
+        }) else {
+            continue;
+        };
+        let Some(remaining) = remaining_work.checked_sub(work) else {
+            continue;
+        };
+        remaining_work = remaining;
+        admitted.insert(id);
+    }
+    admitted
+}
+
+fn precompute_visible_implicit_curve_caches(
+    document: &grafito_core::Document,
+    canvas_rect: Rect,
+) -> BTreeSet<grafito_core::ObjectId> {
+    let view = *document.view();
+    let view_bounds = implicit_curve_view_bounds(view, canvas_rect);
+    let quality = document.render_quality;
+    let grid_size = implicit_curve_grid_size(canvas_rect, quality);
+    let admitted = visible_implicit_cache_plan(document, view_bounds, grid_size, canvas_rect);
+
+    for id in &admitted {
+        let Some(GeoObject::ImplicitCurve(curve)) = document.get_object(*id) else {
+            continue;
+        };
+        let _segments = grafito_core::implicit_curve::segments_or_compute(
+            curve,
+            view_bounds,
+            grid_size,
+            &document.variables,
+            quality,
+        );
+    }
+    admitted
+}
+
+#[cfg(test)]
+mod overlay_layer_tests {
+    use super::*;
+    use grafito_core::{
+        CircleObj, ComplexGridObj, ComplexMappingObj, Document, EllipseObj, Fractal2DObj,
+        FunctionObj, GeoObject, HyperbolaObj, ImplicitCurveObj, LineObj, ParabolaObj,
+        ParametricCurve2DObj, PencilObj, PhasePortraitObj, PointObj, PolarCurveObj,
+        RegressionLineObj, RelationOperator, TransformedObj, VectorField2DObj,
+    };
+
+    #[test]
+    fn complex_grid_preview_caps_cpu_sampling_while_high_quality_keeps_the_requested_density() {
+        assert_eq!(
+            complex_grid_cpu_resolution(500, grafito_core::RenderQuality::Preview),
+            64
+        );
+        assert_eq!(
+            complex_grid_cpu_resolution(500, grafito_core::RenderQuality::High),
+            500
+        );
+    }
+
+    #[test]
+    fn mixed_cpu_gpu_scene_keeps_global_layer_order() {
+        let mut document = Document::new();
+        let function = document.add_object(GeoObject::Function(FunctionObj::new("0")));
+        let circle = document.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(0.0, 0.0),
+            2.0,
+        )));
+
+        assert_eq!(
+            base_scene_paint_plan(&document, true),
+            vec![BasePaint2D::Cpu(circle), BasePaint2D::Gpu(function)]
+        );
+    }
+
+    #[test]
+    fn mixed_cpu_gpu_objects_in_one_layer_keep_object_id_order() {
+        let mut document = Document::new();
+        let function = document.add_object(GeoObject::Function(FunctionObj::new("0")));
+        let line = document.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(-1.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )));
+        let mut expected = vec![BasePaint2D::Gpu(function), BasePaint2D::Cpu(line)];
+        expected.sort_unstable_by_key(|paint| match paint {
+            BasePaint2D::Cpu(id) | BasePaint2D::Gpu(id) => *id,
+        });
+
+        assert_eq!(base_scene_paint_plan(&document, true), expected);
+    }
+
+    #[test]
+    fn gpu_overlay_keeps_vector_field_details_on_cpu() {
+        let document = Document::new();
+        assert!(is_gpu_base_geometry(
+            &document,
+            &GeoObject::Function(FunctionObj::new("sin(x)")),
+        ));
+        assert!(
+            !is_gpu_base_geometry(
+                &document,
+                &GeoObject::VectorField2D(VectorField2DObj::new("x", "y")),
+            ),
+            "the CPU overlay owns vector arrowheads and RK4 streamlines"
+        );
+        assert!(is_gpu_base_geometry(
+            &document,
+            &GeoObject::Fractal2D(Fractal2DObj::mandelbrot()),
+        ));
+        assert!(is_gpu_base_geometry(
+            &document,
+            &GeoObject::ParametricCurve2D(ParametricCurve2DObj::new("t", "t^2", 0.0, 1.0)),
+        ));
+        assert!(is_gpu_base_geometry(
+            &document,
+            &GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, 1.0)),
+        ));
+        assert!(!is_gpu_base_geometry(
+            &document,
+            &GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))),
+        ));
+    }
+
+    #[test]
+    fn gpu_overlay_keeps_function_and_polar_cpu_decorations() {
+        let function = GeoObject::Function(FunctionObj::new("sin(x)"));
+        let polar = GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, 1.0));
+        let parametric =
+            GeoObject::ParametricCurve2D(ParametricCurve2DObj::new("t", "t^2", 0.0, 1.0));
+
+        assert!(gpu_overlay_keeps_cpu_decorations(&function));
+        assert!(gpu_overlay_keeps_cpu_decorations(&polar));
+        assert!(!gpu_overlay_keeps_cpu_decorations(&parametric));
+    }
+
+    #[test]
+    fn gpu_overlay_never_redraws_a_gpu_owned_family_in_full() {
+        let mut document = Document::new();
+        let point = document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))));
+        let objects = [
+            GeoObject::Function(FunctionObj::new("sin(x)")),
+            GeoObject::Fractal2D(Fractal2DObj::mandelbrot()),
+            GeoObject::ParametricCurve2D(ParametricCurve2DObj::new("t", "t^2", 0.0, 1.0)),
+            GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, 1.0)),
+            GeoObject::PhasePortrait(PhasePortraitObj::new("y", "-x", -1.0, 1.0, -1.0, 1.0)),
+            GeoObject::ComplexGrid(ComplexGridObj::new("z", -1.0, 1.0, -1.0, 1.0)),
+            GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", point)),
+            GeoObject::Transformed(TransformedObj::new(
+                GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0))),
+                "z^2",
+            )),
+        ];
+
+        for object in objects {
+            assert!(grafito_render::gpu_2d_base_owns(&document, &object));
+            assert_ne!(
+                cpu_object_pass(&document, &object, true),
+                CpuObjectPass::Full,
+                "{} must not have two base-scene owners",
+                object.name()
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_overlay_keeps_cpu_only_families_in_full() {
+        let document = Document::new();
+        let objects = [
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))),
+            GeoObject::Ellipse(EllipseObj::new(Point2::new(0.0, 0.0), 2.0, 1.0)),
+            GeoObject::ImplicitCurve(ImplicitCurveObj::new("x^2+y^2", "1", RelationOperator::Eq)),
+            GeoObject::VectorField2D(VectorField2DObj::new("x", "y")),
+        ];
+
+        for object in objects {
+            assert!(!grafito_render::gpu_2d_base_owns(&document, &object));
+            assert_eq!(
+                cpu_object_pass(&document, &object, true),
+                CpuObjectPass::Full
+            );
+        }
+    }
+
+    #[test]
+    fn polar_fill_runs_split_at_the_same_nonfinite_and_jump_gaps_as_strokes() {
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let points = [
+            Some(Pos2::new(0.0, 0.0)),
+            Some(Pos2::new(10.0, 0.0)),
+            Some(Pos2::new(700.0, 0.0)),
+            Some(Pos2::new(710.0, 0.0)),
+            None,
+            Some(Pos2::new(20.0, 0.0)),
+            Some(Pos2::new(30.0, 0.0)),
+        ];
+
+        let runs = split_continuous_screen_runs(&points, canvas);
+
+        assert_eq!(
+            runs,
+            vec![
+                vec![Pos2::new(0.0, 0.0), Pos2::new(10.0, 0.0)],
+                vec![Pos2::new(700.0, 0.0), Pos2::new(710.0, 0.0)],
+                vec![Pos2::new(20.0, 0.0), Pos2::new(30.0, 0.0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_overlay_routes_unrecognized_complex_mappings_to_cpu() {
+        let mut document = Document::new();
+        let targets = [
+            document.add_object(GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+                "t", "t^2", 0.0, 1.0,
+            ))),
+            document.add_object(GeoObject::PolarCurve(PolarCurveObj::new("1", 0.0, 1.0))),
+            document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                "x^2 + y^2",
+                "1",
+                RelationOperator::Eq,
+            ))),
+            document.add_object(GeoObject::VectorField2D(VectorField2DObj::new("x", "y"))),
+        ];
+        for target in targets {
+            assert!(!is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
+            ));
+        }
+
+        let point = document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))));
+        assert!(is_gpu_base_geometry(
+            &document,
+            &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", point)),
+        ));
+    }
+
+    #[test]
+    fn complex_mapping_circle_and_pencil_routes_depend_on_map_support() {
+        let mut document = Document::new();
+        let targets = [
+            document.add_object(GeoObject::Circle(CircleObj::new(
+                Point2::new(2.0, 0.0),
+                0.5,
+            ))),
+            document.add_object(GeoObject::Pencil(PencilObj::new(vec![
+                Point2::new(1.0, 0.0),
+                Point2::new(2.0, 1.0),
+            ]))),
+        ];
+
+        for target in targets {
+            assert!(!is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
+            ));
+            assert!(is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", target)),
+            ));
+        }
+    }
+
+    #[test]
+    fn complex_mapping_analytic_curves_route_to_gpu_only_when_recognized() {
+        let mut document = Document::new();
+        let targets = [
+            document.add_object(GeoObject::Ellipse(EllipseObj::new(
+                Point2::new(0.0, 0.0),
+                2.0,
+                1.0,
+            ))),
+            document.add_object(GeoObject::Parabola(ParabolaObj::new(
+                Point2::new(0.0, 0.0),
+                1.0,
+            ))),
+            document.add_object(GeoObject::Hyperbola(HyperbolaObj::new(
+                Point2::new(0.0, 0.0),
+                1.0,
+                0.5,
+            ))),
+            document.add_object(GeoObject::RegressionLine(RegressionLineObj::linear(
+                vec![-1.0, 0.0, 1.0],
+                vec![-1.0, 0.0, 1.0],
+                1.0,
+                0.0,
+                1.0,
+            ))),
+        ];
+
+        for target in targets {
+            assert!(is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", target)),
+            ));
+            assert!(!is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
+            ));
+        }
+    }
+
+    #[test]
+    fn function_projection_rejects_unrepresentable_samples_and_keeps_visible_large_values() {
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mut view = ViewTransform::new(800.0, 600.0);
+        let samples = [(-1.0, Some(1_000_000.0)), (0.0, Some(1e100))];
+
+        assert!(!view
+            .world_to_screen(Point2::new(samples[1].0, samples[1].1.unwrap()))
+            .is_finite());
+        let projected: Vec<_> = samples
+            .iter()
+            .map(|&(x, y)| y.and_then(|y| function_screen_point(&view, canvas, x, y)))
+            .collect();
+        assert!(projected.iter().all(|point| point.is_none()));
+
+        view.scale = 0.0001;
+        let screen = function_screen_point(&view, canvas, samples[0].0, samples[0].1.unwrap())
+            .expect("a finite million-valued constant in view should remain renderable");
+        assert!(screen.is_finite());
+        assert!(canvas.expand(1.0).contains(screen));
+    }
+
+    fn fixed_object_id(value: u128) -> grafito_core::ObjectId {
+        let hex = format!("{value:032x}");
+        let uuid = format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        );
+        serde_json::from_str(&format!("\"{uuid}\"")).expect("valid fixed object id")
+    }
+
+    #[test]
+    fn fill_texture_cache_evicts_least_recent_entry_with_entry_and_byte_budgets() {
+        let first = fixed_object_id(1);
+        let second = fixed_object_id(2);
+        let third = fixed_object_id(3);
+        let mut cache = FillTextureCacheStore::with_limits(2, 128);
+
+        cache.insert(first, FillTextureCache::without_texture((4, 4)));
+        cache.insert(second, FillTextureCache::without_texture((4, 4)));
+        assert!(
+            cache.get(first).is_some(),
+            "the first entry becomes most recent"
+        );
+        cache.insert(third, FillTextureCache::without_texture((4, 4)));
+
+        assert!(cache.contains_key(first));
+        assert!(
+            !cache.contains_key(second),
+            "the least-recent entry is evicted"
+        );
+        assert!(cache.contains_key(third));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.total_bytes(), 128);
+    }
+
+    #[test]
+    fn fill_texture_cache_has_a_global_limit_for_five_thousand_filled_objects() {
+        let mut cache = FillTextureCacheStore::default();
+
+        for value in 1..=5_000 {
+            cache.insert(
+                fixed_object_id(value),
+                FillTextureCache::without_texture((4_096, 4_096)),
+            );
+        }
+
+        assert!(cache.len() <= MAX_FILL_TEXTURE_CACHE_ENTRIES);
+        assert!(cache.total_bytes() <= MAX_FILL_TEXTURE_CACHE_BYTES);
+    }
+
+    #[test]
+    fn fill_texture_cache_removes_deleted_and_hidden_fill_owners() {
+        let mut document = Document::new();
+        let visible = document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x",
+            "0",
+            RelationOperator::Less,
+        )));
+        let hidden = document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "y",
+            "0",
+            RelationOperator::Less,
+        )));
+        let deleted = document.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x + y",
+            "0",
+            RelationOperator::Less,
+        )));
+        document
+            .get_object_mut(hidden)
+            .expect("hidden curve exists")
+            .set_visible(false);
+        assert!(document.remove_object(deleted).is_some());
+
+        let mut cache = FillTextureCacheStore::default();
+        for id in [visible, hidden, deleted] {
+            cache.insert(id, FillTextureCache::without_texture((1, 1)));
+        }
+        cache.retain_visible_fill_owners(&document);
+
+        assert!(cache.contains_key(visible));
+        assert!(!cache.contains_key(hidden));
+        assert!(!cache.contains_key(deleted));
+    }
+
+    #[test]
+    fn implicit_cache_misses_share_a_deterministic_frame_budget() {
+        let mut document = Document::new();
+        document.set_view(ViewTransform::new(800.0, 600.0));
+        let mut ids = Vec::new();
+        for value in 1..=4 {
+            let mut curve = ImplicitCurveObj::new("x", "0", RelationOperator::Less);
+            curve.id = fixed_object_id(value);
+            curve.contour_levels = Some(vec![-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]);
+            ids.push(document.add_object(GeoObject::ImplicitCurve(curve)));
+        }
+        ids.sort_unstable();
+
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let evaluated = super::precompute_visible_implicit_curve_caches(&document, canvas);
+
+        assert_eq!(evaluated.len(), 2);
+        assert!(ids[..2].iter().all(|id| evaluated.contains(id)));
+        assert!(ids[2..].iter().all(|id| !evaluated.contains(id)));
+        assert!(ids[..2].iter().all(|id| {
+            let GeoObject::ImplicitCurve(curve) = document.get_object(*id).unwrap() else {
+                panic!("expected implicit curve");
+            };
+            curve.cached_key.read().unwrap().is_some()
+        }));
+        let GeoObject::ImplicitCurve(deferred) = document.get_object(ids[2]).unwrap() else {
+            panic!("expected deferred implicit curve");
+        };
+        assert!(
+            deferred.cached_key.read().unwrap().is_none(),
+            "a deferred cache miss must not overwrite or mark a cache as ready"
+        );
+    }
 }
 
 fn draw_dashed_line(
@@ -74,6 +822,30 @@ fn trig_asymptotes(function: u8, x_min: f64, x_max: f64) -> Vec<f64> {
     xs
 }
 
+/// Devuelve una cantidad de muestras acotada para el gráfico trigonométrico.
+///
+/// En zoom extremo el tope puede ser menor que el mínimo habitual de calidad
+/// alta; el mínimo efectivo se ajusta al tope para evitar rangos inválidos.
+pub(crate) fn trig_sample_count(
+    width: usize,
+    x_span: f64,
+    quality: grafito_core::RenderQuality,
+) -> usize {
+    let zoom_cap = if x_span.abs() > 80.0 {
+        200
+    } else if x_span.abs() > 40.0 {
+        320
+    } else {
+        760
+    };
+
+    match quality {
+        grafito_core::RenderQuality::Preview => width.clamp(120, zoom_cap.min(280)),
+        grafito_core::RenderQuality::Normal => width.clamp(200, zoom_cap.min(520)),
+        grafito_core::RenderQuality::High => width.clamp(280.min(zoom_cap), zoom_cap),
+    }
+}
+
 /// Caché de textura para el relleno de curvas implícitas.
 ///
 /// Almacena la textura egui resultante de rasterizar el fill de una
@@ -91,6 +863,170 @@ pub struct FillTextureCache {
     /// Región world-space padded/snapped que cubre la textura. Si los
     /// `view_bounds` actuales caen dentro de esta región, se puede reusar.
     pub cached_region: (f64, f64, f64, f64),
+    byte_size: usize,
+    last_used: u64,
+}
+
+impl FillTextureCache {
+    fn new(
+        texture: Option<egui::TextureHandle>,
+        cache_key: u64,
+        canvas_size: (u32, u32),
+        cached_region: (f64, f64, f64, f64),
+    ) -> Self {
+        Self {
+            texture,
+            cache_key,
+            canvas_size,
+            cached_region,
+            byte_size: fill_texture_byte_size(canvas_size),
+            last_used: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn without_texture(canvas_size: (u32, u32)) -> Self {
+        Self::new(None, 0, canvas_size, (0.0, 1.0, 0.0, 1.0))
+    }
+}
+
+/// Máximo global para texturas RGBA8 de relleno. El límite de bytes impide que
+/// documentos grandes con regiones visibles simultáneamente retengan memoria
+/// GPU proporcional al número de objetos.
+pub const MAX_FILL_TEXTURE_CACHE_ENTRIES: usize = 16;
+pub const MAX_FILL_TEXTURE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+fn fill_texture_byte_size(canvas_size: (u32, u32)) -> usize {
+    let pixels = usize::try_from(canvas_size.0).ok().and_then(|width| {
+        usize::try_from(canvas_size.1)
+            .ok()
+            .and_then(|height| width.checked_mul(height))
+    });
+    pixels
+        .and_then(|pixels| pixels.checked_mul(std::mem::size_of::<Color32>()))
+        .unwrap_or(usize::MAX)
+}
+
+/// Caché global LRU de texturas de relleno compartida por curvas implícitas y
+/// mapeos complejos. Cada entrada representa una textura RGBA8 completa.
+pub struct FillTextureCacheStore {
+    entries: HashMap<grafito_core::ObjectId, FillTextureCache>,
+    total_bytes: usize,
+    access_epoch: u64,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for FillTextureCacheStore {
+    fn default() -> Self {
+        Self::with_limits(MAX_FILL_TEXTURE_CACHE_ENTRIES, MAX_FILL_TEXTURE_CACHE_BYTES)
+    }
+}
+
+impl FillTextureCacheStore {
+    fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+            access_epoch: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn next_access_epoch(&mut self) -> u64 {
+        if self.access_epoch == u64::MAX {
+            let mut ids: Vec<_> = self.entries.keys().copied().collect();
+            ids.sort_unstable_by(|left, right| {
+                self.entries[left]
+                    .last_used
+                    .cmp(&self.entries[right].last_used)
+                    .then_with(|| left.cmp(right))
+            });
+            for (index, id) in ids.into_iter().enumerate() {
+                if let Some(entry) = self.entries.get_mut(&id) {
+                    entry.last_used = index as u64 + 1;
+                }
+            }
+            self.access_epoch = self.entries.len() as u64;
+        }
+        self.access_epoch += 1;
+        self.access_epoch
+    }
+
+    fn get(&mut self, object_id: grafito_core::ObjectId) -> Option<&FillTextureCache> {
+        let epoch = self.next_access_epoch();
+        let entry = self.entries.get_mut(&object_id)?;
+        entry.last_used = epoch;
+        Some(entry)
+    }
+
+    fn insert(&mut self, object_id: grafito_core::ObjectId, mut entry: FillTextureCache) {
+        if entry.byte_size > self.max_bytes || self.max_entries == 0 {
+            return;
+        }
+        self.remove(object_id);
+        entry.last_used = self.next_access_epoch();
+        self.total_bytes = self.total_bytes.saturating_add(entry.byte_size);
+        self.entries.insert(object_id, entry);
+        self.evict_to_budget();
+    }
+
+    fn remove(&mut self, object_id: grafito_core::ObjectId) {
+        if let Some(entry) = self.entries.remove(&object_id) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
+
+    fn retain_visible_fill_owners(&mut self, document: &grafito_core::Document) {
+        self.entries.retain(|id, _| match document.get_object(*id) {
+            Some(GeoObject::ImplicitCurve(curve)) => curve.visible,
+            Some(GeoObject::ComplexMapping(mapping)) => mapping.visible,
+            _ => false,
+        });
+        self.total_bytes = self
+            .entries
+            .values()
+            .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
+    }
+
+    fn evict_to_budget(&mut self) {
+        while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes {
+            let Some(id) = self
+                .entries
+                .iter()
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.last_used
+                        .cmp(&right.last_used)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            self.remove(id);
+        }
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, object_id: grafito_core::ObjectId) -> bool {
+        self.entries.contains_key(&object_id)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
 }
 
 /// Calcula la cache key del fill de una curva implícita.
@@ -118,6 +1054,8 @@ pub fn compute_fill_cache_key(
     padded_bounds.3.to_bits().hash(&mut hasher);
     canvas_size.0.hash(&mut hasher);
     canvas_size.1.hash(&mut hasher);
+    let mut variables: Vec<_> = variables.iter().collect();
+    variables.sort_unstable_by_key(|(name, _)| *name);
     for (k, v) in variables {
         k.hash(&mut hasher);
         v.to_bits().hash(&mut hasher);
@@ -238,29 +1176,16 @@ pub fn complex_mapping_segment_strokes(
     segments: &[(Point2, Point2)],
     subdivisions: usize,
 ) -> Vec<(Point2, Point2)> {
-    use num_complex::Complex64;
+    complex_mapping_segment_strokes_at(map, segments, subdivisions, 1.0)
+}
 
-    let subdivisions = subdivisions.max(1);
-    let mut strokes = Vec::new();
-    for (a, b) in segments {
-        let mut prev: Option<Point2> = None;
-        for i in 0..=subdivisions {
-            let t = i as f64 / subdivisions as f64;
-            let z = Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
-            let current = map.apply(z).and_then(|w| {
-                if w.re.is_finite() && w.im.is_finite() {
-                    Some(Point2::new(w.re, w.im))
-                } else {
-                    None
-                }
-            });
-            if let (Some(p), Some(c)) = (prev, current) {
-                strokes.push((p, c));
-            }
-            prev = current;
-        }
-    }
-    strokes
+fn complex_mapping_segment_strokes_at(
+    map: ConformalMap,
+    segments: &[(Point2, Point2)],
+    subdivisions: usize,
+    homotopy_factor: f64,
+) -> Vec<(Point2, Point2)> {
+    grafito_render::transform_complex_mapping_segments(map, segments, subdivisions, homotopy_factor)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -272,6 +1197,7 @@ pub struct StyleOverride {
     pub size_scale: Option<f32>,
     pub hide_label: bool,
     pub clear_fill_color: bool,
+    pub skip_stroke: bool,
 }
 
 fn get_color(base: Color, style: Option<StyleOverride>) -> Color {
@@ -560,7 +1486,12 @@ impl GrafitoApp {
         }
     }
 
-    pub(crate) fn draw_axes(&self, painter: &egui::Painter, canvas_rect: Rect) {
+    pub(crate) fn draw_axes(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        show_numeric_ticks: bool,
+    ) {
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br =
@@ -590,6 +1521,11 @@ impl GrafitoApp {
             ],
             stroke,
         );
+
+        if !show_numeric_ticks {
+            return;
+        }
+
         // Tick marks and labels — log-appropriate or linear
         let text_color = current_theme(painter.ctx()).axis_label;
         let font = egui::FontId::proportional(12.0);
@@ -1002,19 +1938,7 @@ impl GrafitoApp {
 
         let y_span = (y_max - y_min).abs().max(1.0);
         let x_span = (x_max - x_min).abs();
-        // En zoom-out extremo, reducir samples para evitar artefactos y lag.
-        let zoom_cap = if x_span > 80.0 {
-            200
-        } else if x_span > 40.0 {
-            320
-        } else {
-            760
-        };
-        let samples = match self.document.render_quality {
-            grafito_core::RenderQuality::Preview => (width as usize).clamp(120, zoom_cap.min(280)),
-            grafito_core::RenderQuality::Normal => (width as usize).clamp(200, zoom_cap.min(520)),
-            grafito_core::RenderQuality::High => (width as usize).clamp(280, zoom_cap),
-        };
+        let samples = trig_sample_count(width as usize, x_span, self.document.render_quality);
         let mut segments = Vec::with_capacity(samples);
         let mut prev: Option<Point2> = None;
         let asymptotes = trig_asymptotes(self.trig_function, x_min, x_max);
@@ -1170,14 +2094,14 @@ impl GrafitoApp {
     }
 
     fn active_complex_animation_expr(&self) -> (String, &'static str) {
-        for (_, obj) in self.document.objects_iter() {
+        for (_, obj) in grafito_render::ordered_visible_2d_objects(&self.document) {
             if let GeoObject::ComplexMapping(cm) = obj {
                 if cm.visible {
                     return (cm.expr.clone(), "f");
                 }
             }
         }
-        for (_, obj) in self.document.objects_iter() {
+        for (_, obj) in grafito_render::ordered_visible_2d_objects(&self.document) {
             if let GeoObject::ComplexGrid(cg) = obj {
                 if cg.visible {
                     return (cg.expr.clone(), "f");
@@ -1191,41 +2115,14 @@ impl GrafitoApp {
         &mut self,
         painter: &egui::Painter,
         canvas_rect: Rect,
-        overlay_only: bool,
+        gpu_base_active: bool,
+        mut paint_gpu_object: impl FnMut(ObjectId),
     ) {
-        // Pre-compute (or reuse cached) implicit-curve geometry before the
-        // immutable draw pass. The cache lives inside each ImplicitCurveObj and
-        // is invalidated only when expression, view bounds or variables change.
-        {
-            let view = *self.document.view();
-            let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-            let world_br =
-                view.screen_to_world(glam::Vec2::new(canvas_rect.width(), canvas_rect.height()));
-            let view_bounds = (
-                world_tl.x.min(world_br.x),
-                world_tl.x.max(world_br.x),
-                world_br.y.min(world_tl.y),
-                world_br.y.max(world_tl.y),
-            );
-            let quality = self.document.render_quality;
-            let grid_size = grafito_core::implicit_curve::recommended_grid_size_for_quality(
-                canvas_rect.width(),
-                canvas_rect.height(),
-                quality,
-            );
-            let variables = &self.document.variables;
-            for (_, obj) in self.document.objects_iter() {
-                if let GeoObject::ImplicitCurve(ic) = obj {
-                    let _unused = grafito_core::implicit_curve::segments_or_compute(
-                        ic,
-                        view_bounds,
-                        grid_size,
-                        variables,
-                        quality,
-                    );
-                }
-            }
-        }
+        self.prune_fill_texture_cache();
+
+        // Cache misses and fill rasterization are admitted in ObjectId order
+        // under one frame budget. Deferred curves keep their old cache untouched.
+        precompute_visible_implicit_curve_caches(&self.document, canvas_rect);
 
         let mut hovered_object_for_tool = None;
         if matches!(
@@ -1251,17 +2148,15 @@ impl GrafitoApp {
             }
         }
 
-        for (id, obj) in self.document.objects_iter() {
-            if !obj.is_visible() {
+        for paint in base_scene_paint_plan(&self.document, gpu_base_active) {
+            let id = match paint {
+                BasePaint2D::Cpu(id) | BasePaint2D::Gpu(id) => id,
+            };
+            let Some(obj) = self.document.get_object(id) else {
                 continue;
-            }
-            // Skip 3D objects in 2D view — they can't be rendered here.
-            if obj.is_3d() {
-                continue;
-            }
-
-            let is_tool_hovered = hovered_object_for_tool == Some(*id);
-            let is_driver = self.tool_state.driver == Some(*id);
+            };
+            let is_tool_hovered = hovered_object_for_tool == Some(id);
+            let is_driver = self.tool_state.driver == Some(id);
 
             let style = if is_tool_hovered || is_driver {
                 Some(StyleOverride {
@@ -1277,7 +2172,16 @@ impl GrafitoApp {
             } else {
                 None
             };
-            self.draw_object_styled(painter, canvas_rect, obj, style, overlay_only);
+            match paint {
+                BasePaint2D::Cpu(_) => {
+                    self.draw_object_styled(painter, canvas_rect, obj, style, false);
+                }
+                BasePaint2D::Gpu(_) => {
+                    self.draw_gpu_object_backfill(painter, canvas_rect, obj);
+                    paint_gpu_object(id);
+                    self.draw_object_styled(painter, canvas_rect, obj, style, true);
+                }
+            }
         }
 
         if let Some(preview) = &self.preview_object {
@@ -1325,63 +2229,64 @@ impl GrafitoApp {
         }
     }
 
-    /// Dibuja sólo los rellenos de regiones implícitas en el pase base.
-    ///
-    /// En modo GPU `grafito-render` omite `ImplicitCurve` para evitar doble
-    /// contorno; por eso los fills CPU deben pintarse antes del callback GPU.
-    /// Los contornos y etiquetas se dibujan después con `draw_objects(..., true)`.
-    pub(crate) fn draw_implicit_curve_fills(&self, painter: &egui::Painter, canvas_rect: Rect) {
+    fn draw_gpu_object_backfill(
+        &self,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+        object: &GeoObject,
+    ) {
+        if gpu_base_needs_cpu_backfill(object) {
+            self.draw_object_styled(
+                painter,
+                canvas_rect,
+                object,
+                Some(StyleOverride {
+                    hide_label: true,
+                    skip_stroke: true,
+                    ..Default::default()
+                }),
+                false,
+            );
+        }
+
+        let GeoObject::ComplexMapping(cm) = object else {
+            return;
+        };
         let view = self.document.view();
-        for (_, obj) in self.document.objects_iter() {
-            let GeoObject::ImplicitCurve(ic) = obj else {
-                continue;
-            };
-            if !ic.visible {
-                continue;
-            }
-            let Some(fill_color) = ic.fill_color else {
-                continue;
-            };
-            if matches!(
-                ic.operator,
-                RelationOperator::Less
-                    | RelationOperator::LessEq
-                    | RelationOperator::Greater
-                    | RelationOperator::GreaterEq
-            ) {
-                self.draw_implicit_curve_fill(painter, canvas_rect, view, ic, fill_color);
-            }
+        let admitted = visible_implicit_cache_plan(
+            &self.document,
+            implicit_curve_view_bounds(*view, canvas_rect),
+            implicit_curve_grid_size(canvas_rect, self.document.render_quality),
+            canvas_rect,
+        );
+        let Some(map) = cm.conformal_map(self.document.complex_base_symbol.as_str()) else {
+            return;
+        };
+        let Some(GeoObject::ImplicitCurve(ic)) = self.document.get_object(cm.target) else {
+            return;
+        };
+        if !admitted.contains(&cm.target) || matches!(ic.operator, RelationOperator::Eq) {
+            return;
+        }
+        let Some(fill_color) = ic.fill_color else {
+            return;
+        };
+        let homotopy_factor = grafito_render::complex_mapping_homotopy_factor(
+            cm.animate_homotopy,
+            cm.homotopy_speed,
+            self.transient_render_state.homotopy_time(),
+        );
+        if homotopy_factor >= 1.0 - f64::EPSILON {
+            self.draw_complex_mapping_fill(painter, canvas_rect, view, ic, cm.id, map, fill_color);
         }
     }
 
-    /// Dibuja sólo los rellenos cacheados de `ComplexMapping` en el pase base.
-    ///
-    /// En modo GPU el contorno transformado lo dibuja `grafito-render`; el fill
-    /// sigue siendo una textura CPU cacheada porque depende de aplicar el mapa
-    /// inverso por píxel.
-    pub(crate) fn draw_complex_mapping_fills(&self, painter: &egui::Painter, canvas_rect: Rect) {
-        let view = self.document.view();
-        for (_, obj) in self.document.objects_iter() {
-            let GeoObject::ComplexMapping(cm) = obj else {
-                continue;
-            };
-            if !cm.visible {
-                continue;
-            }
-            let Some(map) = cm.conformal_map(self.document.complex_base_symbol.as_str()) else {
-                continue;
-            };
-            let Some(GeoObject::ImplicitCurve(ic)) = self.document.get_object(cm.target) else {
-                continue;
-            };
-            let Some(fill_color) = ic.fill_color else {
-                continue;
-            };
-            if matches!(ic.operator, RelationOperator::Eq) {
-                continue;
-            }
-            self.draw_complex_mapping_fill(painter, canvas_rect, view, ic, cm.id, map, fill_color);
-        }
+    fn prune_fill_texture_cache(&self) {
+        let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
+            log::warn!("Fill texture cache write lock poisoned; recovering");
+            poisoned.into_inner()
+        });
+        cache.retain_visible_fill_owners(&self.document);
     }
 
     fn hovered_analysis_color(
@@ -1555,11 +2460,11 @@ impl GrafitoApp {
         // 5) Verificar caché por el ObjectId del ComplexMapping (no del
         //    ImplicitCurve, para no pisarlo con su propia cache de fill).
         {
-            let cache = self.fill_textures.read().unwrap_or_else(|poisoned| {
-                log::warn!("Fill texture cache read lock poisoned; recovering");
+            let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache write lock poisoned; recovering");
                 poisoned.into_inner()
             });
-            if let Some(entry) = cache.get(&cm_id) {
+            if let Some(entry) = cache.get(cm_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
                     && entry.texture.is_some()
@@ -1636,12 +2541,12 @@ impl GrafitoApp {
             });
             cache.insert(
                 cm_id,
-                FillTextureCache {
-                    texture: Some(texture.clone()),
+                FillTextureCache::new(
+                    Some(texture.clone()),
                     cache_key,
-                    canvas_size: (texture_w, texture_h),
-                    cached_region: padded_bounds,
-                },
+                    (texture_w, texture_h),
+                    padded_bounds,
+                ),
             );
         }
         let texture_id = texture.id();
@@ -1735,11 +2640,11 @@ impl GrafitoApp {
         //    dentro de la región cacheada, blitear la textura y retornar.
         let object_id = ic.id;
         {
-            let cache = self.fill_textures.read().unwrap_or_else(|poisoned| {
-                log::warn!("Fill texture cache read lock poisoned; recovering");
+            let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
+                log::warn!("Fill texture cache write lock poisoned; recovering");
                 poisoned.into_inner()
             });
-            if let Some(entry) = cache.get(&object_id) {
+            if let Some(entry) = cache.get(object_id) {
                 if entry.cache_key == cache_key
                     && entry.canvas_size == (texture_w, texture_h)
                     && entry.texture.is_some()
@@ -1816,12 +2721,12 @@ impl GrafitoApp {
             });
             cache.insert(
                 object_id,
-                FillTextureCache {
-                    texture: Some(texture.clone()),
+                FillTextureCache::new(
+                    Some(texture.clone()),
                     cache_key,
-                    canvas_size: (texture_w, texture_h),
-                    cached_region: padded_bounds,
-                },
+                    (texture_w, texture_h),
+                    padded_bounds,
+                ),
             );
         }
 
@@ -1843,14 +2748,11 @@ impl GrafitoApp {
         style: Option<StyleOverride>,
         overlay_only: bool,
     ) {
-        if overlay_only
-            && matches!(
-                obj,
-                GeoObject::ComplexGrid(_) | GeoObject::ComplexMapping(_)
-            )
-        {
-            return;
-        }
+        let overlay_only = match cpu_object_pass(&self.document, obj, overlay_only) {
+            CpuObjectPass::Full => false,
+            CpuObjectPass::Supplement => true,
+            CpuObjectPass::Skip => return,
+        };
 
         let view = self.document.view();
         let label_color = current_theme(painter.ctx()).object_label;
@@ -2026,7 +2928,7 @@ impl GrafitoApp {
                     );
                 }
             }
-            GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+            GeoObject::Pencil(pencil) if pencil.points.len() >= 2 || pencil.is_dynamic_locus() => {
                 // Polilínea: dibuja cada par consecutivo como segmento.
                 let width = get_width(pencil.width, style);
                 let color = to_color32(get_color(pencil.color, style));
@@ -2041,6 +2943,23 @@ impl GrafitoApp {
                         ],
                         stroke,
                     );
+                }
+                if pencil.is_dynamic_locus() {
+                    if let Some(last) = pencil.points.last().copied() {
+                        let screen = view.world_to_screen(last);
+                        let end = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        painter.circle_stroke(end, (width * 1.6).max(3.0), Stroke::new(1.0, color));
+                        let label = get_label(&pencil.label, style);
+                        if !label.is_empty() {
+                            painter.text(
+                                end + Vec2::new(6.0, -6.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
+                        }
+                    }
                 }
             }
             GeoObject::Function(fun) => {
@@ -2087,7 +3006,7 @@ impl GrafitoApp {
                         xs.zip(batch_results.into_iter().chain(std::iter::repeat(None)))
                     {
                         if let Some(y) = y_opt {
-                            if y.is_finite() && y.abs() < 1e50 {
+                            if y.is_finite() {
                                 s.push((x, Some(y)));
                                 continue;
                             }
@@ -2103,7 +3022,7 @@ impl GrafitoApp {
                             }
                         }
                         if let Ok(y) = eval_function_with_vars(&fun.expr, x, variables) {
-                            if y.is_finite() && y.abs() < 1e50 {
+                            if y.is_finite() {
                                 s.push((x, Some(y)));
                                 continue;
                             }
@@ -2142,7 +3061,7 @@ impl GrafitoApp {
                             for _ in 0..24 {
                                 let mid = (good_x + bad_x) * 0.5;
                                 if let Ok(y) = eval_function_with_vars(&fun.expr, mid, variables) {
-                                    if y.is_finite() && y.abs() < 1e50 {
+                                    if y.is_finite() {
                                         good_x = mid;
                                         best_y = y;
                                     } else {
@@ -2158,102 +3077,116 @@ impl GrafitoApp {
                     }
                 }
                 let samples = refined_samples;
+                let projected_samples: Vec<Option<Pos2>> = samples
+                    .iter()
+                    .map(|&(x, y)| y.and_then(|y| function_screen_point(view, canvas_rect, x, y)))
+                    .collect();
+                let draw_bounds = canvas_rect.expand(1.0);
 
                 // Fill area under curve if fill_color is set
-                if let Some(fill) = fill_color {
-                    let mut fill_pts: Vec<Pos2> = Vec::new();
-                    // Top edge: left to right along the curve
-                    for &(x, y_opt) in &samples {
-                        if let Some(y) = y_opt {
-                            if y.is_finite() {
-                                let s = view.world_to_screen(Point2::new(x, y));
-                                fill_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
+                if !overlay_only {
+                    if let Some(fill) = fill_color {
+                        let fill_rgba = to_color32(fill);
+                        let mut run: Vec<(Pos2, Pos2)> = Vec::new();
+                        let flush_run = |run: &mut Vec<(Pos2, Pos2)>| {
+                            if run.len() < 2 {
+                                run.clear();
+                                return;
+                            }
+                            let mut fill_pts: Vec<Pos2> =
+                                run.iter().map(|(curve, _)| *curve).collect();
+                            fill_pts.extend(run.iter().rev().map(|(_, baseline)| *baseline));
+                            if fill_pts.len() >= 3 {
+                                painter.add(Shape::Path(egui::epaint::PathShape {
+                                    points: fill_pts,
+                                    closed: true,
+                                    fill: fill_rgba,
+                                    stroke: Stroke::new(0.5, fill_rgba).into(),
+                                }));
+                            }
+                            run.clear();
+                        };
+
+                        for ((x, _), curve) in samples.iter().zip(&projected_samples) {
+                            if let (Some(curve), Some(baseline)) =
+                                (curve, function_screen_point(view, canvas_rect, *x, 0.0))
+                            {
+                                if let Some((prev, _)) = run.last() {
+                                    if !should_connect_screen_points(*prev, *curve, canvas_rect) {
+                                        flush_run(&mut run);
+                                    }
+                                }
+                                run.push((*curve, baseline));
+                            } else {
+                                flush_run(&mut run);
                             }
                         }
-                    }
-                    // Bottom edge: right to left along y=0 (or min_y)
-                    if !fill_pts.is_empty() {
-                        let mut bottom_pts: Vec<Pos2> = Vec::new();
-                        for &(x, _) in samples.iter().rev() {
-                            let s = view.world_to_screen(Point2::new(x, 0.0));
-                            bottom_pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
-                        }
-                        fill_pts.append(&mut bottom_pts);
-                        // Close polygon on the left
-                        if let Some(first) = fill_pts.first() {
-                            fill_pts.push(*first);
-                        }
-                        if fill_pts.len() >= 3 {
-                            let fill_rgba = to_color32(fill);
-                            let fill_stroke = Stroke::new(0.5, fill_rgba);
-                            painter.add(Shape::line(fill_pts.clone(), fill_stroke));
-                            painter.add(Shape::convex_polygon(fill_pts, fill_rgba, Stroke::NONE));
-                        }
+                        flush_run(&mut run);
                     }
                 }
 
-                let stroke = Stroke::new(width, to_color32(color));
-                let mut optimized_points = Vec::new();
-                let mut i = 0;
-                while i < samples.len() {
-                    let (x, y_opt) = samples[i];
-                    if let Some(y) = y_opt {
-                        let p = view.world_to_screen(Point2::new(x, y));
-                        let px = p.x.round() as i32;
-                        let first_y = p.y;
-                        let mut min_y = p.y;
-                        let mut max_y = p.y;
-                        let mut min_j = i;
-                        let mut max_j = i;
-                        let mut last_y = p.y;
+                if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    let stroke = Stroke::new(width, to_color32(color));
+                    let mut optimized_points = Vec::new();
+                    let mut i = 0;
+                    while i < projected_samples.len() {
+                        if let Some(p) = projected_samples[i] {
+                            let px = p.x.round().clamp(draw_bounds.min.x, draw_bounds.max.x);
+                            let first_y = p.y;
+                            let mut min_y = p.y;
+                            let mut max_y = p.y;
+                            let mut min_j = i;
+                            let mut max_j = i;
+                            let mut last_y = p.y;
 
-                        let mut j = i + 1;
-                        while j < samples.len() {
-                            if let Some(y2) = samples[j].1 {
-                                let p2 = view.world_to_screen(Point2::new(samples[j].0, y2));
-                                if (p2.x.round() as i32) == px {
-                                    if p2.y < min_y {
-                                        min_y = p2.y;
-                                        min_j = j;
+                            let mut j = i + 1;
+                            while j < projected_samples.len() {
+                                if let Some(p2) = projected_samples[j] {
+                                    if p2.x.round().clamp(draw_bounds.min.x, draw_bounds.max.x)
+                                        == px
+                                    {
+                                        if p2.y < min_y {
+                                            min_y = p2.y;
+                                            min_j = j;
+                                        }
+                                        if p2.y > max_y {
+                                            max_y = p2.y;
+                                            max_j = j;
+                                        }
+                                        last_y = p2.y;
+                                        j += 1;
+                                    } else {
+                                        break;
                                     }
-                                    if p2.y > max_y {
-                                        max_y = p2.y;
-                                        max_j = j;
-                                    }
-                                    last_y = p2.y;
-                                    j += 1;
                                 } else {
                                     break;
                                 }
-                            } else {
-                                break;
                             }
-                        }
-                        optimized_points.push(canvas_rect.min + Vec2::new(px as f32, first_y));
-                        if (min_y - first_y).abs() > 1.0 || (max_y - first_y).abs() > 1.0 {
-                            if min_j < max_j {
-                                optimized_points
-                                    .push(canvas_rect.min + Vec2::new(px as f32, min_y));
-                                optimized_points
-                                    .push(canvas_rect.min + Vec2::new(px as f32, max_y));
-                            } else {
-                                optimized_points
-                                    .push(canvas_rect.min + Vec2::new(px as f32, max_y));
-                                optimized_points
-                                    .push(canvas_rect.min + Vec2::new(px as f32, min_y));
+                            optimized_points.push(Pos2::new(px, first_y));
+                            if (min_y - first_y).abs() > 1.0 || (max_y - first_y).abs() > 1.0 {
+                                if min_j < max_j {
+                                    optimized_points.push(Pos2::new(px, min_y));
+                                    optimized_points.push(Pos2::new(px, max_y));
+                                } else {
+                                    optimized_points.push(Pos2::new(px, max_y));
+                                    optimized_points.push(Pos2::new(px, min_y));
+                                }
                             }
+                            optimized_points.push(Pos2::new(px, last_y));
+                            i = j;
+                        } else {
+                            if !optimized_points.is_empty() {
+                                painter.add(Shape::line(
+                                    std::mem::take(&mut optimized_points),
+                                    stroke,
+                                ));
+                            }
+                            i += 1;
                         }
-                        optimized_points.push(canvas_rect.min + Vec2::new(px as f32, last_y));
-                        i = j;
-                    } else {
-                        if !optimized_points.is_empty() {
-                            painter.add(Shape::line(std::mem::take(&mut optimized_points), stroke));
-                        }
-                        i += 1;
                     }
-                }
-                if !optimized_points.is_empty() {
-                    painter.add(Shape::line(optimized_points, stroke));
+                    if !optimized_points.is_empty() {
+                        painter.add(Shape::line(optimized_points, stroke));
+                    }
                 }
 
                 if !label.is_empty() {
@@ -2263,14 +3196,18 @@ impl GrafitoApp {
                         mid_x,
                         &self.document.variables,
                     ) {
-                        let s = view.world_to_screen(Point2::new(mid_x, y));
-                        painter.text(
-                            canvas_rect.min + Vec2::new(s.x, s.y + 14.0),
-                            egui::Align2::CENTER_TOP,
-                            label,
-                            egui::FontId::proportional(12.0),
-                            label_color,
-                        );
+                        if let Some(position) = function_screen_point(view, canvas_rect, mid_x, y) {
+                            let label_position = position + Vec2::new(0.0, 14.0);
+                            if draw_bounds.contains(label_position) {
+                                painter.text(
+                                    label_position,
+                                    egui::Align2::CENTER_TOP,
+                                    label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2312,20 +3249,19 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Parabola(pb) => {
-                if pb.p <= 0.0 {
+                if !pb.p.is_finite() || pb.p.abs() < 1e-12 {
                     return;
                 }
                 let stroke = Stroke::new(pb.width, to_color32(pb.color));
                 let steps = 128;
                 let range = (20.0 / view.scale).clamp(0.1, 500.0);
-                let p_safe = pb.p;
                 let cos_a = pb.angle.cos();
                 let sin_a = pb.angle.sin();
                 let mut prev: Option<Pos2> = None;
                 for i in 0..=steps {
                     let t = -range + 2.0 * range * i as f64 / steps as f64;
                     let lx = t;
-                    let ly = t * t / (4.0 * p_safe);
+                    let ly = t * t / (4.0 * pb.p);
                     let wx = pb.vertex.x + lx * cos_a - ly * sin_a;
                     let wy = pb.vertex.y + lx * sin_a + ly * cos_a;
                     let s = view.world_to_screen(Point2::new(wx, wy));
@@ -2550,7 +3486,9 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Fractal2D(fr) => {
-                use grafito_geometry::fractals::{compute_fractal, fractal_color_hsv, FractalType};
+                use grafito_geometry::fractals::{
+                    fractal_color_hsv, try_compute_fractal, FractalType,
+                };
                 let fractal_type = match fr.fractal_type.as_str() {
                     "julia" if fr.params.len() >= 2 => FractalType::Julia {
                         cr: fr.params[0],
@@ -2567,8 +3505,8 @@ impl GrafitoApp {
                         max_iter: fr.max_iter,
                     },
                 };
-                let res = fr.resolution.clamp(20, 400);
-                let pixels = compute_fractal(
+                let res = fr.resolution;
+                let Ok(pixels) = try_compute_fractal(
                     &fractal_type,
                     fr.x_min,
                     fr.x_max,
@@ -2576,7 +3514,12 @@ impl GrafitoApp {
                     fr.y_max,
                     res,
                     res,
-                );
+                ) else {
+                    return;
+                };
+                if res == 0 {
+                    return;
+                }
                 let dx = (fr.x_max - fr.x_min) / res as f64;
                 let dy = (fr.y_max - fr.y_min) / res as f64;
                 for px in &pixels {
@@ -2612,10 +3555,15 @@ impl GrafitoApp {
                         let screen = view.world_to_screen(Point2::new(x, y));
                         let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
                         if let Some(prev_pos) = prev {
-                            painter.line_segment(
-                                [prev_pos, pos],
-                                Stroke::new(pc.width, to_color32(pc.color)),
-                            );
+                            if !overlay_only
+                                && !style.is_some_and(|style| style.skip_stroke)
+                                && should_connect_screen_points(prev_pos, pos, canvas_rect)
+                            {
+                                painter.line_segment(
+                                    [prev_pos, pos],
+                                    Stroke::new(pc.width, to_color32(pc.color)),
+                                );
+                            }
                         }
                         prev = Some(pos);
                     } else {
@@ -2630,39 +3578,55 @@ impl GrafitoApp {
                     steps,
                     &self.document.variables,
                 );
-                let mut prev: Option<Pos2> = None;
-                let mut all_pts: Vec<Pos2> = Vec::new();
-                for &(x, y) in samples.iter() {
-                    if x.is_finite() && y.is_finite() {
-                        let screen = view.world_to_screen(Point2::new(x, y));
-                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                        if let Some(prev_pos) = prev {
+                let projected: Vec<_> = samples
+                    .iter()
+                    .map(|&(x, y)| {
+                        (x.is_finite() && y.is_finite()).then(|| {
+                            let screen = view.world_to_screen(Point2::new(x, y));
+                            canvas_rect.min + Vec2::new(screen.x, screen.y)
+                        })
+                    })
+                    .collect();
+                let runs = split_continuous_screen_runs(&projected, canvas_rect);
+                if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    for run in &runs {
+                        for points in run.windows(2) {
                             painter.line_segment(
-                                [prev_pos, pos],
+                                [points[0], points[1]],
                                 Stroke::new(pol.width, to_color32(pol.color)),
                             );
                         }
-                        all_pts.push(pos);
-                        prev = Some(pos);
-                    } else {
-                        prev = None;
                     }
                 }
                 // Fill from origin
-                if let Some(fill) = pol.fill_color {
-                    if all_pts.len() >= 3 {
+                if !overlay_only {
+                    if let Some(fill) = get_fill_color(pol.fill_color, style) {
                         let origin = view.world_to_screen(Point2::new(0.0, 0.0));
                         let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
-                        let mut fill_pts = all_pts.clone();
-                        fill_pts.push(origin_pos);
-                        if let Some(&first) = all_pts.first() {
-                            fill_pts.push(first);
+                        for run in runs.iter().filter(|run| run.len() >= 2) {
+                            let mut fill_pts = run.clone();
+                            fill_pts.push(origin_pos);
+                            fill_pts.push(run[0]);
+                            painter.add(Shape::Path(egui::epaint::PathShape {
+                                points: fill_pts,
+                                closed: true,
+                                fill: to_color32(fill),
+                                stroke: Stroke::NONE.into(),
+                            }));
                         }
-                        painter.add(Shape::convex_polygon(
-                            fill_pts,
-                            to_color32(fill),
-                            Stroke::NONE,
-                        ));
+                    }
+                }
+                let all_pts: Vec<_> = runs.iter().flatten().copied().collect();
+                let label = get_label(&pol.label, style);
+                if !label.is_empty() {
+                    if let Some(position) = all_pts.get(all_pts.len() / 2) {
+                        painter.text(
+                            *position + Vec2::new(0.0, 14.0),
+                            egui::Align2::CENTER_TOP,
+                            label,
+                            egui::FontId::proportional(12.0),
+                            label_color,
+                        );
                     }
                 }
             }
@@ -2677,8 +3641,8 @@ impl GrafitoApp {
                     world_br.y.max(world_tl.y),
                 );
                 let grid_size = vf.density.clamp(5, 80);
-                let dx = (world_br.x - world_tl.x) / grid_size as f64;
-                let dy = (world_br.y - world_tl.y) / grid_size as f64;
+                let dx = (view_bounds.1 - view_bounds.0).abs() / grid_size as f64;
+                let dy = (view_bounds.3 - view_bounds.2).abs() / grid_size as f64;
                 let arrow_length = dx.min(dy) * 0.8;
 
                 let samples = vector_field_sampling::samples_or_compute(
@@ -2690,10 +3654,10 @@ impl GrafitoApp {
                 .clone();
 
                 for (x, y, u, v) in samples {
-                    if x < world_tl.x - dx
-                        || x > world_br.x + dx
-                        || y < world_tl.y - dy
-                        || y > world_br.y + dy
+                    if x < view_bounds.0 - dx
+                        || x > view_bounds.1 + dx
+                        || y < view_bounds.2 - dy
+                        || y > view_bounds.3 + dy
                     {
                         continue;
                     }
@@ -2742,6 +3706,42 @@ impl GrafitoApp {
                 let sl_dt = 0.05;
                 let sl_color = Color32::from_rgba_unmultiplied(180, 100, 200, 180);
                 let sl_stroke = Stroke::new(1.2, sl_color);
+                let prepared_u =
+                    prepare_function_ast(&vf.expr_u, &self.document.variables, &["x", "y"]).ok();
+                let prepared_v =
+                    prepare_function_ast(&vf.expr_v, &self.document.variables, &["x", "y"]).ok();
+                let mut base_environment: Vec<_> = self
+                    .document
+                    .variables
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "x" && name.as_str() != "y")
+                    .map(|(name, value)| (name.clone(), *value))
+                    .collect();
+                base_environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                let evaluate_field = |x: f64, y: f64| {
+                    let mut environment = base_environment.clone();
+                    environment.push(("x".to_string(), x));
+                    environment.push(("y".to_string(), y));
+                    let u = prepared_u
+                        .as_ref()
+                        .map(|ast| ast.eval_2d("x", x, "y", y))
+                        .filter(|value| value.is_finite())
+                        .or_else(|| {
+                            grafito_geometry::expr::evaluate(&vf.expr_u, &environment)
+                                .ok()
+                                .filter(|value| value.is_finite())
+                        })?;
+                    let v = prepared_v
+                        .as_ref()
+                        .map(|ast| ast.eval_2d("x", x, "y", y))
+                        .filter(|value| value.is_finite())
+                        .or_else(|| {
+                            grafito_geometry::expr::evaluate(&vf.expr_v, &environment)
+                                .ok()
+                                .filter(|value| value.is_finite())
+                        })?;
+                    Some((u, v))
+                };
                 // Distribute seeds uniformly
                 let seeds_x = 5;
                 let seeds_y = 5;
@@ -2753,111 +3753,91 @@ impl GrafitoApp {
                         let mut y = world_tl.y + sj as f64 * sy;
                         let mut prev: Option<Pos2> = None;
                         for _ in 0..sl_steps {
-                            let vars_eval = vec![("x".to_string(), x), ("y".to_string(), y)];
-                            if let (Ok(u), Ok(v)) = (
-                                grafito_geometry::expr::evaluate(&vf.expr_u, &vars_eval),
-                                grafito_geometry::expr::evaluate(&vf.expr_v, &vars_eval),
-                            ) {
-                                if !u.is_finite() || !v.is_finite() {
-                                    break;
-                                }
-                                let k1x = u;
-                                let k1y = v;
-                                let half_dt = sl_dt * 0.5;
-                                // k2
-                                let (k2x, k2y) = match (
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_u,
-                                        &[
-                                            ("x".into(), x + half_dt * k1x),
-                                            ("y".into(), y + half_dt * k1y),
-                                        ],
-                                    ),
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_v,
-                                        &[
-                                            ("x".into(), x + half_dt * k1x),
-                                            ("y".into(), y + half_dt * k1y),
-                                        ],
-                                    ),
-                                ) {
-                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
-                                    _ => {
-                                        break;
-                                    }
-                                };
-                                // k3
-                                let (k3x, k3y) = match (
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_u,
-                                        &[
-                                            ("x".into(), x + half_dt * k2x),
-                                            ("y".into(), y + half_dt * k2y),
-                                        ],
-                                    ),
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_v,
-                                        &[
-                                            ("x".into(), x + half_dt * k2x),
-                                            ("y".into(), y + half_dt * k2y),
-                                        ],
-                                    ),
-                                ) {
-                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
-                                    _ => {
-                                        break;
-                                    }
-                                };
-                                // k4
-                                let (k4x, k4y) = match (
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_u,
-                                        &[
-                                            ("x".into(), x + sl_dt * k3x),
-                                            ("y".into(), y + sl_dt * k3y),
-                                        ],
-                                    ),
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_v,
-                                        &[
-                                            ("x".into(), x + sl_dt * k3x),
-                                            ("y".into(), y + sl_dt * k3y),
-                                        ],
-                                    ),
-                                ) {
-                                    (Ok(a), Ok(b)) if a.is_finite() && b.is_finite() => (a, b),
-                                    _ => {
-                                        break;
-                                    }
-                                };
-                                x += sl_dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
-                                y += sl_dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
-                                let screen = view.world_to_screen(Point2::new(x, y));
-                                let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                                if x < world_tl.x - dx
-                                    || x > world_br.x + dx
-                                    || y < world_tl.y - dy
-                                    || y > world_br.y + dy
-                                {
-                                    break;
-                                }
-                                if let Some(prev_pos) = prev {
-                                    painter.line_segment([prev_pos, pos], sl_stroke);
-                                }
-                                prev = Some(pos);
-                            } else {
+                            let Some((k1x, k1y)) = evaluate_field(x, y) else {
+                                break;
+                            };
+                            let half_dt = sl_dt * 0.5;
+                            let Some((k2x, k2y)) =
+                                evaluate_field(x + half_dt * k1x, y + half_dt * k1y)
+                            else {
+                                break;
+                            };
+                            let Some((k3x, k3y)) =
+                                evaluate_field(x + half_dt * k2x, y + half_dt * k2y)
+                            else {
+                                break;
+                            };
+                            let Some((k4x, k4y)) = evaluate_field(x + sl_dt * k3x, y + sl_dt * k3y)
+                            else {
+                                break;
+                            };
+                            x += sl_dt / 6.0 * (k1x + 2.0 * k2x + 2.0 * k3x + k4x);
+                            y += sl_dt / 6.0 * (k1y + 2.0 * k2y + 2.0 * k3y + k4y);
+                            let screen = view.world_to_screen(Point2::new(x, y));
+                            let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                            if x < world_tl.x - dx
+                                || x > world_br.x + dx
+                                || y < world_tl.y - dy
+                                || y > world_br.y + dy
+                            {
                                 break;
                             }
+                            if let Some(prev_pos) = prev {
+                                painter.line_segment([prev_pos, pos], sl_stroke);
+                            }
+                            prev = Some(pos);
+                        }
+                    }
+                }
+            }
+            GeoObject::PhasePortrait(portrait) => {
+                let segments =
+                    grafito_render::sample_phase_portrait(portrait, &self.document.variables);
+                if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    let stroke = Stroke::new(1.5, to_color32(portrait.color));
+                    for (start, end) in &segments {
+                        let start = view.world_to_screen(*start);
+                        let end = view.world_to_screen(*end);
+                        if start.is_finite() && end.is_finite() {
+                            painter.line_segment(
+                                [
+                                    canvas_rect.min + Vec2::new(start.x, start.y),
+                                    canvas_rect.min + Vec2::new(end.x, end.y),
+                                ],
+                                stroke,
+                            );
+                        }
+                    }
+                }
+                let label = get_label(&portrait.label, style);
+                if !label.is_empty() {
+                    if let Some((start, _)) = segments.get(segments.len() / 2) {
+                        let start = view.world_to_screen(*start);
+                        if start.is_finite() {
+                            painter.text(
+                                canvas_rect.min + Vec2::new(start.x, start.y - 8.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
                         }
                     }
                 }
             }
             GeoObject::ImplicitCurve(ic) => {
+                let quality = self.document.render_quality;
+                if !implicit_curve_cache_matches_request(
+                    ic,
+                    implicit_curve_view_bounds(*view, canvas_rect),
+                    implicit_curve_grid_size(canvas_rect, quality),
+                    &self.document.variables,
+                    quality,
+                ) {
+                    return;
+                }
                 // 0) Relleno del interior (solo para regiones con `<=`, `>=`, `<`, `>`).
                 //    Para curvas con `=`, no hay interior que rellenar.
-                //    En modo GPU se dibuja antes del callback con
-                //    `draw_implicit_curve_fills`; aquí se omite en overlay para
-                //    no cubrir la geometría GPU que ya fue pintada.
                 if !overlay_only {
                     if let Some(fill_color) = ic.fill_color {
                         if matches!(
@@ -2918,7 +3898,7 @@ impl GrafitoApp {
 
                 if cg.render_mode == 1 || cg.render_mode == 2 {
                     // Domain coloring (complex f(z)) or Heat map (real f(x,y))
-                    let res = cg.density.clamp(50, 500);
+                    let res = complex_grid_cpu_resolution(cg.density, self.document.render_quality);
                     let dx = (cg.x_max - cg.x_min) / res as f64;
                     let dy = (cg.y_max - cg.y_min) / res as f64;
 
@@ -3209,20 +4189,37 @@ impl GrafitoApp {
                 let world_br =
                     view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
                 let (xmin, xmax) = (world_tl.x.min(world_br.x), world_tl.x.max(world_br.x));
+                let (ymin, ymax) = (world_br.y.min(world_tl.y), world_br.y.max(world_tl.y));
 
                 let conformal_map = cm.conformal_map(self.document.complex_base_symbol.as_str());
+                let homotopy_factor = grafito_render::complex_mapping_homotopy_factor(
+                    cm.animate_homotopy,
+                    cm.homotopy_speed,
+                    self.transient_render_state.homotopy_time(),
+                );
 
                 if let (GeoObject::ImplicitCurve(ic), Some(map)) = (target, conformal_map) {
-                    if let Some(fill_color) = ic.fill_color {
-                        self.draw_complex_mapping_fill(
-                            painter,
-                            canvas_rect,
-                            view,
-                            ic,
-                            cm.id,
-                            map,
-                            fill_color,
-                        );
+                    if !implicit_curve_cache_matches_request(
+                        ic,
+                        (xmin, xmax, ymin, ymax),
+                        implicit_curve_grid_size(canvas_rect, self.document.render_quality),
+                        &self.document.variables,
+                        self.document.render_quality,
+                    ) {
+                        return;
+                    }
+                    if homotopy_factor >= 1.0 - f64::EPSILON {
+                        if let Some(fill_color) = ic.fill_color {
+                            self.draw_complex_mapping_fill(
+                                painter,
+                                canvas_rect,
+                                view,
+                                ic,
+                                cm.id,
+                                map,
+                                fill_color,
+                            );
+                        }
                     }
 
                     let mut source_segments = Vec::new();
@@ -3236,7 +4233,12 @@ impl GrafitoApp {
                     }
 
                     let stroke = Stroke::new(2.0, to_color32(cm.color));
-                    for (a, b) in complex_mapping_segment_strokes(map, &source_segments, 16) {
+                    for (a, b) in complex_mapping_segment_strokes_at(
+                        map,
+                        &source_segments,
+                        16,
+                        homotopy_factor,
+                    ) {
                         let p1 = view.world_to_screen(a);
                         let p2 = view.world_to_screen(b);
                         if (p2.x - p1.x).abs() > 300.0 || (p2.y - p1.y).abs() > 300.0 {
@@ -3268,6 +4270,10 @@ impl GrafitoApp {
                             Complex64::new(x, y)
                         })
                         .collect(),
+                    GeoObject::Point(point) => vec![Complex64::new(
+                        self.document.resolve_expr(&point.x_expr, point.position.x),
+                        self.document.resolve_expr(&point.y_expr, point.position.y),
+                    )],
                     GeoObject::Line(line) => {
                         let start = Point2::new(
                             self.document.resolve_expr(&line.start_x_expr, line.start.x),
@@ -3288,6 +4294,35 @@ impl GrafitoApp {
                             })
                             .collect()
                     }
+                    GeoObject::Circle(circle) => {
+                        let radius = self
+                            .document
+                            .resolve_expr(&circle.radius_expr, circle.radius);
+                        if !circle.center.x.is_finite()
+                            || !circle.center.y.is_finite()
+                            || !radius.is_finite()
+                            || radius <= 0.0
+                        {
+                            Vec::new()
+                        } else {
+                            let samples = 128;
+                            (0..=samples)
+                                .map(|index| {
+                                    let angle =
+                                        index as f64 * std::f64::consts::TAU / samples as f64;
+                                    Complex64::new(
+                                        circle.center.x + radius * angle.cos(),
+                                        circle.center.y + radius * angle.sin(),
+                                    )
+                                })
+                                .collect()
+                        }
+                    }
+                    GeoObject::Pencil(pencil) => pencil
+                        .points
+                        .iter()
+                        .map(|point| Complex64::new(point.x, point.y))
+                        .collect(),
                     GeoObject::Function(f) => {
                         let n = 400;
                         (0..=n)
@@ -3304,33 +4339,45 @@ impl GrafitoApp {
                             })
                             .collect()
                     }
-                    GeoObject::ImplicitCurve(_ic) => {
-                        // Para implícitas usamos el helper de muestreo del
-                        // crate core (marching squares + polilínea cerrada).
-                        //
-                        // Filtro de segmentos degenerados: marching squares
-                        // puede emitir segmentos muy cortos (de longitud menor
-                        // a 1e-3) en celdas donde la interpolación es
-                        // inestable.
-                        let mut samples = Vec::new();
-                        for (level, segments) in self.document.implicit_curve_segments(cm.target) {
-                            for (a, b) in segments {
-                                let len = (a.x - b.x).hypot(a.y - b.y);
-                                if len < 1e-3 {
-                                    continue;
+                    GeoObject::ImplicitCurve(ic) => {
+                        if !implicit_curve_cache_matches_request(
+                            ic,
+                            (xmin, xmax, ymin, ymax),
+                            implicit_curve_grid_size(canvas_rect, self.document.render_quality),
+                            &self.document.variables,
+                            self.document.render_quality,
+                        ) {
+                            Vec::new()
+                        } else {
+                            // Para implícitas usamos el helper de muestreo del
+                            // crate core (marching squares + polilínea cerrada).
+                            //
+                            // Filtro de segmentos degenerados: marching squares
+                            // puede emitir segmentos muy cortos (de longitud menor
+                            // a 1e-3) en celdas donde la interpolación es
+                            // inestable.
+                            let mut samples = Vec::new();
+                            for (level, segments) in
+                                self.document.implicit_curve_segments(cm.target)
+                            {
+                                for (a, b) in segments {
+                                    let len = (a.x - b.x).hypot(a.y - b.y);
+                                    if len < 1e-3 {
+                                        continue;
+                                    }
+                                    let n = 16;
+                                    for i in 0..=n {
+                                        let t = i as f64 / n as f64;
+                                        samples.push(Complex64::new(
+                                            a.x + t * (b.x - a.x),
+                                            a.y + t * (b.y - a.y),
+                                        ));
+                                    }
+                                    let _ = level;
                                 }
-                                let n = 16;
-                                for i in 0..=n {
-                                    let t = i as f64 / n as f64;
-                                    samples.push(Complex64::new(
-                                        a.x + t * (b.x - a.x),
-                                        a.y + t * (b.y - a.y),
-                                    ));
-                                }
-                                let _ = level;
                             }
+                            samples
                         }
-                        samples
                     }
                     GeoObject::ParametricCurve2D(c) => {
                         let n = 200;
@@ -3376,6 +4423,109 @@ impl GrafitoApp {
                                 Complex64::new(r * t.cos(), r * t.sin())
                             })
                             .collect()
+                    }
+                    GeoObject::Ellipse(el) => {
+                        let n = 128;
+                        let cos_a = el.angle.cos();
+                        let sin_a = el.angle.sin();
+                        (0..=n)
+                            .map(|i| {
+                                let t = i as f64 * std::f64::consts::TAU / n as f64;
+                                Complex64::new(
+                                    el.center.x + el.rx * t.cos() * cos_a - el.ry * t.sin() * sin_a,
+                                    el.center.y + el.rx * t.cos() * sin_a + el.ry * t.sin() * cos_a,
+                                )
+                            })
+                            .collect()
+                    }
+                    GeoObject::Parabola(pb) if pb.p.is_finite() && pb.p.abs() >= 1e-12 => {
+                        let n = 128;
+                        let range = (20.0 / view.scale).clamp(0.1, 500.0);
+                        let cos_a = pb.angle.cos();
+                        let sin_a = pb.angle.sin();
+                        (0..=n)
+                            .map(|i| {
+                                let t = -range + 2.0 * range * i as f64 / n as f64;
+                                Complex64::new(
+                                    pb.vertex.x + t * cos_a - (t * t / (4.0 * pb.p)) * sin_a,
+                                    pb.vertex.y + t * sin_a + (t * t / (4.0 * pb.p)) * cos_a,
+                                )
+                            })
+                            .collect()
+                    }
+                    GeoObject::Hyperbola(hb)
+                        if hb.a.is_finite() && hb.b.is_finite() && hb.a > 0.0 && hb.b > 0.0 =>
+                    {
+                        let n = 64;
+                        let epsilon = 0.05;
+                        let cos_a = hb.angle.cos();
+                        let sin_a = hb.angle.sin();
+                        let mut samples = Vec::with_capacity((n + 2) * 2);
+                        for branch in 0..2 {
+                            let start = -std::f64::consts::FRAC_PI_2
+                                + epsilon
+                                + branch as f64 * std::f64::consts::PI;
+                            let end = std::f64::consts::FRAC_PI_2 - epsilon
+                                + branch as f64 * std::f64::consts::PI;
+                            for i in 0..=n {
+                                let t = start + (end - start) * i as f64 / n as f64;
+                                let (local_x, local_y) = if hb.horizontal {
+                                    (hb.a / t.cos(), hb.b * t.tan())
+                                } else {
+                                    (hb.b * t.tan(), hb.a / t.cos())
+                                };
+                                samples.push(Complex64::new(
+                                    hb.center.x + local_x * cos_a - local_y * sin_a,
+                                    hb.center.y + local_x * sin_a + local_y * cos_a,
+                                ));
+                            }
+                            samples.push(Complex64::new(f64::NAN, f64::NAN));
+                        }
+                        samples
+                    }
+                    GeoObject::RegressionLine(rl)
+                        if rl.x_min.is_finite()
+                            && rl.x_max.is_finite()
+                            && rl.slope.is_finite()
+                            && rl.intercept.is_finite()
+                            && rl.x_min < rl.x_max =>
+                    {
+                        vec![
+                            Complex64::new(rl.x_min, rl.slope * rl.x_min + rl.intercept),
+                            Complex64::new(rl.x_max, rl.slope * rl.x_max + rl.intercept),
+                        ]
+                    }
+                    GeoObject::VectorField2D(vf) => {
+                        let grid_size = vf.density.clamp(5, 80);
+                        let cell_width = (xmax - xmin).abs() / grid_size as f64;
+                        let cell_height = (ymax - ymin).abs() / grid_size as f64;
+                        let arrow_length = cell_width.min(cell_height) * 0.8;
+                        if !arrow_length.is_finite() || arrow_length <= 0.0 {
+                            return;
+                        }
+                        let samples = vector_field_sampling::samples_or_compute(
+                            vf,
+                            (xmin, xmax, ymin, ymax),
+                            grid_size,
+                            &self.document.variables,
+                        );
+                        let mut points = Vec::with_capacity(samples.len() * 2);
+                        for (x, y, u, v) in samples.iter() {
+                            if !x.is_finite() || !y.is_finite() || !u.is_finite() || !v.is_finite()
+                            {
+                                continue;
+                            }
+                            let magnitude = (*u).hypot(*v);
+                            if !magnitude.is_finite() || magnitude <= 1e-10 {
+                                continue;
+                            }
+                            points.push(Complex64::new(*x, *y));
+                            points.push(Complex64::new(
+                                *x + *u / magnitude * arrow_length,
+                                *y + *v / magnitude * arrow_length,
+                            ));
+                        }
+                        points
                     }
                     _ => return,
                 };
@@ -3434,7 +4584,14 @@ impl GrafitoApp {
                 for (z_in, w_out) in z_samples.iter().zip(results.iter()) {
                     match w_out {
                         Some(w) if w.re.is_finite() && w.im.is_finite() => {
-                            transformed.push((Point2::new(w.re, w.im), true));
+                            transformed.push((
+                                grafito_render::interpolate_complex_mapping_point(
+                                    Point2::new(z_in.re, z_in.im),
+                                    Point2::new(w.re, w.im),
+                                    homotopy_factor,
+                                ),
+                                true,
+                            ));
                         }
                         _ => {
                             // Guardamos el z original (no el resultado) como
@@ -3445,6 +4602,25 @@ impl GrafitoApp {
                             transformed.push((Point2::new(f64::NAN, f64::NAN), false));
                         }
                     }
+                }
+
+                if let GeoObject::Point(point) = target {
+                    let source = Point2::new(
+                        self.document.resolve_expr(&point.x_expr, point.position.x),
+                        self.document.resolve_expr(&point.y_expr, point.position.y),
+                    );
+                    let marker = transformed
+                        .first()
+                        .and_then(|(point, finite)| finite.then_some(*point))
+                        // A non-finite image is not drawable. Retain a source marker so the
+                        // user sees the singular mapping instead of an absent object.
+                        .unwrap_or(source);
+                    let screen = view.world_to_screen(marker);
+                    if screen.is_finite() {
+                        let position = canvas_rect.min + Vec2::new(screen.x, screen.y);
+                        painter.circle_filled(position, point.size.max(6.0), to_color32(cm.color));
+                    }
+                    return;
                 }
 
                 // 6) Render: dibujar segmentos sólidos entre puntos finitos
@@ -3468,7 +4644,11 @@ impl GrafitoApp {
                 let mut prev: Option<(Point2, Pos2, Vec2)> = None;
                 // (world_pos, screen_pos, screen_dir_of_tangent)
 
-                for (world_pt, is_finite) in transformed.iter() {
+                let vector_target = matches!(target, GeoObject::VectorField2D(_));
+                for (index, (world_pt, is_finite)) in transformed.iter().enumerate() {
+                    if vector_target && index % 2 == 0 {
+                        prev = None;
+                    }
                     if *is_finite {
                         let screen_pt = to_screen(*world_pt);
                         if let Some((prev_world, prev_screen, _)) = prev {
@@ -3552,7 +4732,17 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Transformed(t) => {
-                self.draw_object_styled(painter, canvas_rect, &t.inner, style, overlay_only);
+                if overlay_only {
+                    return;
+                }
+                let (vertices, indices) =
+                    grafito_render::Renderer::build_transformed_geometry_static(
+                        &self.document,
+                        t,
+                        view,
+                        self.dark_mode,
+                    );
+                paint_render_geometry(painter, canvas_rect, &vertices, &indices, style);
             }
             _ => {}
         }

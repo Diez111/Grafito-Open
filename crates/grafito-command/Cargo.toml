@@ -10,9 +10,12 @@ rust-version.workspace = true
 [dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+grafito-assistant-types.workspace = true
 grafito-complex = { path = "../grafito-complex" }
 geo.workspace = true
 glam.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 grafito-core.workspace = true

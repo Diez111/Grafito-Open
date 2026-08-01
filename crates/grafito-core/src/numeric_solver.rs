@@ -8,9 +8,23 @@
 //! deficient Jacobians.
 
 use rayon::prelude::*;
+use std::fmt;
 
 /// Index of a scalar variable in the solver vector.
 pub type VarIndex = usize;
+
+/// Largest aggregate residual dimension accepted by the dense solver.
+pub const MAX_CONSTRAINT_EQUATIONS: usize = 10_000;
+/// Largest aggregate dense matrix element count accepted by the solver.
+pub const MAX_SOLVER_MATRIX_ELEMENTS: usize = 8_000_000;
+/// Largest variable count that keeps dense normal-equation elimination bounded.
+pub const MAX_SOLVER_VARIABLES: usize = 192;
+/// Largest elimination operation count allowed per iteration and per configured solve.
+pub const MAX_SOLVER_ELIMINATION_OPERATIONS: usize = 8_000_000;
+/// Largest `J^T J` operation count allowed per iteration and per configured solve.
+pub const MAX_NORMAL_EQUATION_OPERATIONS: usize = 8_000_000;
+/// Largest configured number of LM iterations accepted by the public solver API.
+pub const MAX_SOLVER_ITERATIONS: usize = 1_000;
 
 /// A single equation (or coupled set of equations) that can be evaluated for a
 /// given variable vector.
@@ -32,6 +46,16 @@ pub trait ConstraintEquation: Send + Sync {
     /// differences for this equation.
     fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
         Vec::new()
+    }
+
+    /// Validates any variable indices held by this equation before evaluation.
+    ///
+    /// The default supports equations that only use the supplied slice through
+    /// safe access. Equations that store variable indices override it so the
+    /// solver can return a typed error rather than allowing an invalid index to
+    /// reach their residual or Jacobian implementation.
+    fn validate_variables(&self, _vars: &[f64]) -> Result<(), VarIndex> {
+        Ok(())
     }
 }
 
@@ -66,7 +90,152 @@ pub enum SolveError {
     MaxIterations { final_residual: f64 },
     /// No equations were supplied or no variables were present.
     NoEquations,
+    /// An equation returned a residual vector with a different size than its declaration.
+    MalformedResidualDimension {
+        equation: usize,
+        expected: usize,
+        actual: usize,
+    },
+    /// An analytic Jacobian entry addresses a row or column outside the system.
+    MalformedJacobianEntry {
+        equation: usize,
+        row: usize,
+        column: usize,
+    },
+    /// An equation produced a non-finite residual value.
+    NonFiniteResidual { equation: usize, row: usize },
+    /// An equation produced a non-finite analytic Jacobian value.
+    NonFiniteJacobian {
+        equation: usize,
+        row: usize,
+        column: usize,
+    },
+    /// An input variable or warm-start value is non-finite.
+    NonFiniteVariable { index: usize },
+    /// An equation refers to a variable outside the supplied vector.
+    VariableIndexOutOfBounds {
+        equation: usize,
+        index: usize,
+        variables: usize,
+    },
+    /// Solver configuration is not finite or is outside its valid range.
+    InvalidConfiguration { field: &'static str },
+    /// A variable bound is invalid or non-finite.
+    InvalidBounds { index: usize },
+    /// An internal numeric operation overflowed or became non-finite.
+    NonFiniteComputation { stage: &'static str },
+    /// An equation declared a residual block too large for the dense solver.
+    EquationDimensionLimitExceeded {
+        equation: usize,
+        dimension: usize,
+        maximum: usize,
+    },
+    /// The aggregate dense matrices would exceed the solver's memory budget.
+    SystemTooLarge {
+        equations: usize,
+        variables: usize,
+        maximum_elements: usize,
+    },
+    /// A dense solver resource budget would be exceeded before allocation.
+    ResourceLimitExceeded {
+        resource: &'static str,
+        requested: usize,
+        maximum: usize,
+    },
+    /// A fixed system has no free variables and does not satisfy its constraints.
+    Unsatisfied { final_residual: f64 },
 }
+
+impl fmt::Display for SolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MaxIterations { final_residual } => {
+                write!(f, "solver did not converge (residual {final_residual})")
+            }
+            Self::NoEquations => write!(f, "solver requires at least one equation and variable"),
+            Self::MalformedResidualDimension {
+                equation,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "equation {equation} returned {actual} residuals, expected {expected}"
+            ),
+            Self::MalformedJacobianEntry {
+                equation,
+                row,
+                column,
+            } => write!(
+                f,
+                "equation {equation} returned invalid Jacobian entry ({row}, {column})"
+            ),
+            Self::NonFiniteResidual { equation, row } => {
+                write!(
+                    f,
+                    "equation {equation} produced non-finite residual row {row}"
+                )
+            }
+            Self::NonFiniteJacobian {
+                equation,
+                row,
+                column,
+            } => write!(
+                f,
+                "equation {equation} produced non-finite Jacobian entry ({row}, {column})"
+            ),
+            Self::NonFiniteVariable { index } => {
+                write!(f, "solver variable {index} is non-finite")
+            }
+            Self::VariableIndexOutOfBounds {
+                equation,
+                index,
+                variables,
+            } => write!(
+                f,
+                "equation {equation} references variable {index}, but only {variables} variables were supplied"
+            ),
+            Self::InvalidConfiguration { field } => {
+                write!(f, "solver configuration {field} is invalid")
+            }
+            Self::InvalidBounds { index } => {
+                write!(f, "solver bounds for variable {index} are invalid")
+            }
+            Self::NonFiniteComputation { stage } => {
+                write!(f, "solver computation became non-finite during {stage}")
+            }
+            Self::EquationDimensionLimitExceeded {
+                equation,
+                dimension,
+                maximum,
+            } => write!(
+                f,
+                "equation {equation} declares dimension {dimension}, maximum is {maximum}"
+            ),
+            Self::SystemTooLarge {
+                equations,
+                variables,
+                maximum_elements,
+            } => write!(
+                f,
+                "solver system {equations}x{variables} exceeds {maximum_elements} matrix elements"
+            ),
+            Self::ResourceLimitExceeded {
+                resource,
+                requested,
+                maximum,
+            } => write!(
+                f,
+                "solver {resource} resource request {requested} exceeds maximum {maximum}"
+            ),
+            Self::Unsatisfied { final_residual } => write!(
+                f,
+                "fixed constraints are unsatisfied (residual {final_residual})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SolveError {}
 
 /// Levenberg-Marquardt solver configuration.
 #[derive(Debug, Clone)]
@@ -90,14 +259,6 @@ impl Default for NumericSolver {
             regularization: 1e-12,
         }
     }
-}
-
-/// Cached Jacobian sparsity pattern derived from analytic Jacobians.
-struct JacobianPattern {
-    /// For each global column, the list of global rows that depend on it.
-    col_to_rows: Vec<Vec<usize>>,
-    /// Whether the pattern is fully described by analytic Jacobians.
-    has_analytic: bool,
 }
 
 impl NumericSolver {
@@ -149,24 +310,187 @@ impl NumericSolver {
         warm_start: Option<&[f64]>,
         bounds: &[Bounds],
     ) -> Result<SolveStats, SolveError> {
-        let m: usize = equations.iter().map(|eq| eq.dimension()).sum();
-        if m == 0 || vars.is_empty() {
+        self.validate_configuration()?;
+        let n = vars.len();
+        if n > MAX_SOLVER_VARIABLES {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "variables",
+                requested: n,
+                maximum: MAX_SOLVER_VARIABLES,
+            });
+        }
+
+        let mut m = 0usize;
+        for (equation, eq) in equations.iter().enumerate() {
+            let dimension = eq.dimension();
+            if dimension > MAX_CONSTRAINT_EQUATIONS {
+                return Err(SolveError::EquationDimensionLimitExceeded {
+                    equation,
+                    dimension,
+                    maximum: MAX_CONSTRAINT_EQUATIONS,
+                });
+            }
+            m = m
+                .checked_add(dimension)
+                .ok_or(SolveError::EquationDimensionLimitExceeded {
+                    equation,
+                    dimension,
+                    maximum: MAX_CONSTRAINT_EQUATIONS,
+                })?;
+            if m > MAX_CONSTRAINT_EQUATIONS {
+                return Err(SolveError::EquationDimensionLimitExceeded {
+                    equation,
+                    dimension,
+                    maximum: MAX_CONSTRAINT_EQUATIONS,
+                });
+            }
+        }
+        if m == 0 {
             return Err(SolveError::NoEquations);
         }
 
-        let n = vars.len();
+        let jacobian_elements = m.checked_mul(n).ok_or(SolveError::ResourceLimitExceeded {
+            resource: "matrix elements",
+            requested: usize::MAX,
+            maximum: MAX_SOLVER_MATRIX_ELEMENTS,
+        })?;
+        let normal_elements = n.checked_mul(n).ok_or(SolveError::ResourceLimitExceeded {
+            resource: "matrix elements",
+            requested: usize::MAX,
+            maximum: MAX_SOLVER_MATRIX_ELEMENTS,
+        })?;
+        let augmented_elements = n
+            .checked_add(1)
+            .and_then(|width| n.checked_mul(width))
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "matrix elements",
+                requested: usize::MAX,
+                maximum: MAX_SOLVER_MATRIX_ELEMENTS,
+            })?;
+        let total_matrix_elements = jacobian_elements
+            .checked_add(normal_elements)
+            .and_then(|total| total.checked_add(augmented_elements))
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "matrix elements",
+                requested: usize::MAX,
+                maximum: MAX_SOLVER_MATRIX_ELEMENTS,
+            })?;
+        if total_matrix_elements > MAX_SOLVER_MATRIX_ELEMENTS {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "matrix elements",
+                requested: total_matrix_elements,
+                maximum: MAX_SOLVER_MATRIX_ELEMENTS,
+            });
+        }
+        let normal_equation_operations = m
+            .checked_mul(n)
+            .and_then(|entries| entries.checked_mul(n))
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested: usize::MAX,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            })?;
+        if normal_equation_operations > MAX_NORMAL_EQUATION_OPERATIONS {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested: normal_equation_operations,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            });
+        }
+        let aggregate_normal_equation_operations = normal_equation_operations
+            .checked_mul(self.max_iter)
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested: usize::MAX,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            })?;
+        if aggregate_normal_equation_operations > MAX_NORMAL_EQUATION_OPERATIONS {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested: aggregate_normal_equation_operations,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            });
+        }
+        let elimination_operations = n
+            .checked_mul(n)
+            .and_then(|square| n.checked_add(1).and_then(|width| square.checked_mul(width)))
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "elimination operations",
+                requested: usize::MAX,
+                maximum: MAX_SOLVER_ELIMINATION_OPERATIONS,
+            })?;
+        if elimination_operations > MAX_SOLVER_ELIMINATION_OPERATIONS {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "elimination operations",
+                requested: elimination_operations,
+                maximum: MAX_SOLVER_ELIMINATION_OPERATIONS,
+            });
+        }
+        let aggregate_elimination_operations = elimination_operations
+            .checked_mul(self.max_iter)
+            .ok_or(SolveError::ResourceLimitExceeded {
+                resource: "elimination operations",
+                requested: usize::MAX,
+                maximum: MAX_SOLVER_ELIMINATION_OPERATIONS,
+            })?;
+        if aggregate_elimination_operations > MAX_SOLVER_ELIMINATION_OPERATIONS {
+            return Err(SolveError::ResourceLimitExceeded {
+                resource: "elimination operations",
+                requested: aggregate_elimination_operations,
+                maximum: MAX_SOLVER_ELIMINATION_OPERATIONS,
+            });
+        }
         if let Some(ws) = warm_start {
             if ws.len() == n {
                 vars.copy_from_slice(ws);
             }
         }
 
-        let pattern = Self::build_jacobian_pattern(equations, m, n);
+        for (index, value) in vars.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return Err(SolveError::NonFiniteVariable { index });
+            }
+        }
+        for (equation, eq) in equations.iter().enumerate() {
+            if let Err(index) = eq.validate_variables(vars) {
+                return Err(SolveError::VariableIndexOutOfBounds {
+                    equation,
+                    index,
+                    variables: n,
+                });
+            }
+        }
+        for (index, bound) in bounds.iter().take(n).enumerate() {
+            let lower_valid = bound.lower.map_or(true, f64::is_finite);
+            let upper_valid = bound.upper.map_or(true, f64::is_finite);
+            if !lower_valid
+                || !upper_valid
+                || matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)
+            {
+                return Err(SolveError::InvalidBounds { index });
+            }
+        }
 
         let mut lambda = self.lambda;
-        let mut r = compute_residual(vars, equations, m);
-        let mut residual_norm = norm(&r);
+        let mut r = compute_residual(vars, equations, m)?;
+        let mut residual_norm = norm(&r).ok_or(SolveError::NonFiniteComputation {
+            stage: "residual norm",
+        })?;
         let mut condition_estimate = 1.0;
+
+        if n == 0 {
+            return if residual_norm < self.tol {
+                Ok(SolveStats {
+                    iterations: 0,
+                    final_residual: residual_norm,
+                    condition_number_estimate: condition_estimate,
+                })
+            } else {
+                Err(SolveError::Unsatisfied {
+                    final_residual: residual_norm,
+                })
+            };
+        }
 
         for iter in 0..self.max_iter {
             if residual_norm < self.tol {
@@ -177,7 +501,7 @@ impl NumericSolver {
                 });
             }
 
-            let j = Self::compute_jacobian(vars, equations, &r, m, n, &pattern);
+            let j = Self::compute_jacobian(vars, equations, &r, m, n)?;
 
             // Build the normal equations: (J^T J + lambda I) delta = -J^T r
             let mut jtj = vec![vec![0.0; n]; n];
@@ -186,11 +510,26 @@ impl NumericSolver {
                 for k in 0..m {
                     acc += j[k][i] * j[k][i];
                 }
+                if !acc.is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "normal matrix diagonal",
+                    });
+                }
                 jtj[i][i] = acc + lambda;
+                if !jtj[i][i].is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "damped normal matrix diagonal",
+                    });
+                }
                 for j_ in (i + 1)..n {
                     let mut acc = 0.0;
                     for k in 0..m {
                         acc += j[k][i] * j[k][j_];
+                    }
+                    if !acc.is_finite() {
+                        return Err(SolveError::NonFiniteComputation {
+                            stage: "normal matrix off-diagonal",
+                        });
                     }
                     jtj[i][j_] = acc;
                     jtj[j_][i] = acc;
@@ -203,11 +542,16 @@ impl NumericSolver {
                 for k in 0..m {
                     acc += j[k][i] * r[k];
                 }
+                if !acc.is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "normal equation right-hand side",
+                    });
+                }
                 rhs[i] = -acc;
             }
 
             let (delta, cond) =
-                solve_linear_system_with_regularization(&jtj, &rhs, lambda, self.regularization);
+                solve_linear_system_with_regularization(&jtj, &rhs, lambda, self.regularization)?;
             condition_estimate = cond;
 
             let delta = match delta {
@@ -222,11 +566,11 @@ impl NumericSolver {
                 }
             };
 
-            if norm(&delta) < self.tol {
-                return Ok(SolveStats {
-                    iterations: iter,
+            if norm(&delta).ok_or(SolveError::NonFiniteComputation { stage: "step norm" })?
+                < self.tol
+            {
+                return Err(SolveError::MaxIterations {
                     final_residual: residual_norm,
-                    condition_number_estimate: condition_estimate,
                 });
             }
 
@@ -255,8 +599,10 @@ impl NumericSolver {
                     continue;
                 }
 
-                let rt = compute_residual(&trial, equations, m);
-                let rt_norm = norm(&rt);
+                let rt = compute_residual(&trial, equations, m)?;
+                let rt_norm = norm(&rt).ok_or(SolveError::NonFiniteComputation {
+                    stage: "trial residual norm",
+                })?;
 
                 if rt_norm.is_finite() && rt_norm < residual_norm {
                     r_trial = rt;
@@ -275,52 +621,25 @@ impl NumericSolver {
                 lambda /= self.lambda_scale;
             } else {
                 lambda *= self.lambda_scale;
+                if !lambda.is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "damping adjustment",
+                    });
+                }
             }
+        }
+
+        if residual_norm < self.tol {
+            return Ok(SolveStats {
+                iterations: self.max_iter,
+                final_residual: residual_norm,
+                condition_number_estimate: condition_estimate,
+            });
         }
 
         Err(SolveError::MaxIterations {
             final_residual: residual_norm,
         })
-    }
-
-    fn build_jacobian_pattern(
-        equations: &[Box<dyn ConstraintEquation>],
-        m: usize,
-        n: usize,
-    ) -> JacobianPattern {
-        let mut col_to_rows: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut row_offset = 0usize;
-        let mut has_analytic = true;
-
-        for eq in equations {
-            let dim = eq.dimension();
-            let triples = eq.jacobian(&[]);
-            if triples.is_empty() {
-                has_analytic = false;
-            } else {
-                for (local_row, col, _) in triples {
-                    let global_row = row_offset + local_row;
-                    if col < n && global_row < m {
-                        let rows = &mut col_to_rows[col];
-                        if rows.last() != Some(&global_row) {
-                            rows.push(global_row);
-                        }
-                    }
-                }
-            }
-            row_offset += dim;
-        }
-
-        // Sort and deduplicate row lists for stable access.
-        for rows in &mut col_to_rows {
-            rows.sort_unstable();
-            rows.dedup();
-        }
-
-        JacobianPattern {
-            col_to_rows,
-            has_analytic,
-        }
     }
 
     fn compute_jacobian(
@@ -329,24 +648,42 @@ impl NumericSolver {
         r0: &[f64],
         m: usize,
         n: usize,
-        pattern: &JacobianPattern,
-    ) -> Vec<Vec<f64>> {
-        if pattern.has_analytic {
-            Self::analytic_jacobian(vars, equations, r0, m, n, pattern)
+    ) -> Result<Vec<Vec<f64>>, SolveError> {
+        let analytic: Vec<Vec<(usize, usize, f64)>> =
+            equations.par_iter().map(|eq| eq.jacobian(vars)).collect();
+
+        for (equation, (eq, triples)) in equations.iter().zip(&analytic).enumerate() {
+            for &(row, column, value) in triples {
+                if row >= eq.dimension() || column >= n {
+                    return Err(SolveError::MalformedJacobianEntry {
+                        equation,
+                        row,
+                        column,
+                    });
+                }
+                if !value.is_finite() {
+                    return Err(SolveError::NonFiniteJacobian {
+                        equation,
+                        row,
+                        column,
+                    });
+                }
+            }
+        }
+
+        if analytic.iter().all(|triples| !triples.is_empty()) {
+            Self::analytic_jacobian(equations, &analytic, m, n)
         } else {
             Self::finite_difference_jacobian(vars, equations, r0, m, n)
         }
     }
 
     fn analytic_jacobian(
-        vars: &[f64],
         equations: &[Box<dyn ConstraintEquation>],
-        r0: &[f64],
+        analytic: &[Vec<(usize, usize, f64)>],
         m: usize,
         n: usize,
-        pattern: &JacobianPattern,
-    ) -> Vec<Vec<f64>> {
-        // Evaluate analytic Jacobians in parallel per equation, then merge.
+    ) -> Result<Vec<Vec<f64>>, SolveError> {
         let row_offsets: Vec<usize> = equations
             .iter()
             .scan(0usize, |offset, eq| {
@@ -356,36 +693,20 @@ impl NumericSolver {
             })
             .collect();
 
-        let per_eq_jacobians: Vec<Vec<(usize, usize, f64)>> =
-            equations.par_iter().map(|eq| eq.jacobian(vars)).collect();
-
         let mut j = vec![vec![0.0; n]; m];
-        for (offset, triples) in row_offsets.iter().zip(per_eq_jacobians.iter()) {
+        for (offset, triples) in row_offsets.iter().zip(analytic.iter()) {
             for &(local_row, col, value) in triples {
-                let global_row = offset + local_row;
-                if global_row < m && col < n {
-                    j[global_row][col] = value;
+                let entry = &mut j[offset + local_row][col];
+                *entry += value;
+                if !entry.is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "analytic Jacobian accumulation",
+                    });
                 }
             }
         }
 
-        // For any column not covered by the analytic pattern, fall back to
-        // finite differences on the affected rows only. This keeps the sparse
-        // speedup while guaranteeing correctness if an equation omitted some
-        // non-zero entries.
-        for col in 0..n {
-            if pattern.col_to_rows[col].is_empty() {
-                let h = 1e-8 * vars[col].abs().max(1.0);
-                let mut vars_plus = vars.to_vec();
-                vars_plus[col] += h;
-                let r_plus = compute_residual(&vars_plus, equations, m);
-                for row in 0..m {
-                    j[row][col] = (r_plus[row] - compute_residual_row(r0, row)) / h;
-                }
-            }
-        }
-
-        j
+        Ok(j)
     }
 
     fn finite_difference_jacobian(
@@ -394,45 +715,92 @@ impl NumericSolver {
         r0: &[f64],
         m: usize,
         n: usize,
-    ) -> Vec<Vec<f64>> {
+    ) -> Result<Vec<Vec<f64>>, SolveError> {
         let mut j = vec![vec![0.0; n]; m];
 
         // Parallelise over columns: each perturbed evaluation is independent.
         let cols: Vec<usize> = (0..n).collect();
-        let col_results: Vec<(usize, Vec<f64>)> = cols
+        let col_results: Vec<Result<(usize, Vec<f64>), SolveError>> = cols
             .par_iter()
             .map(|&i| {
                 let h = 1e-8 * vars[i].abs().max(1.0);
                 let mut vars_plus = vars.to_vec();
                 vars_plus[i] += h;
-                let r_plus = compute_residual(&vars_plus, equations, m);
-                let col: Vec<f64> = (0..m).map(|k| (r_plus[k] - r0[k]) / h).collect();
-                (i, col)
+                let r_plus = compute_residual(&vars_plus, equations, m)?;
+                let mut col = Vec::with_capacity(m);
+                for k in 0..m {
+                    let value = (r_plus[k] - r0[k]) / h;
+                    if !value.is_finite() {
+                        return Err(SolveError::NonFiniteComputation {
+                            stage: "finite-difference Jacobian",
+                        });
+                    }
+                    col.push(value);
+                }
+                Ok((i, col))
             })
             .collect();
 
-        for (i, col) in col_results {
+        for result in col_results {
+            let (i, col) = result?;
             for k in 0..m {
                 j[k][i] = col[k];
             }
         }
 
-        j
+        Ok(j)
+    }
+
+    fn validate_configuration(&self) -> Result<(), SolveError> {
+        if self.max_iter > MAX_SOLVER_ITERATIONS {
+            return Err(SolveError::InvalidConfiguration { field: "max_iter" });
+        }
+        if !self.lambda.is_finite() || self.lambda < 0.0 {
+            return Err(SolveError::InvalidConfiguration { field: "lambda" });
+        }
+        if !self.lambda_scale.is_finite() || self.lambda_scale <= 1.0 {
+            return Err(SolveError::InvalidConfiguration {
+                field: "lambda_scale",
+            });
+        }
+        if !self.tol.is_finite() || self.tol <= 0.0 {
+            return Err(SolveError::InvalidConfiguration { field: "tol" });
+        }
+        if !self.regularization.is_finite() || self.regularization <= 0.0 {
+            return Err(SolveError::InvalidConfiguration {
+                field: "regularization",
+            });
+        }
+        Ok(())
     }
 }
 
-#[inline]
-fn compute_residual_row(r0: &[f64], row: usize) -> f64 {
-    r0.get(row).copied().unwrap_or(0.0)
-}
-
-fn compute_residual(vars: &[f64], equations: &[Box<dyn ConstraintEquation>], m: usize) -> Vec<f64> {
+fn compute_residual(
+    vars: &[f64],
+    equations: &[Box<dyn ConstraintEquation>],
+    m: usize,
+) -> Result<Vec<f64>, SolveError> {
     let per_eq: Vec<Vec<f64>> = equations.par_iter().map(|eq| eq.residual(vars)).collect();
     let mut r = Vec::with_capacity(m);
-    for eq_r in per_eq {
+    for (equation, (eq, eq_r)) in equations.iter().zip(per_eq).enumerate() {
+        let expected = eq.dimension();
+        let actual = eq_r.len();
+        if actual != expected {
+            return Err(SolveError::MalformedResidualDimension {
+                equation,
+                expected,
+                actual,
+            });
+        }
+        for (row, value) in eq_r.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return Err(SolveError::NonFiniteResidual { equation, row });
+            }
+        }
         r.extend(eq_r);
     }
-    r
+    debug_assert_eq!(r.len(), m);
+    Ok(r)
 }
 
 /// Solve `a x = b` by Gaussian elimination with partial pivoting and
@@ -450,8 +818,17 @@ fn solve_linear_system_with_regularization(
     b: &[f64],
     lambda: f64,
     reg: f64,
-) -> (Option<Vec<f64>>, f64) {
+) -> Result<(Option<Vec<f64>>, f64), SolveError> {
     let n = b.len();
+    if a.len() != n
+        || a.iter().any(|row| row.len() != n)
+        || a.iter().flatten().any(|value| !value.is_finite())
+        || b.iter().any(|value| !value.is_finite())
+    {
+        return Err(SolveError::NonFiniteComputation {
+            stage: "linear system input",
+        });
+    }
     let mut aug: Vec<Vec<f64>> = a
         .iter()
         .zip(b.iter())
@@ -482,6 +859,11 @@ fn solve_linear_system_with_regularization(
         }
 
         let diag_abs = aug[col][col].abs();
+        if !diag_abs.is_finite() || diag_abs == 0.0 {
+            return Err(SolveError::NonFiniteComputation {
+                stage: "linear-system pivot",
+            });
+        }
         if diag_abs > max_diag {
             max_diag = diag_abs;
         }
@@ -491,8 +873,18 @@ fn solve_linear_system_with_regularization(
 
         for row in (col + 1)..n {
             let factor = aug[row][col] / aug[col][col];
+            if !factor.is_finite() {
+                return Err(SolveError::NonFiniteComputation {
+                    stage: "linear-system elimination factor",
+                });
+            }
             for c in col..=n {
                 aug[row][c] -= factor * aug[col][c];
+                if !aug[row][c].is_finite() {
+                    return Err(SolveError::NonFiniteComputation {
+                        stage: "linear-system elimination",
+                    });
+                }
             }
         }
     }
@@ -502,6 +894,11 @@ fn solve_linear_system_with_regularization(
     } else {
         1.0
     };
+    if !condition_estimate.is_finite() {
+        return Err(SolveError::NonFiniteComputation {
+            stage: "condition estimate",
+        });
+    }
 
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
@@ -509,21 +906,33 @@ fn solve_linear_system_with_regularization(
         for j in (i + 1)..n {
             sum -= aug[i][j] * x[j];
         }
+        if !sum.is_finite() {
+            return Err(SolveError::NonFiniteComputation {
+                stage: "linear-system back substitution",
+            });
+        }
         if aug[i][i].abs() < reg {
-            return (None, condition_estimate);
+            return Ok((None, condition_estimate));
         }
         x[i] = sum / aug[i][i];
+        if !x[i].is_finite() {
+            return Err(SolveError::NonFiniteComputation {
+                stage: "linear-system solution",
+            });
+        }
     }
-    (Some(x), condition_estimate)
+    Ok((Some(x), condition_estimate))
 }
 
-fn norm(v: &[f64]) -> f64 {
-    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+fn norm(v: &[f64]) -> Option<f64> {
+    let norm = v.iter().copied().fold(0.0_f64, f64::hypot);
+    norm.is_finite().then_some(norm)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::numeric_constraints::{CoincidentEq, VarOrConst};
 
     struct CircleIntersection {
         offset: f64,
@@ -553,6 +962,294 @@ mod tests {
         fn residual(&self, vars: &[f64]) -> Vec<f64> {
             vec![self.a[0] * vars[0] + self.a[1] * vars[1] - self.b]
         }
+    }
+
+    struct StationaryNonzeroResidual;
+
+    impl ConstraintEquation for StationaryNonzeroResidual {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            vec![1.0]
+        }
+
+        fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+            vec![(0, 0, 0.0)]
+        }
+    }
+
+    struct WrongResidualDimension;
+
+    impl ConstraintEquation for WrongResidualDimension {
+        fn dimension(&self) -> usize {
+            2
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            vec![0.0]
+        }
+    }
+
+    struct WrongJacobianDimension;
+
+    impl ConstraintEquation for WrongJacobianDimension {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            vec![1.0]
+        }
+
+        fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+            vec![(1, 0, 1.0)]
+        }
+    }
+
+    struct NonFiniteJacobian;
+
+    impl ConstraintEquation for NonFiniteJacobian {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            vec![1.0]
+        }
+
+        fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+            vec![(0, 0, f64::NAN)]
+        }
+    }
+
+    struct ExcessiveDimension;
+
+    impl ConstraintEquation for ExcessiveDimension {
+        fn dimension(&self) -> usize {
+            usize::MAX
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            unreachable!("a rejected dimension must not be evaluated")
+        }
+    }
+
+    struct ExcessiveNormalEquationWork;
+
+    impl ConstraintEquation for ExcessiveNormalEquationWork {
+        fn dimension(&self) -> usize {
+            MAX_CONSTRAINT_EQUATIONS
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            unreachable!("a rejected normal-equation workload must not be evaluated")
+        }
+    }
+
+    struct AnalyticScalarEq {
+        index: usize,
+        target: f64,
+    }
+
+    impl ConstraintEquation for AnalyticScalarEq {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn validate_variables(&self, vars: &[f64]) -> Result<(), VarIndex> {
+            if self.index < vars.len() {
+                Ok(())
+            } else {
+                Err(self.index)
+            }
+        }
+
+        fn residual(&self, vars: &[f64]) -> Vec<f64> {
+            vec![vars[self.index] - self.target]
+        }
+
+        fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+            vec![(0, self.index, 1.0)]
+        }
+    }
+
+    struct DuplicateJacobianEntries {
+        entries: Vec<(usize, usize, f64)>,
+    }
+
+    impl ConstraintEquation for DuplicateJacobianEntries {
+        fn dimension(&self) -> usize {
+            1
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            vec![0.0]
+        }
+
+        fn jacobian(&self, _vars: &[f64]) -> Vec<(usize, usize, f64)> {
+            self.entries.clone()
+        }
+    }
+
+    struct NeverEvaluatedEquation {
+        dimension: usize,
+    }
+
+    impl ConstraintEquation for NeverEvaluatedEquation {
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+
+        fn residual(&self, _vars: &[f64]) -> Vec<f64> {
+            unreachable!("aggregate work must be rejected before residual evaluation")
+        }
+    }
+
+    #[test]
+    fn max_iterations_is_bounded_before_any_equation_evaluation() {
+        for max_iter in [MAX_SOLVER_ITERATIONS - 1, MAX_SOLVER_ITERATIONS] {
+            let solver = NumericSolver {
+                max_iter,
+                ..NumericSolver::default()
+            };
+            let mut vars = [0.0];
+            let error = solver
+                .solve(&mut vars, &[])
+                .expect_err("a valid configuration reaches the empty-system validation");
+            assert!(matches!(error, SolveError::NoEquations));
+        }
+
+        let solver = NumericSolver {
+            max_iter: MAX_SOLVER_ITERATIONS + 1,
+            ..NumericSolver::default()
+        };
+        let mut vars = [0.0];
+        let error = solver
+            .solve(&mut vars, &[])
+            .expect_err("an excessive max_iter must be rejected first");
+        assert!(matches!(
+            error,
+            SolveError::InvalidConfiguration { field: "max_iter" }
+        ));
+    }
+
+    #[test]
+    fn duplicate_sparse_jacobian_entries_are_accumulated_deterministically() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![
+            Box::new(DuplicateJacobianEntries {
+                entries: vec![(0, 0, 3.0), (0, 0, -1.0), (0, 0, 2.0)],
+            }),
+            Box::new(DuplicateJacobianEntries {
+                entries: vec![(0, 0, 2.0), (0, 0, -1.0), (0, 0, 3.0)],
+            }),
+        ];
+
+        let jacobian = NumericSolver::compute_jacobian(&[0.0], &equations, &[0.0, 0.0], 2, 1)
+            .expect("duplicate entries are valid sparse Jacobian contributions");
+
+        assert_eq!(jacobian, vec![vec![4.0], vec![4.0]]);
+    }
+
+    #[test]
+    fn same_object_coincident_assembles_to_zero_jacobian() {
+        let x = VarOrConst::new(Some(0), 0.0);
+        let y = VarOrConst::new(Some(1), 0.0);
+        let equations: Vec<Box<dyn ConstraintEquation>> =
+            vec![Box::new(CoincidentEq::new(x, y, x, y))];
+
+        let jacobian = NumericSolver::compute_jacobian(&[3.0, -2.0], &equations, &[0.0, 0.0], 2, 2)
+            .expect("same-object aliases are valid analytic contributions");
+
+        assert_eq!(jacobian, vec![vec![0.0, 0.0], vec![0.0, 0.0]]);
+    }
+
+    #[test]
+    fn same_object_tautology_cannot_change_a_combined_solve() {
+        let solver = NumericSolver {
+            max_iter: 1,
+            tol: 1e-2,
+            ..NumericSolver::default()
+        };
+        let target_equations = || -> Vec<Box<dyn ConstraintEquation>> {
+            vec![
+                Box::new(AnalyticScalarEq {
+                    index: 0,
+                    target: 1.0,
+                }),
+                Box::new(AnalyticScalarEq {
+                    index: 1,
+                    target: -2.0,
+                }),
+            ]
+        };
+
+        let mut baseline = [0.0, 0.0];
+        let baseline_stats = solver
+            .solve(&mut baseline, &target_equations())
+            .expect("the independent target equations converge in one iteration");
+
+        let x = VarOrConst::new(Some(0), 0.0);
+        let y = VarOrConst::new(Some(1), 0.0);
+        let mut combined_equations: Vec<Box<dyn ConstraintEquation>> =
+            vec![Box::new(CoincidentEq::new(x, y, x, y))];
+        combined_equations.extend(target_equations());
+        let mut combined = [0.0, 0.0];
+        let combined_stats = solver
+            .solve(&mut combined, &combined_equations)
+            .expect("a zero tautology cannot consume or bias the solve");
+
+        assert_eq!(combined, baseline);
+        assert_eq!(combined_stats.final_residual, baseline_stats.final_residual);
+    }
+
+    #[test]
+    fn aggregate_normal_equation_work_is_rejected_before_evaluation() {
+        let equations: Vec<Box<dyn ConstraintEquation>> =
+            vec![Box::new(NeverEvaluatedEquation { dimension: 3_000 })];
+        let solver = NumericSolver {
+            max_iter: MAX_SOLVER_ITERATIONS,
+            ..NumericSolver::default()
+        };
+        let mut vars = [0.0; 2];
+
+        let error = solver
+            .solve(&mut vars, &equations)
+            .expect_err("aggregate normal-equation work must be bounded");
+
+        assert!(matches!(
+            error,
+            SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested: 12_000_000,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            }
+        ));
+    }
+
+    #[test]
+    fn aggregate_elimination_work_is_rejected_before_evaluation() {
+        let equations: Vec<Box<dyn ConstraintEquation>> =
+            vec![Box::new(NeverEvaluatedEquation { dimension: 1 })];
+        let solver = NumericSolver {
+            max_iter: MAX_SOLVER_ITERATIONS,
+            ..NumericSolver::default()
+        };
+        let mut vars = [0.0; 20];
+
+        let error = solver
+            .solve(&mut vars, &equations)
+            .expect_err("aggregate elimination work must be bounded");
+
+        assert!(matches!(
+            error,
+            SolveError::ResourceLimitExceeded {
+                resource: "elimination operations",
+                requested: 8_400_000,
+                maximum: MAX_SOLVER_ELIMINATION_OPERATIONS,
+            }
+        ));
     }
 
     #[test]
@@ -650,5 +1347,138 @@ mod tests {
             stats.condition_number_estimate.is_finite(),
             "condition estimate should be finite"
         );
+    }
+
+    #[test]
+    fn stationary_nonzero_residual_is_not_reported_as_converged() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(StationaryNonzeroResidual)];
+        let mut vars = [0.0];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("a zero step cannot converge a nonzero residual");
+
+        assert!(matches!(
+            error,
+            SolveError::MaxIterations { final_residual } if (final_residual - 1.0).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn malformed_residual_dimensions_return_a_typed_error() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(WrongResidualDimension)];
+        let mut vars = [0.0];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("malformed residuals must not panic");
+
+        assert!(matches!(
+            error,
+            SolveError::MalformedResidualDimension {
+                equation: 0,
+                expected: 2,
+                actual: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_jacobian_dimensions_return_a_typed_error() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(WrongJacobianDimension)];
+        let mut vars = [0.0];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("malformed Jacobians must not be ignored");
+
+        assert!(matches!(
+            error,
+            SolveError::MalformedJacobianEntry {
+                equation: 0,
+                row: 1,
+                column: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn non_finite_jacobian_values_return_a_typed_error() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(NonFiniteJacobian)];
+        let mut vars = [0.0];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("non-finite Jacobians must not enter the linear system");
+
+        assert!(matches!(
+            error,
+            SolveError::NonFiniteJacobian {
+                equation: 0,
+                row: 0,
+                column: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn excessive_equation_dimension_is_rejected_before_allocation() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(ExcessiveDimension)];
+        let mut vars = [0.0];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("a hostile dimension must not reach Vec allocation");
+
+        assert!(matches!(
+            error,
+            SolveError::EquationDimensionLimitExceeded {
+                equation: 0,
+                dimension: usize::MAX,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn excessive_variable_count_is_rejected_before_dense_solver_allocation() {
+        let equations: Vec<Box<dyn ConstraintEquation>> = vec![Box::new(LinearEq {
+            a: [1.0, 0.0],
+            b: 0.0,
+        })];
+        let mut vars = vec![0.0; MAX_SOLVER_VARIABLES + 1];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("a dense normal equation beyond the variable cap must be rejected");
+
+        assert!(matches!(
+            error,
+            SolveError::ResourceLimitExceeded {
+                resource: "variables",
+                requested,
+                maximum: MAX_SOLVER_VARIABLES,
+            } if requested == MAX_SOLVER_VARIABLES + 1
+        ));
+    }
+
+    #[test]
+    fn excessive_normal_equation_work_is_rejected_before_residual_evaluation() {
+        let equations: Vec<Box<dyn ConstraintEquation>> =
+            vec![Box::new(ExcessiveNormalEquationWork)];
+        let mut vars = vec![0.0; MAX_SOLVER_VARIABLES];
+
+        let error = NumericSolver::default()
+            .solve(&mut vars, &equations)
+            .expect_err("a quadratic normal-equation workload must be rejected");
+
+        assert!(matches!(
+            error,
+            SolveError::ResourceLimitExceeded {
+                resource: "normal equation operations",
+                requested,
+                maximum: MAX_NORMAL_EQUATION_OPERATIONS,
+            } if requested > MAX_NORMAL_EQUATION_OPERATIONS
+        ));
     }
 }

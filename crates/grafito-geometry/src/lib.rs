@@ -18,11 +18,14 @@
 //! ```
 
 pub mod analysis;
+pub mod assumptions;
 pub mod ast;
 pub mod attractors;
 pub mod boolean;
 pub mod cas;
 pub mod dd;
+pub mod derivation;
+pub mod exact;
 pub mod expr;
 pub mod fractals;
 pub mod integral;
@@ -31,7 +34,9 @@ pub mod interval;
 pub mod lines;
 pub mod matrices;
 pub mod ode;
+pub mod outcome;
 pub mod planes3d;
+pub mod polytopes;
 pub mod precision;
 pub mod special_curves;
 pub mod special_functions;
@@ -41,9 +46,13 @@ pub mod types;
 pub mod types3d;
 pub mod value;
 
+pub use assumptions::{Assumption, Assumptions};
 pub use boolean::*;
+pub use exact::{ExactRational, ExactRationalError};
 pub use lines::*;
+pub use outcome::{MathError, MathOperation, MathResult, MAX_MATH_INPUT_BYTES};
 pub use planes3d::*;
+pub use polytopes::*;
 pub use types::*;
 pub use types3d::*;
 

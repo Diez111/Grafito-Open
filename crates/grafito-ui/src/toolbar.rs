@@ -1,133 +1,157 @@
 //! Horizontal toolbar with tool groups, each with dropdown.
 //! Icons are drawn with egui::Painter — no Unicode dependency.
-//! Pattern: one icon per group (last used tool), ▾ opens sub-menu.
+//! Pattern: one icon per group (last used tool), ASCII fallback opens sub-menu.
 
 use egui::{pos2, vec2, Color32, Painter, Rect, Shape, Stroke, Ui};
 use std::f32::consts::TAU;
 
+use crate::animation::interpolate_color;
+use crate::icons::{draw_icon, Icon};
+use crate::theme::current_theme;
+use crate::tokens::RADIUS_MD;
 use crate::Tool;
 
 /// Una entrada de la toolbar: `(Tool, etiqueta, atajo)`.
 pub type ToolEntry = (Tool, &'static str, &'static str);
 
-const GROUP_MOVE: &[ToolEntry] = &[(Tool::Select, "↖ Seleccionar", "F1")];
+const TOOL_MENU_PREFERRED_WIDTH: f32 = 220.0;
+const TOOL_MENU_ITEM_HEIGHT: f32 = 30.0;
+const TOOL_MENU_SCREEN_MARGIN: f32 = 16.0;
+const TOOL_MENU_VERTICAL_RESERVE: f32 = 72.0;
+pub const COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_120.0;
+/// Lado reservado para cada selector de grupo de herramientas.
+pub const TOOLBAR_BUTTON_SIZE: f32 = 36.0;
+/// Espacio vertical que rodea la única fila de herramientas.
+pub const TOOLBAR_VERTICAL_PADDING: f32 = 4.0;
+/// Altura total del chrome de herramientas, incluidos sus márgenes.
+pub const TOOLBAR_PANEL_HEIGHT: f32 = TOOLBAR_BUTTON_SIZE + 2.0 * TOOLBAR_VERTICAL_PADDING;
+
+const GROUP_MOVE: &[ToolEntry] = &[(Tool::Select, "Seleccionar", "F1")];
 
 const GROUP_POINT: &[ToolEntry] = &[
-    (Tool::Point, "· Punto", "F2"),
+    (Tool::Point, "Punto", "F2"),
     (Tool::Midpoint, "M Punto medio", ""),
 ];
 
 const GROUP_LINE: &[ToolEntry] = &[
-    (Tool::Line, "╱ Recta", "F3"),
-    (Tool::Segment, "─ Segmento", ""),
-    (Tool::Ray, "→ Semirrecta", ""),
-    (Tool::Vector, "→ Vector", ""),
-    (Tool::Perpendicular, "⊥ Perpendicular", ""),
+    (Tool::Line, "Recta", "F3"),
+    (Tool::Segment, "Segmento", ""),
+    (Tool::Ray, "Semirrecta", ""),
+    (Tool::Vector, "Vector", ""),
+    (Tool::Perpendicular, "Perpendicular", ""),
 ];
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
-    (Tool::Circle, "○ Círculo centro-punto", "F4"),
-    (Tool::Tangent, "⌒ Tangente", ""),
+    (Tool::Circle, "Circulo centro-punto", "F4"),
+    (Tool::Tangent, "Tangente", ""),
 ];
 
 const GROUP_POLYGON: &[ToolEntry] = &[
-    (Tool::Polygon, "△ Polígono", "F5"),
-    (Tool::RegularPolygon, "⬡ Polígono regular", ""),
+    (Tool::Polygon, "Poligono", "F5"),
+    (Tool::RegularPolygon, "Poligono regular", ""),
 ];
 
-const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "✏ Lápiz", "Ctrl+P")];
+const GROUP_PENCIL: &[ToolEntry] = &[(Tool::Pencil, "Lapiz", "Ctrl+P")];
 
-const GROUP_ERASER: &[ToolEntry] = &[(Tool::Eraser, "🩹 Borrador", "Ctrl+E")];
+const GROUP_ERASER: &[ToolEntry] = &[(Tool::Eraser, "Borrador", "Ctrl+E")];
 
 const GROUP_CONIC: &[ToolEntry] = &[
-    (Tool::EllipseByFoci, "◯ Elipse por focos", ""),
+    (Tool::EllipseByFoci, "Elipse por focos", ""),
     (
         Tool::ParabolaByFocusDirectrix,
-        "∪ Parábola foco-directriz",
+        "Parabola foco-directriz",
         "",
     ),
-    (Tool::HyperbolaByFoci, "⊃ Hipérbola por focos", ""),
-    (Tool::ConicByFivePoints, "⬭ Cónica por 5 puntos", ""),
+    (Tool::HyperbolaByFoci, "Hiperbola por focos", ""),
+    (Tool::ConicByFivePoints, "Conica por 5 puntos", ""),
 ];
 
 const GROUP_CURVE: &[ToolEntry] = &[
     (Tool::Function, "f(x) Función", "F6"),
     (Tool::ParametricCurve2D, "(x,y) Paramétrica 2D", ""),
-    (Tool::PolarCurve, "r(θ) Polar", ""),
+    (Tool::PolarCurve, "r(t) Polar", ""),
     (Tool::ImplicitCurve, "F(x,y)=0 Implícita", ""),
-    (Tool::VectorField2D, "⇄ Campo vectorial", ""),
-    (Tool::Locus, "⌒ Lugar geométrico", ""),
+    (Tool::VectorField2D, "Campo vectorial", ""),
+    (Tool::Locus, "Lugar geométrico", ""),
 ];
 
 const GROUP_MEASURE: &[ToolEntry] = &[
-    (Tool::Distance, "↔ Distancia", ""),
-    (Tool::Angle, "∠ Ángulo", ""),
-    (Tool::Area, "⬜ Área", ""),
+    (Tool::Distance, "Distancia", ""),
+    (Tool::Angle, "Angulo", ""),
+    (Tool::Area, "Area", ""),
     (Tool::Slope, "m Pendiente", ""),
 ];
 
 const GROUP_ANALYSIS: &[ToolEntry] = &[
-    (Tool::Root, "√ Raíces", ""),
-    (Tool::Extremum, "▲ Extremos", ""),
-    (Tool::Inflection, "∿ Inflexión", ""),
-    (Tool::YIntercept, "↕ Intersección Y", ""),
-    (Tool::XIntercept, "↔ Intersección X", ""),
-    (Tool::Intersect, "⊕ Intersección", ""),
-    (Tool::Analyze, "⚙ Analizar", ""),
+    (Tool::Root, "Raices", ""),
+    (Tool::Extremum, "Extremos", ""),
+    (Tool::Inflection, "Inflexion", ""),
+    (Tool::YIntercept, "Interseccion Y", ""),
+    (Tool::XIntercept, "Interseccion X", ""),
+    (Tool::Intersect, "Interseccion", ""),
+    (Tool::Analyze, "Analizar", ""),
 ];
 
 const GROUP_CONSTRAINT: &[ToolEntry] = &[
-    (Tool::Coincident, "⊙ Coincidente", ""),
-    (Tool::DistanceConstraint, "↔ Distancia", ""),
-    (Tool::AngleConstraint, "∠ Ángulo", ""),
-    (Tool::Horizontal, "─ Horizontal", ""),
-    (Tool::Vertical, "│ Vertical", ""),
+    (Tool::Coincident, "Coincidente", ""),
+    (Tool::DistanceConstraint, "Distancia", ""),
+    (Tool::AngleConstraint, "Angulo", ""),
+    (Tool::Horizontal, "Horizontal", ""),
+    (Tool::Vertical, "Vertical", ""),
     (Tool::EqualLength, "= Igual longitud", ""),
-    (Tool::Symmetry, "⇋ Simetría", ""),
+    (Tool::Symmetry, "Simetria", ""),
+    (Tool::Locus, "Lugar geometrico", ""),
 ];
 
 const GROUP_BOOLEAN: &[ToolEntry] = &[
-    (Tool::PolygonUnion, "∪ Unión", ""),
-    (Tool::PolygonIntersection, "∩ Intersección", ""),
-    (Tool::PolygonDifference, "∖ Diferencia", ""),
-    (Tool::PolygonXor, "⊻ XOR", ""),
+    (Tool::PolygonUnion, "Union", ""),
+    (Tool::PolygonIntersection, "Interseccion", ""),
+    (Tool::PolygonDifference, "Diferencia", ""),
+    (Tool::PolygonXor, "XOR", ""),
 ];
 
 const GROUP_3D: &[ToolEntry] = &[
-    (Tool::Point3D, "● Punto 3D", ""),
-    (Tool::Segment3D, "─ Segmento 3D", ""),
-    (Tool::Line3D, "╱ Recta 3D", ""),
-    (Tool::Plane3D, "▱ Plano 3D", ""),
-    (Tool::Sphere3D, "◯ Esfera", "F8"),
-    (Tool::Cube3D, "□ Cubo", "F9"),
-    (Tool::Cylinder3D, "▥ Cilindro", ""),
-    (Tool::Cone3D, "△ Cono", ""),
-    (Tool::Torus3D, "◎ Toro", ""),
-    (Tool::MoebiusStrip, "∞ Möbius", ""),
+    (Tool::Point3D, "Punto 3D", ""),
+    (Tool::Segment3D, "Segmento 3D", ""),
+    (Tool::Line3D, "Recta 3D", ""),
+    (Tool::Plane3D, "Plano 3D", ""),
+    (Tool::Sphere3D, "Esfera", "F8"),
+    (Tool::Cube3D, "Cubo", "F9"),
+    (Tool::Cylinder3D, "Cilindro", ""),
+    (Tool::Cone3D, "Cono", ""),
+    (Tool::Torus3D, "Toro", ""),
+    (Tool::MoebiusStrip, "Mobius", ""),
     (Tool::Surface3D, "z Superficie", ""),
     (Tool::ParametricCurve3D, "(x,y,z) Curva 3D", ""),
-    (Tool::VectorField3D, "⇶ Campo 3D", ""),
+    (Tool::VectorField3D, "Campo 3D", ""),
     (Tool::HyperSurface4D, "4D Hipersuperficie", ""),
+];
+
+const GROUP_4D: &[ToolEntry] = &[
+    (
+        Tool::Tesseract4D,
+        "Teseracto 4D: objeto centrado y proyectado",
+        "",
+    ),
+    (
+        Tool::Hypercube5D,
+        "Hipercubo 5D: objeto centrado y proyectado",
+        "",
+    ),
 ];
 
 const GROUP_ADVANCED: &[ToolEntry] = &[
-    (Tool::Attractor, "≈ Atractor", ""),
-    (Tool::Fractal, "❄ Fractal", ""),
-    (Tool::Histogram, "📊 Histograma", ""),
-    (Tool::ScatterPlot, "·· Dispersión", ""),
-    (Tool::DomainColoring, "🌈 Domain Coloring", ""),
-    (Tool::HeatMap, "🔥 Heat Map", ""),
-    (Tool::ComplexGrid, "🌀 Complex Grid", ""),
-    (Tool::Slider, "═ Deslizador", ""),
-    (Tool::Button, "☑ Checkbox/Botón", ""),
-    (Tool::Image, "🖼 Imagen", ""),
+    (Tool::Attractor, "Atractor", ""),
+    (Tool::Fractal, "Fractal", ""),
+    (Tool::Histogram, "Histograma", ""),
+    (Tool::ScatterPlot, "Dispersion", ""),
+    (Tool::DomainColoring, "Domain Coloring", ""),
+    (Tool::HeatMap, "Heat Map", ""),
+    (Tool::ComplexGrid, "Complex Grid", ""),
+    (Tool::Slider, "Deslizador", ""),
 ];
 
-const GROUP_DYNAMICS: &[ToolEntry] = &[
-    (Tool::Attractor, "≈ Atractor 3D", ""),
-    (Tool::VectorField3D, "⇶ Campo vectorial 3D", ""),
-    (Tool::HyperSurface4D, "4D Hipersuperficie", ""),
-];
+const GROUP_DYNAMICS: &[ToolEntry] = &[(Tool::Attractor, "Atractor 3D", "")];
 
 /// Identificador de un grupo de herramientas de la toolbar.
 ///
@@ -152,6 +176,7 @@ pub enum ToolGroupId {
     Constraint,
     Boolean,
     ThreeD,
+    FourD,
     Advanced,
     Dynamics,
 }
@@ -174,8 +199,31 @@ impl ToolGroupId {
             ToolGroupId::Constraint => (icon_constraint, GROUP_CONSTRAINT),
             ToolGroupId::Boolean => (icon_boolean, GROUP_BOOLEAN),
             ToolGroupId::ThreeD => (icon_3d, GROUP_3D),
+            ToolGroupId::FourD => (icon_four_d, GROUP_4D),
             ToolGroupId::Advanced => (icon_advanced, GROUP_ADVANCED),
-            ToolGroupId::Dynamics => (icon_advanced, GROUP_DYNAMICS),
+            ToolGroupId::Dynamics => (icon_dynamics, GROUP_DYNAMICS),
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            ToolGroupId::Move => "Seleccionar",
+            ToolGroupId::Point => "Puntos",
+            ToolGroupId::Line => "Rectas",
+            ToolGroupId::Circle => "Círculos",
+            ToolGroupId::Polygon => "Polígonos",
+            ToolGroupId::Pencil => "Trazo",
+            ToolGroupId::Eraser => "Borrar",
+            ToolGroupId::Conic => "Cónicas",
+            ToolGroupId::Curve => "Curvas",
+            ToolGroupId::Measure => "Medición",
+            ToolGroupId::Analysis => "Análisis",
+            ToolGroupId::Constraint => "Restricciones",
+            ToolGroupId::Boolean => "Booleanas",
+            ToolGroupId::ThreeD => "3D",
+            ToolGroupId::FourD => "4D proyectado",
+            ToolGroupId::Advanced => "Avanzado",
+            ToolGroupId::Dynamics => "Dinámica",
         }
     }
 }
@@ -196,7 +244,6 @@ pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Constraint,
     ToolGroupId::Boolean,
     ToolGroupId::Advanced,
-    ToolGroupId::Dynamics,
 ];
 
 // ── Vector icon drawing functions ──
@@ -237,6 +284,72 @@ fn icon_line(painter: &Painter, rect: Rect, color: Color32) {
     painter.line_segment([a, b], Stroke::new(2.0, color));
     painter.circle_filled(a, 2.2, color);
     painter.circle_filled(b, 2.2, color);
+}
+
+fn icon_segment(painter: &Painter, rect: Rect, color: Color32) {
+    let m = rect.width() * 0.2;
+    let a = rect.min + vec2(m, rect.height() * 0.75);
+    let b = rect.max - vec2(m, rect.height() * 0.75);
+    let sw = Stroke::new(2.0, color);
+    painter.line_segment([a, b], sw);
+    painter.circle_filled(a, 2.5, color);
+    painter.circle_filled(b, 2.5, color);
+}
+
+fn icon_ray(painter: &Painter, rect: Rect, color: Color32) {
+    let m = rect.width() * 0.2;
+    let a = rect.min + vec2(m, rect.height() * 0.75);
+    let b = rect.max - vec2(m, rect.height() * 0.75);
+    let sw = Stroke::new(2.0, color);
+    painter.line_segment([a, b], sw);
+    painter.circle_filled(a, 2.5, color);
+    let dir = (b - a).normalized();
+    let perp = vec2(-dir.y, dir.x);
+    painter.line_segment([b, b - dir * 7.0 + perp * 4.0], sw);
+    painter.line_segment([b, b - dir * 7.0 - perp * 4.0], sw);
+}
+
+fn icon_vector(painter: &Painter, rect: Rect, color: Color32) {
+    let m = rect.width() * 0.2;
+    let a = rect.min + vec2(m, rect.height() * 0.75);
+    let b = rect.max - vec2(m, rect.height() * 0.75);
+    let sw = Stroke::new(2.2, color);
+    painter.line_segment([a, b], sw);
+    let dir = (b - a).normalized();
+    let perp = vec2(-dir.y, dir.x);
+    painter.line_segment([b, b - dir * 8.0 + perp * 4.5], sw);
+    painter.line_segment([b, b - dir * 8.0 - perp * 4.5], sw);
+}
+
+fn icon_midpoint(painter: &Painter, rect: Rect, color: Color32) {
+    icon_segment(painter, rect, color.gamma_multiply(0.7));
+    painter.circle_filled(rect.center(), 3.5, color);
+}
+
+fn icon_perpendicular(painter: &Painter, rect: Rect, color: Color32) {
+    let sw = Stroke::new(2.0, color);
+    let c = rect.center();
+    let h = rect.width() * 0.34;
+    painter.line_segment([c - vec2(h, 0.0), c + vec2(h, 0.0)], sw);
+    painter.line_segment([c, c - vec2(0.0, h)], sw);
+    let s = rect.width() * 0.12;
+    painter.line_segment([c + vec2(s, 0.0), c + vec2(s, -s)], Stroke::new(1.4, color));
+    painter.line_segment(
+        [c + vec2(0.0, -s), c + vec2(s, -s)],
+        Stroke::new(1.4, color),
+    );
+}
+
+fn icon_tangent(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let r = rect.width() * 0.28;
+    let sw = Stroke::new(1.8, color);
+    painter.circle_stroke(c, r, sw);
+    painter.line_segment(
+        [c + vec2(-r * 0.95, -r), c + vec2(r * 0.95, -r)],
+        Stroke::new(2.0, color),
+    );
+    painter.circle_filled(c + vec2(0.0, -r), 2.2, color);
 }
 
 fn icon_circle(painter: &Painter, rect: Rect, color: Color32) {
@@ -323,6 +436,91 @@ fn icon_3d(painter: &Painter, rect: Rect, color: Color32) {
     painter.line_segment([ftl, btl], sw);
     painter.line_segment([ftr, btr], sw);
     painter.line_segment([btl, btr], sw);
+}
+
+fn icon_tesseract_4d(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.27;
+    let outer = [
+        c + vec2(-s, -s),
+        c + vec2(s, -s),
+        c + vec2(s, s),
+        c + vec2(-s, s),
+    ];
+    let inner = [
+        c + vec2(-s * 0.62, -s * 0.46),
+        c + vec2(s * 0.62, -s * 0.46),
+        c + vec2(s * 0.62, s * 0.78),
+        c + vec2(-s * 0.62, s * 0.78),
+    ];
+    let stroke = Stroke::new(1.5, color);
+    for index in 0..4 {
+        painter.line_segment([outer[index], outer[(index + 1) % 4]], stroke);
+        painter.line_segment([inner[index], inner[(index + 1) % 4]], stroke);
+        painter.line_segment([outer[index], inner[index]], stroke);
+    }
+}
+
+fn icon_hypercube_5d(painter: &Painter, rect: Rect, color: Color32) {
+    icon_tesseract_4d(painter, rect, color.gamma_multiply(0.8));
+    let c = rect.center();
+    let r = rect.width() * 0.1;
+    painter.circle_stroke(c, r, Stroke::new(1.5, color));
+    painter.line_segment(
+        [c - vec2(r * 1.5, 0.0), c + vec2(r * 1.5, 0.0)],
+        Stroke::new(1.2, color),
+    );
+    painter.line_segment(
+        [c - vec2(0.0, r * 1.5), c + vec2(0.0, r * 1.5)],
+        Stroke::new(1.2, color),
+    );
+}
+
+fn icon_four_d(painter: &Painter, rect: Rect, color: Color32) {
+    icon_tesseract_4d(painter, rect, color);
+}
+
+fn icon_plane(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let sw = Stroke::new(1.8, color);
+    let p1 = c + vec2(-9.0, 5.0);
+    let p2 = c + vec2(-1.0, -7.0);
+    let p3 = c + vec2(10.0, -3.0);
+    let p4 = c + vec2(2.0, 9.0);
+    painter.add(Shape::convex_polygon(
+        vec![p1, p2, p3, p4],
+        Color32::TRANSPARENT,
+        sw,
+    ));
+}
+
+fn icon_surface(painter: &Painter, rect: Rect, color: Color32) {
+    let sw = Stroke::new(1.6, color);
+    let n = 16;
+    for row in 0..3 {
+        let mut pts = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let x = rect.min.x + rect.width() * t;
+            let y = rect.center().y + (row as f32 - 1.0) * 5.0 + (t * TAU).sin() * 3.0;
+            pts.push(pos2(x, y));
+        }
+        painter.add(Shape::line(pts, sw));
+    }
+}
+
+fn icon_dynamics(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let sw = Stroke::new(1.5, color);
+    let n = 48;
+    let mut pts = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / n as f32 * TAU * 2.0;
+        let r = rect.width() * (0.08 + 0.26 * i as f32 / n as f32);
+        pts.push(c + vec2(r * t.cos(), r * t.sin()));
+    }
+    painter.add(Shape::line(pts, sw));
+    painter.circle_filled(c, 2.4, color);
 }
 
 fn icon_advanced(painter: &Painter, rect: Rect, color: Color32) {
@@ -426,6 +624,74 @@ fn icon_boolean(painter: &Painter, rect: Rect, color: Color32) {
 /// Función de dibujo de icono vectorial para un grupo de la toolbar.
 pub type IconFn = fn(&Painter, Rect, Color32);
 
+/// Devuelve el icono vectorial que representa a una herramienta concreta.
+pub const fn icon_for_tool(tool: Tool) -> IconFn {
+    match tool {
+        Tool::Select => icon_move,
+        Tool::Point | Tool::Point3D => icon_point,
+        Tool::Line | Tool::Line3D => icon_line,
+        Tool::Segment | Tool::Segment3D => icon_segment,
+        Tool::Ray => icon_ray,
+        Tool::Vector => icon_vector,
+        Tool::Circle => icon_circle,
+        Tool::Polygon => icon_polygon,
+        Tool::RegularPolygon => icon_polygon,
+        Tool::Pencil => icon_pencil,
+        Tool::Eraser => icon_eraser,
+        Tool::Function => icon_curve,
+        Tool::ParametricCurve2D | Tool::PolarCurve | Tool::ImplicitCurve => icon_curve,
+        Tool::VectorField2D | Tool::VectorField3D => icon_vector,
+        Tool::Locus => icon_curve,
+        Tool::Midpoint => icon_midpoint,
+        Tool::Perpendicular => icon_perpendicular,
+        Tool::Tangent => icon_tangent,
+        Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope => icon_measure,
+        Tool::Root
+        | Tool::Extremum
+        | Tool::Inflection
+        | Tool::YIntercept
+        | Tool::XIntercept
+        | Tool::Intersect
+        | Tool::Analyze => icon_analysis,
+        Tool::EllipseByFoci
+        | Tool::ParabolaByFocusDirectrix
+        | Tool::HyperbolaByFoci
+        | Tool::ConicByFivePoints => icon_conic,
+        Tool::DistanceConstraint
+        | Tool::AngleConstraint
+        | Tool::Coincident
+        | Tool::Horizontal
+        | Tool::Vertical
+        | Tool::EqualLength
+        | Tool::Symmetry => icon_constraint,
+        Tool::PolygonUnion
+        | Tool::PolygonIntersection
+        | Tool::PolygonDifference
+        | Tool::PolygonXor => icon_boolean,
+        Tool::Plane3D => icon_plane,
+        Tool::Sphere3D => icon_circle,
+        Tool::Cube3D => icon_3d,
+        Tool::Tesseract4D => icon_tesseract_4d,
+        Tool::Hypercube5D => icon_hypercube_5d,
+        Tool::Cylinder3D | Tool::Cone3D | Tool::Torus3D | Tool::MoebiusStrip => icon_3d,
+        Tool::Surface3D | Tool::HyperSurface4D => icon_surface,
+        Tool::ParametricCurve3D => icon_curve,
+        Tool::Attractor => icon_dynamics,
+        Tool::Fractal => icon_advanced,
+        Tool::Histogram
+        | Tool::ScatterPlot
+        | Tool::DomainColoring
+        | Tool::HeatMap
+        | Tool::ComplexGrid => icon_advanced,
+        Tool::Slider | Tool::Button | Tool::Image | Tool::TrigAnimation => icon_advanced,
+    }
+}
+
+/// Dibuja el icono vectorial compartido para una herramienta concreta.
+pub fn draw_tool_icon(painter: &Painter, rect: Rect, tool: Tool, color: Color32) {
+    icon_for_tool(tool)(painter, rect, color);
+}
+
 // ── Public toolbar ──
 
 /// Toolbar clásica: muestra todos los grupos (más el grupo 3D si `is_3d`).
@@ -436,10 +702,38 @@ pub fn toolbar(ui: &mut Ui, current_tool: &mut Tool, is_3d: bool) -> egui::Respo
     if is_3d {
         let mut groups: Vec<ToolGroupId> = ALL_GROUPS.to_vec();
         groups.push(ToolGroupId::ThreeD);
+        groups.push(ToolGroupId::FourD);
         toolbar_filtered(ui, current_tool, &groups)
     } else {
         toolbar_filtered(ui, current_tool, ALL_GROUPS)
     }
+}
+
+pub fn toolbar_uses_overflow(viewport_width: f32) -> bool {
+    viewport_width <= COMPACT_TOOLBAR_MAX_WIDTH
+}
+
+fn active_toolbar_group(current: Tool, groups: &[ToolGroupId]) -> Option<ToolGroupId> {
+    groups.iter().copied().find(|group| {
+        if current == Tool::Select {
+            *group == ToolGroupId::Move
+        } else {
+            let (_, tools) = group.def();
+            tools.iter().any(|(tool, _, _)| *tool == current)
+        }
+    })
+}
+
+fn compact_toolbar_inline_groups(
+    current: Tool,
+    groups: &[ToolGroupId],
+) -> [Option<ToolGroupId>; 2] {
+    let move_group = groups
+        .contains(&ToolGroupId::Move)
+        .then_some(ToolGroupId::Move);
+    let active_group =
+        active_toolbar_group(current, groups).filter(|group| Some(*group) != move_group);
+    [move_group, active_group]
 }
 
 /// Toolbar filtrada: renderiza únicamente los `groups` indicados, en el orden
@@ -450,53 +744,152 @@ pub fn toolbar_filtered(
     current_tool: &mut Tool,
     groups: &[ToolGroupId],
 ) -> egui::Response {
-    let is_dark = ui.visuals().dark_mode;
-    let txt = if is_dark {
-        Color32::WHITE
-    } else {
-        Color32::from_rgb(26, 26, 26)
-    };
-    let txt_dim = if is_dark {
-        Color32::from_gray(150)
-    } else {
-        Color32::from_gray(100)
-    };
-    let accent = Color32::from_rgb(53, 132, 228);
-    let bg = if is_dark {
-        Color32::from_rgb(42, 42, 46)
-    } else {
-        Color32::from_rgb(245, 246, 248)
-    };
+    let theme = current_theme(ui.ctx());
 
     egui::Frame::none()
-        .fill(bg)
-        .inner_margin(egui::Margin::symmetric(3.0, 2.0))
+        .fill(theme.toolbar_bg)
+        .inner_margin(egui::Margin::symmetric(4.0, TOOLBAR_VERTICAL_PADDING))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(1.0, 0.0);
-            // ScrollArea horizontal: ventanas angostas ya no ocultan grupos.
-            egui::ScrollArea::horizontal()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for &gid in groups {
-                            let (icon_fn, tools) = gid.def();
-                            tool_group(ui, current_tool, icon_fn, tools, accent, txt, txt_dim);
-                        }
-                    });
+            ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+            ui.set_height(TOOLBAR_BUTTON_SIZE);
+            if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
+                compact_toolbar(ui, current_tool, groups);
+            } else {
+                ui.horizontal(|ui| {
+                    for &gid in groups {
+                        let (_, tools) = gid.def();
+                        tool_group(ui, current_tool, tools);
+                    }
                 });
+            }
         })
         .response
 }
 
-fn tool_group(
+fn compact_toolbar(ui: &mut Ui, current: &mut Tool, groups: &[ToolGroupId]) {
+    let inline_groups = compact_toolbar_inline_groups(*current, groups);
+    ui.horizontal(|ui| {
+        for group in inline_groups.into_iter().flatten() {
+            let (_, tools) = group.def();
+            tool_group(ui, current, tools);
+        }
+        if groups
+            .iter()
+            .copied()
+            .any(|group| !inline_groups.contains(&Some(group)))
+        {
+            compact_toolbar_overflow(ui, current, groups, inline_groups);
+        }
+    });
+}
+
+fn compact_toolbar_overflow(
     ui: &mut Ui,
     current: &mut Tool,
-    icon_fn: IconFn,
-    tools: &[ToolEntry],
-    accent: Color32,
-    _txt: Color32,
-    txt_dim: Color32,
+    groups: &[ToolGroupId],
+    inline_groups: [Option<ToolGroupId>; 2],
 ) {
+    let theme = current_theme(ui.ctx());
+    let popup_id = ui.make_persistent_id("compact_toolbar_overflow");
+    let size = egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Más herramientas")
+    });
+    let response = response.on_hover_text("Más herramientas");
+    let progress = ui.ctx().animate_bool(
+        ui.id().with("compact_toolbar_overflow_state"),
+        response.hovered(),
+    );
+    ui.painter().rect(
+        rect,
+        RADIUS_MD,
+        interpolate_color(Color32::TRANSPARENT, theme.hover_overlay, progress),
+        Stroke::new(
+            1.0,
+            interpolate_color(Color32::TRANSPARENT, theme.separator, progress),
+        ),
+    );
+    draw_icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), vec2(22.0, 22.0)),
+        Icon::Menu,
+        interpolate_color(theme.text_secondary, theme.text_primary, progress),
+    );
+
+    if response.clicked() {
+        ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+    }
+    show_compact_toolbar_overflow(ui, popup_id, &response, current, groups, inline_groups);
+}
+
+fn show_compact_toolbar_overflow(
+    ui: &Ui,
+    popup_id: egui::Id,
+    button: &egui::Response,
+    current: &mut Tool,
+    groups: &[ToolGroupId],
+    inline_groups: [Option<ToolGroupId>; 2],
+) {
+    if !ui.memory(|memory| memory.is_popup_open(popup_id)) {
+        return;
+    }
+
+    let menu_width = tool_menu_width(ui.ctx().screen_rect().width());
+    let menu_max_height = tool_menu_max_height(ui.ctx().screen_rect().height());
+    let mut selected_tool = None;
+    let response = egui::Area::new(popup_id.with("constrained_area"))
+        .kind(egui::UiKind::Popup)
+        .order(egui::Order::Foreground)
+        .fixed_pos(button.rect.left_bottom())
+        .default_width(menu_width)
+        .constrain_to(ui.ctx().screen_rect())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(menu_width);
+                ui.label(egui::RichText::new("Más herramientas").strong());
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(menu_max_height)
+                    .show(ui, |ui| {
+                        for &group in groups {
+                            if inline_groups.contains(&Some(group)) {
+                                continue;
+                            }
+                            let (_, tools) = group.def();
+                            ui.collapsing(ToolGroupId::label(group), |ui| {
+                                for (tool, name, key) in tools {
+                                    let selected = *current == *tool;
+                                    let response = ui.add_sized(
+                                        [menu_width - 12.0, TOOL_MENU_ITEM_HEIGHT],
+                                        egui::Button::new(*name)
+                                            .selected(selected)
+                                            .truncate()
+                                            .shortcut_text(*key),
+                                    );
+                                    if response.on_hover_text(*name).clicked() {
+                                        selected_tool = Some(*tool);
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+        });
+
+    if let Some(tool) = selected_tool {
+        *current = tool;
+        ui.memory_mut(|memory| memory.close_popup());
+        return;
+    }
+    let clicked_outside = button.clicked_elsewhere() && response.response.clicked_elsewhere();
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) || clicked_outside {
+        ui.memory_mut(|memory| memory.close_popup());
+    }
+}
+
+fn tool_group(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) -> egui::Response {
+    let theme = current_theme(ui.ctx());
     let is_active = if *current == Tool::Select {
         std::ptr::eq(tools.as_ptr(), GROUP_MOVE.as_ptr())
     } else {
@@ -507,36 +900,61 @@ fn tool_group(
         .find(|(t, _, _)| *t == *current)
         .unwrap_or(&tools[0]);
     let label = active_tool.1;
+    let popup_id = ui.make_persistent_id(("tool_group_menu", tools.as_ptr() as usize));
 
-    let size = egui::vec2(36.0, 32.0);
+    let size = egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let resp = resp.on_hover_text(label);
 
-    if is_active || resp.hovered() {
-        let fill = if is_active {
-            Color32::from_rgba_unmultiplied(53, 132, 228, 25)
-        } else {
-            Color32::from_rgba_unmultiplied(128, 128, 128, 15)
-        };
-        ui.painter().rect_filled(rect, 6.0, fill);
-    }
+    let state_progress = ui.ctx().animate_bool(
+        ui.id()
+            .with(("toolbar_group_state", tools.as_ptr() as usize)),
+        is_active || resp.hovered(),
+    );
+    let state_fill = if is_active {
+        theme.selection_bg
+    } else {
+        theme.hover_overlay
+    };
+    let border_color = if is_active {
+        theme.accent
+    } else {
+        theme.separator
+    };
+    ui.painter().rect(
+        rect,
+        RADIUS_MD,
+        interpolate_color(Color32::TRANSPARENT, state_fill, state_progress),
+        Stroke::new(
+            1.0,
+            interpolate_color(Color32::TRANSPARENT, border_color, state_progress),
+        ),
+    );
     if is_active {
         let indicator = Rect::from_min_max(
-            pos2(rect.min.x + 6.0, rect.max.y - 3.0),
-            pos2(rect.max.x - 6.0, rect.max.y),
+            pos2(rect.min.x + 5.0, rect.max.y - 3.0),
+            pos2(rect.max.x - 5.0, rect.max.y),
         );
-        ui.painter().rect_filled(indicator, 1.0, accent);
+        ui.painter().rect_filled(indicator, 1.0, theme.accent);
     }
 
     let icon_rect = Rect::from_center_size(rect.center(), vec2(22.0, 24.0));
-    icon_fn(
+    draw_tool_icon(
         ui.painter(),
         icon_rect,
-        if is_active { accent } else { txt_dim },
+        active_tool.0,
+        interpolate_color(theme.text_secondary, theme.text_primary, state_progress),
     );
 
+    if tools.len() > 1 {
+        draw_group_menu_indicator(ui.painter(), rect, theme.text_tertiary);
+    }
+
     if resp.clicked() {
-        if let Some((tool, _, _)) = tools.first() {
+        if tools.len() > 1 {
+            ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+        } else if let Some((tool, _, _)) = tools.first() {
             if is_active && *tool == Tool::Pencil && *current == Tool::Pencil {
                 *current = Tool::Select;
             } else {
@@ -544,17 +962,230 @@ fn tool_group(
             }
         }
     }
-    resp.context_menu(|ui| {
-        for (tool, name, key) in tools {
-            let key_hint = if key.is_empty() {
-                String::new()
-            } else {
-                format!("  ({})", key)
-            };
-            if ui.button(format!("{} {}", name, key_hint)).clicked() {
-                *current = *tool;
-                ui.close_menu();
+    if tools.len() > 1 {
+        show_tool_group_menu(ui, popup_id, &resp, current, tools);
+    }
+    resp
+}
+
+fn show_tool_group_menu(
+    ui: &Ui,
+    popup_id: egui::Id,
+    button: &egui::Response,
+    current: &mut Tool,
+    tools: &[ToolEntry],
+) {
+    if !ui.memory(|memory| memory.is_popup_open(popup_id)) {
+        return;
+    }
+
+    let response = egui::Area::new(popup_id.with("constrained_area"))
+        .kind(egui::UiKind::Popup)
+        .order(egui::Order::Foreground)
+        .fixed_pos(button.rect.left_bottom())
+        .default_width(tool_menu_width(ui.ctx().screen_rect().width()))
+        .constrain_to(ui.ctx().screen_rect())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| tool_menu(ui, current, tools));
+        });
+
+    let clicked_outside = button.clicked_elsewhere() && response.response.clicked_elsewhere();
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) || clicked_outside {
+        ui.memory_mut(|memory| memory.close_popup());
+    }
+}
+
+fn draw_group_menu_indicator(painter: &Painter, rect: Rect, color: Color32) {
+    let center = pos2(rect.max.x - 6.0, rect.max.y - 7.0);
+    let size = 2.5;
+    let stroke = Stroke::new(1.25, color);
+    painter.line_segment(
+        [
+            pos2(center.x - size, center.y - size * 0.4),
+            pos2(center.x, center.y + size * 0.6),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(center.x, center.y + size * 0.6),
+            pos2(center.x + size, center.y - size * 0.4),
+        ],
+        stroke,
+    );
+}
+
+fn tool_menu(ui: &mut Ui, current: &mut Tool, tools: &[ToolEntry]) {
+    let menu_width = tool_menu_width(ui.ctx().screen_rect().width());
+    let menu_max_height = tool_menu_max_height(ui.ctx().screen_rect().height());
+    ui.set_min_width(menu_width);
+    ui.set_max_width(menu_width);
+    ui.spacing_mut().item_spacing.y = 2.0;
+
+    egui::ScrollArea::vertical()
+        .max_height(menu_max_height)
+        .show(ui, |ui| {
+            for (tool, name, key) in tools {
+                let response = ui.add_sized(
+                    [menu_width, TOOL_MENU_ITEM_HEIGHT],
+                    egui::Button::new(*name).truncate().shortcut_text(*key),
+                );
+                if response.on_hover_text(*name).clicked() {
+                    *current = *tool;
+                    ui.memory_mut(|memory| memory.close_popup());
+                }
             }
+        });
+}
+
+fn tool_menu_width(viewport_width: f32) -> f32 {
+    (viewport_width - TOOL_MENU_SCREEN_MARGIN).clamp(0.0, TOOL_MENU_PREFERRED_WIDTH)
+}
+
+fn tool_menu_max_height(viewport_height: f32) -> f32 {
+    (viewport_height - TOOL_MENU_VERTICAL_RESERVE)
+        .max(0.0)
+        .min(viewport_height.max(0.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_menu_stays_inside_ordinary_narrow_viewports() {
+        for viewport_width in [100.0, 180.0, 220.0, 407.0] {
+            assert!(tool_menu_width(viewport_width) <= viewport_width);
         }
-    });
+    }
+
+    #[test]
+    fn tool_menu_limits_its_height_on_short_screens() {
+        for viewport_height in [50.0, 240.0, 600.0] {
+            assert!(tool_menu_max_height(viewport_height) <= viewport_height);
+        }
+    }
+
+    #[test]
+    fn compact_toolbar_uses_overflow_through_its_narrow_width_boundary() {
+        for width in [960.0, 1_026.0, 1_120.0] {
+            assert!(toolbar_uses_overflow(width));
+        }
+        assert!(!toolbar_uses_overflow(1_121.0));
+    }
+
+    #[test]
+    fn compact_toolbar_keeps_move_and_the_active_group_inline() {
+        let groups = [
+            ToolGroupId::Move,
+            ToolGroupId::Point,
+            ToolGroupId::Line,
+            ToolGroupId::Circle,
+        ];
+
+        assert_eq!(
+            compact_toolbar_inline_groups(Tool::Line, &groups),
+            [Some(ToolGroupId::Move), Some(ToolGroupId::Line)]
+        );
+        assert_eq!(
+            compact_toolbar_inline_groups(Tool::Select, &groups),
+            [Some(ToolGroupId::Move), None]
+        );
+    }
+
+    #[test]
+    fn compact_toolbar_keeps_the_active_four_d_group_inline_with_overflow_available() {
+        let groups = [
+            ToolGroupId::Move,
+            ToolGroupId::ThreeD,
+            ToolGroupId::FourD,
+            ToolGroupId::Pencil,
+        ];
+
+        assert_eq!(
+            compact_toolbar_inline_groups(Tool::Tesseract4D, &groups),
+            [Some(ToolGroupId::Move), Some(ToolGroupId::FourD)]
+        );
+        assert!(groups
+            .iter()
+            .any(|group| *group != ToolGroupId::Move && *group != ToolGroupId::FourD));
+        assert!(toolbar_uses_overflow(COMPACT_TOOLBAR_MAX_WIDTH));
+    }
+
+    #[test]
+    fn toolbar_content_fits_inside_its_fixed_host_panel() {
+        let ctx = egui::Context::default();
+        let mut current = Tool::Select;
+        let mut panel_height = 0.0;
+        let mut toolbar_height = 0.0;
+
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                let panel = egui::TopBottomPanel::top("toolbar_layout_test")
+                    .exact_height(TOOLBAR_PANEL_HEIGHT)
+                    .frame(egui::Frame::none())
+                    .show(ctx, |ui| {
+                        toolbar_filtered(
+                            ui,
+                            &mut current,
+                            &[
+                                ToolGroupId::Move,
+                                ToolGroupId::Point,
+                                ToolGroupId::Line,
+                                ToolGroupId::Circle,
+                            ],
+                        )
+                    });
+                panel_height = panel.response.rect.height();
+                toolbar_height = panel.inner.rect.height();
+            },
+        );
+
+        assert_eq!(panel_height, TOOLBAR_PANEL_HEIGHT);
+        assert_eq!(toolbar_height, TOOLBAR_PANEL_HEIGHT);
+    }
+
+    #[test]
+    fn toolbar_group_buttons_share_one_baseline() {
+        let ctx = egui::Context::default();
+        let mut current = Tool::Select;
+        let mut rects = Vec::new();
+
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        for group in [
+                            ToolGroupId::Move,
+                            ToolGroupId::Point,
+                            ToolGroupId::Line,
+                            ToolGroupId::Circle,
+                        ] {
+                            let (_, tools) = group.def();
+                            rects.push(tool_group(ui, &mut current, tools).rect);
+                        }
+                    });
+                });
+            },
+        );
+
+        assert!(rects
+            .iter()
+            .all(|rect| rect.height() == TOOLBAR_BUTTON_SIZE));
+        assert!(rects.windows(2).all(|pair| pair[0].min.y == pair[1].min.y));
+    }
+
+    #[test]
+    fn locus_is_reachable_from_the_curve_group_used_by_analytic_perspectives() {
+        let (_, curve_tools) = ToolGroupId::Curve.def();
+        assert!(curve_tools.iter().any(|(tool, _, _)| *tool == Tool::Locus));
+    }
 }

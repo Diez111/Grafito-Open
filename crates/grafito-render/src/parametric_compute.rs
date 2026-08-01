@@ -9,7 +9,9 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
-use crate::implicit_compute::{compile_expr_with_mapping, BytecodeProgram, CompileError};
+use crate::implicit_compute::{
+    compile_expr_with_mapping, f32_bounds_have_precision, BytecodeProgram, CompileError,
+};
 use grafito_core::object::{
     Curve2DSamples, Curve3DSamples, ParametricCurve2DObj, ParametricCurve3DObj, PolarCurveObj,
     Surface3DObj, SurfaceSamples,
@@ -19,6 +21,138 @@ use std::collections::HashMap;
 
 const MAX_CURVE_STEPS: usize = 4000;
 const MAX_SURFACE_RES: usize = 128;
+// `exp(88.8)` is near `f32::MAX`; leave a margin so results do not depend on
+// whether an individual GPU backend saturates or produces infinity.
+const MAX_SAFE_F32_EXP_ARGUMENT: f64 = 88.0;
+
+fn has_strictly_increasing_finite_bounds(bounds: &[f64]) -> bool {
+    bounds.iter().all(|bound| bound.is_finite())
+        && bounds.windows(2).all(|bounds| bounds[0] < bounds[1])
+}
+
+fn any_exp_argument_matches(
+    expression: &grafito_geometry::ast::Expr,
+    predicate: &impl Fn(&grafito_geometry::ast::Expr) -> bool,
+) -> bool {
+    use grafito_geometry::ast::Expr;
+
+    match expression {
+        Expr::Const(_) | Expr::Var(_) => false,
+        Expr::Exp(argument) => predicate(argument) || any_exp_argument_matches(argument, predicate),
+        Expr::Neg(argument)
+        | Expr::Sin(argument)
+        | Expr::Cos(argument)
+        | Expr::Tan(argument)
+        | Expr::Asin(argument)
+        | Expr::Acos(argument)
+        | Expr::Atan(argument)
+        | Expr::Ln(argument)
+        | Expr::Log(argument)
+        | Expr::Sqrt(argument)
+        | Expr::Abs(argument)
+        | Expr::Sinh(argument)
+        | Expr::Cosh(argument)
+        | Expr::Tanh(argument)
+        | Expr::Floor(argument)
+        | Expr::Ceil(argument)
+        | Expr::Round(argument)
+        | Expr::Sec(argument)
+        | Expr::Csc(argument)
+        | Expr::Cot(argument)
+        | Expr::Asinh(argument)
+        | Expr::Acosh(argument)
+        | Expr::Atanh(argument)
+        | Expr::Sign(argument)
+        | Expr::Heaviside(argument)
+        | Expr::Cbrt(argument)
+        | Expr::Re(argument)
+        | Expr::Im(argument)
+        | Expr::Arg(argument)
+        | Expr::Conj(argument)
+        | Expr::Erf(argument)
+        | Expr::Erfc(argument)
+        | Expr::Gamma(argument)
+        | Expr::LnGamma(argument)
+        | Expr::Digamma(argument)
+        | Expr::Trigamma(argument) => any_exp_argument_matches(argument, predicate),
+        Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
+        | Expr::Pow(left, right)
+        | Expr::Atan2(left, right)
+        | Expr::Modulo(left, right)
+        | Expr::Min(left, right)
+        | Expr::Max(left, right)
+        | Expr::Beta(left, right)
+        | Expr::BesselJ(left, right)
+        | Expr::BesselY(left, right)
+        | Expr::BesselI(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Gt(left, right)
+        | Expr::Le(left, right)
+        | Expr::Ge(left, right)
+        | Expr::Eq(left, right)
+        | Expr::Ne(left, right) => {
+            any_exp_argument_matches(left, predicate) || any_exp_argument_matches(right, predicate)
+        }
+        Expr::Clamp(value, lower, upper) => {
+            any_exp_argument_matches(value, predicate)
+                || any_exp_argument_matches(lower, predicate)
+                || any_exp_argument_matches(upper, predicate)
+        }
+        Expr::Sum(body, _, start, end) | Expr::Product(body, _, start, end) => {
+            any_exp_argument_matches(body, predicate)
+                || any_exp_argument_matches(start, predicate)
+                || any_exp_argument_matches(end, predicate)
+        }
+        Expr::Piecewise(parts, default) => {
+            parts.iter().any(|(condition, value)| {
+                any_exp_argument_matches(condition, predicate)
+                    || any_exp_argument_matches(value, predicate)
+            }) || any_exp_argument_matches(default, predicate)
+        }
+    }
+}
+
+fn curve_expression_has_unsafe_f32_exp(
+    expression: &str,
+    parameter: &str,
+    bounds: (f64, f64),
+    variables: &HashMap<String, f64>,
+) -> bool {
+    let Ok(expression) = grafito_geometry::ast::parse_ast(expression) else {
+        return false;
+    };
+    let expression = expression.substitute_vars(variables, &[parameter]);
+    let samples = [bounds.0, (bounds.0 + bounds.1) * 0.5, bounds.1];
+    any_exp_argument_matches(&expression, &|argument| {
+        samples
+            .iter()
+            .any(|sample| argument.eval_at(parameter, *sample) >= MAX_SAFE_F32_EXP_ARGUMENT)
+    })
+}
+
+fn surface_expression_has_unsafe_f32_exp(
+    expression: &str,
+    x_bounds: (f64, f64),
+    y_bounds: (f64, f64),
+    variables: &HashMap<String, f64>,
+) -> bool {
+    let Ok(expression) = grafito_geometry::ast::parse_ast(expression) else {
+        return false;
+    };
+    let expression = expression.substitute_vars(variables, &["x", "y"]);
+    let x_samples = [x_bounds.0, (x_bounds.0 + x_bounds.1) * 0.5, x_bounds.1];
+    let y_samples = [y_bounds.0, (y_bounds.0 + y_bounds.1) * 0.5, y_bounds.1];
+    any_exp_argument_matches(&expression, &|argument| {
+        x_samples.iter().any(|x| {
+            y_samples
+                .iter()
+                .any(|y| argument.eval_2d("x", *x, "y", *y) >= MAX_SAFE_F32_EXP_ARGUMENT)
+        })
+    })
+}
 
 /// GPU resources needed to evaluate parametric objects.
 pub struct ParametricComputePipeline {
@@ -318,7 +452,16 @@ impl ParametricComputePipeline {
         let steps = steps.clamp(1, self.max_curve_samples);
         let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
         let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-        if !t_min.is_finite() || !t_max.is_finite() {
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            return None;
+        }
+        if curve_expression_has_unsafe_f32_exp(&pc.expr_x, "t", (t_min, t_max), variables)
+            || curve_expression_has_unsafe_f32_exp(&pc.expr_y, "t", (t_min, t_max), variables)
+        {
+            return None;
+        }
+        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
             return None;
         }
 
@@ -375,14 +518,36 @@ impl ParametricComputePipeline {
         let steps = steps.clamp(1, self.max_curve_samples);
         let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
         let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-        if !t_min.is_finite() || !t_max.is_finite() {
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            return None;
+        }
+        if curve_expression_has_unsafe_f32_exp(
+            &pc.expr_x,
+            pc.parameter.as_str(),
+            (t_min, t_max),
+            variables,
+        ) || curve_expression_has_unsafe_f32_exp(
+            &pc.expr_y,
+            pc.parameter.as_str(),
+            (t_min, t_max),
+            variables,
+        ) || curve_expression_has_unsafe_f32_exp(
+            &pc.expr_z,
+            pc.parameter.as_str(),
+            (t_min, t_max),
+            variables,
+        ) {
+            return None;
+        }
+        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
             return None;
         }
 
-        let mut prog = BytecodeProgram::default();
-        Self::compile_parametric_expr(&pc.expr_x, variables, "t", &mut prog).ok()?;
-        Self::compile_parametric_expr(&pc.expr_y, variables, "t", &mut prog).ok()?;
-        Self::compile_parametric_expr(&pc.expr_z, variables, "t", &mut prog).ok()?;
+        let prog = compile_curve_3d_program(pc, variables).ok()?;
+        if !curve_3d_samples_preserve_f32_resolution(pc, steps, variables) {
+            return None;
+        }
 
         let params = ParametricParamsUniform {
             mode: 1,
@@ -438,7 +603,14 @@ impl ParametricComputePipeline {
         let steps = steps.clamp(1, self.max_curve_samples);
         let t_min = Self::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
         let t_max = Self::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
-        if !t_min.is_finite() || !t_max.is_finite() {
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            return None;
+        }
+        if curve_expression_has_unsafe_f32_exp(&pol.expr_r, "t", (t_min, t_max), variables) {
+            return None;
+        }
+        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
             return None;
         }
 
@@ -491,12 +663,30 @@ impl ParametricComputePipeline {
         res: usize,
         variables: &HashMap<String, f64>,
     ) -> Option<SurfaceSamples> {
+        if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
+            return None;
+        }
         let res = res.clamp(1, self.max_surface_res);
         let x_min = Self::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
         let x_max = Self::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
         let y_min = Self::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
         let y_max = Self::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
-        if !x_min.is_finite() || !x_max.is_finite() || !y_min.is_finite() || !y_max.is_finite() {
+        if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
+            || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
+        {
+            return None;
+        }
+        if surface_expression_has_unsafe_f32_exp(
+            &surf.expr,
+            (x_min, x_max),
+            (y_min, y_max),
+            variables,
+        ) {
+            return None;
+        }
+        let min_step = ((x_max - x_min).abs() / res.max(1) as f64)
+            .min((y_max - y_min).abs() / res.max(1) as f64);
+        if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
             return None;
         }
 
@@ -539,6 +729,131 @@ impl ParametricComputePipeline {
     }
 }
 
+fn compile_curve_3d_program(
+    pc: &ParametricCurve3DObj,
+    variables: &HashMap<String, f64>,
+) -> Result<BytecodeProgram, CompileError> {
+    let mut prog = BytecodeProgram::default();
+    let parameter = pc.parameter.as_str();
+    ParametricComputePipeline::compile_parametric_expr(
+        &pc.expr_x, variables, parameter, &mut prog,
+    )?;
+    ParametricComputePipeline::compile_parametric_expr(
+        &pc.expr_y, variables, parameter, &mut prog,
+    )?;
+    ParametricComputePipeline::compile_parametric_expr(
+        &pc.expr_z, variables, parameter, &mut prog,
+    )?;
+    Ok(prog)
+}
+
+/// Ensure that sampling the curve on the GPU will not collapse distinct CPU
+/// samples after its expression values are narrowed to `f32`.
+fn curve_3d_samples_preserve_f32_resolution(
+    pc: &ParametricCurve3DObj,
+    steps: usize,
+    variables: &HashMap<String, f64>,
+) -> bool {
+    let samples = parametric_sampling::evaluate_parametric_curve_3d(pc, steps, variables);
+    if samples.len() < 2 {
+        return false;
+    }
+
+    let mut has_distinct_coordinate = false;
+    for pair in samples.windows(2) {
+        let [(ax, ay, az), (bx, by, bz)] = pair else {
+            return false;
+        };
+        for (a, b) in [(ax, bx), (ay, by), (az, bz)] {
+            if !a.is_finite() || !b.is_finite() {
+                return false;
+            }
+            let narrowed_a = *a as f32;
+            let narrowed_b = *b as f32;
+            if !narrowed_a.is_finite() || !narrowed_b.is_finite() {
+                return false;
+            }
+
+            let separation = (*b - *a).abs();
+            if separation == 0.0 {
+                continue;
+            }
+            has_distinct_coordinate = true;
+            let allowed_error = separation * 0.25;
+            if narrowed_a == narrowed_b
+                || (*a - narrowed_a as f64).abs() > allowed_error
+                || (*b - narrowed_b as f64).abs() > allowed_error
+            {
+                return false;
+            }
+        }
+    }
+
+    has_distinct_coordinate
+}
+
+fn finite_layout_matches_2d(gpu: &Curve2DSamples, cpu: &Curve2DSamples) -> bool {
+    gpu.len() == cpu.len()
+        && gpu.iter().zip(cpu).all(|(gpu, cpu)| {
+            gpu.0.is_finite() == cpu.0.is_finite() && gpu.1.is_finite() == cpu.1.is_finite()
+        })
+}
+
+fn finite_layout_matches_3d(gpu: &Curve3DSamples, cpu: &Curve3DSamples) -> bool {
+    gpu.len() == cpu.len()
+        && gpu.iter().zip(cpu).all(|(gpu, cpu)| {
+            gpu.0.is_finite() == cpu.0.is_finite()
+                && gpu.1.is_finite() == cpu.1.is_finite()
+                && gpu.2.is_finite() == cpu.2.is_finite()
+        })
+}
+
+fn nonfinite_curve_2d_samples_match_cpu(
+    gpu: &Curve2DSamples,
+    pc: &ParametricCurve2DObj,
+    steps: usize,
+    variables: &HashMap<String, f64>,
+) -> bool {
+    if gpu.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        return true;
+    }
+    let cpu = parametric_sampling::evaluate_parametric_curve_2d(pc, steps, variables);
+    finite_layout_matches_2d(gpu, &cpu)
+}
+
+fn nonfinite_curve_3d_samples_match_cpu(
+    gpu: &Curve3DSamples,
+    pc: &ParametricCurve3DObj,
+    steps: usize,
+    variables: &HashMap<String, f64>,
+) -> bool {
+    if gpu
+        .iter()
+        .all(|(x, y, z)| x.is_finite() && y.is_finite() && z.is_finite())
+    {
+        return true;
+    }
+    let cpu = parametric_sampling::evaluate_parametric_curve_3d(pc, steps, variables);
+    finite_layout_matches_3d(gpu, &cpu)
+}
+
+fn nonfinite_polar_samples_match_cpu(
+    gpu: &Curve2DSamples,
+    pol: &PolarCurveObj,
+    steps: usize,
+    variables: &HashMap<String, f64>,
+) -> bool {
+    if gpu.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        return true;
+    }
+    let cpu = parametric_sampling::evaluate_polar_curve(pol, steps, variables);
+    finite_layout_matches_2d(gpu, &cpu)
+}
+
+fn surface_samples_are_finite(gpu: &SurfaceSamples) -> bool {
+    gpu.iter().flatten().all(|point| point.is_finite())
+}
+
 /// Try to populate the 2D parametric curve cache using the GPU.
 pub fn maybe_compute_curve_2d_on_gpu(
     compute: &ParametricComputePipeline,
@@ -551,9 +866,13 @@ pub fn maybe_compute_curve_2d_on_gpu(
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
     let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return false;
+    }
     let key = grafito_core::ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: parametric_sampling::curve_2d_expr_hash(pc),
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
@@ -569,6 +888,9 @@ pub fn maybe_compute_curve_2d_on_gpu(
     let Some(samples) = compute.evaluate_curve_2d(device, queue, pc, steps, variables) else {
         return false;
     };
+    if !nonfinite_curve_2d_samples_match_cpu(&samples, pc, steps, variables) {
+        return false;
+    }
 
     *pc.cached_samples.write().unwrap_or_else(|p| {
         log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -593,9 +915,13 @@ pub fn maybe_compute_curve_3d_on_gpu(
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
     let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return false;
+    }
     let key = grafito_core::ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: parametric_sampling::curve_3d_expr_hash(pc),
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
@@ -611,6 +937,9 @@ pub fn maybe_compute_curve_3d_on_gpu(
     let Some(samples) = compute.evaluate_curve_3d(device, queue, pc, steps, variables) else {
         return false;
     };
+    if !nonfinite_curve_3d_samples_match_cpu(&samples, pc, steps, variables) {
+        return false;
+    }
 
     *pc.cached_samples.write().unwrap_or_else(|p| {
         log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -635,9 +964,13 @@ pub fn maybe_compute_polar_on_gpu(
     let steps = steps.min(MAX_CURVE_STEPS);
     let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
     let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return false;
+    }
     let key = grafito_core::ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: parametric_sampling::polar_expr_hash(pol),
         variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
@@ -653,6 +986,9 @@ pub fn maybe_compute_polar_on_gpu(
     let Some(samples) = compute.evaluate_polar(device, queue, pol, steps, variables) else {
         return false;
     };
+    if !nonfinite_polar_samples_match_cpu(&samples, pol, steps, variables) {
+        return false;
+    }
 
     *pol.cached_samples.write().unwrap_or_else(|p| {
         log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -674,11 +1010,19 @@ pub fn maybe_compute_surface_on_gpu(
     res: usize,
     variables: &HashMap<String, f64>,
 ) -> bool {
+    if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
+        return false;
+    }
     let res = res.min(MAX_SURFACE_RES);
     let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
     let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
     let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
     let y_max = ParametricComputePipeline::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
+        || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
+    {
+        return false;
+    }
     let key = grafito_core::SurfaceCacheKey {
         x_domain: (x_min, x_max),
         y_domain: (y_min, y_max),
@@ -700,6 +1044,9 @@ pub fn maybe_compute_surface_on_gpu(
     let Some(grid) = compute.evaluate_surface(device, queue, surf, res, variables) else {
         return false;
     };
+    if !surface_samples_are_finite(&grid) {
+        return false;
+    }
 
     *surf.cached_grid.write().unwrap_or_else(|p| {
         log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -710,4 +1057,55 @@ pub fn maybe_compute_surface_on_gpu(
         p.into_inner()
     }) = Some(key);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::implicit_compute::Op;
+
+    #[test]
+    fn curve_3d_compilation_keeps_its_declared_parameter_dynamic() {
+        let curve = ParametricCurve3DObj::new("s", "s + 1", "s^2", 0.0, 1.0).with_parameter("s");
+        let variables = HashMap::from([("s".to_string(), 99.0)]);
+
+        let program = compile_curve_3d_program(&curve, &variables).unwrap();
+
+        assert_eq!(
+            program
+                .code
+                .iter()
+                .filter(|instruction| **instruction & 0xFF == Op::PushVar as u32)
+                .count(),
+            3
+        );
+        assert!(!program.constants.contains(&99.0));
+    }
+
+    #[test]
+    fn curve_3d_precision_preflight_rejects_large_offsets_at_small_sample_intervals() {
+        let constant_offset =
+            ParametricCurve3DObj::new("999999+s", "0", "0", 0.0, 0.01).with_parameter("s");
+        let variable_offset =
+            ParametricCurve3DObj::new("offset+s", "0", "0", 0.0, 0.01).with_parameter("s");
+        let variables = HashMap::from([("offset".to_string(), 999999.0)]);
+
+        assert!(!curve_3d_samples_preserve_f32_resolution(
+            &constant_offset,
+            4,
+            &HashMap::new(),
+        ));
+        assert!(!curve_3d_samples_preserve_f32_resolution(
+            &variable_offset,
+            4,
+            &variables,
+        ));
+    }
+
+    #[test]
+    fn surface_post_validation_checks_the_evaluated_z_coordinate() {
+        let gpu = vec![vec![grafito_geometry::Point3D::new(1.0, 1.0, f64::NAN)]];
+
+        assert!(!surface_samples_are_finite(&gpu));
+    }
 }

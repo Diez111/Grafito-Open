@@ -1,0 +1,48 @@
+[package]
+name = "grafito-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Keep the fuzz package independent of Grafito's workspace manifests.
+[workspace]
+members = ["."]
+
+[dependencies]
+grafito-command = { path = "../crates/grafito-command" }
+grafito-complex = { path = "../crates/grafito-complex" }
+grafito-core = { path = "../crates/grafito-core" }
+grafito-geometry = { path = "../crates/grafito-geometry" }
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+
+[[bin]]
+name = "ast_parser"
+path = "fuzz_targets/ast_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "complex_parser"
+path = "fuzz_targets/complex_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document_deserialization"
+path = "fuzz_targets/document_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command_atomicity"
+path = "fuzz_targets/command_atomicity.rs"
+test = false
+doc = false
+bench = false

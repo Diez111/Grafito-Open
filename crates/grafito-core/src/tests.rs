@@ -43,12 +43,42 @@ mod tests {
     }
 
     #[test]
+    fn crafted_label_counter_is_canonicalized_without_overflow_or_collision() {
+        let mut doc = Document::new();
+        doc.add_point(Point2::new(0.0, 0.0));
+        doc.add_point(Point2::new(1.0, 0.0));
+
+        let mut persisted = serde_json::to_value(&doc).expect("document serializes");
+        persisted["next_label_number"] = serde_json::json!({ "P": usize::MAX });
+        let mut restored: Document =
+            serde_json::from_value(persisted).expect("crafted counter is canonicalized");
+
+        let id = restored.add_point(Point2::new(2.0, 0.0));
+        assert_eq!(restored.get_object(id).map(GeoObject::label), Some("P₂"));
+        crate::validation::validate_document(&restored)
+            .expect("canonicalized label counters remain valid");
+    }
+
+    #[test]
     fn test_document_remove_object() {
         let mut doc = Document::new();
         let obj = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
         let id = doc.add_object(obj);
         assert!(doc.remove_object(id).is_some());
         assert_eq!(doc.object_count(), 0);
+    }
+
+    #[test]
+    fn removing_a_spreadsheet_owned_point_clears_its_owner_mapping() {
+        let mut doc = Document::new();
+        let point = doc.add_object(GeoObject::Point(
+            PointObj::new(Point2::new(1.0, 2.0)).with_label("A1"),
+        ));
+        doc.set_spreadsheet_coordinate_point("A1".to_string(), point);
+
+        assert_eq!(doc.spreadsheet_coordinate_point("A1"), Some(point));
+        assert!(doc.remove_object(point).is_some());
+        assert_eq!(doc.spreadsheet_coordinate_point("A1"), None);
     }
 
     #[test]
@@ -76,6 +106,120 @@ mod tests {
         doc.set_variable("a".into(), 42.0);
         assert_eq!(doc.get_variable("a"), Some(42.0));
         assert_eq!(doc.get_variable("b"), None);
+    }
+
+    #[test]
+    fn variable_mutations_recompute_spreadsheet_dependencies_and_reject_owned_values() {
+        let mut doc = Document::new();
+        doc.try_set_variable("a".into(), 1.0)
+            .expect("seed variable");
+        doc.set_spreadsheet_cell(0, 0, "a".into())
+            .expect("seed spreadsheet formula");
+        doc.recompute_spreadsheet_variables()
+            .expect("spreadsheet formula resolves");
+
+        doc.try_set_variable("a".into(), 2.0)
+            .expect("ordinary variable mutation remains valid");
+        assert_eq!(doc.get_variable("A1"), Some(2.0));
+
+        let before = serde_json::to_value(&doc).expect("document serializes");
+        assert!(doc.try_set_variable("A1".into(), 3.0).is_err());
+        assert_eq!(
+            serde_json::to_value(&doc).expect("document serializes"),
+            before
+        );
+    }
+
+    #[test]
+    fn implicit_curve_cache_invalidates_on_variable_change() {
+        let ic = ImplicitCurveObj::new("x^2 + y^2", "r^2", RelationOperator::Eq);
+        let bounds = (-2.0, 2.0, -2.0, 2.0);
+
+        let mut vars = HashMap::new();
+        vars.insert("r".to_string(), 1.0);
+        drop(crate::implicit_curve::segments_or_compute(
+            &ic,
+            bounds,
+            64,
+            &vars,
+            RenderQuality::High,
+        ));
+        let first_key = ic.cached_key.read().unwrap().clone().unwrap();
+
+        vars.insert("r".to_string(), 1.5);
+        drop(crate::implicit_curve::segments_or_compute(
+            &ic,
+            bounds,
+            64,
+            &vars,
+            RenderQuality::High,
+        ));
+        let second_key = ic.cached_key.read().unwrap().clone().unwrap();
+
+        assert_ne!(first_key.variables_hash, second_key.variables_hash);
+    }
+
+    #[test]
+    fn implicit_curve_cache_invalidates_on_contour_change() {
+        let mut ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Eq);
+        let bounds = (-2.0, 2.0, -2.0, 2.0);
+        let vars = HashMap::new();
+
+        ic.contour_levels = Some(vec![0.0]);
+        drop(crate::implicit_curve::segments_or_compute(
+            &ic,
+            bounds,
+            64,
+            &vars,
+            RenderQuality::High,
+        ));
+        let first_key = ic.cached_key.read().unwrap().clone().unwrap();
+
+        ic.contour_levels = Some(vec![0.0, 1.0]);
+        drop(crate::implicit_curve::segments_or_compute(
+            &ic,
+            bounds,
+            64,
+            &vars,
+            RenderQuality::High,
+        ));
+        let second_key = ic.cached_key.read().unwrap().clone().unwrap();
+
+        assert_ne!(
+            first_key.contour_levels_hash,
+            second_key.contour_levels_hash
+        );
+    }
+
+    #[test]
+    fn parametric_curve_cache_invalidates_on_expression_change() {
+        let mut pc = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
+        let vars = HashMap::new();
+
+        let first_last_y = {
+            let samples = crate::parametric_sampling::samples_or_compute_curve_2d(&pc, 8, &vars);
+            samples.last().unwrap().1
+        };
+
+        pc.expr_y = "2*t".to_string();
+        let second_last_y = {
+            let samples = crate::parametric_sampling::samples_or_compute_curve_2d(&pc, 8, &vars);
+            samples.last().unwrap().1
+        };
+
+        assert_eq!(first_last_y, 1.0);
+        assert_eq!(second_last_y, 2.0);
+    }
+
+    #[test]
+    fn surface_hash_distinguishes_complex_mode() {
+        let real = Surface3DObj::new("z", (-1.0, 1.0), (-1.0, 1.0));
+        let complex = Surface3DObj::new_complex("z", (-1.0, 1.0), (-1.0, 1.0));
+
+        assert_ne!(
+            crate::parametric_sampling::surface_expr_hash(&real),
+            crate::parametric_sampling::surface_expr_hash(&complex)
+        );
     }
 
     #[test]
@@ -116,6 +260,15 @@ mod tests {
         // Click lejos del segmento.
         let miss = doc.pick_object(Point2::new(10.0, 10.0), 0.1);
         assert!(miss.is_none(), "Pencil lejos no debe ser hit");
+    }
+
+    #[test]
+    fn negative_parabolas_remain_pickable_on_the_rendered_branch() {
+        let mut doc = Document::new();
+        let parabola = ParabolaObj::new(Point2::new(0.0, 0.0), -1.0);
+        let id = doc.add_object(GeoObject::Parabola(parabola));
+
+        assert_eq!(doc.pick_object(Point2::new(2.0, -1.0), 0.1), Some(id));
     }
 
     #[test]
@@ -195,21 +348,21 @@ mod tests {
         cg.add_free_object(a);
 
         // C1: A -> B
-        cg.add_constraint("C1", vec![a], vec![b], HashMap::new());
+        let c1 = cg
+            .try_add_constraint("C1", vec![a], vec![b], HashMap::new())
+            .expect("first constraint should be accepted");
         // C2: B -> C
-        cg.add_constraint("C2", vec![b], vec![c], HashMap::new());
+        let c2 = cg
+            .try_add_constraint("C2", vec![b], vec![c], HashMap::new())
+            .expect("second constraint should be accepted");
         // C3: C -> B (creates a cycle B -> C -> B)
-        cg.add_constraint("C3", vec![c], vec![b], HashMap::new());
+        let error = cg
+            .try_add_constraint("C3", vec![c], vec![b], HashMap::new())
+            .expect_err("a second creator must be rejected before it can form a cycle");
+        assert!(error.contains("already has a creating constraint"));
 
         let order = cg.get_update_order(&[a]);
-        assert_eq!(
-            order.len(),
-            3,
-            "all reachable constraints should be returned"
-        );
-        assert!(order.contains(&0));
-        assert!(order.contains(&1));
-        assert!(order.contains(&2));
+        assert_eq!(order, vec![c1, c2]);
         // No duplicates
         let unique: std::collections::HashSet<_> = order.iter().collect();
         assert_eq!(unique.len(), order.len());
@@ -220,14 +373,97 @@ mod tests {
         let mut doc = Document::new();
         let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
         let b = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(4.0, 0.0))));
-        let (m, _) = doc.add_constructed_object(
-            GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0)).with_label("M")),
-            "Midpoint",
-            &[a, b],
-        );
+        let (m, _) = doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0)).with_label("M")),
+                "Midpoint",
+                &[a, b],
+            )
+            .expect("valid construction should succeed");
         assert!(!doc.is_free_object(&m));
         assert!(doc.is_free_object(&a));
         assert_eq!(doc.constraints.constraint_count(), 1);
+    }
+
+    #[test]
+    fn constructed_objects_reject_constraint_capacity_without_partial_insertion() {
+        let mut doc = Document::new();
+        let input = doc.add_point(Point2::new(0.0, 0.0));
+        let second_input = doc.add_point(Point2::new(2.0, 0.0));
+        for _ in 0..crate::constraints::MAX_CONSTRAINTS {
+            doc.constraints
+                .try_add_constraint("Existing", vec![input], Vec::new(), HashMap::new())
+                .expect("constraint below the limit should be accepted");
+        }
+
+        let objects_before = doc.object_count();
+        let error = doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))),
+                "Midpoint",
+                &[input, second_input],
+            )
+            .expect_err("construction at the constraint limit must fail");
+        assert!(error.contains("maximum"));
+        assert_eq!(doc.object_count(), objects_before);
+        assert_eq!(
+            doc.constraints.constraint_count(),
+            crate::constraints::MAX_CONSTRAINTS
+        );
+
+        let (rejected_id, rejected_constraint) = doc.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))),
+            "Midpoint",
+            &[input, second_input],
+        );
+        assert_eq!(rejected_constraint, usize::MAX);
+        assert!(doc.get_object(rejected_id).is_none());
+        assert_eq!(doc.object_count(), objects_before);
+        assert_eq!(
+            doc.constraints.constraint_count(),
+            crate::constraints::MAX_CONSTRAINTS
+        );
+    }
+
+    #[test]
+    fn constructed_objects_reject_exhausted_constraint_identifiers_without_panicking() {
+        let mut doc = Document::new();
+        let input = doc.add_point(Point2::new(0.0, 0.0));
+        let second_input = doc.add_point(Point2::new(2.0, 0.0));
+        doc.constraints
+            .add_constraint("Existing", vec![input], Vec::new(), HashMap::new());
+
+        let mut persisted = serde_json::to_value(&doc).expect("serialize document");
+        let constraints = persisted["constraints"]["constraints"]
+            .as_object_mut()
+            .expect("serialized constraints");
+        let mut constraint = constraints.remove("0").expect("existing constraint");
+        constraint["id"] = serde_json::json!(usize::MAX - 1);
+        constraints.insert((usize::MAX - 1).to_string(), constraint);
+        let mut restored: Document =
+            serde_json::from_value(persisted).expect("restore saturated counter state");
+
+        let objects_before = restored.object_count();
+        let error = restored
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))),
+                "Midpoint",
+                &[input, second_input],
+            )
+            .expect_err("construction with exhausted identifiers must fail");
+        assert!(error.contains("exhausted"));
+        assert_eq!(restored.object_count(), objects_before);
+        assert_eq!(restored.constraints.constraint_count(), 1);
+
+        let (rejected_id, rejected_constraint) = restored.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))),
+            "Midpoint",
+            &[input, second_input],
+        );
+        assert_eq!(rejected_constraint, usize::MAX);
+        assert!(restored.get_object(rejected_id).is_none());
+        assert_eq!(restored.object_count(), objects_before);
+        assert_eq!(restored.constraints.constraint_count(), 1);
     }
 
     #[test]
@@ -486,7 +722,7 @@ mod tests {
                     Point2::new(1.0, 1.0),
                     LineKind::Line,
                 )
-                .with_label("P"),
+                .with_label("perpendicular"),
             ),
             "Perpendicular",
             &[line, p],
@@ -511,6 +747,67 @@ mod tests {
     }
 
     #[test]
+    fn legacy_origin_rotate_constraint_still_propagates() {
+        let mut doc = Document::new();
+        let source = doc.add_object(GeoObject::Point(
+            PointObj::new(Point2::new(2.0, 0.0)).with_label("A"),
+        ));
+        let mut params = HashMap::new();
+        params.insert("angle".to_string(), 90.0);
+        let (rotated, _) = doc
+            .try_add_constructed_object_with_params(
+                GeoObject::Point(PointObj::new(Point2::new(0.0, 2.0)).with_label("A'")),
+                "Rotate",
+                &[source],
+                params,
+            )
+            .expect("legacy origin rotation should remain valid");
+
+        assert!(doc
+            .try_move_point_and_re_evaluate(source, Point2::new(3.0, 0.0))
+            .expect("legacy rotation should propagate"));
+        let position = doc.point_position(rotated).expect("rotated point");
+        assert!(position.x.abs() < 1e-12);
+        assert!((position.y - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn transform_constraints_require_their_semantic_parameters() {
+        let mut rotate_doc = Document::new();
+        let source = rotate_doc.add_point(Point2::new(1.0, 0.0));
+        let before = serde_json::to_value(&rotate_doc).expect("document serializes");
+        let error = rotate_doc
+            .try_add_constructed_object(
+                GeoObject::Point(PointObj::new(Point2::new(0.0, 1.0))),
+                "Rotate",
+                &[source],
+            )
+            .expect_err("Rotate without an angle must fail");
+        assert!(error.contains("angle"), "{error}");
+        assert_eq!(
+            serde_json::to_value(&rotate_doc).expect("document serializes"),
+            before
+        );
+
+        let mut dilate_doc = Document::new();
+        let source = dilate_doc.add_point(Point2::new(1.0, 0.0));
+        let before = serde_json::to_value(&dilate_doc).expect("document serializes");
+        let error = dilate_doc
+            .try_add_constructed_object_with_params(
+                GeoObject::Point(PointObj::new(Point2::new(2.0, 0.0))),
+                "Dilate",
+                &[source],
+                HashMap::from([("center_x".to_string(), 0.0), ("center_y".to_string(), 0.0)]),
+            )
+            .expect_err("Dilate without a factor must fail");
+        assert!(error.contains("factor"), "{error}");
+        assert_eq!(
+            serde_json::to_value(&dilate_doc).expect("document serializes"),
+            before
+        );
+    }
+
+    #[test]
     fn test_parallel_constraint() {
         let mut doc = Document::new();
         let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
@@ -527,7 +824,7 @@ mod tests {
                     Point2::new(1.0, 1.0),
                     LineKind::Line,
                 )
-                .with_label("L"),
+                .with_label("parallel"),
             ),
             "Parallel",
             &[line, p],
@@ -674,6 +971,24 @@ mod tests {
     }
 
     #[test]
+    fn hyperbola_by_vertical_foci_keeps_the_transverse_axis_vertical_after_rotation() {
+        let mut doc = Document::new();
+        let f1 = doc.add_point(Point2::new(0.0, -1.0));
+        let f2 = doc.add_point(Point2::new(0.0, 1.0));
+        let p = doc.add_point(Point2::new(1.0, 2.0));
+        let constraint = doc.add_hyperbola_by_foci_constraint(f1, f2, p);
+        let order = doc.constraints.get_update_order(&[f1, f2, p]);
+        doc.re_evaluate_constraints(&order);
+        let output = doc.constraints.get_constraint(constraint).unwrap().outputs[0];
+
+        let GeoObject::Hyperbola(hyperbola) = doc.get_object(output).unwrap() else {
+            panic!("expected hyperbola");
+        };
+        assert!(hyperbola.horizontal);
+        assert!((hyperbola.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_conic_by_five_points_ellipse() {
         let mut doc = Document::new();
         let pts: Vec<ObjectId> = [
@@ -737,10 +1052,11 @@ mod tests {
         // simulate an old JSON document that has no params field on Constraint.
         let mut doc = Document::new();
         let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        let b = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
         let (_m, _) = doc.add_constructed_object(
             GeoObject::Point(PointObj::new(Point2::new(1.0, 1.0)).with_label("M")),
             "Midpoint",
-            &[a, a],
+            &[a, b],
         );
 
         let mut json = serde_json::to_string(&doc).expect("serialize document");
@@ -968,8 +1284,8 @@ mod tests {
         assert_eq!(grid.len(), 9);
         assert_eq!(grid[0].len(), 9);
         assert!(grid[8][8].x.abs() < 1e-9);
-        assert!((grid[8][8].z - 1.0).abs() < 1e-9);
-        assert!((grid[8][8].y - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        assert!((grid[8][8].y - 1.0).abs() < 1e-9);
+        assert!((grid[8][8].z - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
 
     #[test]

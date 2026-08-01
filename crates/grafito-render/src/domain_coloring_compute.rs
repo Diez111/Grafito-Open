@@ -11,6 +11,54 @@ use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
 
 const MAX_CELLS: usize = 250_000;
+const MAX_COMPLEX_CODE: usize = 4096;
+const GPU_COMPLEX_STACK_SIZE: usize = 32;
+
+pub(crate) fn gpu_program_is_supported(code: &[u32]) -> bool {
+    let mut stack_depth = 0usize;
+    for instruction in code {
+        match instruction & 0xFF {
+            0 => {}
+            1 | 2 => {
+                if stack_depth == GPU_COMPLEX_STACK_SIZE {
+                    return false;
+                }
+                stack_depth += 1;
+            }
+            3..=7 => {
+                if stack_depth < 2 {
+                    return false;
+                }
+                stack_depth -= 1;
+            }
+            8..=15 | 22..=27 | 31..=33 | 102..=105 => {
+                if stack_depth == 0 {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    stack_depth == 1
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cpu_only_complex_opcodes_are_rejected_before_domain_dispatch() {
+        assert!(super::gpu_program_is_supported(&[1, 2, 3, 105]));
+        assert!(!super::gpu_program_is_supported(&[28]));
+        assert!(!super::gpu_program_is_supported(&[100]));
+    }
+
+    #[test]
+    fn domain_programs_deeper_than_the_wgsl_stack_are_rejected_before_dispatch() {
+        let mut code = vec![2; 33];
+        code.extend(vec![3; 32]);
+
+        assert!(!super::gpu_program_is_supported(&code));
+    }
+}
 
 pub struct DomainColoringComputePipeline {
     pipeline: wgpu::ComputePipeline,
@@ -206,11 +254,21 @@ impl DomainColoringComputePipeline {
             return None;
         }
 
-        let grid_size = points.len() as u32;
+        if prog.code.len() > MAX_COMPLEX_CODE || !gpu_program_is_supported(&prog.code) {
+            return None;
+        }
+        let f32_constants = crate::complex_compute::pack_complex_constants(&prog.constants)?;
+
+        let grid_size = u32::try_from(points.len()).ok()?;
 
         let mut in_data = Vec::with_capacity(points.len());
         for &(x, y) in points {
-            in_data.push([x as f32, y as f32]);
+            let x = x as f32;
+            let y = y as f32;
+            if !x.is_finite() || !y.is_finite() {
+                return None;
+            }
+            in_data.push([x, y]);
         }
 
         let point_bytes = (points.len() * std::mem::size_of::<[f32; 2]>()) as u64;
@@ -218,15 +276,10 @@ impl DomainColoringComputePipeline {
 
         let params = GridParamsUniform {
             grid_size,
-            code_len: prog.code.len() as u32,
+            code_len: u32::try_from(prog.code.len()).ok()?,
             dc_mode,
             _pad1: 0,
         };
-
-        let mut f32_constants = Vec::with_capacity(prog.constants.len());
-        for c in &prog.constants {
-            f32_constants.push(*c as f32);
-        }
 
         queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&[params]));
         queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&prog.code));
@@ -298,6 +351,14 @@ impl DomainColoringComputePipeline {
 
         let data = slice.get_mapped_range();
         let colors_f32: &[[f32; 4]] = bytemuck::cast_slice(&data);
+        if colors_f32
+            .iter()
+            .any(|color| color.iter().any(|component| !component.is_finite()))
+        {
+            drop(data);
+            self.out_readback.unmap();
+            return None;
+        }
         let result = colors_f32.to_vec();
         drop(data);
         self.out_readback.unmap();

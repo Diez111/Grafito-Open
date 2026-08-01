@@ -51,6 +51,19 @@ fn test_cas_derivative_returns_message() {
 }
 
 #[test]
+fn cas_success_text_may_contain_error_identifier() {
+    let mut doc = Document::new();
+    let mut input = "Derivative[error*x, x]".to_string();
+
+    let outcome = process_input(&mut doc, &mut input);
+
+    assert!(
+        matches!(outcome, CommandOutcome::Message(ref message) if message.contains("error")),
+        "a valid identifier must not determine the outcome type: {outcome:?}"
+    );
+}
+
+#[test]
 fn implicit_curve_folium_of_descartes() {
     let mut doc = Document::new();
     let mut input = "ImplicitCurve[x^3 + y^3 - 3*x*y = 0]".to_string();
@@ -138,6 +151,51 @@ fn test_lorenz_positional_params() {
         _ => None,
     });
     assert_eq!(beta, Some(8.0 / 3.0));
+}
+
+#[test]
+fn documented_optional_attractor_parameters_reach_the_existing_handlers() {
+    for (command, attractor_type, expected_params) in [
+        (
+            "Aizawa[0.95, 0.7, 0.6, 3.5, 0.25, 0.1]",
+            "aizawa",
+            &[0.95, 0.7, 0.6, 3.5, 0.25, 0.1][..],
+        ),
+        ("Chen[35, 3, 28]", "chen", &[35.0, 3.0, 28.0][..]),
+        (
+            "Halvorsen[1.4, 0, 0, 0]",
+            "halvorsen",
+            &[1.4, 0.0, 0.0, 0.0][..],
+        ),
+        (
+            "Dadras[3, 2.7, 1.7, 2, 9]",
+            "dadras",
+            &[3.0, 2.7, 1.7, 2.0, 9.0][..],
+        ),
+        (
+            "Chua[15.6, 28, -1.143, -0.714]",
+            "chua",
+            &[15.6, 28.0, -1.143, -0.714][..],
+        ),
+    ] {
+        let mut document = Document::new();
+        let mut input = command.to_string();
+        let outcome = process_input(&mut document, &mut input);
+
+        assert!(
+            matches!(outcome, CommandOutcome::Message(_)),
+            "{command}: {outcome:?}"
+        );
+        let params = document
+            .objects_iter()
+            .find_map(|(_, object)| match object {
+                GeoObject::Attractor3D(attractor) if attractor.attractor_type == attractor_type => {
+                    Some(attractor.params.as_slice())
+                }
+                _ => None,
+            });
+        assert_eq!(params, Some(expected_params), "{command}");
+    }
 }
 
 #[test]

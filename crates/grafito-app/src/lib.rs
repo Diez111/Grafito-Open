@@ -7,6 +7,8 @@
 
 pub(crate) mod algebra;
 pub(crate) mod app;
+pub(crate) mod assistant;
+pub(crate) mod assistant_credentials;
 pub(crate) mod canvas;
 pub(crate) mod commands;
 pub(crate) mod export;
@@ -194,7 +196,7 @@ impl Perspective {
                 canvas_mode: CanvasMode::D3,
                 left_panel: LeftPanelContent::Algebra,
                 right_panel: Some(RightPanelContent::Properties),
-                visible_tool_groups: &[G::Move, G::ThreeD, G::Pencil, G::Eraser],
+                visible_tool_groups: &[G::Move, G::ThreeD, G::FourD, G::Pencil, G::Eraser],
                 show_math_keyboard: true,
                 show_input_bar: true,
                 default_tool: Tool::Select,
@@ -228,7 +230,7 @@ impl Perspective {
                 left_panel: LeftPanelContent::Stats,
                 right_panel: Some(RightPanelContent::Data),
                 visible_tool_groups: &[G::Move, G::Advanced],
-                show_math_keyboard: false,
+                show_math_keyboard: true,
                 show_input_bar: true,
                 default_tool: Tool::Select,
             },
@@ -239,7 +241,7 @@ impl Perspective {
                 left_panel: LeftPanelContent::Stats,
                 right_panel: Some(RightPanelContent::Regression),
                 visible_tool_groups: &[G::Move, G::Advanced, G::Measure],
-                show_math_keyboard: false,
+                show_math_keyboard: true,
                 show_input_bar: true,
                 default_tool: Tool::Select,
             },
@@ -251,7 +253,7 @@ impl Perspective {
                 right_panel: Some(RightPanelContent::DomainColoring),
                 visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: true,
-                show_input_bar: true,
+                show_input_bar: false,
                 default_tool: Tool::Select,
             },
             Perspective::Dynamics => PerspectiveLayout {
@@ -272,7 +274,7 @@ impl Perspective {
                 left_panel: LeftPanelContent::Spreadsheet,
                 right_panel: Some(RightPanelContent::Regression),
                 visible_tool_groups: &[G::Move, G::Advanced],
-                show_math_keyboard: false,
+                show_math_keyboard: true,
                 show_input_bar: true,
                 default_tool: Tool::Select,
             },
@@ -283,7 +285,7 @@ impl Perspective {
                 left_panel: LeftPanelContent::Algebra,
                 right_panel: None,
                 visible_tool_groups: &[G::Move, G::Point, G::Line, G::Circle, G::Polygon],
-                show_math_keyboard: false,
+                show_math_keyboard: true,
                 show_input_bar: true,
                 default_tool: Tool::Select,
             },
@@ -300,6 +302,97 @@ pub enum CanvasMode {
     D3,
     /// Canvas 2D reducido (comparte espacio con paneles, p.ej. Álgebra/CAS).
     SmallD2,
+}
+
+/// Rango de ancho disponible para el shell de escritorio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellWidthClass {
+    Compact,
+    Medium,
+    Wide,
+}
+
+/// Pestaña activa del dock contextual compartido por Inspector y Asistente en 3D.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum WorkspaceDockTab {
+    #[default]
+    Inspector,
+    Assistant,
+}
+
+/// Política responsive para los drawers persistentes y la entrada de comandos.
+///
+/// El modo compacto prioriza el canvas; el medio conserva sólo el drawer
+/// izquierdo junto al asistente permanente; el ancho permite además un drawer
+/// contextual cuando todavía queda espacio de trabajo suficiente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShellLayout {
+    pub width_class: ShellWidthClass,
+    pub show_sidebar: bool,
+    pub show_left_drawer: bool,
+    pub show_right_drawer: bool,
+    pub show_bottom_input: bool,
+}
+
+impl ShellLayout {
+    // The rail, the default 220 px workspace drawer, the assistant, and a
+    // useful 760 px canvas first fit together at this breakpoint.
+    const CANVAS_FOCUS_MAX_WIDTH: f32 = 1_360.0;
+    // 56 px rail + drawers + the assistant need a 640 px canvas before the
+    // contextual drawer may coexist with the permanent chat panel.
+    const WIDE_MIN_WIDTH: f32 = 1680.0;
+    const SIDEBAR_MIN_WIDTH: f32 = 420.0;
+
+    pub(crate) fn for_viewport(
+        width: f32,
+        perspective: Perspective,
+        sidebar_tab: usize,
+        right_drawer_available: bool,
+        right_drawer_open: bool,
+        left_drawer_open: bool,
+    ) -> Self {
+        let width = width.max(0.0);
+        let width_class = if width < Self::CANVAS_FOCUS_MAX_WIDTH {
+            ShellWidthClass::Compact
+        } else if width < Self::WIDE_MIN_WIDTH {
+            ShellWidthClass::Medium
+        } else {
+            ShellWidthClass::Wide
+        };
+        let show_left_drawer = width_class != ShellWidthClass::Compact && left_drawer_open;
+        let show_right_drawer =
+            width_class == ShellWidthClass::Wide && right_drawer_available && right_drawer_open;
+        let left_drawer_has_input = show_left_drawer && matches!(sidebar_tab, 0 | 2);
+        let show_bottom_input = if show_left_drawer {
+            perspective.layout().show_input_bar && !left_drawer_has_input
+        } else {
+            // El input del drawer no existe en compacto; incluso Complejos
+            // necesita una única entrada visible para completar comandos.
+            true
+        };
+
+        Self {
+            width_class,
+            // Keep the rail visible when its drawer is closed so users can
+            // restore a workspace panel without sacrificing the whole canvas.
+            show_sidebar: width_class != ShellWidthClass::Compact
+                && width >= Self::SIDEBAR_MIN_WIDTH,
+            show_left_drawer,
+            show_right_drawer,
+            show_bottom_input,
+        }
+    }
+
+    /// Expone el drawer de trabajo bajo demanda sin perder el canvas-focus
+    /// layout de los viewports compactos.
+    pub(crate) fn with_compact_left_drawer(mut self, open: bool, sidebar_tab: usize) -> Self {
+        if self.width_class == ShellWidthClass::Compact && open {
+            self.show_left_drawer = true;
+            // Algebra and CAS already contain the shared command editor.
+            self.show_bottom_input = !matches!(sidebar_tab, 0 | 2);
+        }
+        self
+    }
 }
 
 /// Contenido del panel izquierdo según la perspectiva.
@@ -363,6 +456,42 @@ pub enum RightPanelContent {
     TrigAnimation,
     /// Hoja de cálculo lateral.
     Spreadsheet,
+}
+
+impl RightPanelContent {
+    pub(crate) const fn uses_spreadsheet_editor(self) -> bool {
+        matches!(self, Self::Data | Self::Spreadsheet)
+    }
+}
+
+/// Geometry 3D supports one dock instead of two competing right-side columns.
+pub(crate) fn geometry_utility_dock_available(
+    perspective: Perspective,
+    right_panel: Option<RightPanelContent>,
+    width_class: ShellWidthClass,
+) -> bool {
+    perspective == Perspective::Geometry3D
+        && matches!(right_panel, Some(RightPanelContent::Properties))
+        && width_class != ShellWidthClass::Compact
+}
+
+/// Returns whether the Geometry 3D dock is currently reserving screen space.
+pub(crate) fn uses_geometry_utility_dock(
+    perspective: Perspective,
+    right_panel: Option<RightPanelContent>,
+    width_class: ShellWidthClass,
+    dock_open: bool,
+) -> bool {
+    geometry_utility_dock_available(perspective, right_panel, width_class) && dock_open
+}
+
+/// The compact Geometry 3D utility is opened on demand from the Panels menu.
+pub(crate) fn uses_compact_geometry_utility_dock(
+    perspective: Perspective,
+    width_class: ShellWidthClass,
+    dock_open: bool,
+) -> bool {
+    perspective == Perspective::Geometry3D && width_class == ShellWidthClass::Compact && dock_open
 }
 
 /// Definición estática de qué mostrar para una [`Perspective`].

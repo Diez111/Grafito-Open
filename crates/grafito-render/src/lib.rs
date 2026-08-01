@@ -22,11 +22,23 @@
 )]
 
 use grafito_complex::algebraic_mappings::ConformalMap;
-use grafito_core::{ComplexGridObj, Document, GeoObject, RenderQuality};
-use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
+use grafito_core::{
+    ComplexGridObj, Document, GeoObject, ObjectId, PhasePortraitObj, RenderQuality, TransformedObj,
+    VectorField3DObj,
+};
+use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform};
+use lyon::{
+    math::point,
+    path::Path,
+    tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers},
+};
 use wgpu::util::DeviceExt;
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+
 pub mod complex_compute;
+pub mod depth_3d;
 pub mod domain_coloring_compute;
 pub mod fill_compute;
 pub mod function_compute;
@@ -36,6 +48,205 @@ pub mod vector_compute;
 
 #[cfg(test)]
 mod tests;
+
+fn sample_environment(
+    variables: &std::collections::HashMap<String, f64>,
+    local_names: &[&str],
+) -> Vec<(String, f64)> {
+    let mut environment: Vec<_> = variables
+        .iter()
+        .filter(|(name, _)| !local_names.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    environment
+}
+
+fn evaluate_prepared_2d(
+    prepared: Option<&grafito_geometry::ast::Expr>,
+    expression: &str,
+    environment: &[(String, f64)],
+    x: f64,
+    y: f64,
+) -> Option<f64> {
+    prepared
+        .map(|ast| ast.eval_2d("x", x, "y", y))
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            grafito_geometry::expr::evaluate(expression, environment)
+                .ok()
+                .filter(|value| value.is_finite())
+        })
+}
+
+fn evaluate_prepared_3d(
+    prepared: Option<&grafito_geometry::ast::Expr>,
+    expression: &str,
+    environment: &[(String, f64)],
+    x: f64,
+    y: f64,
+    z: f64,
+) -> Option<f64> {
+    prepared
+        .map(|ast| ast.eval_3d("x", x, "y", y, "z", z))
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            grafito_geometry::expr::evaluate(expression, environment)
+                .ok()
+                .filter(|value| value.is_finite())
+        })
+}
+
+/// Muestrea un retrato de fase con las variables del documento y devuelve
+/// segmentos en coordenadas matemáticas `(x, y)`.
+pub fn sample_phase_portrait(
+    portrait: &PhasePortraitObj,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Vec<(Point2, Point2)> {
+    if ![
+        portrait.x_min,
+        portrait.x_max,
+        portrait.y_min,
+        portrait.y_max,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        || portrait.x_min >= portrait.x_max
+        || portrait.y_min >= portrait.y_max
+    {
+        return Vec::new();
+    }
+
+    let density = portrait.density.clamp(5, 40);
+    let dx = (portrait.x_max - portrait.x_min) / density as f64;
+    let dy = (portrait.y_max - portrait.y_min) / density as f64;
+    let prepared_dx =
+        grafito_geometry::expr::prepare_function_ast(&portrait.expr_dx, variables, &["x", "y"])
+            .ok();
+    let prepared_dy =
+        grafito_geometry::expr::prepare_function_ast(&portrait.expr_dy, variables, &["x", "y"])
+            .ok();
+    let mut environment = sample_environment(variables, &["x", "y"]);
+    let x_index = environment.len();
+    environment.push(("x".to_string(), 0.0));
+    let y_index = environment.len();
+    environment.push(("y".to_string(), 0.0));
+    let mut segments = Vec::with_capacity((density + 1) * (density + 1));
+
+    for i in 0..=density {
+        let x = portrait.x_min + i as f64 * dx;
+        environment[x_index].1 = x;
+        for j in 0..=density {
+            let y = portrait.y_min + j as f64 * dy;
+            environment[y_index].1 = y;
+            let (Some(u), Some(v)) = (
+                evaluate_prepared_2d(prepared_dx.as_ref(), &portrait.expr_dx, &environment, x, y),
+                evaluate_prepared_2d(prepared_dy.as_ref(), &portrait.expr_dy, &environment, x, y),
+            ) else {
+                continue;
+            };
+            let magnitude = u.hypot(v);
+            if !magnitude.is_finite() || magnitude <= 0.001 {
+                continue;
+            }
+            segments.push((
+                Point2::new(x, y),
+                Point2::new(x + u / magnitude * 0.5, y + v / magnitude * 0.5),
+            ));
+        }
+    }
+    segments
+}
+
+pub(crate) fn vector_field_3d_sample_count(field: &VectorField3DObj) -> Option<usize> {
+    field.density.clamp(3, 15).checked_add(1)?.checked_pow(3)
+}
+
+/// Muestrea un campo vectorial 3D con un único contrato CPU/GPU. Los extremos
+/// permanecen en coordenadas de documento `(x, y, z)` y las flechas ocupan el
+/// 40 % de la menor celda del dominio.
+pub fn sample_vector_field_3d(
+    field: &VectorField3DObj,
+    variables: &std::collections::HashMap<String, f64>,
+) -> Vec<(Point3D, Point3D)> {
+    if ![
+        field.x_min,
+        field.x_max,
+        field.y_min,
+        field.y_max,
+        field.z_min,
+        field.z_max,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+        || field.x_min >= field.x_max
+        || field.y_min >= field.y_max
+        || field.z_min >= field.z_max
+    {
+        return Vec::new();
+    }
+
+    let density = field.density.clamp(3, 15);
+    let dx = (field.x_max - field.x_min) / density as f64;
+    let dy = (field.y_max - field.y_min) / density as f64;
+    let dz = (field.z_max - field.z_min) / density as f64;
+    let arrow_scale = dx.abs().min(dy.abs()).min(dz.abs()) * 0.4;
+    if !arrow_scale.is_finite() || arrow_scale <= 0.0 {
+        return Vec::new();
+    }
+
+    let prepared_u =
+        grafito_geometry::expr::prepare_function_ast(&field.expr_u, variables, &["x", "y", "z"])
+            .ok();
+    let prepared_v =
+        grafito_geometry::expr::prepare_function_ast(&field.expr_v, variables, &["x", "y", "z"])
+            .ok();
+    let prepared_w =
+        grafito_geometry::expr::prepare_function_ast(&field.expr_w, variables, &["x", "y", "z"])
+            .ok();
+    let mut environment = sample_environment(variables, &["x", "y", "z"]);
+    let x_index = environment.len();
+    environment.push(("x".to_string(), 0.0));
+    let y_index = environment.len();
+    environment.push(("y".to_string(), 0.0));
+    let z_index = environment.len();
+    environment.push(("z".to_string(), 0.0));
+    let mut segments = Vec::with_capacity(vector_field_3d_sample_count(field).unwrap_or(0));
+
+    for i in 0..=density {
+        let x = field.x_min + i as f64 * dx;
+        environment[x_index].1 = x;
+        for j in 0..=density {
+            let y = field.y_min + j as f64 * dy;
+            environment[y_index].1 = y;
+            for k in 0..=density {
+                let z = field.z_min + k as f64 * dz;
+                environment[z_index].1 = z;
+                let (Some(u), Some(v), Some(w)) = (
+                    evaluate_prepared_3d(prepared_u.as_ref(), &field.expr_u, &environment, x, y, z),
+                    evaluate_prepared_3d(prepared_v.as_ref(), &field.expr_v, &environment, x, y, z),
+                    evaluate_prepared_3d(prepared_w.as_ref(), &field.expr_w, &environment, x, y, z),
+                ) else {
+                    continue;
+                };
+                let magnitude = u.hypot(v).hypot(w);
+                if !magnitude.is_finite() || magnitude <= 0.001 {
+                    continue;
+                }
+                let start = Point3D::new(x, y, z);
+                let end = Point3D::new(
+                    x + u / magnitude * arrow_scale,
+                    y + v / magnitude * arrow_scale,
+                    z + w / magnitude * arrow_scale,
+                );
+                if end.x.is_finite() && end.y.is_finite() && end.z.is_finite() {
+                    segments.push((start, end));
+                }
+            }
+        }
+    }
+    segments
+}
 
 /// Transforma segmentos independientes por un mapa conforme sin crear líneas
 /// puente entre segmentos consecutivos del marching squares.
@@ -55,9 +266,11 @@ pub fn transform_complex_mapping_segments(
             let z_mapped = map.apply(z_orig);
             let current = match z_mapped {
                 Some(w) if w.re.is_finite() && w.im.is_finite() => {
-                    let morph_re = (1.0 - t_val) * z_orig.re + t_val * w.re;
-                    let morph_im = (1.0 - t_val) * z_orig.im + t_val * w.im;
-                    Some(Point2::new(morph_re, morph_im))
+                    Some(interpolate_complex_mapping_point(
+                        Point2::new(z_orig.re, z_orig.im),
+                        Point2::new(w.re, w.im),
+                        t_val,
+                    ))
                 }
                 _ => None,
             };
@@ -68,6 +281,14 @@ pub fn transform_complex_mapping_segments(
         }
     }
     strokes
+}
+
+/// Interpola un punto con el mismo factor usado por los caminos CPU y GPU.
+pub fn interpolate_complex_mapping_point(source: Point2, mapped: Point2, factor: f64) -> Point2 {
+    Point2::new(
+        source.x + (mapped.x - source.x) * factor,
+        source.y + (mapped.y - source.y) * factor,
+    )
 }
 
 /// Cálculo simple de iluminación para objetos 3D
@@ -95,6 +316,280 @@ pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam
 pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+}
+
+pub use depth_3d::{Vertex3D, WorldMesh};
+
+/// Per-canvas render targets owned by the 3D callback. The texture is sampled
+/// during callback paint because egui-wgpu does not expose a depth attachment
+/// for its active render pass.
+pub struct DepthRenderTarget {
+    color_texture: wgpu::Texture,
+    pub color_view: wgpu::TextureView,
+    msaa_color_texture: Option<wgpu::Texture>,
+    pub render_color_view: wgpu::TextureView,
+    depth_texture: wgpu::Texture,
+    pub depth_view: wgpu::TextureView,
+    composite_bind_group: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+    sample_count: u32,
+}
+
+impl DepthRenderTarget {
+    pub fn matches_size(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+
+    pub fn resolve_target(&self) -> Option<&wgpu::TextureView> {
+        self.msaa_color_texture.as_ref().map(|_| &self.color_view)
+    }
+
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+}
+
+pub(crate) const MAX_GEOMETRY_VERTICES: usize = 1_000_000;
+const MAX_GEOMETRY_INDICES: usize = 3_000_000;
+const MAX_POLYGON_VERTICES: usize = 65_536;
+const MAX_SCREEN_COORDINATE: f32 = 1_000_000.0;
+
+/// Orden visual estable de la escena 2D. Los objetos de una misma capa se
+/// ordenan por [`ObjectId`] para que los límites de geometría sean reproducibles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SceneLayer2D {
+    Background,
+    Region,
+    Curve,
+    Marker,
+    Annotation,
+}
+
+pub fn scene_layer_2d(object: &GeoObject) -> SceneLayer2D {
+    match object {
+        GeoObject::Fractal2D(_) | GeoObject::ComplexGrid(_) => SceneLayer2D::Background,
+        GeoObject::Circle(_)
+        | GeoObject::Polygon(_)
+        | GeoObject::Ellipse(_)
+        | GeoObject::Histogram(_)
+        | GeoObject::BoxPlot(_) => SceneLayer2D::Region,
+        GeoObject::Point(_) | GeoObject::ScatterPlot(_) => SceneLayer2D::Marker,
+        GeoObject::Text(_) | GeoObject::ComplexIntegral(_) => SceneLayer2D::Annotation,
+        _ => SceneLayer2D::Curve,
+    }
+}
+
+/// Objetos 2D visibles en el único orden usado para pintar y admitir geometría.
+pub fn ordered_visible_2d_objects(document: &Document) -> Vec<(ObjectId, &GeoObject)> {
+    let mut objects: Vec<_> = document
+        .objects_iter()
+        .filter(|(_, object)| object.is_visible() && !object.is_3d())
+        .map(|(id, object)| (*id, object))
+        .collect();
+    objects.sort_unstable_by_key(|(id, object)| (scene_layer_2d(object), *id));
+    objects
+}
+
+/// Indica si el callback 2D emite la geometría base de este objeto.
+pub fn gpu_2d_base_owns(document: &Document, object: &GeoObject) -> bool {
+    match object {
+        GeoObject::Function(_)
+        | GeoObject::Fractal2D(_)
+        | GeoObject::ParametricCurve2D(_)
+        | GeoObject::PolarCurve(_)
+        | GeoObject::PhasePortrait(_)
+        | GeoObject::ComplexGrid(_)
+        | GeoObject::Transformed(_) => true,
+        GeoObject::ComplexMapping(mapping) => {
+            mapping
+                .conformal_map(document.complex_base_symbol.as_str())
+                .is_some()
+                && document.get_object(mapping.target).is_some_and(|target| {
+                    matches!(
+                        target,
+                        GeoObject::Point(_)
+                            | GeoObject::Line(_)
+                            | GeoObject::Circle(_)
+                            | GeoObject::Polygon(_)
+                            | GeoObject::Pencil(_)
+                            | GeoObject::Function(_)
+                            | GeoObject::ImplicitCurve(_)
+                            | GeoObject::ParametricCurve2D(_)
+                            | GeoObject::PolarCurve(_)
+                            | GeoObject::Ellipse(_)
+                            | GeoObject::Parabola(_)
+                            | GeoObject::Hyperbola(_)
+                            | GeoObject::RegressionLine(_)
+                            | GeoObject::VectorField2D(_)
+                    )
+                })
+        }
+        _ => false,
+    }
+}
+
+fn apply_complex_transform_cpu(
+    vertices: &mut [Vertex],
+    view: &ViewTransform,
+    expression: &str,
+    variables: &std::collections::HashMap<String, f64>,
+    complex_symbol: &str,
+) -> bool {
+    let Ok(ast) = grafito_complex::math::complex_expr::parse(expression) else {
+        return false;
+    };
+    let mut environment: std::collections::HashMap<_, _> = variables
+        .iter()
+        .map(|(name, value)| (name.clone(), num_complex::Complex64::new(*value, 0.0)))
+        .collect();
+
+    for vertex in vertices {
+        let screen = glam::Vec2::new(vertex.position[0], vertex.position[1]);
+        let world = view.screen_to_world(screen);
+        let z = num_complex::Complex64::new(world.x, world.y);
+        environment.insert("x".to_string(), num_complex::Complex64::new(world.x, 0.0));
+        environment.insert("y".to_string(), num_complex::Complex64::new(world.y, 0.0));
+        environment.insert("z".to_string(), z);
+        environment.insert(complex_symbol.to_string(), z);
+
+        let transformed = ast
+            .eval(&environment)
+            .ok()
+            .filter(|value| value.re.is_finite() && value.im.is_finite());
+        let screen = transformed
+            .and_then(|value| bounded_screen_point(view, Point2::new(value.re, value.im)));
+        vertex.position = screen.map_or([f32::NAN, f32::NAN, 0.0], |point| [point.x, point.y, 0.0]);
+    }
+    true
+}
+
+/// Factor común de interpolación entre la geometría fuente (0) y su imagen (1).
+pub fn complex_mapping_homotopy_factor(animate: bool, speed: f32, elapsed: f64) -> f64 {
+    if !animate {
+        return 1.0;
+    }
+    let phase = elapsed * speed as f64;
+    if !phase.is_finite() {
+        return 1.0;
+    }
+    0.5 + 0.5 * phase.cos()
+}
+
+fn bounded_screen_point(view: &ViewTransform, point: Point2) -> Option<glam::Vec2> {
+    if !point.x.is_finite() || !point.y.is_finite() || !view.screen_size.is_finite() {
+        return None;
+    }
+
+    let screen = view.world_to_screen(point);
+    let margin = view.screen_size.max_element().clamp(1.0, 16_384.0);
+    let max_x = (view.screen_size.x + margin).min(MAX_SCREEN_COORDINATE);
+    let max_y = (view.screen_size.y + margin).min(MAX_SCREEN_COORDINATE);
+    (screen.is_finite()
+        && screen.x >= -margin
+        && screen.x <= max_x
+        && screen.y >= -margin
+        && screen.y <= max_y)
+        .then_some(screen)
+}
+
+fn screen_point_is_renderable(point: glam::Vec2) -> bool {
+    point.is_finite()
+        && point.x.abs() <= MAX_SCREEN_COORDINATE
+        && point.y.abs() <= MAX_SCREEN_COORDINATE
+}
+
+fn color_is_renderable(color: Color) -> bool {
+    color
+        .to_array()
+        .iter()
+        .all(|component| component.is_finite())
+}
+
+fn vector_arrow_end(x: f64, y: f64, u: f64, v: f64, arrow_length: f64) -> Option<Point2> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !u.is_finite()
+        || !v.is_finite()
+        || !arrow_length.is_finite()
+        || arrow_length <= 0.0
+    {
+        return None;
+    }
+
+    let magnitude = u.hypot(v);
+    if !magnitude.is_finite() || magnitude <= 1e-10 {
+        return None;
+    }
+
+    let end = Point2::new(
+        x + u / magnitude * arrow_length,
+        y + v / magnitude * arrow_length,
+    );
+    (end.x.is_finite() && end.y.is_finite()).then_some(end)
+}
+
+pub(crate) fn can_append_geometry(
+    current_vertices: usize,
+    current_indices: usize,
+    additional_vertices: usize,
+    additional_indices: usize,
+) -> bool {
+    let max_indexable_vertices = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+    current_vertices
+        .checked_add(additional_vertices)
+        .is_some_and(|count| count <= MAX_GEOMETRY_VERTICES && count <= max_indexable_vertices)
+        && current_indices
+            .checked_add(additional_indices)
+            .is_some_and(|count| count <= MAX_GEOMETRY_INDICES)
+}
+
+fn reserve_geometry(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    additional_vertices: usize,
+    additional_indices: usize,
+) -> Option<u32> {
+    if !can_append_geometry(
+        vertices.len(),
+        indices.len(),
+        additional_vertices,
+        additional_indices,
+    ) {
+        return None;
+    }
+    vertices.try_reserve(additional_vertices).ok()?;
+    indices.try_reserve(additional_indices).ok()?;
+    u32::try_from(vertices.len()).ok()
+}
+
+fn fractal_geometry_fits(
+    current_vertices: usize,
+    current_indices: usize,
+    fractal: &grafito_core::Fractal2DObj,
+) -> bool {
+    Renderer::fractal_geometry_requirements(fractal).is_some_and(
+        |(additional_vertices, additional_indices)| {
+            can_append_geometry(
+                current_vertices,
+                current_indices,
+                additional_vertices,
+                additional_indices,
+            )
+        },
+    )
+}
+
+fn polygon_geometry_is_within_limit(vertex_count: usize) -> bool {
+    (3..=MAX_POLYGON_VERTICES).contains(&vertex_count)
+}
+
+pub(crate) fn row_major_cell_coordinates(
+    index: usize,
+    resolution: usize,
+) -> Option<(usize, usize)> {
+    (resolution > 0 && index < resolution.checked_mul(resolution)?)
+        .then_some((index / resolution, index % resolution))
 }
 
 impl Vertex {
@@ -128,9 +623,15 @@ impl Vertex {
 pub struct Renderer {
     pub pipeline: wgpu::RenderPipeline,
     pub pipeline_3d: wgpu::RenderPipeline,
+    pub pipeline_3d_wire: wgpu::RenderPipeline,
+    composite_3d_pipeline: wgpu::RenderPipeline,
     pub mvp_bind_group_layout: wgpu::BindGroupLayout,
     pub mvp_buffer: wgpu::Buffer,
     pub mvp_bind_group: wgpu::BindGroup,
+    composite_3d_bind_group_layout: wgpu::BindGroupLayout,
+    composite_3d_sampler: wgpu::Sampler,
+    target_format: wgpu::TextureFormat,
+    scene_3d_sample_count: u32,
     pub implicit_compute: Option<crate::implicit_compute::ImplicitComputePipeline>,
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
     pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
@@ -216,15 +717,22 @@ fn complex_grid_resolution(cg: &ComplexGridObj, quality: RenderQuality) -> usize
 }
 
 fn surface_point_visible(p: &Point3D) -> bool {
-    p.x.is_finite()
-        && p.y.is_finite()
-        && p.z.is_finite()
-        && p.x.abs() < 1_000.0
-        && p.y.abs() < 1_000.0
-        && p.z.abs() < 1_000.0
+    depth_3d::point_is_renderable(*p)
 }
 
 impl Renderer {
+    /// Builds world-space 3D data for the depth-enabled GPU path. Clipping is
+    /// intentionally left to the perspective pipeline instead of baking it
+    /// into CPU screen-space geometry.
+    pub fn build_3d_world_mesh(
+        document: &Document,
+        camera: &Camera3D,
+        screen_w: f32,
+        screen_h: f32,
+    ) -> WorldMesh {
+        depth_3d::build_world_mesh(document, camera, screen_w, screen_h)
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -257,6 +765,44 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        let composite_3d_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("3D Composite Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let composite_3d_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("3D Composite Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let composite_3d_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("3D Composite Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("composite_3d.wgsl").into()),
+        });
+        let composite_3d_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("3D Composite Pipeline Layout"),
+            bind_group_layouts: &[&composite_3d_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         let multisample = if sample_count > 1 {
             wgpu::MultisampleState {
                 count: sample_count,
@@ -265,6 +811,24 @@ impl Renderer {
             }
         } else {
             wgpu::MultisampleState::default()
+        };
+        // eframe already selected this count for the active surface format on
+        // the same adapter, so the offscreen scene must use the exact count.
+        let scene_3d_sample_count = sample_count.max(1);
+        let scene_3d_multisample = wgpu::MultisampleState {
+            count: scene_3d_sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        };
+        // The offscreen target is already premultiplied by its own alpha blend.
+        // Compositing it with ordinary alpha blending would darken antialiased edges.
+        let premultiplied_alpha_blending = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent::OVER,
         };
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -302,12 +866,12 @@ impl Renderer {
         });
 
         let pipeline_3d = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("3D Render Pipeline"),
+            label: Some("3D Opaque Depth Render Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex3D::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -329,11 +893,84 @@ impl Renderer {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
-            multisample,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: scene_3d_multisample,
             multiview: None,
             cache: None,
         });
+
+        let pipeline_3d_wire = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("3D Transparent and Wire Depth Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex3D::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: scene_3d_multisample,
+            multiview: None,
+            cache: None,
+        });
+
+        let composite_3d_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("3D Offscreen Composite Pipeline"),
+                layout: Some(&composite_3d_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_3d_shader,
+                    entry_point: "vs_composite",
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_3d_shader,
+                    entry_point: "fs_composite",
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(premultiplied_alpha_blending),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample,
+                multiview: None,
+                cache: None,
+            });
 
         let mvp_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("MVP Buffer"),
@@ -362,7 +999,6 @@ impl Renderer {
         let vector_compute = Some(crate::vector_compute::VectorComputePipeline::new(
             device, queue, 128,
         ));
-        let fill_compute = Some(crate::fill_compute::FillComputePipeline::new(device, queue));
         let complex_compute = Some(crate::complex_compute::ComplexComputePipeline::new(
             device, queue,
         ));
@@ -372,14 +1008,23 @@ impl Renderer {
         Self {
             pipeline,
             pipeline_3d,
+            pipeline_3d_wire,
+            composite_3d_pipeline,
             mvp_bind_group_layout,
             mvp_buffer,
             mvp_bind_group,
+            composite_3d_bind_group_layout,
+            composite_3d_sampler,
+            target_format,
+            scene_3d_sample_count,
             implicit_compute,
             function_compute,
             parametric_compute,
             vector_compute,
-            fill_compute,
+            // Fill masks are currently rasterized by the CPU path. Keeping the
+            // optional pipeline empty avoids reserving two 4096x4096 buffers
+            // (128 MiB) for a feature with no caller.
+            fill_compute: None,
             complex_compute,
             domain_coloring_compute,
         }
@@ -393,25 +1038,122 @@ impl Renderer {
         );
     }
 
+    /// Allocates a multisampled 3D color/depth target plus a resolved texture
+    /// that can be sampled while compositing into egui's color-only pass.
+    pub fn create_depth_render_target(
+        &self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> DepthRenderTarget {
+        let width = width.max(1);
+        let height = height.max(1);
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3D Offscreen Color Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (msaa_color_texture, render_color_view) = if self.scene_3d_sample_count > 1 {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("3D Offscreen MSAA Color Target"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.scene_3d_sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some(texture), view)
+        } else {
+            (
+                None,
+                color_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            )
+        };
+        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3D Offscreen Depth Target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: self.scene_3d_sample_count,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth24Plus,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let composite_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3D Composite Bind Group"),
+            layout: &self.composite_3d_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_3d_sampler),
+                },
+            ],
+        });
+        DepthRenderTarget {
+            color_texture,
+            color_view,
+            msaa_color_texture,
+            render_color_view,
+            depth_texture,
+            depth_view,
+            composite_bind_group,
+            width,
+            height,
+            sample_count: self.scene_3d_sample_count,
+        }
+    }
+
+    pub fn composite_depth_render_target(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        target: &DepthRenderTarget,
+    ) {
+        render_pass.set_pipeline(&self.composite_3d_pipeline);
+        render_pass.set_bind_group(0, &target.composite_bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+    }
+
     pub fn build_geometry_static(
         document: &Document,
         view: &ViewTransform,
         dark_mode: bool,
         include_overlays: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let obj_count = document.object_count().max(1);
-        let mut vertices = Vec::with_capacity(obj_count * 256);
-        let mut indices = Vec::with_capacity(obj_count * 384);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
         if include_overlays {
             Self::build_grid_static(&mut vertices, &mut indices, view, dark_mode);
             Self::build_axes_static(&mut vertices, &mut indices, view, dark_mode);
         }
 
-        for (_, obj) in document.objects_iter() {
-            if !obj.is_visible() {
-                continue;
-            }
+        for (_, obj) in ordered_visible_2d_objects(document) {
             match obj {
                 GeoObject::Point(p) if include_overlays => {
                     let screen = view.world_to_screen(p.position);
@@ -465,7 +1207,9 @@ impl Renderer {
                         Self::add_circle_fill(&mut vertices, &mut indices, center, radius, fill);
                     }
                 }
-                GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+                GeoObject::Polygon(poly)
+                    if polygon_geometry_is_within_limit(poly.vertices.len()) =>
+                {
                     let mut screen_verts = Vec::with_capacity(poly.vertices.len());
                     for (i, v) in poly.vertices.iter().enumerate() {
                         let x = document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
@@ -512,6 +1256,119 @@ impl Renderer {
                         }
                     }
                 }
+                GeoObject::Function(fun) => {
+                    Self::add_function_geometry(&mut vertices, &mut indices, document, view, fun);
+                }
+                GeoObject::ParametricCurve2D(curve) => {
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
+                        curve,
+                        1_000,
+                        &document.variables,
+                    );
+                    let mut previous: Option<glam::Vec2> = None;
+                    for &(x, y) in samples.iter() {
+                        if !x.is_finite() || !y.is_finite() {
+                            previous = None;
+                            continue;
+                        }
+                        let current = view.world_to_screen(Point2::new(x, y));
+                        if !current.is_finite() {
+                            previous = None;
+                            continue;
+                        }
+                        if let Some(previous) = previous {
+                            if (current.x - previous.x).abs() < 300.0
+                                && (current.y - previous.y).abs() < 300.0
+                            {
+                                Self::add_line_segment(
+                                    &mut vertices,
+                                    &mut indices,
+                                    previous,
+                                    current,
+                                    curve.width,
+                                    curve.color,
+                                );
+                            }
+                        }
+                        previous = Some(current);
+                    }
+                }
+                GeoObject::PolarCurve(curve) => {
+                    let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
+                        curve,
+                        1_000,
+                        &document.variables,
+                    );
+                    let mut previous: Option<glam::Vec2> = None;
+                    for &(x, y) in samples.iter() {
+                        if !x.is_finite() || !y.is_finite() {
+                            previous = None;
+                            continue;
+                        }
+                        let current = view.world_to_screen(Point2::new(x, y));
+                        if !current.is_finite() {
+                            previous = None;
+                            continue;
+                        }
+                        if let Some(previous) = previous {
+                            if (current.x - previous.x).abs() < 300.0
+                                && (current.y - previous.y).abs() < 300.0
+                            {
+                                Self::add_line_segment(
+                                    &mut vertices,
+                                    &mut indices,
+                                    previous,
+                                    current,
+                                    curve.width,
+                                    curve.color,
+                                );
+                            }
+                        }
+                        previous = Some(current);
+                    }
+                }
+                GeoObject::ImplicitCurve(curve) => {
+                    let top_left = view.screen_to_world(glam::Vec2::ZERO);
+                    let bottom_right = view.screen_to_world(view.screen_size);
+                    let bounds = (
+                        top_left.x.min(bottom_right.x),
+                        top_left.x.max(bottom_right.x),
+                        top_left.y.min(bottom_right.y),
+                        top_left.y.max(bottom_right.y),
+                    );
+                    let segments = grafito_core::implicit_curve::segments_or_compute(
+                        curve,
+                        bounds,
+                        128,
+                        &document.variables,
+                        document.render_quality,
+                    );
+                    for (_, level_segments) in segments.iter() {
+                        for (start, end) in level_segments {
+                            let start = view.world_to_screen(*start);
+                            let end = view.world_to_screen(*end);
+                            if start.is_finite() && end.is_finite() {
+                                Self::add_line_segment(
+                                    &mut vertices,
+                                    &mut indices,
+                                    start,
+                                    end,
+                                    curve.width,
+                                    curve.color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::VectorField2D(vf) => {
+                    Self::add_vector_field_geometry(
+                        &mut vertices,
+                        &mut indices,
+                        document,
+                        view,
+                        vf,
+                    );
+                }
                 GeoObject::ComplexGrid(cg) => {
                     Self::add_complex_grid_geometry(
                         &mut vertices,
@@ -528,13 +1385,421 @@ impl Renderer {
                         document,
                         view,
                         cm,
+                        0.0,
                     );
+                }
+                GeoObject::Fractal2D(fr) => {
+                    let _ = Self::add_fractal_geometry(&mut vertices, &mut indices, view, fr);
+                }
+                GeoObject::Histogram(histogram) => {
+                    let bins =
+                        grafito_geometry::statistics::histogram(&histogram.data, histogram.bins);
+                    let max_count = bins.iter().map(|(_, _, count)| *count).fold(0.0, f64::max);
+                    if max_count > 0.0 {
+                        let y_scale = (histogram.y_max - histogram.y_min) / max_count;
+                        for (left, right, count) in bins {
+                            let bottom = view.world_to_screen(Point2::new(left, histogram.y_min));
+                            let top = view.world_to_screen(Point2::new(
+                                right,
+                                histogram.y_min + count * y_scale,
+                            ));
+                            if bottom.is_finite() && top.is_finite() {
+                                Self::add_rect(
+                                    &mut vertices,
+                                    &mut indices,
+                                    bottom,
+                                    top.x - bottom.x,
+                                    top.y - bottom.y,
+                                    histogram.color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::ScatterPlot(scatter) => {
+                    for (x, y) in scatter.xs.iter().zip(&scatter.ys) {
+                        let point = view.world_to_screen(Point2::new(*x, *y));
+                        if point.is_finite() {
+                            Self::add_rect(
+                                &mut vertices,
+                                &mut indices,
+                                point,
+                                scatter.point_size,
+                                scatter.point_size,
+                                scatter.color,
+                            );
+                        }
+                    }
+                }
+                GeoObject::BoxPlot(box_plot) => {
+                    if let Some((min, q1, _, q3, max, outliers)) =
+                        grafito_geometry::statistics::boxplot_stats(&box_plot.data)
+                    {
+                        let x = view.world_to_screen(Point2::new(box_plot.position, 0.0)).x;
+                        let y_min = view.world_to_screen(Point2::new(0.0, min)).y;
+                        let y_q1 = view.world_to_screen(Point2::new(0.0, q1)).y;
+                        let y_q3 = view.world_to_screen(Point2::new(0.0, q3)).y;
+                        let y_max = view.world_to_screen(Point2::new(0.0, max)).y;
+                        let half_width = (box_plot.width_box * view.scale) as f32;
+                        if [x, y_min, y_q1, y_q3, y_max]
+                            .iter()
+                            .all(|value| value.is_finite())
+                        {
+                            Self::add_rect(
+                                &mut vertices,
+                                &mut indices,
+                                glam::Vec2::new(x - half_width, y_q3),
+                                half_width * 2.0,
+                                (y_q1 - y_q3).abs(),
+                                box_plot.color,
+                            );
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                glam::Vec2::new(x, y_q3),
+                                glam::Vec2::new(x, y_max),
+                                box_plot.width,
+                                box_plot.color,
+                            );
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                glam::Vec2::new(x, y_q1),
+                                glam::Vec2::new(x, y_min),
+                                box_plot.width,
+                                box_plot.color,
+                            );
+                            for outlier in outliers {
+                                let y = view.world_to_screen(Point2::new(0.0, outlier)).y;
+                                if y.is_finite() {
+                                    Self::add_rect(
+                                        &mut vertices,
+                                        &mut indices,
+                                        glam::Vec2::new(x - 2.0, y - 2.0),
+                                        4.0,
+                                        4.0,
+                                        box_plot.color,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                GeoObject::RegressionLine(regression) => {
+                    let x_min = regression.xs.iter().copied().fold(f64::INFINITY, f64::min);
+                    let x_max = regression
+                        .xs
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    if x_min.is_finite() && x_max.is_finite() {
+                        let start = view.world_to_screen(Point2::new(
+                            x_min,
+                            regression.slope * x_min + regression.intercept,
+                        ));
+                        let end = view.world_to_screen(Point2::new(
+                            x_max,
+                            regression.slope * x_max + regression.intercept,
+                        ));
+                        if start.is_finite() && end.is_finite() {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                start,
+                                end,
+                                regression.width,
+                                regression.color,
+                            );
+                        }
+                    }
+                }
+                GeoObject::PhasePortrait(portrait) => {
+                    for (start, end) in sample_phase_portrait(portrait, &document.variables) {
+                        let start = view.world_to_screen(start);
+                        let end = view.world_to_screen(end);
+                        if start.is_finite() && end.is_finite() {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                start,
+                                end,
+                                1.5,
+                                portrait.color,
+                            );
+                        }
+                    }
                 }
                 _ => {}
             }
         }
 
         (vertices, indices)
+    }
+
+    /// Construye una representación CPU acotada de un objeto transformado.
+    /// La malla base recibe el mapa complejo persistido para que el fallback
+    /// nunca sustituya silenciosamente el objeto por su `inner` sin transformar.
+    pub fn build_transformed_geometry_static(
+        document: &Document,
+        transformed: &TransformedObj,
+        view: &ViewTransform,
+        dark_mode: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        Self::build_transformed_geometry_static_at(document, transformed, view, dark_mode, 0)
+    }
+
+    fn build_transformed_geometry_static_at(
+        document: &Document,
+        transformed: &TransformedObj,
+        view: &ViewTransform,
+        dark_mode: bool,
+        depth: usize,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        if depth >= grafito_core::validation::MAX_TRANSFORM_DEPTH {
+            return (Vec::new(), Vec::new());
+        }
+
+        let (mut vertices, indices) = match transformed.inner.as_ref() {
+            GeoObject::Transformed(inner) => Self::build_transformed_geometry_static_at(
+                document,
+                inner,
+                view,
+                dark_mode,
+                depth + 1,
+            ),
+            GeoObject::Point(point) => {
+                let mut vertices = Vec::new();
+                let mut indices = Vec::new();
+                let screen = view.world_to_screen(point.position);
+                let size = point.size.max(1.0);
+                Self::add_rect(&mut vertices, &mut indices, screen, size, size, point.color);
+                (vertices, indices)
+            }
+            inner => {
+                let mut source = document.clone();
+                let target_id = inner.id();
+                let mut replaced = false;
+                for (id, object) in source.objects_iter_mut() {
+                    if *id == target_id {
+                        *object = inner.clone();
+                        object.set_visible(true);
+                        replaced = true;
+                    } else {
+                        object.set_visible(false);
+                    }
+                }
+                if !replaced {
+                    source.add_object(inner.clone());
+                }
+                Self::build_geometry_static(&source, view, dark_mode, false)
+            }
+        };
+        let _ = apply_complex_transform_cpu(
+            &mut vertices,
+            view,
+            &transformed.complex_expr,
+            &document.variables,
+            document.complex_base_symbol.as_str(),
+        );
+        (vertices, indices)
+    }
+
+    fn add_function_geometry(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        document: &Document,
+        view: &ViewTransform,
+        fun: &grafito_core::FunctionObj,
+    ) {
+        let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+        let world_br = view.screen_to_world(view.screen_size);
+        let domain = (
+            document.resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap_or(world_tl.x)),
+            document.resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x)),
+        );
+        let grid_size = grafito_core::function_sampling::recommended_grid_size_for_quality(
+            view.screen_size.x,
+            document.render_quality,
+        );
+        let samples = grafito_core::function_sampling::samples_or_compute(
+            fun,
+            domain,
+            grid_size,
+            &document.variables,
+        );
+
+        let mut previous: Option<glam::Vec2> = None;
+        for (x, y_opt) in samples.iter() {
+            let y = match y_opt {
+                Some(y) => Some(*y),
+                // Core sampling intentionally marks extreme values as gaps for
+                // general plotting. Re-evaluate here so finite samples that are
+                // actually in the active view are not discarded by that global cap.
+                None if !fun.is_integral => grafito_geometry::expr::eval_function_with_vars(
+                    &fun.expr,
+                    *x,
+                    &document.variables,
+                )
+                .ok()
+                .filter(|value| value.is_finite()),
+                None => None,
+            };
+            let Some(y) = y else {
+                previous = None;
+                continue;
+            };
+            let Some(current) = bounded_screen_point(view, Point2::new(*x, y)) else {
+                previous = None;
+                continue;
+            };
+            if let Some(previous) = previous {
+                if (current.x - previous.x).abs() < 300.0 {
+                    Self::add_line_segment(
+                        vertices, indices, previous, current, fun.width, fun.color,
+                    );
+                }
+            }
+            previous = Some(current);
+        }
+    }
+
+    fn add_vector_field_geometry(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        document: &Document,
+        view: &ViewTransform,
+        vf: &grafito_core::VectorField2DObj,
+    ) {
+        let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+        let world_br = view.screen_to_world(view.screen_size);
+        let bounds = (
+            world_tl.x.min(world_br.x),
+            world_tl.x.max(world_br.x),
+            world_br.y.min(world_tl.y),
+            world_br.y.max(world_tl.y),
+        );
+        if ![bounds.0, bounds.1, bounds.2, bounds.3]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return;
+        }
+
+        let grid_size = vf.density.clamp(5, 128);
+        let cell_width = (bounds.1 - bounds.0).abs() / grid_size as f64;
+        let cell_height = (bounds.3 - bounds.2).abs() / grid_size as f64;
+        let arrow_length = cell_width.min(cell_height) * 0.8;
+        if !arrow_length.is_finite() || arrow_length <= 0.0 {
+            return;
+        }
+
+        let samples = grafito_core::vector_field_sampling::samples_or_compute(
+            vf,
+            bounds,
+            grid_size,
+            &document.variables,
+        );
+        for (x, y, u, v) in samples.iter() {
+            let start = Point2::new(*x, *y);
+            let Some(end) = vector_arrow_end(*x, *y, *u, *v, arrow_length) else {
+                continue;
+            };
+            let (Some(start), Some(end)) = (
+                bounded_screen_point(view, start),
+                bounded_screen_point(view, end),
+            ) else {
+                continue;
+            };
+            Self::add_line_segment(vertices, indices, start, end, 1.5, vf.color);
+        }
+    }
+
+    fn fractal_geometry_requirements(fr: &grafito_core::Fractal2DObj) -> Option<(usize, usize)> {
+        if fr.resolution == 0
+            || ![fr.x_min, fr.x_max, fr.y_min, fr.y_max]
+                .into_iter()
+                .all(f64::is_finite)
+            || fr.x_min >= fr.x_max
+            || fr.y_min >= fr.y_max
+            || grafito_geometry::fractals::validate_fractal_budget(
+                fr.resolution,
+                fr.resolution,
+                fr.max_iter,
+            )
+            .is_err()
+        {
+            return None;
+        }
+
+        let pixels = fr.resolution.checked_mul(fr.resolution)?;
+        Some((pixels.checked_mul(4)?, pixels.checked_mul(6)?))
+    }
+
+    fn fractal_type(fr: &grafito_core::Fractal2DObj) -> grafito_geometry::fractals::FractalType {
+        match fr.fractal_type.as_str() {
+            "julia" if fr.params.len() >= 2 => grafito_geometry::fractals::FractalType::Julia {
+                cr: fr.params[0],
+                ci: fr.params[1],
+                max_iter: fr.max_iter,
+            },
+            "burning_ship" => grafito_geometry::fractals::FractalType::BurningShip {
+                max_iter: fr.max_iter,
+            },
+            "tricorn" => grafito_geometry::fractals::FractalType::Tricorn {
+                max_iter: fr.max_iter,
+            },
+            _ => grafito_geometry::fractals::FractalType::Mandelbrot {
+                max_iter: fr.max_iter,
+            },
+        }
+    }
+
+    fn add_fractal_geometry(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        view_transform: &ViewTransform,
+        fr: &grafito_core::Fractal2DObj,
+    ) -> bool {
+        let Some((required_vertices, _)) = Self::fractal_geometry_requirements(fr) else {
+            return false;
+        };
+        if !fractal_geometry_fits(vertices.len(), indices.len(), fr) {
+            return false;
+        }
+
+        let resolution = fr.resolution;
+        let fractal = Self::fractal_type(fr);
+        let Ok(pixels) = grafito_geometry::fractals::try_compute_fractal(
+            &fractal, fr.x_min, fr.x_max, fr.y_min, fr.y_max, resolution, resolution,
+        ) else {
+            return false;
+        };
+        if pixels.len() != required_vertices / 4 {
+            return false;
+        }
+
+        let dx = (fr.x_max - fr.x_min) / resolution as f64;
+        let dy = (fr.y_max - fr.y_min) / resolution as f64;
+        for pixel in &pixels {
+            let (r, g, b, a) = grafito_geometry::fractals::fractal_color_hsv(
+                pixel.iter,
+                pixel.max_iter,
+                pixel.smooth_value,
+            );
+            let color = Color::new(r, g, b, a);
+            let screen = view_transform.world_to_screen(Point2::new(pixel.x, pixel.y));
+            let pixel_width = (dx * view_transform.scale) as f32;
+            let pixel_height = (dy * view_transform.scale) as f32;
+            Self::add_rect(
+                vertices,
+                indices,
+                screen,
+                pixel_width.max(1.0),
+                pixel_height.max(1.0),
+                color,
+            );
+        }
+        true
     }
 
     fn build_grid_static(
@@ -615,9 +1880,8 @@ impl Renderer {
         screen_w: f32,
         screen_h: f32,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let obj_count = document.object_count().max(1);
-        let mut vertices = Vec::with_capacity(obj_count * 256);
-        let mut indices = Vec::with_capacity(obj_count * 384);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
         Self::build_3d_grid_static(
             &mut vertices,
@@ -716,6 +1980,19 @@ impl Renderer {
                         screen_h,
                     );
                 }
+                GeoObject::Tetrahedron3D(t) => {
+                    Self::add_wireframe_tetrahedron(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &t.center,
+                        t.edge_length,
+                        t.width,
+                        t.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
                 GeoObject::Pyramid3D(p) => {
                     Self::add_wireframe_pyramid(
                         &mut vertices,
@@ -806,7 +2083,7 @@ impl Renderer {
                     let mut prev: Option<Point3D> = None;
                     for &(x, y, z) in samples.iter() {
                         if x.is_finite() && y.is_finite() && z.is_finite() {
-                            let p = Point3D::new(x, z, y);
+                            let p = Point3D::new(x, y, z);
                             if let Some(prev_p) = prev {
                                 Self::add_line_3d(
                                     &mut vertices,
@@ -1099,8 +2376,13 @@ impl Renderer {
         dark_mode: bool,
         device: Option<&wgpu::Device>,
         queue: Option<&wgpu::Queue>,
+        fractals_complete: &mut bool,
+        homotopy_time: f64,
     ) {
         if !obj.is_visible() {
+            return;
+        }
+        if !include_overlays && !gpu_2d_base_owns(document, obj) {
             return;
         }
         match obj {
@@ -1149,7 +2431,7 @@ impl Renderer {
                     Self::add_circle_fill(vertices, indices, screen_center, radius, fill);
                 }
             }
-            GeoObject::Polygon(poly) if poly.vertices.len() >= 3 => {
+            GeoObject::Polygon(poly) if polygon_geometry_is_within_limit(poly.vertices.len()) => {
                 let mut screen_verts = Vec::with_capacity(poly.vertices.len());
                 for (i, v) in poly.vertices.iter().enumerate() {
                     let x = document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
@@ -1188,41 +2470,7 @@ impl Renderer {
                 }
             }
             GeoObject::Function(fun) => {
-                let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                let min_x = document
-                    .resolve_expr(&fun.domain_min_expr, fun.domain_min.unwrap_or(world_tl.x));
-                let max_x = document
-                    .resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x));
-                let domain = (min_x, max_x);
-                let grid_size = grafito_core::function_sampling::recommended_grid_size_for_quality(
-                    view_transform.screen_size.x,
-                    document.render_quality,
-                );
-                let samples = grafito_core::function_sampling::samples_or_compute(
-                    fun,
-                    domain,
-                    grid_size,
-                    &document.variables,
-                );
-
-                let mut prev_screen: Option<glam::Vec2> = None;
-                for (x, y_opt) in samples.iter() {
-                    if let Some(y) = y_opt {
-                        let s = view_transform.world_to_screen(Point2::new(*x, *y));
-                        if let Some(prev) = prev_screen {
-                            let gap = (s.x - prev.x).abs();
-                            if gap < 300.0 {
-                                Self::add_line_segment(
-                                    vertices, indices, prev, s, fun.width, fun.color,
-                                );
-                            }
-                        }
-                        prev_screen = Some(s);
-                    } else {
-                        prev_screen = None;
-                    }
-                }
+                Self::add_function_geometry(vertices, indices, document, view_transform, fun);
             }
             GeoObject::Ellipse(el) => {
                 let n = 64;
@@ -1243,16 +2491,18 @@ impl Renderer {
                 Self::add_polygon_stroke(vertices, indices, &pts, el.width, el.color);
             }
             GeoObject::Parabola(pb) => {
+                if !pb.p.is_finite() || pb.p.abs() < 1e-12 {
+                    return;
+                }
                 let steps = 128;
                 let range = (20.0 / view_transform.scale).clamp(0.1, 500.0);
-                let p_safe = pb.p.max(0.001);
                 let cos_a = pb.angle.cos();
                 let sin_a = pb.angle.sin();
                 let mut prev: Option<glam::Vec2> = None;
                 for i in 0..=steps {
                     let t = -range + 2.0 * range * i as f64 / steps as f64;
                     let lx = t;
-                    let ly = t * t / (4.0 * p_safe);
+                    let ly = t * t / (4.0 * pb.p);
                     let wx = pb.vertex.x + lx * cos_a - ly * sin_a;
                     let wy = pb.vertex.y + lx * sin_a + ly * cos_a;
                     if wx.is_finite() && wy.is_finite() {
@@ -1547,73 +2797,14 @@ impl Renderer {
                     );
                 }
             }
-            GeoObject::Fractal2D(fr) => {
-                let width = 200u32;
-                let height = (width as f64 * (fr.y_max - fr.y_min) / (fr.x_max - fr.x_min)) as u32;
-                let max_dim = width.max(height);
-                if max_dim <= 2048 {
-                    let fractal = match fr.fractal_type.as_str() {
-                        "julia" => grafito_geometry::fractals::FractalType::julia_dendrite(),
-                        "burning_ship" => grafito_geometry::fractals::FractalType::burning_ship(),
-                        _ => grafito_geometry::fractals::FractalType::mandelbrot(),
-                    };
-                    let pixels = grafito_geometry::fractals::compute_fractal(
-                        &fractal,
-                        fr.x_min,
-                        fr.x_max,
-                        fr.y_min,
-                        fr.y_max,
-                        width as usize,
-                        height as usize,
-                    );
-                    let dx = (fr.x_max - fr.x_min) / width as f64;
-                    let dy = (fr.y_max - fr.y_min) / height as f64;
-                    for p in &pixels {
-                        let (r, g, b, a) = grafito_geometry::fractals::fractal_color_hsv(
-                            p.iter,
-                            p.max_iter,
-                            p.smooth_value,
-                        );
-                        let color = Color::new(r, g, b, a);
-                        let sx = view_transform.world_to_screen(Point2::new(p.x, p.y));
-                        let px_w = (dx * view_transform.scale) as f32;
-                        let px_h = (dy * view_transform.scale) as f32;
-                        Self::add_rect(vertices, indices, sx, px_w.max(1.0), px_h.max(1.0), color);
-                    }
-                }
+            GeoObject::Fractal2D(fr)
+                if !Self::add_fractal_geometry(vertices, indices, view_transform, fr) =>
+            {
+                *fractals_complete = false;
             }
-            GeoObject::VectorField2D(vf) => {
-                let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                let view_bounds = (
-                    world_tl.x.min(world_br.x),
-                    world_tl.x.max(world_br.x),
-                    world_br.y.min(world_tl.y),
-                    world_br.y.max(world_tl.y),
-                );
-                let grid_size = vf.density.max(5).min(128);
-                let samples = grafito_core::vector_field_sampling::samples_or_compute(
-                    vf,
-                    view_bounds,
-                    grid_size,
-                    &document.variables,
-                );
-                for (x, y, u, v) in samples.iter() {
-                    if u.is_finite() && v.is_finite() {
-                        let mag = (u * u + v * v).sqrt();
-                        if mag > 0.001 {
-                            let nx = u / mag;
-                            let ny = v / mag;
-                            let len = mag.min(2.0) * 0.5;
-                            let start = Point2::new(*x, *y);
-                            let end = Point2::new(x + nx * len, y + ny * len);
-                            let s = view_transform.world_to_screen(start);
-                            let e = view_transform.world_to_screen(end);
-                            Self::add_line_segment(vertices, indices, s, e, 1.5, vf.color);
-                        }
-                    }
-                }
-            }
+            // The app's CPU overlay owns 2D vector fields so arrowheads and RK4
+            // streamlines stay identical in CPU and GPU canvas modes.
+            GeoObject::VectorField2D(_) => {}
             GeoObject::ComplexGrid(cg) => {
                 self.add_complex_grid_geometry_gpu(
                     vertices,
@@ -1626,152 +2817,21 @@ impl Renderer {
                 );
             }
             GeoObject::ComplexMapping(cm) => {
-                Self::add_complex_mapping_geometry(vertices, indices, document, view_transform, cm);
-
-                if let Some(target_obj) = document.get_object(cm.target) {
-                    let capacity = match target_obj {
-                        GeoObject::Polygon(poly) => poly.vertices.len(),
-                        GeoObject::Point(_) => 1,
-                        GeoObject::Line(_) => 21,
-                        GeoObject::Circle(_) => 32,
-                        GeoObject::Function(_) => 51,
-                        _ => 0,
-                    };
-                    let mut sample_pts: Vec<Point2> = Vec::with_capacity(capacity);
-                    match target_obj {
-                        GeoObject::Polygon(poly) => {
-                            for (i, v) in poly.vertices.iter().enumerate() {
-                                let x = document
-                                    .resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
-                                let y = document
-                                    .resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
-                                sample_pts.push(Point2::new(x, y));
-                            }
-                        }
-                        GeoObject::Point(p) => sample_pts.push(p.position),
-                        GeoObject::Line(l) => {
-                            let start = Point2::new(
-                                document.resolve_expr(&l.start_x_expr, l.start.x),
-                                document.resolve_expr(&l.start_y_expr, l.start.y),
-                            );
-                            let end = Point2::new(
-                                document.resolve_expr(&l.end_x_expr, l.end.x),
-                                document.resolve_expr(&l.end_y_expr, l.end.y),
-                            );
-                            for i in 0..=20 {
-                                let t = i as f64 / 20.0;
-                                sample_pts.push(Point2::new(
-                                    start.x + t * (end.x - start.x),
-                                    start.y + t * (end.y - start.y),
-                                ));
-                            }
-                        }
-                        GeoObject::Circle(c) => {
-                            for i in 0..32 {
-                                let a = i as f64 / 32.0 * std::f64::consts::TAU;
-                                sample_pts.push(Point2::new(
-                                    c.center.x + c.radius * a.cos(),
-                                    c.center.y + c.radius * a.sin(),
-                                ));
-                            }
-                        }
-                        GeoObject::Function(f) => {
-                            let x_min = document
-                                .resolve_expr(&f.domain_min_expr, f.domain_min.unwrap_or(-10.0));
-                            let x_max = document
-                                .resolve_expr(&f.domain_max_expr, f.domain_max.unwrap_or(10.0));
-                            for i in 0..=50 {
-                                let x = x_min + i as f64 / 50.0 * (x_max - x_min);
-                                if let Ok(y) = grafito_geometry::expr::evaluate(
-                                    &f.expr,
-                                    &[("x".to_string(), x)],
-                                ) {
-                                    if y.is_finite() {
-                                        sample_pts.push(Point2::new(x, y));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    if sample_pts.len() >= 2 {
-                        if let Some(map) = cm.conformal_cache {
-                            let mut prev: Option<glam::Vec2> = None;
-                            for pt in &sample_pts {
-                                let z = num_complex::Complex64::new(pt.x, pt.y);
-                                if let Some(fz) = map.apply(z) {
-                                    if fz.re.is_finite() && fz.im.is_finite() {
-                                        let tw = Point2::new(fz.re, fz.im);
-                                        let ts = view_transform.world_to_screen(tw);
-                                        if let Some(ps) = prev {
-                                            if (ts.x - ps.x).abs() < 300.0
-                                                && (ts.y - ps.y).abs() < 300.0
-                                            {
-                                                Self::add_line_segment(
-                                                    vertices, indices, ps, ts, 1.5, cm.color,
-                                                );
-                                            }
-                                        }
-                                        prev = Some(ts);
-                                    }
-                                }
-                            }
-                        } else if let Ok(parsed) = grafito_complex::complex_expr::parse(&cm.expr) {
-                            let mut prev: Option<glam::Vec2> = None;
-                            let mut vars = std::collections::HashMap::new();
-                            for pt in &sample_pts {
-                                let z = num_complex::Complex64::new(pt.x, pt.y);
-                                vars.insert(document.complex_base_symbol.clone(), z);
-                                if let Ok(fz) = parsed.eval(&vars) {
-                                    if fz.re.is_finite() && fz.im.is_finite() {
-                                        let tw = Point2::new(fz.re, fz.im);
-                                        let ts = view_transform.world_to_screen(tw);
-                                        if let Some(ps) = prev {
-                                            if (ts.x - ps.x).abs() < 300.0
-                                                && (ts.y - ps.y).abs() < 300.0
-                                            {
-                                                Self::add_line_segment(
-                                                    vertices, indices, ps, ts, 1.5, cm.color,
-                                                );
-                                            }
-                                        }
-                                        prev = Some(ts);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Self::add_complex_mapping_geometry(
+                    vertices,
+                    indices,
+                    document,
+                    view_transform,
+                    cm,
+                    homotopy_time,
+                );
             }
             GeoObject::PhasePortrait(pp) => {
-                let d = pp.density.max(5).min(40);
-                let dx = (pp.x_max - pp.x_min) / d as f64;
-                let dy = (pp.y_max - pp.y_min) / d as f64;
-                for i in 0..=d {
-                    let x = pp.x_min + i as f64 * dx;
-                    for j in 0..=d {
-                        let y = pp.y_min + j as f64 * dy;
-                        if let (Ok(u), Ok(v)) = (
-                            grafito_geometry::expr::evaluate(
-                                &pp.expr_dx,
-                                &[("x".to_string(), x), ("y".to_string(), y)],
-                            ),
-                            grafito_geometry::expr::evaluate(
-                                &pp.expr_dy,
-                                &[("x".to_string(), x), ("y".to_string(), y)],
-                            ),
-                        ) {
-                            if u.is_finite() && v.is_finite() {
-                                let mag = (u * u + v * v).sqrt();
-                                if mag > 0.001 {
-                                    let start = Point2::new(x, y);
-                                    let end = Point2::new(x + u / mag * 0.5, y + v / mag * 0.5);
-                                    let s = view_transform.world_to_screen(start);
-                                    let e = view_transform.world_to_screen(end);
-                                    Self::add_line_segment(vertices, indices, s, e, 1.5, pp.color);
-                                }
-                            }
-                        }
+                for (start, end) in sample_phase_portrait(pp, &document.variables) {
+                    let start = view_transform.world_to_screen(start);
+                    let end = view_transform.world_to_screen(end);
+                    if start.is_finite() && end.is_finite() {
+                        Self::add_line_segment(vertices, indices, start, end, 1.5, pp.color);
                     }
                 }
             }
@@ -1784,14 +2844,14 @@ impl Renderer {
                     vertices,
                     indices,
                     view_transform,
-                    include_overlays,
+                    true,
                     dark_mode,
                     device,
                     queue,
+                    fractals_complete,
+                    homotopy_time,
                 );
                 if let Ok(ast) = grafito_complex::math::complex_expr::parse(&t.complex_expr) {
-                    let vars_f64 = std::collections::HashMap::new();
-                    let mut vars_complex = std::collections::HashMap::new();
                     let mut points = Vec::with_capacity(vertices.len() - start_v);
                     for v in &vertices[start_v..] {
                         let world_p = view_transform
@@ -1802,50 +2862,31 @@ impl Renderer {
                     let gpu_result = if let (Some(device), Some(queue), Some(compute)) =
                         (device, queue, &self.complex_compute)
                     {
-                        compute.evaluate(device, queue, &ast, &points, &vars_f64)
+                        compute.evaluate(device, queue, &ast, &points, &document.variables)
                     } else {
                         None
                     };
 
-                    if let Some(transformed_points) = gpu_result {
+                    if let Some(transformed_points) =
+                        gpu_result.filter(|points| points.len() == vertices.len() - start_v)
+                    {
                         for (i, v) in vertices[start_v..].iter_mut().enumerate() {
                             let tp = transformed_points[i];
-                            if tp.x.is_finite() && tp.y.is_finite() {
-                                let scr = view_transform
-                                    .world_to_screen(grafito_geometry::Point2::new(tp.x, tp.y));
-                                v.position = [scr.x, scr.y, 0.0];
-                            } else {
-                                v.position = [f32::NAN, f32::NAN, 0.0];
-                            }
+                            let screen = bounded_screen_point(
+                                view_transform,
+                                grafito_geometry::Point2::new(tp.x, tp.y),
+                            );
+                            v.position = screen
+                                .map_or([f32::NAN, f32::NAN, 0.0], |point| [point.x, point.y, 0.0]);
                         }
                     } else {
-                        for v in &mut vertices[start_v..] {
-                            let screen_pos = glam::Vec2::new(v.position[0], v.position[1]);
-                            let world_p = view_transform.screen_to_world(screen_pos);
-                            let z = num_complex::Complex64::new(world_p.x, world_p.y);
-                            vars_complex.insert("z".to_string(), z);
-                            vars_complex.insert(
-                                "x".to_string(),
-                                num_complex::Complex64::new(world_p.x, 0.0),
-                            );
-                            vars_complex.insert(
-                                "y".to_string(),
-                                num_complex::Complex64::new(world_p.y, 0.0),
-                            );
-
-                            let res = ast.eval(&vars_complex);
-                            if let Ok(val) = res {
-                                if val.re.is_finite() && val.im.is_finite() {
-                                    let new_world_p = grafito_geometry::Point2::new(val.re, val.im);
-                                    let scr = view_transform.world_to_screen(new_world_p);
-                                    v.position = [scr.x, scr.y, 0.0];
-                                } else {
-                                    v.position = [f32::NAN, f32::NAN, 0.0];
-                                }
-                            } else {
-                                v.position = [f32::NAN, f32::NAN, 0.0];
-                            }
-                        }
+                        let _ = apply_complex_transform_cpu(
+                            &mut vertices[start_v..],
+                            view_transform,
+                            &t.complex_expr,
+                            &document.variables,
+                            document.complex_base_symbol.as_str(),
+                        );
                     }
                 }
             }
@@ -1861,9 +2902,74 @@ impl Renderer {
         device: Option<&wgpu::Device>,
         queue: Option<&wgpu::Queue>,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let obj_count = document.object_count().max(1);
-        let mut vertices = Vec::with_capacity(obj_count * 256);
-        let mut indices = Vec::with_capacity(obj_count * 384);
+        let (vertices, indices, _) = self.build_geometry_with_fractal_status(
+            document,
+            dark_mode,
+            include_overlays,
+            device,
+            queue,
+        );
+        (vertices, indices)
+    }
+
+    /// Construye la escena 2D y señala si toda la geometría visible pudo
+    /// materializarse dentro de los presupuestos de cálculo y almacenamiento.
+    pub fn build_geometry_with_fractal_status(
+        &self,
+        document: &Document,
+        dark_mode: bool,
+        include_overlays: bool,
+        device: Option<&wgpu::Device>,
+        queue: Option<&wgpu::Queue>,
+    ) -> (Vec<Vertex>, Vec<u32>, bool) {
+        self.build_geometry_with_fractal_status_at(
+            document,
+            dark_mode,
+            include_overlays,
+            device,
+            queue,
+            0.0,
+        )
+    }
+
+    /// Igual que [`Self::build_geometry_with_fractal_status`], usando tiempo
+    /// transitorio de homotopía que nunca forma parte del documento persistido.
+    pub fn build_geometry_with_fractal_status_at(
+        &self,
+        document: &Document,
+        dark_mode: bool,
+        include_overlays: bool,
+        device: Option<&wgpu::Device>,
+        queue: Option<&wgpu::Queue>,
+        homotopy_time: f64,
+    ) -> (Vec<Vertex>, Vec<u32>, bool) {
+        let (vertices, indices, _, scene_complete) = self.build_geometry_with_object_ranges_at(
+            document,
+            dark_mode,
+            include_overlays,
+            device,
+            queue,
+            homotopy_time,
+        );
+        (vertices, indices, scene_complete)
+    }
+
+    /// Construye una escena y conserva el rango de índices de cada objeto.
+    /// Los rangos permiten intercalar callbacks GPU y formas CPU sin perder el
+    /// orden visual global `(SceneLayer2D, ObjectId)`.
+    pub fn build_geometry_with_object_ranges_at(
+        &self,
+        document: &Document,
+        dark_mode: bool,
+        include_overlays: bool,
+        device: Option<&wgpu::Device>,
+        queue: Option<&wgpu::Queue>,
+        homotopy_time: f64,
+    ) -> (Vec<Vertex>, Vec<u32>, BTreeMap<ObjectId, Range<u32>>, bool) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut object_ranges = BTreeMap::new();
+        let mut fractals_complete = true;
 
         let view_transform = *document.view();
 
@@ -1872,7 +2978,8 @@ impl Renderer {
             self.build_axes(&mut vertices, &mut indices, &view_transform, dark_mode);
         }
 
-        for (_, obj) in document.objects_iter() {
+        for (id, obj) in ordered_visible_2d_objects(document) {
+            let index_start = indices.len();
             self.build_single_geometry(
                 document,
                 obj,
@@ -1883,10 +2990,26 @@ impl Renderer {
                 dark_mode,
                 device,
                 queue,
+                &mut fractals_complete,
+                homotopy_time,
             );
+            if indices.len() > index_start {
+                let range = u32::try_from(index_start)
+                    .ok()
+                    .zip(u32::try_from(indices.len()).ok())
+                    .map(|(start, end)| start..end);
+                if let Some(range) = range {
+                    object_ranges.insert(id, range);
+                }
+            }
         }
 
-        (vertices, indices)
+        // Primitive builders reserve in quads/triangles. If no smallest quad
+        // fits, a later object may already have been truncated at the cap;
+        // conservatively keep the CPU fallback for this scene.
+        let scene_complete =
+            fractals_complete && can_append_geometry(vertices.len(), indices.len(), 4, 6);
+        (vertices, indices, object_ranges, scene_complete)
     }
 
     fn build_grid(
@@ -2086,8 +3209,9 @@ impl Renderer {
                 ) {
                     // Generar rectángulos con los colores del GPU
                     for (idx, color) in colors.iter().enumerate() {
-                        let i = idx % res;
-                        let j = idx / res;
+                        let Some((i, j)) = row_major_cell_coordinates(idx, res) else {
+                            break;
+                        };
                         let x = cg.x_min + i as f64 * dx;
                         let y = cg.y_min + j as f64 * dy;
                         let center = view.world_to_screen(Point2::new(x + dx * 0.5, y + dy * 0.5));
@@ -2425,6 +3549,7 @@ impl Renderer {
         document: &Document,
         view: &ViewTransform,
         cm: &grafito_core::ComplexMappingObj,
+        homotopy_time: f64,
     ) -> bool {
         let Some(target_obj) = document.get_object(cm.target) else {
             return false;
@@ -2432,6 +3557,34 @@ impl Renderer {
         let Some(map) = cm.conformal_map(document.complex_base_symbol.as_str()) else {
             return false;
         };
+
+        let t_val =
+            complex_mapping_homotopy_factor(cm.animate_homotopy, cm.homotopy_speed, homotopy_time);
+
+        if let GeoObject::Point(point) = target_obj {
+            let source = Point2::new(
+                document.resolve_expr(&point.x_expr, point.position.x),
+                document.resolve_expr(&point.y_expr, point.position.y),
+            );
+            let marker = map
+                .apply(num_complex::Complex64::new(source.x, source.y))
+                .filter(|mapped| mapped.re.is_finite() && mapped.im.is_finite())
+                .map(|mapped| {
+                    interpolate_complex_mapping_point(
+                        source,
+                        Point2::new(mapped.re, mapped.im),
+                        t_val,
+                    )
+                })
+                // A singular image cannot be represented as a finite point. Keep a
+                // visible source marker rather than silently dropping the mapping.
+                .unwrap_or(source);
+            if let Some(screen) = bounded_screen_point(view, marker) {
+                let size = point.size.max(6.0);
+                Self::add_rect(vertices, indices, screen, size, size, cm.color);
+            }
+            return true;
+        }
 
         let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
         let world_br = view.screen_to_world(view.screen_size);
@@ -2495,7 +3648,7 @@ impl Renderer {
                 }
             }
             GeoObject::Polygon(p) => {
-                let len = p.vertices.len();
+                let len = p.vertices.len().min(MAX_POLYGON_VERTICES);
                 if len >= 2 {
                     for i in 0..len {
                         source_segments.push((p.vertices[i], p.vertices[(i + 1) % len]));
@@ -2609,6 +3762,112 @@ impl Renderer {
                     }
                 }
             }
+            GeoObject::Ellipse(el) => {
+                let steps = 128;
+                let cos_a = el.angle.cos();
+                let sin_a = el.angle.sin();
+                let mut previous = None;
+                for index in 0..=steps {
+                    let t = index as f64 * std::f64::consts::TAU / steps as f64;
+                    let point = Point2::new(
+                        el.center.x + el.rx * t.cos() * cos_a - el.ry * t.sin() * sin_a,
+                        el.center.y + el.rx * t.cos() * sin_a + el.ry * t.sin() * cos_a,
+                    );
+                    if let Some(previous) = previous {
+                        source_segments.push((previous, point));
+                    }
+                    previous = Some(point);
+                }
+            }
+            GeoObject::Parabola(pb) if pb.p.is_finite() && pb.p.abs() >= 1e-12 => {
+                let steps = 128;
+                let range = (20.0 / view.scale).clamp(0.1, 500.0);
+                let cos_a = pb.angle.cos();
+                let sin_a = pb.angle.sin();
+                let mut previous = None;
+                for index in 0..=steps {
+                    let t = -range + 2.0 * range * index as f64 / steps as f64;
+                    let point = Point2::new(
+                        pb.vertex.x + t * cos_a - (t * t / (4.0 * pb.p)) * sin_a,
+                        pb.vertex.y + t * sin_a + (t * t / (4.0 * pb.p)) * cos_a,
+                    );
+                    if point.x.is_finite() && point.y.is_finite() {
+                        if let Some(previous) = previous {
+                            source_segments.push((previous, point));
+                        }
+                        previous = Some(point);
+                    } else {
+                        previous = None;
+                    }
+                }
+            }
+            GeoObject::Hyperbola(hb)
+                if hb.a.is_finite() && hb.b.is_finite() && hb.a > 0.0 && hb.b > 0.0 =>
+            {
+                let steps = 64;
+                let epsilon = 0.05;
+                let cos_a = hb.angle.cos();
+                let sin_a = hb.angle.sin();
+                for branch in 0..2 {
+                    let start = -std::f64::consts::FRAC_PI_2
+                        + epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let end = std::f64::consts::FRAC_PI_2 - epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let mut previous = None;
+                    for index in 0..=steps {
+                        let t = start + (end - start) * index as f64 / steps as f64;
+                        let (local_x, local_y) = if hb.horizontal {
+                            (hb.a / t.cos(), hb.b * t.tan())
+                        } else {
+                            (hb.b * t.tan(), hb.a / t.cos())
+                        };
+                        let point = Point2::new(
+                            hb.center.x + local_x * cos_a - local_y * sin_a,
+                            hb.center.y + local_x * sin_a + local_y * cos_a,
+                        );
+                        if point.x.is_finite() && point.y.is_finite() {
+                            if let Some(previous) = previous {
+                                source_segments.push((previous, point));
+                            }
+                            previous = Some(point);
+                        } else {
+                            previous = None;
+                        }
+                    }
+                }
+            }
+            GeoObject::RegressionLine(rl)
+                if rl.x_min.is_finite()
+                    && rl.x_max.is_finite()
+                    && rl.slope.is_finite()
+                    && rl.intercept.is_finite()
+                    && rl.x_min < rl.x_max =>
+            {
+                source_segments.push((
+                    Point2::new(rl.x_min, rl.slope * rl.x_min + rl.intercept),
+                    Point2::new(rl.x_max, rl.slope * rl.x_max + rl.intercept),
+                ));
+            }
+            GeoObject::VectorField2D(vf) => {
+                let grid_size = vf.density.clamp(5, 128);
+                let cell_width = (view_bounds.1 - view_bounds.0).abs() / grid_size as f64;
+                let cell_height = (view_bounds.3 - view_bounds.2).abs() / grid_size as f64;
+                let arrow_length = cell_width.min(cell_height) * 0.8;
+                if arrow_length.is_finite() && arrow_length > 0.0 {
+                    let samples = grafito_core::vector_field_sampling::samples_or_compute(
+                        vf,
+                        view_bounds,
+                        grid_size,
+                        &document.variables,
+                    );
+                    for (x, y, u, v) in samples.iter() {
+                        if let Some(end) = vector_arrow_end(*x, *y, *u, *v, arrow_length) {
+                            source_segments.push((Point2::new(*x, *y), end));
+                        }
+                    }
+                }
+            }
             _ => {
                 // Not supported yet for this type
                 return false;
@@ -2619,12 +3878,6 @@ impl Renderer {
             RenderQuality::Preview => 4,
             RenderQuality::Normal => 8,
             RenderQuality::High => 16,
-        };
-        let t_val = if cm.animate_homotopy {
-            let t_accum = document.variables.get("t_homotopy").copied().unwrap_or(0.0);
-            0.5 + 0.5 * (t_accum * cm.homotopy_speed as f64).cos()
-        } else {
-            1.0
         };
         for (a, b) in transform_complex_mapping_segments(map, &source_segments, subdivisions, t_val)
         {
@@ -2645,15 +3898,31 @@ impl Renderer {
         h: f32,
         color: Color,
     ) {
+        if !screen_point_is_renderable(center)
+            || !w.is_finite()
+            || !h.is_finite()
+            || !color_is_renderable(color)
+        {
+            return;
+        }
         let hw = w * 0.5;
         let hh = h * 0.5;
-        let base = vertices.len() as u32;
-        vertices.reserve(4);
-        indices.reserve(6);
-        vertices.push(Vertex::new(center.x - hw, center.y - hh, color));
-        vertices.push(Vertex::new(center.x + hw, center.y - hh, color));
-        vertices.push(Vertex::new(center.x + hw, center.y + hh, color));
-        vertices.push(Vertex::new(center.x - hw, center.y + hh, color));
+        let corners = [
+            glam::Vec2::new(center.x - hw, center.y - hh),
+            glam::Vec2::new(center.x + hw, center.y - hh),
+            glam::Vec2::new(center.x + hw, center.y + hh),
+            glam::Vec2::new(center.x - hw, center.y + hh),
+        ];
+        if corners
+            .iter()
+            .any(|corner| !screen_point_is_renderable(*corner))
+        {
+            return;
+        }
+        let Some(base) = reserve_geometry(vertices, indices, 4, 6) else {
+            return;
+        };
+        vertices.extend(corners.map(|corner| Vertex::new(corner.x, corner.y, color)));
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
@@ -2665,20 +3934,35 @@ impl Renderer {
         width: f32,
         color: Color,
     ) {
+        if !screen_point_is_renderable(a)
+            || !screen_point_is_renderable(b)
+            || !width.is_finite()
+            || !color_is_renderable(color)
+        {
+            return;
+        }
         let dir = b - a;
-        if dir.length_squared() < 0.0001 {
+        let length_squared = dir.length_squared();
+        if !length_squared.is_finite() || length_squared < 0.0001 {
             return;
         }
         let dir = dir.normalize();
         let perp = glam::Vec2::new(-dir.y, dir.x) * (width * 0.5).max(0.5);
+        if !perp.is_finite() {
+            return;
+        }
+        let corners = [a + perp, b + perp, b - perp, a - perp];
+        if corners
+            .iter()
+            .any(|corner| !screen_point_is_renderable(*corner))
+        {
+            return;
+        }
 
-        let base = vertices.len() as u32;
-        vertices.reserve(4);
-        indices.reserve(6);
-        vertices.push(Vertex::new(a.x + perp.x, a.y + perp.y, color));
-        vertices.push(Vertex::new(b.x + perp.x, b.y + perp.y, color));
-        vertices.push(Vertex::new(b.x - perp.x, b.y - perp.y, color));
-        vertices.push(Vertex::new(a.x - perp.x, a.y - perp.y, color));
+        let Some(base) = reserve_geometry(vertices, indices, 4, 6) else {
+            return;
+        };
+        vertices.extend(corners.map(|corner| Vertex::new(corner.x, corner.y, color)));
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
@@ -2984,12 +4268,35 @@ impl Renderer {
         width: f32,
         color: Color,
     ) {
+        if !screen_point_is_renderable(center)
+            || !radius.is_finite()
+            || radius < 0.0
+            || !width.is_finite()
+            || !color_is_renderable(color)
+        {
+            return;
+        }
         let segments = ((radius * 0.5).clamp(16.0, 128.0)) as usize;
         let inner_r = (radius - width * 0.5).max(0.0);
         let outer_r = radius + width * 0.5;
-        let base = vertices.len() as u32;
-        vertices.reserve((segments + 1) * 2);
-        indices.reserve(segments * 6);
+        if !inner_r.is_finite() || !outer_r.is_finite() {
+            return;
+        }
+        if [
+            glam::Vec2::new(center.x - outer_r, center.y),
+            glam::Vec2::new(center.x + outer_r, center.y),
+            glam::Vec2::new(center.x, center.y - outer_r),
+            glam::Vec2::new(center.x, center.y + outer_r),
+        ]
+        .iter()
+        .any(|point| !screen_point_is_renderable(*point))
+        {
+            return;
+        }
+        let vertex_count = (segments + 1).saturating_mul(2);
+        let Some(base) = reserve_geometry(vertices, indices, vertex_count, segments * 6) else {
+            return;
+        };
 
         for i in 0..=segments {
             let theta = (i as f32 / segments as f32) * std::f32::consts::TAU;
@@ -3008,7 +4315,12 @@ impl Renderer {
         }
 
         for i in 0..segments {
-            let i0 = base + (i * 2) as u32;
+            let Ok(offset) = u32::try_from(i * 2) else {
+                return;
+            };
+            let Some(i0) = base.checked_add(offset) else {
+                return;
+            };
             let i1 = i0 + 1;
             let i2 = i0 + 2;
             let i3 = i0 + 3;
@@ -3023,10 +4335,29 @@ impl Renderer {
         radius: f32,
         color: Color,
     ) {
+        if !screen_point_is_renderable(center)
+            || !radius.is_finite()
+            || radius < 0.0
+            || !color_is_renderable(color)
+        {
+            return;
+        }
+        if [
+            glam::Vec2::new(center.x - radius, center.y),
+            glam::Vec2::new(center.x + radius, center.y),
+            glam::Vec2::new(center.x, center.y - radius),
+            glam::Vec2::new(center.x, center.y + radius),
+        ]
+        .iter()
+        .any(|point| !screen_point_is_renderable(*point))
+        {
+            return;
+        }
         let segments = ((radius * 0.5).max(16.0).min(128.0)) as usize;
-        let center_idx = vertices.len() as u32;
-        vertices.reserve(segments + 2);
-        indices.reserve(segments * 3);
+        let Some(center_idx) = reserve_geometry(vertices, indices, segments + 2, segments * 3)
+        else {
+            return;
+        };
         vertices.push(Vertex::new(center.x, center.y, color));
 
         for i in 0..=segments {
@@ -3039,11 +4370,15 @@ impl Renderer {
         }
 
         for i in 0..segments {
-            indices.extend_from_slice(&[
-                center_idx,
-                center_idx + 1 + i as u32,
-                center_idx + 2 + i as u32,
-            ]);
+            let Ok(i) = u32::try_from(i) else {
+                return;
+            };
+            let (Some(i1), Some(i2)) =
+                (center_idx.checked_add(1 + i), center_idx.checked_add(2 + i))
+            else {
+                return;
+            };
+            indices.extend_from_slice(&[center_idx, i1, i2]);
         }
     }
 
@@ -3053,18 +4388,47 @@ impl Renderer {
         pts: &[glam::Vec2],
         color: Color,
     ) {
-        if pts.len() < 3 {
+        if !polygon_geometry_is_within_limit(pts.len())
+            || pts.iter().any(|point| !screen_point_is_renderable(*point))
+            || !color_is_renderable(color)
+        {
             return;
         }
-        // Simple fan triangulation (assumes convex or near-convex)
-        let base = vertices.len() as u32;
-        vertices.reserve(pts.len());
-        indices.reserve((pts.len() - 1) * 3);
-        for p in pts {
+        let mut path_builder = Path::builder();
+        path_builder.begin(point(pts[0].x, pts[0].y));
+        for p in &pts[1..] {
+            path_builder.line_to(point(p.x, p.y));
+        }
+        path_builder.end(true);
+
+        let mut tessellator = FillTessellator::new();
+        let mut geometry: VertexBuffers<lyon::math::Point, u32> = VertexBuffers::new();
+        if tessellator
+            .tessellate_path(
+                &path_builder.build(),
+                &FillOptions::default(),
+                &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| vertex.position()),
+            )
+            .is_err()
+        {
+            return;
+        }
+        let Some(base) = reserve_geometry(
+            vertices,
+            indices,
+            geometry.vertices.len(),
+            geometry.indices.len(),
+        ) else {
+            return;
+        };
+        for p in geometry.vertices {
             vertices.push(Vertex::new(p.x, p.y, color));
         }
-        for i in 1..(pts.len() - 1) {
-            indices.extend_from_slice(&[base, base + i as u32, base + (i + 1) as u32]);
+        for index in geometry.indices {
+            let Some(index) = base.checked_add(index) else {
+                return;
+            };
+            indices.push(index);
         }
     }
 
@@ -3078,8 +4442,6 @@ impl Renderer {
         if pts.len() < 2 {
             return;
         }
-        vertices.reserve(pts.len() * 4);
-        indices.reserve(pts.len() * 6);
         for i in 0..pts.len() {
             let a = pts[i];
             let b = pts[(i + 1) % pts.len()];
@@ -3096,9 +4458,8 @@ impl Renderer {
         screen_h: f32,
         include_overlays: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let obj_count = document.object_count().max(1);
-        let mut vertices = Vec::with_capacity(obj_count * 256);
-        let mut indices = Vec::with_capacity(obj_count * 384);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
         if include_overlays {
             self.build_3d_grid(
@@ -3214,6 +4575,31 @@ impl Renderer {
                         c.size,
                         c.width,
                         c.color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
+                GeoObject::Tetrahedron3D(t) => {
+                    if let Some(fill) = t.fill_color {
+                        Self::add_solid_tetrahedron(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &t.center,
+                            t.edge_length,
+                            fill,
+                            screen_w,
+                            screen_h,
+                        );
+                    }
+                    Self::add_wireframe_tetrahedron(
+                        &mut vertices,
+                        &mut indices,
+                        camera,
+                        &t.center,
+                        t.edge_length,
+                        t.width,
+                        t.color,
                         screen_w,
                         screen_h,
                     );
@@ -3370,7 +4756,7 @@ impl Renderer {
                     let mut prev: Option<Point3D> = None;
                     for &(x, y, z) in samples.iter() {
                         if x.is_finite() && y.is_finite() && z.is_finite() {
-                            let p = Point3D::new(x, z, y);
+                            let p = Point3D::new(x, y, z);
                             if let Some(prev_p) = prev {
                                 Self::add_line_3d(
                                     &mut vertices,
@@ -3413,64 +4799,18 @@ impl Renderer {
                     }
                 }
                 GeoObject::VectorField3D(vf) => {
-                    let d = vf.density.max(3).min(15);
-                    let dx = (vf.x_max - vf.x_min) / d as f64;
-                    let dy = (vf.y_max - vf.y_min) / d as f64;
-                    let dz = (vf.z_max - vf.z_min) / d as f64;
-                    for i in 0..=d {
-                        let x = vf.x_min + i as f64 * dx;
-                        for j in 0..=d {
-                            let y = vf.y_min + j as f64 * dy;
-                            for k in 0..=d {
-                                let z = vf.z_min + k as f64 * dz;
-                                if let (Ok(u), Ok(v), Ok(w)) = (
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_u,
-                                        &[
-                                            ("x".to_string(), x),
-                                            ("y".to_string(), y),
-                                            ("z".to_string(), z),
-                                        ],
-                                    ),
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_v,
-                                        &[
-                                            ("x".to_string(), x),
-                                            ("y".to_string(), y),
-                                            ("z".to_string(), z),
-                                        ],
-                                    ),
-                                    grafito_geometry::expr::evaluate(
-                                        &vf.expr_w,
-                                        &[
-                                            ("x".to_string(), x),
-                                            ("y".to_string(), y),
-                                            ("z".to_string(), z),
-                                        ],
-                                    ),
-                                ) {
-                                    if u.is_finite() && v.is_finite() && w.is_finite() {
-                                        let mag = (u * u + v * v + w * w).sqrt();
-                                        if mag > 0.001 {
-                                            let start = Point3D::new(x, y, z);
-                                            let end =
-                                                Point3D::new(x + u / mag, y + v / mag, z + w / mag);
-                                            Self::add_line_3d(
-                                                &mut vertices,
-                                                &mut indices,
-                                                camera,
-                                                &start,
-                                                &end,
-                                                1.5,
-                                                vf.color,
-                                                screen_w,
-                                                screen_h,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    for (start, end) in sample_vector_field_3d(vf, &document.variables) {
+                        Self::add_line_3d(
+                            &mut vertices,
+                            &mut indices,
+                            camera,
+                            &start,
+                            &end,
+                            1.5,
+                            vf.color,
+                            screen_w,
+                            screen_h,
+                        );
                     }
                 }
                 GeoObject::HyperSurface4D(hs) => {
@@ -3951,6 +5291,35 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn add_wireframe_tetrahedron(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        camera: &Camera3D,
+        center: &Point3D,
+        edge_length: f64,
+        width: f32,
+        color: Color,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let tetrahedron = Tetrahedron3D::new(*center, edge_length);
+        let points = tetrahedron.vertices();
+        for [start, end] in tetrahedron.edges() {
+            Self::add_line_3d(
+                vertices,
+                indices,
+                camera,
+                &points[start],
+                &points[end],
+                width,
+                color,
+                screen_w,
+                screen_h,
+            );
+        }
+    }
+
     fn add_wireframe_pyramid(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u32>,
@@ -4324,7 +5693,18 @@ impl Renderer {
             camera.project(p1, screen_w, screen_h),
             camera.project(p2, screen_w, screen_h),
         ) {
-            let base = vertices.len() as u32;
+            if ![s0, s1, s2]
+                .into_iter()
+                .all(|(x, y)| screen_point_is_renderable(glam::Vec2::new(x, y)))
+                || !color_is_renderable(c0)
+                || !color_is_renderable(c1)
+                || !color_is_renderable(c2)
+            {
+                return;
+            }
+            let Some(base) = reserve_geometry(vertices, indices, 3, 3) else {
+                return;
+            };
             vertices.push(Vertex::new(s0.0, s0.1, c0));
             vertices.push(Vertex::new(s1.0, s1.1, c1));
             vertices.push(Vertex::new(s2.0, s2.1, c2));
@@ -4431,6 +5811,27 @@ impl Renderer {
                 fill_color,
                 screen_w,
                 screen_h,
+            );
+        }
+    }
+
+    fn add_solid_tetrahedron(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        camera: &Camera3D,
+        center: &Point3D,
+        edge_length: f64,
+        fill_color: Color,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        let tetrahedron = Tetrahedron3D::new(*center, edge_length);
+        let points = tetrahedron.vertices();
+        for [a, b, c] in tetrahedron.faces() {
+            let normal = Self::face_normal(&points[a], &points[b], &points[c]);
+            Self::add_solid_triangle_3d(
+                vertices, indices, camera, &points[a], normal, &points[b], normal, &points[c],
+                normal, fill_color, screen_w, screen_h,
             );
         }
     }

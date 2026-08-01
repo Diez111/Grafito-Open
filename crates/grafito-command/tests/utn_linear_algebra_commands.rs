@@ -196,6 +196,28 @@ fn ode_commands_expose_advanced_solvers() {
 }
 
 #[test]
+fn ode_system_binds_solver_time_over_document_variable() {
+    let mut doc = Document::new();
+    doc.set_variable("t".into(), 7.0);
+
+    let outcome = run(&mut doc, "ODESystem[t, 0, 0, 0, 0, 1, 100, rk4]");
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "got {outcome:?}"
+    );
+
+    let endpoint = doc
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Pencil(pencil) if pencil.label == "Phase(rk4)" => pencil.points.last(),
+            _ => None,
+        })
+        .expect("ODESystem should create a phase trajectory");
+    assert!((endpoint.x - 0.5).abs() < 1e-6, "got {endpoint:?}");
+    assert!(endpoint.y.abs() < 1e-12, "got {endpoint:?}");
+}
+
+#[test]
 fn sequence_and_series_commands_cover_basic_convergence_workflows() {
     let mut doc = Document::new();
 
@@ -222,6 +244,20 @@ fn sequence_and_series_commands_cover_basic_convergence_workflows() {
         matches!(root, CommandOutcome::Message(ref m) if m.contains("converges") && m.contains("0.333")),
         "got {root:?}"
     );
+}
+
+#[test]
+fn series_sum_rejects_saturated_integer_bounds_without_panicking() {
+    let mut doc = Document::new();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(
+            &mut doc,
+            "SeriesSum[n, n, -9223372036854775808, 9223372036854775807]",
+        )
+    }));
+
+    assert!(outcome.is_ok(), "SeriesSum must not overflow");
+    assert!(matches!(outcome.unwrap(), CommandOutcome::Error(_)));
 }
 
 #[test]

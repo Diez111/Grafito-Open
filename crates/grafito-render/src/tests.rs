@@ -1,7 +1,9 @@
 #[cfg(test)]
 #[allow(clippy::module_inception, clippy::approx_constant)]
 mod tests {
-    use grafito_core::{CircleObj, Document, GeoObject, LineObj, PointObj, PolygonObj};
+    use grafito_core::{
+        CircleObj, Document, Fractal2DObj, GeoObject, LineObj, PointObj, PolygonObj,
+    };
     use grafito_geometry::{Camera3D, Point2, ViewTransform};
 
     #[test]
@@ -102,6 +104,99 @@ mod tests {
     }
 
     #[test]
+    fn geometry_growth_is_capped_before_indices_overflow() {
+        assert!(crate::can_append_geometry(0, 0, 4, 6));
+        assert!(!crate::can_append_geometry(
+            crate::MAX_GEOMETRY_VERTICES,
+            0,
+            1,
+            0
+        ));
+        assert!(!crate::can_append_geometry(u32::MAX as usize, 0, 1, 0));
+    }
+
+    #[test]
+    fn visible_2d_objects_are_ordered_by_explicit_layer_then_object_id() {
+        let mut document = Document::new();
+        let first_curve = document.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+        )));
+        let marker = document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        let background = document.add_object(GeoObject::Fractal2D(Fractal2DObj::mandelbrot()));
+        let second_curve = document.add_object(GeoObject::Line(LineObj::new(
+            Point2::new(0.0, 1.0),
+            Point2::new(1.0, 1.0),
+        )));
+
+        let ordered: Vec<_> = crate::ordered_visible_2d_objects(&document)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut curves = [first_curve, second_curve];
+        curves.sort_unstable();
+
+        assert_eq!(ordered[0], background);
+        assert_eq!(&ordered[1..3], &curves);
+        assert_eq!(ordered[3], marker);
+    }
+
+    #[test]
+    fn second_fractal_is_a_partial_scene_when_geometry_capacity_is_exhausted() {
+        let mut fractal = Fractal2DObj::mandelbrot();
+        fractal.resolution = 400;
+        let (vertices, indices) =
+            crate::Renderer::fractal_geometry_requirements(&fractal).expect("valid fractal");
+
+        assert!(crate::fractal_geometry_fits(0, 0, &fractal));
+        assert!(!crate::fractal_geometry_fits(vertices, indices, &fractal));
+    }
+
+    #[test]
+    fn homotopy_factor_advances_without_document_variables() {
+        let document = Document::new();
+        let start = crate::complex_mapping_homotopy_factor(true, 2.0, 0.0);
+        let advanced =
+            crate::complex_mapping_homotopy_factor(true, 2.0, std::f64::consts::FRAC_PI_2);
+
+        assert_eq!(start, 1.0);
+        assert_eq!(advanced, 0.0);
+        assert!(!document.variables.contains_key("t_homotopy"));
+    }
+
+    #[test]
+    fn polygon_geometry_has_a_per_object_vertex_limit() {
+        assert!(crate::polygon_geometry_is_within_limit(3));
+        assert!(crate::polygon_geometry_is_within_limit(
+            crate::MAX_POLYGON_VERTICES
+        ));
+        assert!(!crate::polygon_geometry_is_within_limit(
+            crate::MAX_POLYGON_VERTICES + 1
+        ));
+    }
+
+    #[test]
+    fn row_major_domain_cells_keep_x_as_the_outer_dimension() {
+        assert_eq!(crate::row_major_cell_coordinates(1, 4), Some((0, 1)));
+        assert_eq!(crate::row_major_cell_coordinates(4, 4), Some((1, 0)));
+        assert_eq!(crate::row_major_cell_coordinates(16, 4), None);
+    }
+
+    #[test]
+    fn world_mesh_keeps_world_coordinates_in_the_opaque_stream() {
+        let vertex = crate::Vertex3D {
+            position: [1.0, -2.0, 3.5],
+            color: [0.1, 0.2, 0.3, 1.0],
+        };
+        let mut mesh = crate::WorldMesh::default();
+        mesh.opaque_vertices = vec![vertex];
+        mesh.opaque_indices = vec![0, 0, 0];
+        assert_eq!(mesh.opaque_vertices[0].position, [1.0, -2.0, 3.5]);
+        assert_eq!(mesh.opaque_indices, vec![0, 0, 0]);
+        assert!(mesh.validate().is_ok());
+    }
+
+    #[test]
     fn test_all_geo_variants_render() {
         use grafito_core::*;
         use grafito_geometry::*;
@@ -161,6 +256,7 @@ mod tests {
             )),
             GeoObject::Sphere3D(Sphere3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0)),
             GeoObject::Cube3D(Cube3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0)),
+            GeoObject::Tetrahedron3D(Tetrahedron3DObj::new(Point3D::new(0.0, 0.0, 0.0), 2.0)),
             GeoObject::Cylinder3D(Cylinder3DObj::new(
                 Point3D::new(0.0, 0.0, 0.0),
                 Point3D::new(0.0, 3.0, 0.0),

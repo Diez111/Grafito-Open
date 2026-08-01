@@ -8,8 +8,9 @@
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
     Document, FunctionObj, GeoObject, ParametricCurve2DObj, PolarCurveObj, PolygonObj,
-    RelationOperator,
+    RelationOperator, TextObj,
 };
+use grafito_geometry::Point2;
 
 fn point_obj_count(doc: &Document) -> usize {
     doc.objects_iter()
@@ -241,4 +242,27 @@ fn complex_mapping_does_not_create_extra_points() {
     let _ = process_input(&mut doc, &mut "ComplexMapping[1/z, f]".to_string());
     let after = point_obj_count(&doc);
     assert_eq!(before, after, "ComplexMapping should not create points");
+}
+
+#[test]
+fn complex_mapping_rejects_targets_without_a_mappable_2d_geometry() {
+    let mut doc = Document::new();
+    let mut text = TextObj::new("nota", Point2::new(0.0, 0.0));
+    text.label = "nota".to_string();
+    doc.add_object(GeoObject::Text(text));
+    let before = doc
+        .objects_iter()
+        .filter(|(_, object)| matches!(object, GeoObject::ComplexMapping(_)))
+        .count();
+
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/z, nota]".to_string());
+
+    assert!(matches!(outcome, CommandOutcome::Error(_)));
+    assert_eq!(
+        doc.objects_iter()
+            .filter(|(_, object)| matches!(object, GeoObject::ComplexMapping(_)))
+            .count(),
+        before,
+        "unsupported targets must not create invisible mappings"
+    );
 }

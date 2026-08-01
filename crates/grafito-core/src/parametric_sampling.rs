@@ -56,10 +56,40 @@ fn resolve_expr(expr: Option<&str>, fallback: f64, variables: &HashMap<String, f
 pub fn surface_expr_hash(surf: &Surface3DObj) -> u64 {
     let mut hasher = DefaultHasher::new();
     surf.is_parametric.hash(&mut hasher);
+    surf.is_complex.hash(&mut hasher);
+    surf.legacy_axis_swap.hash(&mut hasher);
     surf.expr.hash(&mut hasher);
     surf.expr_x.hash(&mut hasher);
     surf.expr_y.hash(&mut hasher);
     surf.expr_z.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn curve_2d_expr_hash(pc: &ParametricCurve2DObj) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pc.expr_x.hash(&mut hasher);
+    pc.expr_y.hash(&mut hasher);
+    pc.t_min_expr.hash(&mut hasher);
+    pc.t_max_expr.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn curve_3d_expr_hash(pc: &ParametricCurve3DObj) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pc.expr_x.hash(&mut hasher);
+    pc.expr_y.hash(&mut hasher);
+    pc.expr_z.hash(&mut hasher);
+    pc.parameter.hash(&mut hasher);
+    pc.t_min_expr.hash(&mut hasher);
+    pc.t_max_expr.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn polar_expr_hash(pol: &PolarCurveObj) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    pol.expr_r.hash(&mut hasher);
+    pol.t_min_expr.hash(&mut hasher);
+    pol.t_max_expr.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -142,10 +172,11 @@ pub fn evaluate_parametric_curve_3d(
         return Curve3DSamples::new();
     }
     let dt = (t_max - t_min) / steps as f64;
+    let parameter = pc.parameter.as_str();
 
-    let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &["t"]).ok();
-    let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &["t"]).ok();
-    let ast_z = expr::prepare_function_ast(&pc.expr_z, variables, &["t"]).ok();
+    let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &[parameter]).ok();
+    let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &[parameter]).ok();
+    let ast_z = expr::prepare_function_ast(&pc.expr_z, variables, &[parameter]).ok();
     let compiled_x = ast_x
         .is_none()
         .then(|| expr::CompiledExpr::new(&pc.expr_x, variables).ok())
@@ -165,29 +196,29 @@ pub fn evaluate_parametric_curve_3d(
             let t = t_min + i as f64 * dt;
             let x = ast_x
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
                 .or_else(|| {
                     compiled_x
                         .as_ref()
-                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                        .and_then(|c| c.eval_at(parameter, t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
             let y = ast_y
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
                 .or_else(|| {
                     compiled_y
                         .as_ref()
-                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                        .and_then(|c| c.eval_at(parameter, t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
             let z = ast_z
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
                 .or_else(|| {
                     compiled_z
                         .as_ref()
-                        .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
+                        .and_then(|c| c.eval_at(parameter, t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
             (x, y, z)
@@ -311,7 +342,7 @@ pub fn evaluate_surface_3d(
                         "v",
                         v,
                     );
-                    row.push(Point3D::new(x, z, y));
+                    row.push(Point3D::new(x, y, z));
                 }
                 row
             })
@@ -356,7 +387,7 @@ pub fn evaluate_surface_3d(
                         Ok(fz) if fz.re.is_finite() && fz.im.is_finite() => fz.norm(),
                         _ => 0.0,
                     };
-                    row.push(Point3D::new(x, z, y));
+                    row.push(surf.explicit_sample_point(x, y, z));
                 }
                 row
             })
@@ -379,7 +410,7 @@ pub fn evaluate_surface_3d(
                 let vars = [("x".to_string(), x), ("y".to_string(), y)];
                 let z =
                     eval_ast_or_compiled(ast.as_ref(), compiled.as_ref(), &vars, "x", x, "y", y);
-                row.push(Point3D::new(x, z, y));
+                row.push(surf.explicit_sample_point(x, y, z));
             }
             row
         })
@@ -397,6 +428,7 @@ pub fn samples_or_compute_curve_2d<'a>(
     let key = ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: curve_2d_expr_hash(pc),
         variables_hash: variables_hash(variables),
     };
     {
@@ -438,6 +470,7 @@ pub fn samples_or_compute_curve_3d<'a>(
     let key = ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: curve_3d_expr_hash(pc),
         variables_hash: variables_hash(variables),
     };
     {
@@ -479,6 +512,7 @@ pub fn samples_or_compute_polar<'a>(
     let key = ParametricCacheKey {
         t_domain: (t_min, t_max),
         steps,
+        expr_hash: polar_expr_hash(pol),
         variables_hash: variables_hash(variables),
     };
     {

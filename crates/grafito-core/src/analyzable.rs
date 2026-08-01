@@ -57,11 +57,13 @@ pub fn analyze_object(
 
     match obj {
         GeoObject::Function(f) => analyze_function(&f.expr, vars, &opts),
-        GeoObject::Line(l) => analyze_line(l.start, l.end, features),
+        GeoObject::Line(l) => analyze_line(l.start, l.end, l.kind, features),
         GeoObject::Circle(c) => analyze_circle(c.center, c.radius, features),
         GeoObject::Ellipse(e) => analyze_ellipse(e.center, e.rx, e.ry, e.angle, features),
-        GeoObject::Parabola(p) => analyze_parabola(p.vertex, p.p, features),
-        GeoObject::Hyperbola(h) => analyze_hyperbola(h.center, h.a, h.b, h.horizontal, features),
+        GeoObject::Parabola(p) => analyze_parabola(p.vertex, p.p, p.angle, features),
+        GeoObject::Hyperbola(h) => {
+            analyze_hyperbola(h.center, h.a, h.b, h.horizontal, h.angle, features)
+        }
         GeoObject::Polygon(p) => analyze_polygon(&p.vertices, features),
         GeoObject::ParametricCurve2D(c) => {
             // Muestreo + bisección rápida para encontrar el t más cercano.
@@ -94,18 +96,7 @@ pub fn evaluate_curve_at(
             grafito_geometry::expr::eval_function_with_vars(&f.expr, world.x, vars).ok()
         }
         GeoObject::Circle(c) => Some(c.center.distance(&world) - c.radius),
-        GeoObject::Line(l) => {
-            // distancia con signo usando el producto cruzado normalizado.
-            let dx = l.end.x - l.start.x;
-            let dy = l.end.y - l.start.y;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 1e-12 {
-                return None;
-            }
-            let nx = -dy / len;
-            let ny = dx / len;
-            Some((world.x - l.start.x) * nx + (world.y - l.start.y) * ny)
-        }
+        GeoObject::Line(l) => Some(l.distance_to_point(world)),
         GeoObject::Pencil(p) => {
             // Distancia con signo al segmento contiguo más cercano. Devuelve
             // `Some(dist)` siempre que haya al menos un punto.
@@ -196,7 +187,7 @@ pub fn quick_analysis_features() -> Vec<AnalysisFeature> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CircleObj, LineObj, PointObj, PolygonObj};
+    use crate::{CircleObj, LineKind, LineObj, ParabolaObj, PointObj, PolygonObj};
 
     fn empty_vars() -> HashMap<String, f64> {
         HashMap::new()
@@ -248,6 +239,42 @@ mod tests {
         );
         assert!(r.iter().any(|x| x.feature == AnalysisFeature::XIntercept));
         assert!(r.iter().any(|x| x.feature == AnalysisFeature::YIntercept));
+    }
+
+    #[test]
+    fn line_analysis_preserves_segment_ray_and_line_domains() {
+        let features = [AnalysisFeature::XIntercept, AnalysisFeature::YIntercept];
+        let start = Point2::new(1.0, 1.0);
+        let end = Point2::new(2.0, 2.0);
+
+        for kind in [LineKind::Segment, LineKind::Ray] {
+            let line = GeoObject::Line(LineObj::new_with_kind(start, end, kind));
+            assert!(analyze_object(&line, bounds(), &empty_vars(), &features).is_empty());
+        }
+
+        let line = GeoObject::Line(LineObj::new_with_kind(start, end, LineKind::Line));
+        let results = analyze_object(&line, bounds(), &empty_vars(), &features);
+        assert!(results
+            .iter()
+            .any(|result| result.point == Point2::new(0.0, 0.0)));
+    }
+
+    #[test]
+    fn conic_analysis_preserves_parabola_rotation() {
+        let mut parabola = ParabolaObj::new(Point2::new(0.0, 0.0), 1.0);
+        parabola.angle = std::f64::consts::FRAC_PI_4;
+        let object = GeoObject::Parabola(parabola);
+        let results = analyze_object(
+            &object,
+            bounds(),
+            &empty_vars(),
+            &[AnalysisFeature::YIntercept],
+        );
+
+        assert!(results.iter().any(|result| {
+            result.feature == AnalysisFeature::YIntercept
+                && (result.point.y - 4.0 * 2.0_f64.sqrt()).abs() < 1e-12
+        }));
     }
 
     #[test]

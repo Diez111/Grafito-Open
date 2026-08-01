@@ -236,6 +236,8 @@ pub struct Color {
 impl Color {
     pub const BLACK: Self = Self::new(0.0, 0.0, 0.0, 1.0);
     pub const WHITE: Self = Self::new(1.0, 1.0, 1.0, 1.0);
+    /// Trazo neutro visible sobre canvas claros y oscuros.
+    pub const DEFAULT_STROKE: Self = Self::new(0.45, 0.48, 0.55, 1.0);
     pub const RED: Self = Self::new(0.9, 0.2, 0.2, 1.0);
     pub const GREEN: Self = Self::new(0.2, 0.8, 0.2, 1.0);
     pub const BLUE: Self = Self::new(0.2, 0.4, 0.9, 1.0);
@@ -276,6 +278,13 @@ mod tests {
         let s = v.world_to_screen(Point2::new(0.0, 0.0));
         assert_eq!(s.x, 350.0);
         assert_eq!(s.y, 300.0);
+    }
+
+    #[test]
+    fn default_stroke_is_not_black() {
+        let default_stroke = Color::DEFAULT_STROKE.to_array();
+        assert_ne!(default_stroke, Color::BLACK.to_array());
+        assert!(default_stroke[0] > 0.4);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Covers 2D/3D drag, pan, zoom, selection, tool clicks, and the transient
 //! tool-ghost preview that follows the pointer.
 
-use crate::{GrafitoApp, PendingAction};
+use crate::{tool_dispatcher::ToolState, GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
@@ -11,7 +11,7 @@ use grafito_core::{
     Point3DObj, PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality,
     VectorField2DObj,
 };
-use grafito_geometry::{Camera3D, Point2, Point3D};
+use grafito_geometry::{Point2, Point3D};
 use grafito_ui::Tool;
 use std::time::Instant;
 
@@ -32,6 +32,48 @@ fn snap_world_to_grid(world: Point2, scale: f64) -> Point2 {
         (world.x / major_step).round() * major_step,
         (world.y / major_step).round() * major_step,
     )
+}
+
+/// Los objetos que se construyen sobre el plano de construcción muestran una
+/// previsualización en la posición del puntero. Los politopos proyectados se
+/// crean centrados, por lo que deliberadamente no usan este fantasma.
+pub(crate) const fn uses_3d_position_ghost(tool: Tool) -> bool {
+    matches!(
+        tool,
+        Tool::Point3D
+            | Tool::Segment3D
+            | Tool::Line3D
+            | Tool::Plane3D
+            | Tool::Sphere3D
+            | Tool::Cube3D
+            | Tool::Cylinder3D
+            | Tool::Cone3D
+            | Tool::Torus3D
+            | Tool::MoebiusStrip
+            | Tool::Surface3D
+            | Tool::ParametricCurve3D
+            | Tool::VectorField3D
+            | Tool::HyperSurface4D
+    )
+}
+
+pub(crate) fn cancel_locus_selection(state: &mut ToolState) {
+    state.driver = None;
+}
+
+pub(crate) fn canvas_local_pointer(canvas_rect: Rect, pointer: egui::Pos2) -> Option<Vec2> {
+    let size = canvas_rect.size();
+    if !pointer.x.is_finite()
+        || !pointer.y.is_finite()
+        || !size.is_finite()
+        || size.x <= 0.0
+        || size.y <= 0.0
+        || !canvas_rect.contains(pointer)
+    {
+        return None;
+    }
+    let local = pointer - canvas_rect.min;
+    local.is_finite().then_some(local)
 }
 
 impl GrafitoApp {
@@ -67,16 +109,21 @@ impl GrafitoApp {
                 // Clic simple: borrar el objeto bajo el cursor (si hay).
                 let tolerance = 10.0 / self.document.view().scale;
                 if let Some(id) = self.document.pick_object(world, tolerance) {
-                    self.save_state();
-                    self.document.remove_object(id);
-                    if self.selected_object == Some(id) {
+                    let mut stroke_has_mutated = false;
+                    if crate::app::erase_object_for_stroke(
+                        &mut self.document,
+                        id,
+                        &mut stroke_has_mutated,
+                        &mut self.undo_stack,
+                        &mut self.redo_stack,
+                    ) && self.selected_object == Some(id)
+                    {
                         self.selected_object = None;
                     }
                 }
             }
             Tool::Point => {
-                self.save_state();
-                self.add_object_logged(GeoObject::Point(PointObj::new(world)), "Point");
+                self.insert_object_from_tool(GeoObject::Point(PointObj::new(world)), "Point", time);
                 self.tool_ghost = None;
             }
             Tool::Line => {
@@ -84,8 +131,7 @@ impl GrafitoApp {
                 if self.tool_state.pending.len() == 2 {
                     let a = self.tool_state.pending[0];
                     let b = self.tool_state.pending[1];
-                    self.save_state();
-                    self.add_object_logged(GeoObject::Line(LineObj::new(a, b)), "Line");
+                    self.insert_object_from_tool(GeoObject::Line(LineObj::new(a, b)), "Line", time);
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
                 }
@@ -96,10 +142,10 @@ impl GrafitoApp {
                     let center = self.tool_state.pending[0];
                     let edge = self.tool_state.pending[1];
                     let radius = center.distance(&edge);
-                    self.save_state();
-                    self.add_object_logged(
+                    self.insert_object_from_tool(
                         GeoObject::Circle(CircleObj::new(center, radius)),
                         "Circle",
+                        time,
                     );
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
@@ -114,10 +160,10 @@ impl GrafitoApp {
             }
             Tool::Point3D => {
                 let p3 = Point3D::new(world.x, world.y, 0.0);
-                self.save_state();
-                self.add_object_logged(
+                self.insert_object_from_tool(
                     GeoObject::Point3D(grafito_core::Point3DObj::new(p3)),
                     "Point3D",
+                    time,
                 );
                 self.tool_ghost = None;
             }
@@ -128,10 +174,10 @@ impl GrafitoApp {
                     let center = self.pending_points_3d[0];
                     let edge = self.pending_points_3d[1];
                     let radius = center.distance(&edge);
-                    self.save_state();
-                    self.add_object_logged(
+                    self.insert_object_from_tool(
                         GeoObject::Sphere3D(grafito_core::Sphere3DObj::new(center, radius)),
                         "Sphere3D",
+                        time,
                     );
                     self.pending_points_3d.clear();
                     self.tool_ghost = None;
@@ -144,14 +190,18 @@ impl GrafitoApp {
                     let p1 = self.pending_points_3d[0];
                     let p2 = self.pending_points_3d[1];
                     let size = p1.distance(&p2);
-                    self.save_state();
-                    self.add_object_logged(
+                    self.insert_object_from_tool(
                         GeoObject::Cube3D(grafito_core::Cube3DObj::new(p1, size)),
                         "Cube3D",
+                        time,
                     );
                     self.pending_points_3d.clear();
                     self.tool_ghost = None;
                 }
+            }
+            Tool::Tesseract4D | Tool::Hypercube5D => {
+                // Los politopos tipados solo se crean desde `handle_3d_click`.
+                self.tool_ghost = None;
             }
             Tool::Attractor => {
                 self.execute_command_and_record("Lorenz[]", time);
@@ -244,12 +294,20 @@ impl GrafitoApp {
             | Tool::VectorField2D => {
                 let tool_name = self.current_tool.name();
                 let mut state = self.tool_state.clone();
+                let before = self.document.clone();
+                let mut staged = self.document.detached_clone_for_staging();
                 let result = crate::tool_dispatcher::dispatch_tool(
                     self.current_tool,
                     &mut state,
-                    &mut self.document,
+                    &mut staged,
                     world,
                 );
+                let outcome = state.last_outcome.take();
+                let inserted = result
+                    .objects
+                    .into_iter()
+                    .map(|object| staged.try_add_object(object))
+                    .collect::<Result<Vec<_>, _>>();
                 self.tool_state = state;
                 if result.reset_tool {
                     self.current_tool = Tool::Select;
@@ -257,11 +315,43 @@ impl GrafitoApp {
                 if let Some(msg) = result.message {
                     self.cas_result = msg;
                 }
-                if let Some(outcome) = self.tool_state.last_outcome.take() {
+                let command_failed = matches!(
+                    outcome.as_ref(),
+                    Some(grafito_command::commands::CommandOutcome::Error(_))
+                );
+                let insertion_error = match inserted {
+                    Ok(ids) => {
+                        if !command_failed
+                            && crate::app::documents_semantically_differ(&before, &staged)
+                        {
+                            staged.version = before.version.wrapping_add(1);
+                            self.document = staged;
+                            self.save_snapshot(before);
+                            let outputs = ids
+                                .iter()
+                                .filter_map(|id| {
+                                    self.document
+                                        .get_object(*id)
+                                        .map(|object| object.label().to_string())
+                                })
+                                .collect::<Vec<_>>();
+                            for output in outputs {
+                                self.record_construction_step(tool_name, Vec::new(), &output);
+                            }
+                        }
+                        None
+                    }
+                    Err(error) => Some(error),
+                };
+                if let Some(outcome) = outcome {
                     self.handle_command_outcome(outcome, time, tool_name);
                 }
-                for obj in result.objects {
-                    self.add_object_logged(obj, tool_name);
+                if let Some(error) = insertion_error {
+                    self.handle_command_outcome(
+                        grafito_command::commands::CommandOutcome::Error(error),
+                        time,
+                        tool_name,
+                    );
                 }
             }
             Tool::Coincident
@@ -366,6 +456,9 @@ impl GrafitoApp {
             Tool::Cube3D => {
                 self.tool_ghost = Some(GeoObject::Point(PointObj::new(world)));
             }
+            Tool::Tesseract4D | Tool::Hypercube5D => {
+                // La creación no depende de una posición 2D.
+            }
             Tool::Angle if pts.len() == 1 => {
                 self.tool_ghost = Some(GeoObject::Line(LineObj::new(pts[0], world)));
             }
@@ -417,7 +510,14 @@ impl GrafitoApp {
             Tool::VectorField2D => {
                 self.tool_ghost = Some(GeoObject::VectorField2D(VectorField2DObj::new("x", "y")));
             }
-            Tool::Locus => {}
+            Tool::Locus => {
+                if let Some(driver) = self.tool_state.driver {
+                    if let Some(GeoObject::Point(point)) = self.document.get_object(driver) {
+                        self.tool_ghost =
+                            Some(GeoObject::Line(LineObj::new(point.position, world)));
+                    }
+                }
+            }
             Tool::Eraser => {
                 // El borrador muestra un anillo de tamaño variable según la
                 // tolerancia de selección; no dibuja objetos.
@@ -434,9 +534,6 @@ impl GrafitoApp {
         const CLICK_THRESHOLD: f32 = 3.0;
 
         let response = ui.interact(canvas_rect, ui.id().with("canvas"), Sense::click_and_drag());
-
-        self.document.view_mut().screen_size =
-            GlamVec2::new(canvas_rect.width(), canvas_rect.height());
 
         let space_pressed = ui.input(|i| i.key_down(egui::Key::Space));
         let pointer = ui.input(|i| i.pointer.clone());
@@ -456,9 +553,40 @@ impl GrafitoApp {
             puffin::profile_scope!("input_drag_start");
             self.canvas_drag_start = current_pos;
             self.canvas_is_panning = false;
+            self.point_drag_has_mutated = false;
+            self.eraser_stroke_has_mutated = false;
+            if self.current_tool == Tool::Eraser {
+                self.tool_state.last_erased = None;
+            }
+            self.point_drag_error_reported = false;
+            self.select_drag_object = None;
             self.is_view_changing = true;
             self.last_interaction_time = Instant::now();
             self.document.render_quality = RenderQuality::Preview;
+
+            if self.current_tool == Tool::Select
+                && response.drag_started_by(PointerButton::Primary)
+                && !space_pressed
+            {
+                if let Some(pos) = current_pos {
+                    let local = pos - canvas_rect.min;
+                    let world = self
+                        .document
+                        .view()
+                        .screen_to_world(GlamVec2::new(local.x, local.y));
+                    let tolerance = 10.0 / self.document.view().scale;
+                    self.select_drag_object = crate::app::captured_select_drag_object(
+                        &mut self.document,
+                        world,
+                        tolerance,
+                    );
+                    if let Some(id) = self.select_drag_object {
+                        self.document.clear_selection();
+                        self.document.select(id);
+                        self.selected_object = Some(id);
+                    }
+                }
+            }
 
             // Inicio de Pencil: crear el PencilObj directamente en el
             // documento con el primer punto. De este modo el usuario ve
@@ -471,7 +599,6 @@ impl GrafitoApp {
                 && !space_pressed
                 && self.tool_state.drawing_pencil.is_none()
             {
-                self.save_state();
                 if let Some(pos) = current_pos {
                     let local = pos - canvas_rect.min;
                     let world = self
@@ -481,8 +608,12 @@ impl GrafitoApp {
                     let mut pencil = PencilObj::new(vec![world]);
                     pencil.color = self.color_favorites[0];
                     pencil.width = 2.0;
-                    let id = self.add_object_logged(GeoObject::Pencil(pencil), "Pencil");
-                    self.tool_state.drawing_pencil = Some(id);
+                    let id = self.insert_object_from_tool(
+                        GeoObject::Pencil(pencil),
+                        "Pencil",
+                        ui.ctx().input(|input| input.time),
+                    );
+                    self.tool_state.drawing_pencil = id;
                 }
             }
         }
@@ -505,7 +636,6 @@ impl GrafitoApp {
             && self.tool_state.drawing_pencil.is_none()
             && self.current_tool == Tool::Pencil
         {
-            self.save_state();
             if let Some(pos) = current_pos {
                 let local = pos - canvas_rect.min;
                 let world = self
@@ -515,8 +645,12 @@ impl GrafitoApp {
                 let mut pencil = PencilObj::new(vec![world]);
                 pencil.color = self.color_favorites[0];
                 pencil.width = 2.0;
-                let id = self.add_object_logged(GeoObject::Pencil(pencil), "Pencil");
-                self.tool_state.drawing_pencil = Some(id);
+                let id = self.insert_object_from_tool(
+                    GeoObject::Pencil(pencil),
+                    "Pencil",
+                    ui.ctx().input(|input| input.time),
+                );
+                self.tool_state.drawing_pencil = id;
                 self.is_view_changing = true;
             }
         }
@@ -576,8 +710,8 @@ impl GrafitoApp {
         else if response.dragged_by(PointerButton::Primary) {
             let moving_point = self.current_tool == Tool::Select
                 && self
-                    .selected_object
-                    .map(|id| self.document.is_free_object(&id))
+                    .select_drag_object
+                    .map(|id| crate::app::is_free_point(&self.document, id))
                     .unwrap_or(false);
             let drawing = drawing_tool;
             if !moving_point && !drawing {
@@ -652,9 +786,15 @@ impl GrafitoApp {
                     .screen_to_world(GlamVec2::new(local.x, local.y));
                 let tolerance = 10.0 / self.document.view().scale;
                 if let Some(id) = self.document.pick_object(world, tolerance) {
-                    if self.tool_state.last_erased != Some(id) {
-                        self.save_state();
-                        self.document.remove_object(id);
+                    if self.tool_state.last_erased != Some(id)
+                        && crate::app::erase_object_for_stroke(
+                            &mut self.document,
+                            id,
+                            &mut self.eraser_stroke_has_mutated,
+                            &mut self.undo_stack,
+                            &mut self.redo_stack,
+                        )
+                    {
                         if self.selected_object == Some(id) {
                             self.selected_object = None;
                         }
@@ -670,7 +810,7 @@ impl GrafitoApp {
             && self.current_tool == Tool::Select
             && response.dragged_by(PointerButton::Primary)
         {
-            if let (Some(sel_id), Some(pos)) = (self.selected_object, current_pos) {
+            if let (Some(sel_id), Some(pos)) = (self.select_drag_object, current_pos) {
                 if self.document.is_free_object(&sel_id) {
                     let local = pos - canvas_rect.min;
                     let mut world = self
@@ -680,12 +820,32 @@ impl GrafitoApp {
                     if self.snap_to_grid {
                         world = snap_world_to_grid(world, self.document.view().scale);
                     }
-                    if response.drag_started_by(PointerButton::Primary) {
-                        self.save_state();
+                    let before = (!self.point_drag_has_mutated
+                        && crate::app::free_point_position_differs(&self.document, sel_id, world))
+                    .then(|| self.document.clone());
+                    let version_before = self.document.version;
+                    match self.document.try_move_point_and_re_evaluate(sel_id, world) {
+                        Ok(true) => {
+                            if let Some(before) = before {
+                                self.save_snapshot(before);
+                            }
+                            self.point_drag_has_mutated = true;
+                            crate::app::refresh_direct_document_change(
+                                &mut self.document,
+                                version_before,
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) if !self.point_drag_error_reported => {
+                            self.point_drag_error_reported = true;
+                            self.handle_command_outcome(
+                                grafito_command::commands::CommandOutcome::Error(error),
+                                ui.ctx().input(|input| input.time),
+                                "Mover punto",
+                            );
+                        }
+                        Err(_) => {}
                     }
-                    self.document.move_point(sel_id, world);
-                    let order = self.document.propagation_order(&[sel_id]);
-                    self.re_evaluate_constraints(&order);
                 }
             }
         }
@@ -786,10 +946,16 @@ impl GrafitoApp {
                 self.current_tool = Tool::Select;
                 return;
             }
-            if self.current_tool == Tool::Polygon && self.tool_state.pending.len() >= 3 {
-                self.save_state();
+            if self.current_tool == Tool::Locus && self.tool_state.driver.is_some() {
+                cancel_locus_selection(&mut self.tool_state);
+                self.tool_ghost = None;
+            } else if self.current_tool == Tool::Polygon && self.tool_state.pending.len() >= 3 {
                 let vertices = self.tool_state.pending.clone();
-                self.add_object_logged(GeoObject::Polygon(PolygonObj::new(vertices)), "Polygon");
+                self.insert_object_from_tool(
+                    GeoObject::Polygon(PolygonObj::new(vertices)),
+                    "Polygon",
+                    ui.ctx().input(|input| input.time),
+                );
                 self.tool_state.pending.clear();
                 self.tool_ghost = None;
             } else if !self.tool_state.pending.is_empty() {
@@ -863,6 +1029,10 @@ impl GrafitoApp {
             }
             self.canvas_is_panning = false;
             self.canvas_drag_start = None;
+            self.point_drag_has_mutated = false;
+            self.select_drag_object = None;
+            self.point_drag_error_reported = false;
+            self.eraser_stroke_has_mutated = false;
         }
 
         // ── Finalizar Pencil/Eraser cuando se suelta el botón (caso touch
@@ -893,6 +1063,7 @@ impl GrafitoApp {
             // Eraser: al soltar el botón, limpiamos `last_erased` para
             // permitir borrar el mismo objeto en un trazo posterior.
             self.tool_state.last_erased = None;
+            self.eraser_stroke_has_mutated = false;
         }
 
         // Keep last known position for external consumers (status bar, etc.)
@@ -1073,7 +1244,12 @@ fn point_inside_polygon(p: Point2, vertices: &[Point2]) -> bool {
 }
 
 impl GrafitoApp {
-    pub(crate) fn handle_canvas_3d_input(&mut self, ui: &mut egui::Ui, canvas_rect: egui::Rect) {
+    pub(crate) fn handle_canvas_3d_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        canvas_rect: egui::Rect,
+        typed_four_d_phase: Option<f64>,
+    ) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("input_canvas_3d");
 
@@ -1093,7 +1269,12 @@ impl GrafitoApp {
                     ui.close_menu();
                 }
                 if ui.button("Reiniciar vista").clicked() {
-                    self.camera = Camera3D::new(w / h.max(1.0));
+                    crate::app::reset_3d_view_and_pause_motion(
+                        &mut self.camera,
+                        w,
+                        h,
+                        &mut self.multidimensional_motion_enabled,
+                    );
                     ui.close_menu();
                 }
             });
@@ -1136,6 +1317,7 @@ impl GrafitoApp {
             #[cfg(feature = "profile")]
             puffin::profile_scope!("input_orbit");
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            self.pause_multidimensional_motion();
             let delta = response.drag_delta();
             self.camera.orbit(delta.x * 0.005, delta.y * 0.005);
         }
@@ -1153,6 +1335,7 @@ impl GrafitoApp {
                 response.drag_delta()
             };
             if delta != egui::Vec2::ZERO {
+                self.pause_multidimensional_motion();
                 self.is_view_changing = true;
                 self.last_interaction_time = Instant::now();
                 self.document.render_quality = RenderQuality::Preview;
@@ -1167,6 +1350,7 @@ impl GrafitoApp {
             if sc.y != 0.0 {
                 #[cfg(feature = "profile")]
                 puffin::profile_scope!("input_zoom");
+                self.pause_multidimensional_motion();
                 self.is_view_changing = true;
                 self.last_interaction_time = Instant::now();
                 self.document.render_quality = RenderQuality::Preview;
@@ -1176,26 +1360,17 @@ impl GrafitoApp {
 
         // Tool ghost for 3D mode
         self.tool_ghost = None;
-        if matches!(
-            self.current_tool,
-            Tool::Point3D
-                | Tool::Segment3D
-                | Tool::Line3D
-                | Tool::Plane3D
-                | Tool::Sphere3D
-                | Tool::Cube3D
-                | Tool::Cylinder3D
-                | Tool::Cone3D
-                | Tool::Torus3D
-                | Tool::MoebiusStrip
-                | Tool::Surface3D
-                | Tool::ParametricCurve3D
-                | Tool::VectorField3D
-                | Tool::HyperSurface4D
-        ) {
-            let t = self.camera.target;
-            let ghost_pos = Point3D::new(t.x as f64, t.y as f64, t.z as f64);
-            self.tool_ghost = Some(GeoObject::Point3D(Point3DObj::new(ghost_pos)));
+        if uses_3d_position_ghost(self.current_tool) {
+            if let Some(local) = current_pos.and_then(|pos| canvas_local_pointer(canvas_rect, pos))
+            {
+                if let Some(ghost_pos) = crate::render_3d::construction_point_from_canvas(
+                    &self.camera,
+                    local,
+                    canvas_rect.size(),
+                ) {
+                    self.tool_ghost = Some(GeoObject::Point3D(Point3DObj::new(ghost_pos)));
+                }
+            }
         }
 
         if let Some(pos) = current_pos {
@@ -1209,12 +1384,36 @@ impl GrafitoApp {
 
         // 3D object placement: only on real clicks, not drags
         let is_click = !self.canvas_is_panning && drag_distance <= 3.0;
-        if response.clicked_by(egui::PointerButton::Primary)
-            && is_click
-            && self.current_tool != Tool::Select
-        {
-            self.handle_3d_click(ui, &response, canvas_rect, w, h);
-            self.tool_ghost = None;
+        if response.clicked_by(egui::PointerButton::Primary) && is_click {
+            if let Some(local) = current_pos.and_then(|pos| canvas_local_pointer(canvas_rect, pos))
+            {
+                if self.current_tool == Tool::Select {
+                    match typed_four_d_phase {
+                        Some(phase) => {
+                            crate::render_3d::select_3d_object_at_pointer_with_typed_four_d_phase(
+                                &mut self.document,
+                                &mut self.selected_object,
+                                &self.camera,
+                                local,
+                                canvas_rect.size(),
+                                Some(phase),
+                            );
+                        }
+                        None => {
+                            crate::render_3d::select_3d_object_at_pointer(
+                                &mut self.document,
+                                &mut self.selected_object,
+                                &self.camera,
+                                local,
+                                canvas_rect.size(),
+                            );
+                        }
+                    }
+                } else {
+                    self.handle_3d_click(ui, local, canvas_rect.size());
+                    self.tool_ghost = None;
+                }
+            }
         }
     }
 }

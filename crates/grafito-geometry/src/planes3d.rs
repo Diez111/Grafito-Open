@@ -25,29 +25,18 @@ impl Plane3D {
 
     /// Crea un plano a partir de tres puntos no colineales.
     pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Self {
-        let v1 = Vec3::new(
-            (p2.x - p1.x) as f32,
-            (p2.y - p1.y) as f32,
-            (p2.z - p1.z) as f32,
-        );
-        let v2 = Vec3::new(
-            (p3.x - p1.x) as f32,
-            (p3.y - p1.y) as f32,
-            (p3.z - p1.z) as f32,
-        );
-        let n = v1.cross(v2);
-        let a = n.x as f64;
-        let b = n.y as f64;
-        let c = n.z as f64;
-        let d = -(a * p1.x + b * p1.y + c * p1.z);
-        Self { a, b, c, d }
+        let v1 = (p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
+        let v2 = (p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
+        Self::from_point_and_normal_f64(p1, cross3(v1, v2))
     }
 
     /// Crea un plano a partir de un punto y un vector normal.
     pub fn from_point_and_normal(point: Point3D, normal: Vec3) -> Self {
-        let a = normal.x as f64;
-        let b = normal.y as f64;
-        let c = normal.z as f64;
+        Self::from_point_and_normal_f64(point, (normal.x as f64, normal.y as f64, normal.z as f64))
+    }
+
+    fn from_point_and_normal_f64(point: Point3D, normal: (f64, f64, f64)) -> Self {
+        let (a, b, c) = normal;
         let d = -(a * point.x + b * point.y + c * point.z);
         Self { a, b, c, d }
     }
@@ -350,10 +339,7 @@ pub fn plane_through_lines(l1: Line3D, l2: Line3D, eps: f64) -> PlaneThroughLine
             if dot3(n, n) <= eps * eps {
                 PlaneThroughLines::CoincidentLines
             } else {
-                PlaneThroughLines::Plane(Plane3D::from_point_and_normal(
-                    p,
-                    Vec3::new(n.0 as f32, n.1 as f32, n.2 as f32),
-                ))
+                PlaneThroughLines::Plane(Plane3D::from_point_and_normal_f64(p, n))
             }
         }
         LineLineRelation::ParallelDistinct => {
@@ -362,10 +348,7 @@ pub fn plane_through_lines(l1: Line3D, l2: Line3D, eps: f64) -> PlaneThroughLine
             if dot3(n, n) <= eps * eps {
                 PlaneThroughLines::CoincidentLines
             } else {
-                PlaneThroughLines::Plane(Plane3D::from_point_and_normal(
-                    l1.point,
-                    Vec3::new(n.0 as f32, n.1 as f32, n.2 as f32),
-                ))
+                PlaneThroughLines::Plane(Plane3D::from_point_and_normal_f64(l1.point, n))
             }
         }
         LineLineRelation::Coincident => PlaneThroughLines::CoincidentLines,
@@ -477,6 +460,17 @@ mod tests {
         assert!((plane.b).abs() < 1e-10);
         assert!((plane.c.abs() - 1.0).abs() < 1e-10);
         assert!((plane.d).abs() < 1e-10);
+    }
+
+    #[test]
+    fn plane_from_three_points_keeps_large_f64_cross_products_finite() {
+        let plane = Plane3D::from_three_points(
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0e20, 0.0, 0.0),
+            Point3D::new(0.0, 1.0e20, 0.0),
+        );
+        assert!(plane.a.is_finite() && plane.b.is_finite() && plane.c.is_finite());
+        assert!(plane.distance_to_point(Point3D::new(1.0e20, 0.0, 0.0)) < 1e-9);
     }
 
     #[test]

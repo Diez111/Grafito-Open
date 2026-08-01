@@ -279,12 +279,21 @@ fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option
                     let s2 = Point2::new(l2.start.x, l2.start.y);
                     let e2 = Point2::new(l2.end.x, l2.end.y);
                     extract_points(line_line(s1, e1, s2, e2))
+                        .into_iter()
+                        .filter(|point| {
+                            l1.kind_contains_t(l1.param_at_point(*point))
+                                && l2.kind_contains_t(l2.param_at_point(*point))
+                        })
+                        .collect()
                 }
                 (GeoObject::Line(l), GeoObject::Circle(c))
                 | (GeoObject::Circle(c), GeoObject::Line(l)) => {
                     let s = Point2::new(l.start.x, l.start.y);
                     let e = Point2::new(l.end.x, l.end.y);
                     extract_points(line_circle(s, e, c.center, c.radius))
+                        .into_iter()
+                        .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
+                        .collect()
                 }
                 (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
                     extract_points(circle_circle(c1.center, c1.radius, c2.center, c2.radius))
@@ -295,14 +304,27 @@ fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option
                     let e = Point2::new(l.end.x, l.end.y);
                     let dx = e.x - s.x;
                     let dy = e.y - s.y;
-                    if dx.abs() < 1e-12 {
-                        continue;
-                    }
-                    let slope = dy / dx;
-                    let intercept = s.y - slope * s.x;
-                    let x_min = s.x.min(e.x) - 5.0;
-                    let x_max = s.x.max(e.x) + 5.0;
-                    function_line(&f.expr, slope, intercept, x_min, x_max)
+                    let points = if dx.abs() < 1e-12 {
+                        grafito_geometry::expr::eval_function_with_vars(
+                            &f.expr,
+                            s.x,
+                            &document.variables,
+                        )
+                        .ok()
+                        .filter(|y| y.is_finite())
+                        .map(|y| vec![Point2::new(s.x, y)])
+                        .unwrap_or_default()
+                    } else {
+                        let slope = dy / dx;
+                        let intercept = s.y - slope * s.x;
+                        let x_min = s.x.min(e.x) - 5.0;
+                        let x_max = s.x.max(e.x) + 5.0;
+                        function_line(&f.expr, slope, intercept, x_min, x_max)
+                    };
+                    points
+                        .into_iter()
+                        .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
+                        .collect()
                 }
                 (GeoObject::Function(f1), GeoObject::Function(f2)) => {
                     function_function(&f1.expr, &f2.expr, -20.0, 20.0)
@@ -387,14 +409,18 @@ fn snap_to_curve(
                     let len2 = dx * dx + dy * dy;
                     if len2 > 1e-20 {
                         let t = ((world.x - start.x) * dx + (world.y - start.y) * dy) / len2;
+                        let t = l.kind.clamp_t(t);
                         let px = start.x + t * dx;
                         let py = start.y + t * dy;
-                        return Some(SnapResult {
-                            point: Point2::new(px, py),
-                            kind: SnapKind::Curve,
-                            feature: None,
-                            label: format!("({:.3}, {:.3})", px, py),
-                        });
+                        let point = Point2::new(px, py);
+                        if point.distance(&world) * view_scale <= tol_screen {
+                            return Some(SnapResult {
+                                point,
+                                kind: SnapKind::Curve,
+                                feature: None,
+                                label: format!("({:.3}, {:.3})", px, py),
+                            });
+                        }
                     }
                 }
             }
@@ -488,7 +514,7 @@ fn snap_to_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafito_core::{Document, FunctionObj, GeoObject, PointObj};
+    use grafito_core::{Document, FunctionObj, GeoObject, LineKind, LineObj, PointObj};
     use grafito_geometry::Point2;
 
     fn empty_doc() -> Document {
@@ -597,5 +623,47 @@ mod tests {
         );
         assert_eq!(r.kind, SnapKind::Object);
         assert!((r.point.x - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn line_snaps_do_not_use_segment_extensions() {
+        let segment = GeoObject::Line(LineObj::new_with_kind(
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            LineKind::Segment,
+        ));
+
+        let mut curve_doc = empty_doc();
+        curve_doc.add_object(segment.clone());
+        assert!(snap_to_curve(Point2::new(2.0, 0.0), &curve_doc, 1.0, 0.1).is_none());
+
+        let mut ray_doc = empty_doc();
+        ray_doc.add_object(GeoObject::Line(LineObj::new_with_kind(
+            Point2::new(1.0, 0.0),
+            Point2::new(2.0, 0.0),
+            LineKind::Ray,
+        )));
+        assert!(snap_to_curve(Point2::new(0.0, 0.0), &ray_doc, 1.0, 0.1).is_none());
+
+        let mut intersection_doc = empty_doc();
+        intersection_doc.add_object(segment);
+        intersection_doc.add_object(GeoObject::Line(LineObj::new_with_kind(
+            Point2::new(2.0, -1.0),
+            Point2::new(2.0, 1.0),
+            LineKind::Line,
+        )));
+
+        assert!(snap_to_intersections(Point2::new(2.0, 0.0), &intersection_doc, 0.1).is_none());
+
+        let mut vertical_doc = empty_doc();
+        vertical_doc.add_object(GeoObject::Function(FunctionObj::new("x".to_string())));
+        vertical_doc.add_object(GeoObject::Line(LineObj::new_with_kind(
+            Point2::new(2.0, 1.0),
+            Point2::new(2.0, 3.0),
+            LineKind::Segment,
+        )));
+        let vertical = snap_to_intersections(Point2::new(2.0, 2.0), &vertical_doc, 0.1)
+            .expect("vertical function-line intersection should snap");
+        assert_eq!(vertical.point, Point2::new(2.0, 2.0));
     }
 }

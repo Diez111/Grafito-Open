@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+grafito-command.workspace = true
+grafito-assistant-types.workspace = true
 
 egui.workspace = true
 log.workspace = true

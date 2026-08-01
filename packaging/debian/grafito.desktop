@@ -1,11 +1,11 @@
 [Desktop Entry]
 Name=Grafito
 Comment=Mathematical function graphing calculator
-Exec=grafito
+Exec=/usr/bin/grafito
 Icon=grafito
 Terminal=false
 Type=Application
-Categories=Graphics;Science;Math;Education;
+Categories=Education;Math;
 Keywords=math;graph;function;calculator;plot;
 StartupNotify=false
-StartupWMClass=Grafito
+StartupWMClass=grafito

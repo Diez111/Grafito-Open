@@ -101,6 +101,8 @@ pub const ICON_XL: f32 = 32.0;
 
 /// Duración estándar de transiciones (ms).
 pub const ANIM_FAST: f32 = 100.0;
+/// Duración de respuestas visuales a hover y selección (ms).
+pub const ANIM_MICRO: f32 = 180.0;
 /// Duración de animaciones de creación/feedback.
 pub const ANIM_NORMAL: f32 = 200.0;
 /// Duración de highlights (e.g. objeto recién creado).
@@ -168,5 +170,12 @@ mod tests {
         assert_eq!(SPACE_LG as i32 % 4, 0);
         assert_eq!(SPACE_XL as i32 % 4, 0);
         assert_eq!(SPACE_XXL as i32 % 4, 0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn micro_interaction_timing_stays_between_fast_and_normal_feedback() {
+        assert!(ANIM_FAST < ANIM_MICRO);
+        assert!(ANIM_MICRO < ANIM_NORMAL);
     }
 }

@@ -1,14 +1,593 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
+/// Máximo de clases que puede generar un histograma para limitar memoria y trabajo.
+pub const MAX_HISTOGRAM_BINS: usize = 4_096;
+/// Máximo grado admitido por la regresión polinómica densa.
+pub const MAX_POLYNOMIAL_REGRESSION_DEGREE: usize = 16;
+/// Máxima cantidad de pares que puede procesar un ajuste local persistente.
+pub const MAX_FIT_DATA_POINTS: usize = 20_000;
+/// Máximo de términos que puede recorrer una CDF discreta por suma directa.
+pub const MAX_DISCRETE_CDF_ITERATIONS: usize = 10_001;
+
+const MIN_SINUSOIDAL_SAMPLES: usize = 4;
+const SINUSOIDAL_FREQUENCY_STEPS: usize = 256;
+const FIT_EPSILON: f64 = 1e-12;
+
+/// Familia de modelo usada por un ajuste local de datos `(x, y)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FitKind {
+    Linear,
+    Polynomial { degree: usize },
+    Exponential,
+    Logarithmic,
+    Power,
+    Sinusoidal,
+}
+
+impl FitKind {
+    /// Cantidad de parámetros esperada en un resultado válido de este modelo.
+    pub fn coefficient_count(self) -> Option<usize> {
+        match self {
+            Self::Linear | Self::Exponential | Self::Logarithmic | Self::Power => Some(2),
+            Self::Polynomial { degree } => degree.checked_add(1),
+            Self::Sinusoidal => Some(4),
+        }
+    }
+
+    /// Nombre corto legible para el panel de datos y los mensajes de comando.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Linear => "lineal",
+            Self::Polynomial { .. } => "polinómico",
+            Self::Exponential => "exponencial",
+            Self::Logarithmic => "logarítmico",
+            Self::Power => "potencia",
+            Self::Sinusoidal => "sinusoidal",
+        }
+    }
+}
+
+/// Diagnósticos de un ajuste expresados en las unidades originales de `y`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FitDiagnostics {
+    pub residuals: Vec<f64>,
+    pub rmse: f64,
+    pub r_squared: f64,
+}
+
+/// Resultado serializable y reproducible de un ajuste local.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FitResult {
+    pub kind: FitKind,
+    pub coefficients: Vec<f64>,
+    /// Centro aplicado a `x` antes de evaluar los modelos que lo requieren.
+    #[serde(default)]
+    pub x_offset: f64,
+    /// Escala positiva aplicada a `x` antes de evaluar los modelos que lo requieren.
+    #[serde(default = "default_fit_x_scale")]
+    pub x_scale: f64,
+    pub diagnostics: FitDiagnostics,
+}
+
+fn default_fit_x_scale() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct XNormalization {
+    offset: f64,
+    scale: f64,
+}
+
+impl XNormalization {
+    const IDENTITY: Self = Self {
+        offset: 0.0,
+        scale: 1.0,
+    };
+}
+
+impl FitResult {
+    /// Evalúa el modelo ajustado en una coordenada `x`.
+    pub fn predict(&self, x: f64) -> f64 {
+        evaluate_fit(
+            self.kind,
+            &self.coefficients,
+            x,
+            XNormalization {
+                offset: self.x_offset,
+                scale: self.x_scale,
+            },
+        )
+        .unwrap_or(f64::NAN)
+    }
+
+    /// Devuelve una expresión compatible con el motor de funciones de Grafito.
+    pub fn expression(&self) -> String {
+        fit_expression(
+            self.kind,
+            &self.coefficients,
+            XNormalization {
+                offset: self.x_offset,
+                scale: self.x_scale,
+            },
+        )
+        .unwrap_or_default()
+    }
+}
+
+/// Ajusta un modelo acotado a pares de datos locales y devuelve sus diagnósticos.
+///
+/// Los residuales y RMSE siempre se calculan en unidades de `y`, incluso para
+/// los modelos que usan una transformación logarítmica interna.
+pub fn fit_xy(kind: FitKind, xs: &[f64], ys: &[f64]) -> Result<FitResult, String> {
+    let minimum_samples = match kind {
+        FitKind::Polynomial { degree } => {
+            if degree == 0 || degree > MAX_POLYNOMIAL_REGRESSION_DEGREE {
+                return Err(format!(
+                    "el grado polinómico debe estar entre 1 y {MAX_POLYNOMIAL_REGRESSION_DEGREE}"
+                ));
+            }
+            degree
+                .checked_add(1)
+                .ok_or_else(|| "el grado polinómico no es representable".to_string())?
+        }
+        FitKind::Sinusoidal => MIN_SINUSOIDAL_SAMPLES,
+        _ => 2,
+    };
+    validate_fit_samples(xs, ys, minimum_samples)?;
+
+    let normalizes_x = matches!(
+        kind,
+        FitKind::Linear | FitKind::Polynomial { .. } | FitKind::Exponential | FitKind::Sinusoidal
+    );
+    let normalization = if normalizes_x {
+        x_normalization(xs)?
+    } else {
+        XNormalization::IDENTITY
+    };
+    let normalized_xs = normalize_xs(xs, normalization)?;
+    let model_xs = if normalizes_x {
+        normalized_xs.as_slice()
+    } else {
+        xs
+    };
+
+    let coefficients = match kind {
+        FitKind::Linear => {
+            let (slope, intercept, _) = linear_regression(model_xs, ys)
+                .ok_or_else(|| "la variación de x no permite un ajuste lineal".to_string())?;
+            vec![slope, intercept]
+        }
+        FitKind::Polynomial { degree } => polynomial_regression(model_xs, ys, degree)
+            .ok_or_else(|| "los datos no permiten ese ajuste polinómico".to_string())?,
+        FitKind::Exponential => {
+            if ys.iter().any(|value| *value <= 0.0) {
+                return Err("el ajuste exponencial requiere valores y positivos".to_string());
+            }
+            let (scale, rate, _) = exponential_regression(model_xs, ys)
+                .ok_or_else(|| "los datos no permiten un ajuste exponencial".to_string())?;
+            vec![scale, rate]
+        }
+        FitKind::Logarithmic => {
+            if xs.iter().any(|value| *value <= 0.0) {
+                return Err("el ajuste logarítmico requiere valores x positivos".to_string());
+            }
+            let (scale, intercept, _) = logarithmic_regression(xs, ys)
+                .ok_or_else(|| "los datos no permiten un ajuste logarítmico".to_string())?;
+            vec![scale, intercept]
+        }
+        FitKind::Power => {
+            if xs.iter().any(|value| *value <= 0.0) || ys.iter().any(|value| *value <= 0.0) {
+                return Err("el ajuste de potencia requiere valores x e y positivos".to_string());
+            }
+            let (scale, exponent, _) = power_regression(xs, ys)
+                .ok_or_else(|| "los datos no permiten un ajuste de potencia".to_string())?;
+            vec![scale, exponent]
+        }
+        FitKind::Sinusoidal => sinusoidal_regression(model_xs, ys)?,
+    };
+
+    if coefficients.iter().any(|value| !value.is_finite()) {
+        return Err("el ajuste produjo parámetros no finitos".to_string());
+    }
+    let diagnostics = fit_diagnostics(kind, &coefficients, xs, ys, normalization)?;
+    Ok(FitResult {
+        kind,
+        coefficients,
+        x_offset: normalization.offset,
+        x_scale: normalization.scale,
+        diagnostics,
+    })
+}
+
+fn validate_fit_samples(xs: &[f64], ys: &[f64], minimum_samples: usize) -> Result<(), String> {
+    if xs.len() != ys.len() {
+        return Err("las listas x e y deben tener la misma longitud".to_string());
+    }
+    if xs.len() < minimum_samples {
+        return Err(format!(
+            "se necesitan al menos {minimum_samples} pares de datos para este ajuste"
+        ));
+    }
+    if xs.len() > MAX_FIT_DATA_POINTS {
+        return Err(format!(
+            "la tabla supera el máximo de {MAX_FIT_DATA_POINTS} pares para un ajuste"
+        ));
+    }
+    if xs.iter().chain(ys.iter()).any(|value| !value.is_finite()) {
+        return Err("todos los pares de datos deben ser finitos".to_string());
+    }
+    Ok(())
+}
+
+fn x_normalization(xs: &[f64]) -> Result<XNormalization, String> {
+    let minimum = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // Halving both finite endpoints avoids overflowing when they share a sign.
+    let offset = minimum * 0.5 + maximum * 0.5;
+    let scale = xs
+        .iter()
+        .map(|value| (value - offset).abs())
+        .fold(0.0_f64, f64::max);
+    if !offset.is_finite() || !scale.is_finite() || scale == 0.0 {
+        return Err("la variación de x no permite un ajuste estable".to_string());
+    }
+    Ok(XNormalization { offset, scale })
+}
+
+fn normalize_xs(xs: &[f64], normalization: XNormalization) -> Result<Vec<f64>, String> {
+    let normalized = xs
+        .iter()
+        .map(|value| (value - normalization.offset) / normalization.scale)
+        .collect::<Vec<_>>();
+    if normalized.iter().any(|value| !value.is_finite()) {
+        return Err("la normalización de x no es representable".to_string());
+    }
+    Ok(normalized)
+}
+
+fn fit_diagnostics(
+    kind: FitKind,
+    coefficients: &[f64],
+    xs: &[f64],
+    ys: &[f64],
+    normalization: XNormalization,
+) -> Result<FitDiagnostics, String> {
+    let mut residuals = Vec::with_capacity(xs.len());
+    for (&x, &y) in xs.iter().zip(ys) {
+        let prediction = evaluate_fit(kind, coefficients, x, normalization)?;
+        if !prediction.is_finite() {
+            return Err("el ajuste produjo predicciones no finitas".to_string());
+        }
+        let residual = y - prediction;
+        if !residual.is_finite() {
+            return Err("el ajuste produjo residuales no finitos".to_string());
+        }
+        residuals.push(residual);
+    }
+
+    let rmse = root_mean_square(&residuals)
+        .ok_or_else(|| "el RMSE del ajuste no es representable".to_string())?;
+    let y_mean = stable_mean(ys).ok_or_else(|| "la media de y no es representable".to_string())?;
+    let (residual_scale, residual_sum) = scaled_sum_squares(&residuals, 0.0);
+    let (total_scale, total_sum) = scaled_sum_squares(ys, y_mean);
+    let r_squared = if total_scale == 0.0 || total_sum == 0.0 {
+        if rmse <= FIT_EPSILON * y_mean.abs().max(1.0) {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        let ratio = residual_scale / total_scale;
+        1.0 - ratio * ratio * residual_sum / total_sum
+    };
+    if !r_squared.is_finite() {
+        return Err("R² del ajuste no es representable".to_string());
+    }
+
+    Ok(FitDiagnostics {
+        residuals,
+        rmse,
+        r_squared,
+    })
+}
+
+fn stable_mean(values: &[f64]) -> Option<f64> {
+    let mut mean = 0.0;
+    for (index, &value) in values.iter().enumerate() {
+        mean += (value - mean) / (index + 1) as f64;
+        if !mean.is_finite() {
+            return None;
+        }
+    }
+    (!values.is_empty()).then_some(mean)
+}
+
+fn root_mean_square(values: &[f64]) -> Option<f64> {
+    let (scale, sum) = scaled_sum_squares(values, 0.0);
+    if scale == 0.0 {
+        return Some(0.0);
+    }
+    let result = scale * (sum / values.len() as f64).sqrt();
+    result.is_finite().then_some(result)
+}
+
+fn scaled_sum_squares(values: &[f64], center: f64) -> (f64, f64) {
+    let mut scale = 0.0;
+    let mut sum = 0.0;
+    for &value in values {
+        let magnitude = (value - center).abs();
+        if magnitude == 0.0 {
+            continue;
+        }
+        if scale < magnitude {
+            let ratio = if scale == 0.0 { 0.0 } else { scale / magnitude };
+            sum = 1.0 + sum * ratio * ratio;
+            scale = magnitude;
+        } else {
+            let ratio = magnitude / scale;
+            sum += ratio * ratio;
+        }
+    }
+    (scale, sum)
+}
+
+fn sinusoidal_regression(xs: &[f64], ys: &[f64]) -> Result<Vec<f64>, String> {
+    let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = x_max - x_min;
+    if !span.is_finite() || span <= FIT_EPSILON * x_max.abs().max(x_min.abs()).max(1.0) {
+        return Err("el ajuste sinusoidal requiere variación finita de x".to_string());
+    }
+
+    let base_frequency = std::f64::consts::TAU / span;
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    for step in 1..=SINUSOIDAL_FREQUENCY_STEPS {
+        let frequency = base_frequency * step as f64 / 4.0;
+        let Some([sin_coefficient, cos_coefficient, offset]) =
+            solve_sinusoidal_basis(xs, ys, frequency)
+        else {
+            continue;
+        };
+        let amplitude = sin_coefficient.hypot(cos_coefficient);
+        let phase = cos_coefficient.atan2(sin_coefficient);
+        let coefficients = vec![amplitude, frequency, phase, offset];
+        let diagnostics = match fit_diagnostics(
+            FitKind::Sinusoidal,
+            &coefficients,
+            xs,
+            ys,
+            XNormalization::IDENTITY,
+        ) {
+            Ok(diagnostics) => diagnostics,
+            Err(_) => continue,
+        };
+        let improves_best = match best.as_ref() {
+            Some((best_rmse, _)) => diagnostics.rmse < *best_rmse,
+            None => true,
+        };
+        if improves_best {
+            best = Some((diagnostics.rmse, coefficients));
+        }
+    }
+
+    best.map(|(_, coefficients)| coefficients)
+        .ok_or_else(|| "los datos no permiten un ajuste sinusoidal estable".to_string())
+}
+
+fn solve_sinusoidal_basis(xs: &[f64], ys: &[f64], frequency: f64) -> Option<[f64; 3]> {
+    let mut matrix = [[0.0; 3]; 3];
+    let mut rhs = [0.0; 3];
+    for (&x, &y) in xs.iter().zip(ys) {
+        let basis = [(frequency * x).sin(), (frequency * x).cos(), 1.0];
+        for row in 0..3 {
+            rhs[row] += basis[row] * y;
+            for column in 0..3 {
+                matrix[row][column] += basis[row] * basis[column];
+            }
+        }
+    }
+    solve_three_by_three(matrix, rhs)
+}
+
+fn solve_three_by_three(mut matrix: [[f64; 3]; 3], mut rhs: [f64; 3]) -> Option<[f64; 3]> {
+    for column in 0..3 {
+        let pivot = (column..3).max_by(|&left, &right| {
+            matrix[left][column]
+                .abs()
+                .partial_cmp(&matrix[right][column].abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        matrix.swap(column, pivot);
+        rhs.swap(column, pivot);
+        let pivot_value = matrix[column][column];
+        if !pivot_value.is_finite() || pivot_value.abs() <= FIT_EPSILON {
+            return None;
+        }
+        let pivot_row = matrix[column];
+        for (row_index, row) in matrix.iter_mut().enumerate().skip(column + 1) {
+            let factor = row[column] / pivot_value;
+            for (entry, pivot_entry) in row.iter_mut().zip(pivot_row.iter()).skip(column) {
+                *entry -= factor * pivot_entry;
+            }
+            rhs[row_index] -= factor * rhs[column];
+        }
+    }
+
+    let mut result = [0.0; 3];
+    for row in (0..3).rev() {
+        let mut value = rhs[row];
+        for (column, result_value) in result.iter().enumerate().skip(row + 1) {
+            value -= matrix[row][column] * result_value;
+        }
+        result[row] = value / matrix[row][row];
+    }
+    result
+        .iter()
+        .all(|value| value.is_finite())
+        .then_some(result)
+}
+
+fn evaluate_fit(
+    kind: FitKind,
+    coefficients: &[f64],
+    x: f64,
+    normalization: XNormalization,
+) -> Result<f64, String> {
+    if !x.is_finite() {
+        return Err("x debe ser finito".to_string());
+    }
+    let expected = kind
+        .coefficient_count()
+        .ok_or_else(|| "la cantidad de parámetros del ajuste no es representable".to_string())?;
+    if coefficients.len() != expected || coefficients.iter().any(|value| !value.is_finite()) {
+        return Err("los parámetros del ajuste no son válidos".to_string());
+    }
+    if !normalization.offset.is_finite()
+        || !normalization.scale.is_finite()
+        || normalization.scale <= 0.0
+    {
+        return Err("la normalización del ajuste no es válida".to_string());
+    }
+    let normalized_x = (x - normalization.offset) / normalization.scale;
+    if !normalized_x.is_finite() {
+        return Err("la coordenada x normalizada no es representable".to_string());
+    }
+    let value = match kind {
+        FitKind::Linear => coefficients[0].mul_add(normalized_x, coefficients[1]),
+        FitKind::Polynomial { .. } => coefficients
+            .iter()
+            .rev()
+            .fold(0.0_f64, |accumulator, coefficient| {
+                accumulator.mul_add(normalized_x, *coefficient)
+            }),
+        FitKind::Exponential => coefficients[0] * (coefficients[1] * normalized_x).exp(),
+        FitKind::Logarithmic => {
+            if x <= 0.0 {
+                return Err("el ajuste logarítmico no está definido para x <= 0".to_string());
+            }
+            coefficients[0].mul_add(x.ln(), coefficients[1])
+        }
+        FitKind::Power => {
+            if x <= 0.0 {
+                return Err("el ajuste de potencia no está definido para x <= 0".to_string());
+            }
+            coefficients[0] * x.powf(coefficients[1])
+        }
+        FitKind::Sinusoidal => {
+            coefficients[0] * (coefficients[1] * normalized_x + coefficients[2]).sin()
+                + coefficients[3]
+        }
+    };
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| "el ajuste produjo una predicción no finita".to_string())
+}
+
+fn fit_expression(
+    kind: FitKind,
+    coefficients: &[f64],
+    normalization: XNormalization,
+) -> Result<String, String> {
+    let scalar = |index: usize| {
+        coefficients
+            .get(index)
+            .filter(|value| value.is_finite())
+            .map(|value| format_fit_scalar(*value))
+            .ok_or_else(|| "los parámetros del ajuste no son válidos".to_string())
+    };
+    let normalized_x = normalized_x_expression(normalization)?;
+    match kind {
+        FitKind::Linear => Ok(format!(
+            "({})*{}+({})",
+            scalar(0)?,
+            normalized_x,
+            scalar(1)?
+        )),
+        FitKind::Polynomial { degree } => {
+            if degree.checked_add(1) != Some(coefficients.len()) {
+                return Err("los parámetros polinómicos no son válidos".to_string());
+            }
+            Ok(coefficients
+                .iter()
+                .enumerate()
+                .map(|(index, coefficient)| match index {
+                    0 => format!("({})", format_fit_scalar(*coefficient)),
+                    1 => format!("({})*{}", format_fit_scalar(*coefficient), normalized_x),
+                    _ => format!(
+                        "({})*({})^{index}",
+                        format_fit_scalar(*coefficient),
+                        normalized_x
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join("+"))
+        }
+        FitKind::Exponential => Ok(format!(
+            "({})*exp(({})*{})",
+            scalar(0)?,
+            scalar(1)?,
+            normalized_x
+        )),
+        FitKind::Logarithmic => Ok(format!("({})*ln(x)+({})", scalar(0)?, scalar(1)?)),
+        FitKind::Power => Ok(format!("({})*x^({})", scalar(0)?, scalar(1)?)),
+        FitKind::Sinusoidal => Ok(format!(
+            "({})*sin(({})*{}+({}))+({})",
+            scalar(0)?,
+            scalar(1)?,
+            normalized_x,
+            scalar(2)?,
+            scalar(3)?
+        )),
+    }
+}
+
+fn format_fit_scalar(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn normalized_x_expression(normalization: XNormalization) -> Result<String, String> {
+    if !normalization.offset.is_finite()
+        || !normalization.scale.is_finite()
+        || normalization.scale <= 0.0
+    {
+        return Err("la normalización del ajuste no es válida".to_string());
+    }
+    if normalization.offset == 0.0 && normalization.scale == 1.0 {
+        Ok("x".to_string())
+    } else {
+        Ok(format!(
+            "((x-({}))/({}))",
+            format_fit_scalar(normalization.offset),
+            format_fit_scalar(normalization.scale)
+        ))
+    }
+}
+
+fn discrete_cdf_within_budget(k: u32) -> bool {
+    usize::try_from(k)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .is_some_and(|iterations| iterations <= MAX_DISCRETE_CDF_ITERATIONS)
+}
+
 pub fn mean(data: &[f64]) -> Option<f64> {
-    if data.is_empty() {
+    if data.is_empty() || data.iter().any(|value| !value.is_finite()) {
         return None;
     }
     Some(data.iter().sum::<f64>() / data.len() as f64)
 }
 
 pub fn median(data: &[f64]) -> Option<f64> {
-    if data.is_empty() {
+    if data.is_empty() || data.iter().any(|value| !value.is_finite()) {
         return None;
     }
     let mut sorted = data.to_vec();
@@ -109,36 +688,51 @@ pub fn pearson_correlation(xs: &[f64], ys: &[f64]) -> Option<f64> {
 }
 
 pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
-    if xs.len() != ys.len() || xs.len() < 2 {
+    if xs.len() != ys.len()
+        || xs.len() < 2
+        || xs.iter().chain(ys.iter()).any(|value| !value.is_finite())
+    {
         return None;
     }
-    let mx = mean(xs)?;
-    let my = mean(ys)?;
-    let ss_xx: f64 = xs.iter().map(|x| (x - mx).powi(2)).sum();
-    let ss_xy: f64 = xs
-        .iter()
-        .zip(ys.iter())
-        .map(|(x, y)| (x - mx) * (y - my))
-        .sum();
-    if ss_xx.abs() < 1e-15 {
+    let mx = stable_mean(xs)?;
+    let my = stable_mean(ys)?;
+    let x_scale = xs.iter().map(|x| (*x - mx).abs()).fold(0.0_f64, f64::max);
+    if !x_scale.is_finite() || x_scale == 0.0 {
         return None;
     }
-    let slope = ss_xy / ss_xx;
+    let y_scale = ys.iter().map(|y| (*y - my).abs()).fold(0.0_f64, f64::max);
+    if !y_scale.is_finite() {
+        return None;
+    }
+    if y_scale == 0.0 {
+        return Some((0.0, my, 1.0));
+    }
+
+    let mut ss_xx = 0.0;
+    let mut ss_xy = 0.0;
+    let mut ss_yy = 0.0;
+    for (&x, &y) in xs.iter().zip(ys) {
+        let normalized_x = (x - mx) / x_scale;
+        let normalized_y = (y - my) / y_scale;
+        ss_xx += normalized_x * normalized_x;
+        ss_xy += normalized_x * normalized_y;
+        ss_yy += normalized_y * normalized_y;
+    }
+    if ss_xx == 0.0 || ss_yy == 0.0 {
+        return None;
+    }
+    let slope = y_scale / x_scale * (ss_xy / ss_xx);
     let intercept = my - slope * mx;
-    let ss_yy: f64 = ys.iter().map(|y| (y - my).powi(2)).sum();
-    let r_squared = if ss_yy.abs() < 1e-15 {
-        1.0
-    } else {
-        (ss_xy * ss_xy) / (ss_xx * ss_yy)
-    };
-    Some((slope, intercept, r_squared))
+    let r_squared = ss_xy * ss_xy / (ss_xx * ss_yy);
+    (slope.is_finite() && intercept.is_finite() && r_squared.is_finite())
+        .then_some((slope, intercept, r_squared))
 }
 
 pub fn polynomial_regression(xs: &[f64], ys: &[f64], degree: usize) -> Option<Vec<f64>> {
-    if xs.len() != ys.len() || xs.len() <= degree {
+    if degree > MAX_POLYNOMIAL_REGRESSION_DEGREE || xs.len() != ys.len() || xs.len() <= degree {
         return None;
     }
-    let m = degree + 1;
+    let m = degree.checked_add(1)?;
     let mut a = vec![vec![0.0f64; m + 1]; m];
     #[allow(clippy::needless_range_loop)]
     for (i, row) in a.iter_mut().enumerate() {
@@ -219,18 +813,25 @@ pub fn histogram(data: &[f64], bins: usize) -> Vec<(f64, f64, f64)> {
     if data.is_empty() || bins == 0 {
         return vec![];
     }
-    let lo = min(data).unwrap();
-    let hi = max(data).unwrap();
+    let finite_data: Vec<f64> = data
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect();
+    if finite_data.is_empty() {
+        return vec![];
+    }
+    let bins = bins.min(MAX_HISTOGRAM_BINS);
+    let (Some(lo), Some(hi)) = (min(&finite_data), max(&finite_data)) else {
+        return vec![];
+    };
     let width = if (hi - lo).abs() < 1e-15 {
         1.0
     } else {
         (hi - lo) / bins as f64
     };
     let mut counts = vec![0usize; bins];
-    for &v in data {
-        if !v.is_finite() {
-            continue;
-        }
+    for v in finite_data {
         let idx = ((v - lo) / width).floor() as usize;
         let idx = idx.min(bins - 1);
         counts[idx] += 1;
@@ -302,20 +903,30 @@ fn gamma_ln(x: f64) -> f64 {
 }
 
 pub fn normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 {
+    if x.is_nan() || !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return f64::NAN;
+    }
     let z = (x - mu) / sigma;
     (-0.5 * z * z).exp() / (sigma * (2.0 * std::f64::consts::PI).sqrt())
 }
 
 pub fn normal_cdf(x: f64, mu: f64, sigma: f64) -> f64 {
-    0.5 * (1.0 + erf((x - mu) / (sigma * std::f64::consts::SQRT_2)))
+    if x.is_nan() || !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+        return f64::NAN;
+    }
+    (0.5 * (1.0 + erf((x - mu) / (sigma * std::f64::consts::SQRT_2)))).clamp(0.0, 1.0)
 }
 
+// The published rational approximation coefficients need their original literals.
+#[allow(clippy::excessive_precision)]
 pub fn normal_quantile(p: f64, mu: f64, sigma: f64) -> f64 {
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
+    if !p.is_finite()
+        || !(0.0..1.0).contains(&p)
+        || !mu.is_finite()
+        || !sigma.is_finite()
+        || sigma <= 0.0
+    {
+        return f64::NAN;
     }
     let a = [
         -3.969_683_028_665_376e+01,
@@ -370,8 +981,17 @@ pub fn normal_quantile(p: f64, mu: f64, sigma: f64) -> f64 {
 }
 
 pub fn binomial_pmf(n: u32, p: f64, k: u32) -> f64 {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return f64::NAN;
+    }
     if k > n {
         return 0.0;
+    }
+    if p == 0.0 {
+        return if k == 0 { 1.0 } else { 0.0 };
+    }
+    if p == 1.0 {
+        return if k == n { 1.0 } else { 0.0 };
     }
     let ln_coeff =
         gamma_ln(n as f64 + 1.0) - gamma_ln(k as f64 + 1.0) - gamma_ln((n - k) as f64 + 1.0);
@@ -379,14 +999,35 @@ pub fn binomial_pmf(n: u32, p: f64, k: u32) -> f64 {
 }
 
 pub fn binomial_cdf(n: u32, p: f64, k: u32) -> f64 {
+    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+        return f64::NAN;
+    }
+    if k >= n {
+        return 1.0;
+    }
+    if !discrete_cdf_within_budget(k) {
+        return f64::NAN;
+    }
     (0..=k).map(|i| binomial_pmf(n, p, i)).sum()
 }
 
 pub fn poisson_pmf(lambda: f64, k: u32) -> f64 {
+    if !lambda.is_finite() || lambda < 0.0 {
+        return f64::NAN;
+    }
+    if lambda == 0.0 {
+        return if k == 0 { 1.0 } else { 0.0 };
+    }
     (k as f64 * lambda.ln() - lambda - gamma_ln(k as f64 + 1.0)).exp()
 }
 
 pub fn poisson_cdf(lambda: f64, k: u32) -> f64 {
+    if !lambda.is_finite() || lambda < 0.0 {
+        return f64::NAN;
+    }
+    if !discrete_cdf_within_budget(k) {
+        return f64::NAN;
+    }
     (0..=k).map(|i| poisson_pmf(lambda, i)).sum()
 }
 
@@ -398,7 +1039,27 @@ pub fn student_t_pdf(x: f64, nu: f64) -> f64 {
 }
 
 pub fn student_t_cdf(x: f64, nu: f64) -> f64 {
-    let t = nu / (nu + x * x);
+    if x.is_nan() || !nu.is_finite() || nu <= 0.0 {
+        return f64::NAN;
+    }
+    if nu == 1.0 {
+        return if x < 0.0 {
+            (-x.recip()).atan() / std::f64::consts::PI
+        } else if x > 0.0 {
+            1.0 - x.recip().atan() / std::f64::consts::PI
+        } else {
+            0.5
+        };
+    }
+
+    let scaled_x = x.abs() / nu.sqrt();
+    let t = if scaled_x <= 1.0 {
+        1.0 / (1.0 + scaled_x * scaled_x)
+    } else {
+        let reciprocal = scaled_x.recip();
+        let reciprocal_squared = reciprocal * reciprocal;
+        reciprocal_squared / (1.0 + reciprocal_squared)
+    };
     let i = regularized_incomplete_beta(nu / 2.0, 0.5, t);
     if x >= 0.0 {
         1.0 - 0.5 * i
@@ -408,29 +1069,94 @@ pub fn student_t_cdf(x: f64, nu: f64) -> f64 {
 }
 
 /// Cuantil (inversa de la CDF) de la distribución t-Student.
-/// Usa bisección sobre `student_t_cdf`.
+/// Amplía el intervalo adaptativamente y usa bisección sobre `student_t_cdf`.
 pub fn student_t_quantile(p: f64, nu: f64) -> f64 {
-    if p <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if p >= 1.0 {
-        return f64::INFINITY;
-    }
-    if nu <= 0.0 {
+    if !p.is_finite() || p <= 0.0 || p >= 1.0 || !nu.is_finite() || nu <= 0.0 {
         return f64::NAN;
     }
-    let mut lo = -100.0;
-    let mut hi = 100.0;
-    for _ in 0..100 {
-        let mid = (lo + hi) / 2.0;
+
+    if p == 0.5 {
+        return 0.0;
+    }
+    if nu == 1.0 {
+        if !(0.25..=0.75).contains(&p) {
+            let tail_probability = if p < 0.5 { p } else { 1.0 - p };
+            let angle = std::f64::consts::PI * tail_probability;
+            let magnitude = if angle < f64::EPSILON.sqrt() {
+                angle.recip()
+            } else {
+                angle.tan().recip()
+            };
+            return if p < 0.5 { -magnitude } else { magnitude };
+        }
+        return (std::f64::consts::PI * (p - 0.5)).tan();
+    }
+
+    let (mut lo, mut hi) = if p < 0.5 { (-1.0, 0.0) } else { (0.0, 1.0) };
+    if p < 0.5 {
+        loop {
+            let cdf = student_t_cdf(lo, nu);
+            if !cdf.is_finite() {
+                return f64::NAN;
+            }
+            if cdf <= p {
+                break;
+            }
+            hi = lo;
+            if lo <= -f64::MAX / 2.0 {
+                lo = -f64::MAX;
+                let edge_cdf = student_t_cdf(lo, nu);
+                if !edge_cdf.is_finite() {
+                    return f64::NAN;
+                }
+                if edge_cdf > p {
+                    return f64::NEG_INFINITY;
+                }
+                break;
+            }
+            lo *= 2.0;
+        }
+    } else {
+        loop {
+            let cdf = student_t_cdf(hi, nu);
+            if !cdf.is_finite() {
+                return f64::NAN;
+            }
+            if cdf >= p {
+                break;
+            }
+            lo = hi;
+            if hi >= f64::MAX / 2.0 {
+                hi = f64::MAX;
+                let edge_cdf = student_t_cdf(hi, nu);
+                if !edge_cdf.is_finite() {
+                    return f64::NAN;
+                }
+                if edge_cdf < p {
+                    return f64::INFINITY;
+                }
+                break;
+            }
+            hi *= 2.0;
+        }
+    }
+
+    for _ in 0..128 {
+        let mid = lo + (hi - lo) / 2.0;
+        if mid == lo || mid == hi {
+            break;
+        }
         let cdf = student_t_cdf(mid, nu);
+        if !cdf.is_finite() {
+            return f64::NAN;
+        }
         if cdf < p {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    (lo + hi) / 2.0
+    lo + (hi - lo) / 2.0
 }
 
 fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
@@ -496,7 +1222,22 @@ fn continued_fraction_beta(a: f64, b: f64, x: f64) -> f64 {
 }
 
 pub fn chi_squared_pdf(x: f64, k: f64) -> f64 {
+    if x.is_nan() || !k.is_finite() || k <= 0.0 {
+        return f64::NAN;
+    }
     if x < 0.0 {
+        return 0.0;
+    }
+    if x == 0.0 {
+        return if k < 2.0 {
+            f64::INFINITY
+        } else if k == 2.0 {
+            0.5
+        } else {
+            0.0
+        };
+    }
+    if x == f64::INFINITY {
         return 0.0;
     }
     let half_k = k / 2.0;
@@ -504,10 +1245,16 @@ pub fn chi_squared_pdf(x: f64, k: f64) -> f64 {
 }
 
 pub fn chi_squared_cdf(x: f64, k: f64) -> f64 {
+    if x.is_nan() || !k.is_finite() || k <= 0.0 {
+        return f64::NAN;
+    }
     if x <= 0.0 {
         return 0.0;
     }
-    regularized_gamma_lower(k / 2.0, x / 2.0)
+    if x == f64::INFINITY {
+        return 1.0;
+    }
+    regularized_gamma_lower(k / 2.0, x / 2.0).clamp(0.0, 1.0)
 }
 
 fn regularized_gamma_lower(a: f64, x: f64) -> f64 {
@@ -565,15 +1312,16 @@ pub fn f_distribution_pdf(x: f64, d1: f64, d2: f64) -> f64 {
     }
     let half_d1 = d1 / 2.0;
     let half_d2 = d2 / 2.0;
-    let ln_coeff = half_d1 * d1.ln() + half_d2 * d2.ln()
-        - gamma_ln(half_d1)
-        - gamma_ln(half_d2)
-        - gamma_ln(half_d1 + half_d2);
+    let ln_coeff = half_d1 * d1.ln() + half_d2 * d2.ln() - gamma_ln(half_d1) - gamma_ln(half_d2)
+        + gamma_ln(half_d1 + half_d2);
     let ln_val = ln_coeff + (half_d1 - 1.0) * x.ln() - (half_d1 + half_d2) * (d1 * x + d2).ln();
     ln_val.exp()
 }
 
 pub fn exponential_pdf(x: f64, lambda: f64) -> f64 {
+    if x.is_nan() || !lambda.is_finite() || lambda <= 0.0 {
+        return f64::NAN;
+    }
     if x < 0.0 {
         return 0.0;
     }
@@ -581,6 +1329,9 @@ pub fn exponential_pdf(x: f64, lambda: f64) -> f64 {
 }
 
 pub fn exponential_cdf(x: f64, lambda: f64) -> f64 {
+    if x.is_nan() || !lambda.is_finite() || lambda <= 0.0 {
+        return f64::NAN;
+    }
     if x < 0.0 {
         return 0.0;
     }
@@ -596,21 +1347,26 @@ pub fn geometric_cdf(p: f64, k: u32) -> f64 {
 }
 
 pub fn hypergeometric_pmf(n_pop: u32, k_success: u32, n_draw: u32, k_observed: u32) -> f64 {
-    if k_observed > k_success || k_observed > n_draw {
+    if k_success > n_pop || n_draw > n_pop || k_observed > k_success || k_observed > n_draw {
         return 0.0;
     }
     if n_draw - k_observed > n_pop - k_success {
         return 0.0;
     }
+    let unobserved_successes = k_success - k_observed;
+    let failures = n_pop - k_success;
+    let unobserved_draws = n_draw - k_observed;
+    let remaining_failures = failures - unobserved_draws;
+    let remaining_population = n_pop - n_draw;
     let ln_num = gamma_ln(k_success as f64 + 1.0)
         - gamma_ln(k_observed as f64 + 1.0)
-        - gamma_ln((k_success - k_observed) as f64 + 1.0)
-        + gamma_ln((n_pop - k_success) as f64 + 1.0)
-        - gamma_ln((n_draw - k_observed) as f64 + 1.0)
-        - gamma_ln((n_pop - k_success - n_draw + k_observed) as f64 + 1.0);
+        - gamma_ln(unobserved_successes as f64 + 1.0)
+        + gamma_ln(failures as f64 + 1.0)
+        - gamma_ln(unobserved_draws as f64 + 1.0)
+        - gamma_ln(remaining_failures as f64 + 1.0);
     let ln_den = gamma_ln(n_pop as f64 + 1.0)
         - gamma_ln(n_draw as f64 + 1.0)
-        - gamma_ln((n_pop - n_draw) as f64 + 1.0);
+        - gamma_ln(remaining_population as f64 + 1.0);
     (ln_num - ln_den).exp()
 }
 
@@ -639,6 +1395,9 @@ pub fn weibull_cdf(x: f64, k: f64, lambda: f64) -> f64 {
 }
 
 pub fn uniform_pdf(x: f64, a: f64, b: f64) -> f64 {
+    if x.is_nan() || !a.is_finite() || !b.is_finite() || a >= b {
+        return f64::NAN;
+    }
     if x < a || x > b {
         return 0.0;
     }
@@ -646,6 +1405,9 @@ pub fn uniform_pdf(x: f64, a: f64, b: f64) -> f64 {
 }
 
 pub fn uniform_cdf(x: f64, a: f64, b: f64) -> f64 {
+    if x.is_nan() || !a.is_finite() || !b.is_finite() || a >= b {
+        return f64::NAN;
+    }
     if x < a {
         return 0.0;
     }
@@ -721,18 +1483,47 @@ pub fn laplace_cdf(x: f64, mu: f64, b: f64) -> f64 {
 }
 
 pub fn negative_binomial_pmf(r: u32, p: f64, k: u32) -> f64 {
-    let coef = super::special_functions::gamma((k + r) as f64)
-        / (super::special_functions::gamma(r as f64)
-            * super::special_functions::gamma((k + 1) as f64));
-    coef * p.powf(r as f64) * (1.0 - p).powf(k as f64)
+    if r == 0 || !p.is_finite() || p <= 0.0 || p > 1.0 {
+        return f64::NAN;
+    }
+    if p == 1.0 {
+        return if k == 0 { 1.0 } else { 0.0 };
+    }
+    let Some(total) = k.checked_add(r) else {
+        return f64::NAN;
+    };
+    let Some(k_plus_one) = k.checked_add(1) else {
+        return f64::NAN;
+    };
+    let log_pmf = gamma_ln(total as f64) - gamma_ln(r as f64) - gamma_ln(k_plus_one as f64)
+        + r as f64 * p.ln()
+        + k as f64 * (-p).ln_1p();
+    log_pmf.exp()
 }
 
 pub fn negative_binomial_cdf(r: u32, p: f64, k: u32) -> f64 {
-    let mut sum = 0.0;
-    for i in 0..=k {
-        sum += negative_binomial_pmf(r, p, i);
+    if r == 0 || !p.is_finite() || p <= 0.0 || p > 1.0 || !discrete_cdf_within_budget(k) {
+        return f64::NAN;
     }
-    sum
+    if p == 1.0 {
+        return 1.0;
+    }
+    if k.checked_add(r).is_none() {
+        return f64::NAN;
+    }
+
+    let log_failure_probability = (-p).ln_1p();
+    let mut log_term = r as f64 * p.ln();
+    let mut log_sum = log_term;
+    for i in 0..k {
+        log_term += (i as f64 + r as f64).ln() - (i as f64 + 1.0).ln() + log_failure_probability;
+        if log_term > log_sum {
+            log_sum = log_term + (log_sum - log_term).exp().ln_1p();
+        } else {
+            log_sum += (log_term - log_sum).exp().ln_1p();
+        }
+    }
+    log_sum.exp().clamp(0.0, 1.0)
 }
 
 pub fn t_test_one_sample(data: &[f64], mu0: f64) -> Option<(f64, f64)> {
@@ -914,6 +1705,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn polynomial_regression_rejects_degrees_above_the_safe_allocation_limit() {
+        let xs: Vec<f64> = (0..=MAX_POLYNOMIAL_REGRESSION_DEGREE + 1)
+            .map(|index| index as f64 / MAX_POLYNOMIAL_REGRESSION_DEGREE as f64)
+            .collect();
+        let ys: Vec<f64> = xs.iter().map(|x| 1.0 + 2.0 * x).collect();
+
+        assert!(polynomial_regression(&xs, &ys, MAX_POLYNOMIAL_REGRESSION_DEGREE - 1).is_some());
+        assert!(polynomial_regression(&xs, &ys, MAX_POLYNOMIAL_REGRESSION_DEGREE).is_some());
+        assert_eq!(
+            polynomial_regression(&xs, &ys, MAX_POLYNOMIAL_REGRESSION_DEGREE + 1),
+            None
+        );
+    }
+
+    #[test]
+    fn discrete_cdfs_stop_at_the_shared_iteration_budget() {
+        let last_allowed_k = (MAX_DISCRETE_CDF_ITERATIONS - 1) as u32;
+
+        assert!(poisson_cdf(1.0, last_allowed_k - 1).is_finite());
+        assert!(poisson_cdf(1.0, last_allowed_k).is_finite());
+        assert!(poisson_cdf(1.0, last_allowed_k + 1).is_nan());
+        assert!(binomial_cdf(last_allowed_k + 1, 0.5, last_allowed_k).is_finite());
+        assert!(binomial_cdf(last_allowed_k + 2, 0.5, last_allowed_k + 1).is_nan());
+        assert!(negative_binomial_cdf(2, 0.5, last_allowed_k + 1).is_nan());
+        assert!(negative_binomial_pmf(2, 0.5, u32::MAX).is_nan());
+    }
+
+    #[test]
     fn test_mean() {
         assert_eq!(mean(&[1.0, 2.0, 3.0, 4.0, 5.0]), Some(3.0));
         assert_eq!(mean(&[]), None);
@@ -923,6 +1742,12 @@ mod tests {
     fn test_median() {
         assert_eq!(median(&[1.0, 3.0, 2.0]), Some(2.0));
         assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), Some(2.5));
+    }
+
+    #[test]
+    fn summary_statistics_reject_non_finite_observations() {
+        assert_eq!(mean(&[1.0, f64::NAN]), None);
+        assert_eq!(median(&[1.0, f64::INFINITY]), None);
     }
 
     #[test]
@@ -949,8 +1774,39 @@ mod tests {
     }
 
     #[test]
+    fn probability_functions_reject_invalid_parameters_and_handle_mass_boundaries() {
+        assert!(normal_pdf(0.0, 0.0, 0.0).is_nan());
+        assert!(normal_cdf(0.0, 0.0, -1.0).is_nan());
+        assert!(normal_quantile(0.0, 0.0, 1.0).is_nan());
+        assert_eq!(binomial_pmf(4, 0.0, 0), 1.0);
+        assert_eq!(binomial_pmf(4, 1.0, 4), 1.0);
+        assert_eq!(poisson_pmf(0.0, 0), 1.0);
+        assert!(exponential_pdf(1.0, 0.0).is_nan());
+        assert!(uniform_cdf(0.0, 1.0, 1.0).is_nan());
+    }
+
+    #[test]
+    fn hypergeometric_validates_population_constraints_before_subtraction() {
+        assert_eq!(hypergeometric_pmf(3, 4, 1, 0), 0.0);
+        assert_eq!(hypergeometric_pmf(3, 1, 4, 0), 0.0);
+    }
+
+    #[test]
+    fn hypergeometric_evaluates_valid_lower_support_without_unsigned_underflow() {
+        let probability = hypergeometric_pmf(10, 8, 5, 3);
+        assert!(probability.is_finite());
+        assert!((0.0..=1.0).contains(&probability));
+    }
+
+    #[test]
     fn test_binomial() {
         assert!((binomial_pmf(10, 0.5, 5) - 0.2461).abs() < 0.001);
+    }
+
+    #[test]
+    fn f_distribution_pdf_uses_beta_normalization() {
+        // Para F(4, 2), f(1) = 8 / 27.
+        assert!((f_distribution_pdf(1.0, 4.0, 2.0) - 8.0 / 27.0).abs() < 1e-12);
     }
 
     #[test]
@@ -960,6 +1816,24 @@ mod tests {
         assert_eq!(h.len(), 5);
         let total: f64 = h.iter().map(|(_, _, c)| c).sum();
         assert_eq!(total, 10.0);
+    }
+
+    #[test]
+    fn histogram_caps_bin_count_before_allocation() {
+        let histogram = histogram(&[1.0, 2.0, 3.0], 4_097);
+        assert_eq!(histogram.len(), 4_096);
+    }
+
+    #[test]
+    fn histogram_ignores_non_finite_observations_before_computing_bounds() {
+        let mixed = histogram(&[1.0, f64::NAN, 3.0, f64::INFINITY], 2);
+        assert_eq!(mixed.len(), 2);
+        assert!(mixed
+            .iter()
+            .all(|(left, right, _)| left.is_finite() && right.is_finite()));
+        assert_eq!(mixed.iter().map(|(_, _, count)| count).sum::<f64>(), 2.0);
+
+        assert!(histogram(&[f64::NAN, f64::NEG_INFINITY], 2).is_empty());
     }
 
     #[test]

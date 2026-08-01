@@ -19,13 +19,22 @@ GPUCache/
 crash_log.txt
 graphify-out/
 
+# Confidential external security assessment artifacts (never commit)
+INFORME_AUDITORIA_SEGURIDAD.md
+INFORME_PENTEST_CANALDIRECTO.md
+findings-canaldirecto/
+
 # Scratch & test files
 scratch*
 test_*.rs
 debug_patch2
 debug_cam.rs
 # Temporary refactor/migration scripts (not part of the codebase)
+__pycache__/
 *.py
+# CI policy scripts are part of the codebase.
+!.github/scripts/verify_advisory_exceptions.py
+!.github/scripts/test_verify_advisory_exceptions.py
 original_*.rs
 refactor.py
 update_ast.py
@@ -36,3 +45,7 @@ packaging/build/
 grafito-*.exe
 grafito
 dist/
+
+# Local cargo-fuzz output
+fuzz/corpus/
+fuzz/artifacts/

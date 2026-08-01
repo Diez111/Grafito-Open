@@ -34,9 +34,17 @@ impl ComplexMatrix {
         if self.a.is_finite() && self.b.is_finite() && self.c.is_finite() && self.d.is_finite() {
             let diff1 = (self.a - self.d).abs();
             let diff2 = (self.b + self.c).abs();
-            // Aceptamos una pequeña tolerancia por ruido numérico de punto flotante
-            assert!(
-                diff1 < 1e-10 && diff2 < 1e-10,
+            let scale = self
+                .a
+                .abs()
+                .max(self.b.abs())
+                .max(self.c.abs())
+                .max(self.d.abs())
+                .max(1.0);
+            // La representación matricial puede acumular ruido relativo; no debe
+            // provocar panic en expresiones ingresadas por el usuario.
+            debug_assert!(
+                diff1 <= 1e-10 * scale && diff2 <= 1e-10 * scale,
                 "Complex Representation Invariant Violated! a={}, b={}, c={}, d={}",
                 self.a,
                 self.b,
@@ -986,73 +994,177 @@ fn complex_lambert_w(z: Complex64) -> Complex64 {
     }
 }
 
-/// Función zeta de Riemann usando la fórmula de Borwein (convergencia acelerada).
-/// ζ(s) = 1/(1 - 2^{1-s}) * Σ_{k=0}^∞ [ 1/2^{k+1} * Σ_{j=0}^k (-1)^j * C(k,j) * (j+1)^{-s} ]
-fn complex_zeta(s: Complex64) -> Complex64 {
-    // Para s con Re(s) < 0, usar la ecuación funcional
-    if s.re < 0.0 {
-        // Ecuación funcional: ζ(s) = 2^s * π^{s-1} * sin(πs/2) * Γ(1-s) * ζ(1-s)
-        let one = Complex64::new(1.0, 0.0);
-        let one_minus_s = one - s;
-        let zeta_one_minus = complex_zeta(one_minus_s);
-        let pi = std::f64::consts::PI;
-        let two_pow_s = Complex64::new(2.0, 0.0).powc(s);
-        let pi_pow_sm1 = Complex64::new(pi, 0.0).powc(s - one);
-        let sin_half = (s * Complex64::new(pi / 2.0, 0.0)).sin();
-        let gamma_term = complex_gamma(one_minus_s);
-        let result = two_pow_s * pi_pow_sm1 * sin_half * gamma_term * zeta_one_minus;
-        if result.re.is_finite() && result.im.is_finite() {
-            return result;
-        }
-        return Complex64::new(f64::NAN, f64::NAN);
-    }
+const ZETA_MIN_SUM_TERMS: usize = 16;
+const ZETA_MAX_SUM_TERMS: usize = 2_048;
 
-    // Fórmula de Borwein (orden N=20)
-    let n_terms = 20usize;
-    let one = Complex64::new(1.0, 0.0);
-    let two = Complex64::new(2.0, 0.0);
-    let two_pow_1_minus_s = two.powc(one - s);
-    let factor = one / (one - two_pow_1_minus_s);
+// B_(2k)/(2k)! para k=1..=12.
+const ZETA_BERNOULLI_COEFFICIENTS: [f64; 12] = [
+    8.333_333_333_333_333e-2,
+    -1.388_888_888_888_889e-3,
+    3.306_878_306_878_307e-5,
+    -8.267_195_767_195_768e-7,
+    2.087_675_698_786_81e-8,
+    -5.284_190_138_687_493e-10,
+    1.338_253_653_068_468e-11,
+    -3.389_680_296_322_582_7e-13,
+    8.586_062_056_277_845e-15,
+    -2.174_868_698_558_062e-16,
+    5.509_002_828_360_23e-18,
+    -1.395_446_468_581_252_3e-19,
+];
 
-    // Coeficientes de Borwein d_k
-    let d_k = |k: usize| -> f64 {
-        let mut sum = 0.0;
-        for j in 0..=k {
-            let binom = comb(k, j) as f64;
-            sum += (-1.0f64).powi(j as i32) * binom * ((j + 1) as f64).powf(-1.0);
-        }
-        sum / 2.0f64.powi((k + 1) as i32)
-    };
+fn zeta_nan() -> Complex64 {
+    Complex64::new(f64::NAN, f64::NAN)
+}
 
-    let mut sum = Complex64::new(0.0, 0.0);
-    for k in 0..n_terms {
-        let d = d_k(k);
-        let term = Complex64::new(d, 0.0) * (Complex64::new((k + 1) as f64, 0.0)).powc(-s);
-        sum += term;
-        if term.norm() < sum.norm() * 1e-16 {
-            break;
-        }
-    }
-
-    let result = factor * sum;
-    if result.re.is_finite() && result.im.is_finite() {
-        result
+fn finite_zeta_or_nan(value: Complex64) -> Complex64 {
+    if value.re.is_finite() && value.im.is_finite() {
+        value
     } else {
-        Complex64::new(f64::NAN, f64::NAN)
+        zeta_nan()
     }
 }
 
-/// Coeficiente binomial C(n, k)
-fn comb(n: usize, k: usize) -> u64 {
-    if k > n {
-        return 0;
+fn zeta_laurent_at_one(delta: Complex64) -> Complex64 {
+    // ζ(1+δ) = 1/δ + Σ (-1)^n γ_n δ^n/n!.
+    const GAMMA_0: f64 = 0.577_215_664_901_532_9;
+    const GAMMA_1: f64 = -0.072_815_845_483_676_72;
+    const GAMMA_2: f64 = -0.009_690_363_192_872_318;
+    const GAMMA_3: f64 = 0.002_053_834_420_303_346;
+
+    let one = Complex64::new(1.0, 0.0);
+    let delta_sq = delta * delta;
+    one / delta + Complex64::new(GAMMA_0, 0.0) - delta * GAMMA_1 + delta_sq * (GAMMA_2 * 0.5)
+        - delta_sq * delta * (GAMMA_3 / 6.0)
+}
+
+fn zeta_euler_maclaurin(s: Complex64) -> Complex64 {
+    let one = Complex64::new(1.0, 0.0);
+
+    // Para Re(s) >= 64, la cola desde 2 es menor que la resolución de f64.
+    if s.re >= 64.0 {
+        return one;
     }
-    let k = k.min(n - k);
-    let mut result: u64 = 1;
-    for i in 0..k {
-        result = result * (n - i) as u64 / (i + 1) as u64;
+
+    let extra_terms = (s.im.abs() * 0.5).ceil();
+    if extra_terms > (ZETA_MAX_SUM_TERMS - ZETA_MIN_SUM_TERMS) as f64 {
+        return zeta_nan();
     }
-    result
+    let boundary = ZETA_MIN_SUM_TERMS + extra_terms as usize;
+
+    // Suma compensada de Σ n^-s para reducir cancelación en la franja crítica.
+    let mut sum = Complex64::new(0.0, 0.0);
+    let mut compensation = Complex64::new(0.0, 0.0);
+    for n in 1..boundary {
+        let term = (-s * (n as f64).ln()).exp();
+        let adjusted = term - compensation;
+        let next = sum + adjusted;
+        compensation = (next - sum) - adjusted;
+        sum = next;
+    }
+
+    let boundary_f64 = boundary as f64;
+    let log_boundary = boundary_f64.ln();
+    let boundary_to_minus_s = (-s * log_boundary).exp();
+    sum += boundary_to_minus_s * 0.5 + ((one - s) * log_boundary).exp() / (s - one);
+
+    let mut rising_factorial = s;
+    let mut inverse_power = boundary_to_minus_s / boundary_f64;
+    let boundary_sq = boundary_f64 * boundary_f64;
+    for (index, coefficient) in ZETA_BERNOULLI_COEFFICIENTS.iter().enumerate() {
+        if index > 0 {
+            let offset = (2 * index) as f64;
+            rising_factorial *= (s + (offset - 1.0)) * (s + offset);
+            inverse_power /= boundary_sq;
+        }
+        sum += rising_factorial * inverse_power * *coefficient;
+    }
+
+    finite_zeta_or_nan(sum)
+}
+
+fn zeta_log_gamma_positive(z: Complex64) -> Complex64 {
+    const COEFFICIENTS: [f64; 9] = [
+        0.999_999_999_999_809_9,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_402_8,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+
+    let z_minus_one = z - Complex64::new(1.0, 0.0);
+    let mut series = Complex64::new(COEFFICIENTS[0], 0.0);
+    for (index, coefficient) in COEFFICIENTS.iter().enumerate().skip(1) {
+        series += *coefficient / (z_minus_one + index as f64);
+    }
+
+    let t = z_minus_one + 7.5;
+    Complex64::new(0.5 * (2.0 * std::f64::consts::PI).ln(), 0.0) + (z_minus_one + 0.5) * t.ln() - t
+        + series.ln()
+}
+
+fn zeta_log_sin(z: Complex64) -> Complex64 {
+    if z.im.abs() <= 20.0 {
+        return z.sin().ln();
+    }
+
+    // Evita overflow de sinh/cosh; el término omitido es menor que e^-40.
+    let phase = Complex64::new(z.re.sin(), z.im.signum() * z.re.cos()).arg();
+    Complex64::new(z.im.abs() - std::f64::consts::LN_2, phase)
+}
+
+fn zeta_functional_equation(s: Complex64) -> Complex64 {
+    let one = Complex64::new(1.0, 0.0);
+    let reflected = zeta_euler_maclaurin(one - s);
+    if !reflected.re.is_finite() || !reflected.im.is_finite() {
+        return zeta_nan();
+    }
+
+    // Se evalúa en logaritmos para no multiplicar por separado factores
+    // exponencialmente grandes y pequeños.
+    let log_factor = s * std::f64::consts::LN_2
+        + (s - one) * std::f64::consts::PI.ln()
+        + zeta_log_sin(s * (std::f64::consts::PI * 0.5))
+        + zeta_log_gamma_positive(one - s);
+    finite_zeta_or_nan((log_factor + reflected.ln()).exp())
+}
+
+/// Función zeta de Riemann con continuación analítica acotada.
+///
+/// Usa Euler-Maclaurin con doce correcciones para `Re(s) >= 0` y la ecuación
+/// funcional en dominio logarítmico para `Re(s) < 0`. La suma directa usa
+/// entre 16 y 2048 términos según `|Im(s)|`; fuera de ese límite devuelve el
+/// par NaN usado por las demás funciones especiales del evaluador.
+fn complex_zeta(s: Complex64) -> Complex64 {
+    if !s.re.is_finite() || !s.im.is_finite() {
+        return zeta_nan();
+    }
+    if s.re == 1.0 && s.im == 0.0 {
+        return zeta_nan();
+    }
+
+    let is_trivial_zero = s.im == 0.0 && s.re < 0.0 && (-0.5 * s.re).fract() == 0.0;
+    if is_trivial_zero {
+        return Complex64::new(0.0, 0.0);
+    }
+
+    let delta = s - Complex64::new(1.0, 0.0);
+    let mut result = if delta.norm() < 1e-3 {
+        zeta_laurent_at_one(delta)
+    } else if s.re < 0.0 {
+        zeta_functional_equation(s)
+    } else {
+        zeta_euler_maclaurin(s)
+    };
+
+    if s.im == 0.0 && result.re.is_finite() && result.im.is_finite() {
+        result.im = 0.0;
+    }
+    finite_zeta_or_nan(result)
 }
 
 /// Función de Bessel de segunda clase Y_n(z) para orden n=0.
@@ -1171,6 +1283,22 @@ mod tests {
         let value = expr.eval(&vars).unwrap();
         assert!((value.re - 0.002).abs() < 1e-12, "got {value}");
         assert!(value.im.abs() < 1e-12);
+    }
+
+    #[test]
+    fn complex_matrix_to_complex_does_not_panic_on_roundoff_noise() {
+        let z = ComplexMatrix {
+            a: 1.0e16,
+            b: -2.0,
+            c: 2.0,
+            d: 1.0e16 + 1.0,
+        };
+
+        let result = std::panic::catch_unwind(|| z.to_complex());
+        assert!(
+            result.is_ok(),
+            "roundoff-sized invariant drift should not panic"
+        );
     }
 
     #[test]

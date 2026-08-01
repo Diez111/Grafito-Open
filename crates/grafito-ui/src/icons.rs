@@ -28,7 +28,7 @@
 //!    crear la función `icon_nuevo(painter, rect, color)` siguiendo el
 //!    estilo outlined.
 
-use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
+use egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Response, Shape, Stroke, Ui, WidgetText};
 
 /// Enum de todos los iconos soportados por la app.
 ///
@@ -51,6 +51,9 @@ pub enum Icon {
     Move,
     Point,
     Line,
+    Segment,
+    Ray,
+    Vector,
     Circle,
     Polygon,
     Pencil,
@@ -61,6 +64,9 @@ pub enum Icon {
     Implicit,
     VectorField,
     Locus,
+    Midpoint,
+    Perpendicular,
+    Tangent,
 
     // Análisis y medida
     Distance,
@@ -99,6 +105,8 @@ pub enum Icon {
     // 3D
     Sphere,
     Cube,
+    Plane,
+    Surface,
     Pyramid,
     Cone,
     Cylinder,
@@ -117,6 +125,9 @@ pub enum Icon {
     ComplexGrid,
     Slider,
     Button,
+    Dynamics,
+    Spreadsheet,
+    Tools,
 
     // Tema
     Sun,
@@ -157,6 +168,9 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Move => icon_move(painter, inner, color, stroke_thick),
         Icon::Point => icon_point(painter, inner, color, stroke_thick),
         Icon::Line => icon_line(painter, inner, color, stroke_thick),
+        Icon::Segment => icon_segment(painter, inner, color, stroke_thick),
+        Icon::Ray => icon_ray(painter, inner, color, stroke_thick),
+        Icon::Vector => icon_vector(painter, inner, color, stroke_thick),
         Icon::Circle => icon_circle(painter, inner, color, stroke_thick),
         Icon::Polygon => icon_polygon(painter, inner, color, stroke_thick),
         Icon::Pencil => icon_pencil(painter, inner, color, stroke_thick),
@@ -167,6 +181,9 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Implicit => icon_implicit(painter, inner, color, stroke_thick),
         Icon::VectorField => icon_vector_field(painter, inner, color, stroke_thick),
         Icon::Locus => icon_locus(painter, inner, color, stroke_thick),
+        Icon::Midpoint => icon_midpoint(painter, inner, color, stroke_thick),
+        Icon::Perpendicular => icon_perpendicular(painter, inner, color, stroke_thick),
+        Icon::Tangent => icon_tangent(painter, inner, color, stroke_thick),
 
         Icon::Distance => icon_distance(painter, inner, color, stroke_thick),
         Icon::Angle => icon_angle(painter, inner, color, stroke_thick),
@@ -200,6 +217,8 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
 
         Icon::Sphere => icon_sphere(painter, inner, color, stroke_thick),
         Icon::Cube => icon_cube(painter, inner, color, stroke_thick),
+        Icon::Plane => icon_plane(painter, inner, color, stroke_thick),
+        Icon::Surface => icon_surface(painter, inner, color, stroke_thick),
         Icon::Pyramid => icon_pyramid(painter, inner, color, stroke_thick),
         Icon::Cone => icon_cone(painter, inner, color, stroke_thick),
         Icon::Cylinder => icon_cylinder(painter, inner, color, stroke_thick),
@@ -217,6 +236,9 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::ComplexGrid => icon_complex_grid(painter, inner, color, stroke_thick),
         Icon::Slider => icon_slider(painter, inner, color, stroke_thick),
         Icon::Button => icon_button(painter, inner, color, stroke_thick),
+        Icon::Dynamics => icon_dynamics(painter, inner, color, stroke_thick),
+        Icon::Spreadsheet => icon_spreadsheet(painter, inner, color, stroke_thick),
+        Icon::Tools => icon_tools(painter, inner, color, stroke_thick),
 
         Icon::Sun => icon_sun(painter, inner, color, stroke_thick),
         Icon::Moon => icon_moon(painter, inner, color, stroke_thick),
@@ -230,6 +252,32 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Close => icon_close(painter, inner, color, stroke_thick),
         Icon::Check => icon_check(painter, inner, color, stroke_thick),
     }
+}
+
+/// Crea un botón compacto con un icono vectorial y una descripción accesible.
+///
+/// Los controles de acción frecuentes no dependen de glifos de fuentes y el
+/// tooltip conserva el significado cuando el icono no es suficiente por sí solo.
+pub fn action_icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    color: Color32,
+    tooltip: impl Into<WidgetText>,
+) -> Response {
+    let response = ui.add_sized(vec2(26.0, 24.0), egui::Button::new("").frame(false));
+    if ui.is_rect_visible(response.rect) {
+        draw_icon(ui.painter(), response.rect.shrink(3.0), icon, color);
+    }
+    let tooltip = tooltip.into();
+    let accessible_label = tooltip.text().to_owned();
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            accessible_label.clone(),
+        )
+    });
+    response.on_hover_text(tooltip)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -557,6 +605,39 @@ fn icon_line(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
     painter.circle_filled(b, 1.8, color);
 }
 
+fn icon_segment(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    let m = r.width() * 0.15;
+    let a = r.min + vec2(m, r.height() * 0.75);
+    let b = r.max - vec2(m, r.height() * 0.75);
+    painter.line_segment([a, b], stroke);
+    painter.circle_filled(a, 2.0, color);
+    painter.circle_filled(b, 2.0, color);
+}
+
+fn icon_ray(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    let m = r.width() * 0.15;
+    let a = r.min + vec2(m, r.height() * 0.75);
+    let b = r.max - vec2(m, r.height() * 0.75);
+    painter.line_segment([a, b], stroke);
+    painter.circle_filled(a, 2.0, color);
+    draw_arrow_head(painter, a, b, stroke);
+}
+
+fn icon_vector(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let m = r.width() * 0.15;
+    let a = r.min + vec2(m, r.height() * 0.75);
+    let b = r.max - vec2(m, r.height() * 0.75);
+    painter.line_segment([a, b], stroke);
+    draw_arrow_head(painter, a, b, stroke);
+}
+
+fn draw_arrow_head(painter: &Painter, a: Pos2, b: Pos2, stroke: Stroke) {
+    let dir = (b - a).normalized();
+    let perp = vec2(-dir.y, dir.x);
+    painter.line_segment([b, b - dir * 7.0 + perp * 4.0], stroke);
+    painter.line_segment([b, b - dir * 7.0 - perp * 4.0], stroke);
+}
+
 fn icon_circle(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
     let c = r.center();
     let rad = r.width() * 0.36;
@@ -711,6 +792,29 @@ fn icon_locus(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
         pts.push(pos2(x, y));
     }
     painter.add(Shape::line(pts, stroke));
+}
+
+fn icon_midpoint(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    icon_segment(painter, r, color.gamma_multiply(0.7), stroke);
+    painter.circle_filled(r.center(), 3.0, color);
+}
+
+fn icon_perpendicular(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let c = r.center();
+    let h = r.width() * 0.34;
+    painter.line_segment([c - vec2(h, 0.0), c + vec2(h, 0.0)], stroke);
+    painter.line_segment([c, c - vec2(0.0, h)], stroke);
+    let s = r.width() * 0.12;
+    painter.line_segment([c + vec2(s, 0.0), c + vec2(s, -s)], stroke);
+    painter.line_segment([c + vec2(0.0, -s), c + vec2(s, -s)], stroke);
+}
+
+fn icon_tangent(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    let c = r.center();
+    let rad = r.width() * 0.28;
+    painter.circle_stroke(c, rad, stroke);
+    painter.line_segment([c + vec2(-rad, -rad), c + vec2(rad, -rad)], stroke);
+    painter.circle_filled(c + vec2(0.0, -rad), 2.0, color);
 }
 
 fn icon_distance(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
@@ -1116,6 +1220,36 @@ fn icon_cube(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     painter.add(Shape::closed_line(back.to_vec(), stroke));
 }
 
+fn icon_plane(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let c = r.center();
+    let s = r.width() * 0.34;
+    painter.add(Shape::convex_polygon(
+        vec![
+            c + vec2(-s, s * 0.45),
+            c + vec2(-s * 0.25, -s),
+            c + vec2(s, -s * 0.45),
+            c + vec2(s * 0.25, s),
+        ],
+        Color32::TRANSPARENT,
+        stroke,
+    ));
+}
+
+fn icon_surface(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let n = 16;
+    for row in 0..3 {
+        let mut pts = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let x = r.min.x + r.width() * t;
+            let y =
+                r.center().y + (row as f32 - 1.0) * 5.0 + (t * std::f32::consts::TAU).sin() * 3.0;
+            pts.push(pos2(x, y));
+        }
+        painter.add(Shape::line(pts, stroke));
+    }
+}
+
 fn icon_pyramid(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     let c = r.center();
     let s = r.width() * 0.35;
@@ -1368,6 +1502,33 @@ fn icon_button(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     painter.line_segment([c - vec2(s * 0.3, s * 0.6), c + vec2(s, -s * 0.6)], stroke);
 }
 
+fn icon_dynamics(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
+    let c = r.center();
+    let n = 48;
+    let mut pts = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 / n as f32 * std::f32::consts::TAU * 2.0;
+        let rad = r.width() * (0.08 + 0.26 * i as f32 / n as f32);
+        pts.push(c + vec2(rad * t.cos(), rad * t.sin()));
+    }
+    painter.add(Shape::line(pts, stroke));
+    painter.circle_filled(c, 2.2, color);
+}
+
+fn icon_spreadsheet(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    icon_grid(painter, r, _color, stroke);
+    let y = r.min.y + r.height() * 0.28;
+    painter.line_segment([pos2(r.min.x, y), pos2(r.max.x, y)], stroke);
+}
+
+fn icon_tools(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let c = r.center();
+    painter.line_segment([c + vec2(-8.0, 7.0), c + vec2(7.0, -8.0)], stroke);
+    painter.line_segment([c + vec2(-7.0, -8.0), c + vec2(8.0, 7.0)], stroke);
+    painter.circle_stroke(c + vec2(-8.0, 7.0), 2.2, stroke);
+    painter.circle_stroke(c + vec2(8.0, 7.0), 2.2, stroke);
+}
+
 fn icon_sun(painter: &Painter, r: Rect, color: Color32, stroke: Stroke) {
     let c = r.center();
     let rad = r.width() * 0.18;
@@ -1483,6 +1644,9 @@ mod tests {
         let _ = Icon::Move;
         let _ = Icon::Point;
         let _ = Icon::Line;
+        let _ = Icon::Segment;
+        let _ = Icon::Ray;
+        let _ = Icon::Vector;
         let _ = Icon::Circle;
         let _ = Icon::Polygon;
         let _ = Icon::Pencil;
@@ -1493,6 +1657,9 @@ mod tests {
         let _ = Icon::Implicit;
         let _ = Icon::VectorField;
         let _ = Icon::Locus;
+        let _ = Icon::Midpoint;
+        let _ = Icon::Perpendicular;
+        let _ = Icon::Tangent;
         let _ = Icon::Distance;
         let _ = Icon::Angle;
         let _ = Icon::Area;
@@ -1521,6 +1688,8 @@ mod tests {
         let _ = Icon::BooleanXor;
         let _ = Icon::Sphere;
         let _ = Icon::Cube;
+        let _ = Icon::Plane;
+        let _ = Icon::Surface;
         let _ = Icon::Pyramid;
         let _ = Icon::Cone;
         let _ = Icon::Cylinder;
@@ -1537,6 +1706,9 @@ mod tests {
         let _ = Icon::ComplexGrid;
         let _ = Icon::Slider;
         let _ = Icon::Button;
+        let _ = Icon::Dynamics;
+        let _ = Icon::Spreadsheet;
+        let _ = Icon::Tools;
         let _ = Icon::Sun;
         let _ = Icon::Moon;
         let _ = Icon::ChevronLeft;

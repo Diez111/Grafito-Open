@@ -4,6 +4,7 @@
 //! (theme, grid visibility, snap-to-grid) used across the desktop app.
 
 use egui::Color32;
+use grafito_assistant_types::ProviderProfile;
 use grafito_geometry::Color;
 
 use crate::snap::SnapConfig;
@@ -17,38 +18,6 @@ pub(crate) fn to_color32(c: Color) -> Color32 {
     )
 }
 
-pub(crate) fn configure_modern_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-
-    // Smooth corners everywhere
-    style.visuals.window_rounding = 8.0.into();
-    style.visuals.menu_rounding = 8.0.into();
-    style.visuals.widgets.noninteractive.rounding = 6.0.into();
-    style.visuals.widgets.inactive.rounding = 6.0.into();
-    style.visuals.widgets.hovered.rounding = 6.0.into();
-    style.visuals.widgets.active.rounding = 6.0.into();
-
-    // Spacing so it doesn't look cramped
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(12.0, 6.0);
-    style.spacing.window_margin = egui::Margin::same(12.0);
-
-    style.visuals.window_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 8.0),
-        blur: 16.0,
-        spread: 0.0,
-        color: egui::Color32::from_black_alpha(40),
-    };
-    style.visuals.popup_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 4.0),
-        blur: 8.0,
-        spread: 0.0,
-        color: egui::Color32::from_black_alpha(40),
-    };
-
-    ctx.set_style(style);
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppConfig {
     pub(crate) dark_mode: bool,
@@ -56,6 +25,20 @@ pub(crate) struct AppConfig {
     pub(crate) snap_to_grid: bool,
     #[serde(default)]
     pub(crate) snap: SnapConfig,
+    #[serde(default = "default_assistant_provider")]
+    pub(crate) assistant_provider: ProviderProfile,
+    #[serde(default = "default_assistant_model")]
+    pub(crate) assistant_model: String,
+    #[serde(default)]
+    pub(crate) allow_fusion_fallback: bool,
+}
+
+const fn default_assistant_provider() -> ProviderProfile {
+    ProviderProfile::OpenCodeGo
+}
+
+fn default_assistant_model() -> String {
+    "minimax-m3".into()
 }
 
 impl Default for AppConfig {
@@ -65,6 +48,9 @@ impl Default for AppConfig {
             show_grid: true,
             snap_to_grid: false,
             snap: SnapConfig::default(),
+            assistant_provider: default_assistant_provider(),
+            assistant_model: default_assistant_model(),
+            allow_fusion_fallback: false,
         }
     }
 }
@@ -97,5 +83,21 @@ pub(crate) fn save_config(config: &AppConfig) {
         if let Err(err) = std::fs::write(&path, json) {
             log::warn!("No se pudo guardar {}: {err}", path.display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_configuration_defaults_assistant_preferences() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"dark_mode":false,"show_grid":true,"snap_to_grid":false}"#)
+                .unwrap();
+
+        assert_eq!(config.assistant_provider, ProviderProfile::OpenCodeGo);
+        assert_eq!(config.assistant_model, "minimax-m3");
+        assert!(!config.allow_fusion_fallback);
     }
 }

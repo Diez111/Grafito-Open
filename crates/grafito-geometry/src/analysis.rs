@@ -6,15 +6,44 @@
 //!
 //! Asesoría matemática: Aivo382 (almironi780@gmail.com)
 
+use crate::ast::{parse_ast, Expr};
 use crate::expr::{eval_batch_1d, eval_batch_2d, eval_function, eval_function_with_vars};
 use crate::integral::composite_simpson;
-use crate::Point2;
+use crate::{line_param_at_point, LineKind, Point2};
 use std::collections::HashMap;
+use std::fmt;
 
 const DEFAULT_SAMPLES: usize = 800;
 const DEFAULT_REFINE_ITER: usize = 30;
 const TOL: f64 = 1e-9;
 const EPS: f64 = 1e-6;
+/// Maximum grid intervals accepted by a public `AnalysisOptions` request.
+pub const MAX_ANALYSIS_SAMPLES: usize = 10_000;
+
+/// Failure returned when function analysis exceeds its fixed sampling budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisError {
+    /// The requested sample count exceeds the analysis budget.
+    SampleLimitExceeded { requested: usize, maximum: usize },
+    /// A bounded sample count could not produce a representable point count.
+    SampleCountOverflow,
+    /// A bounded sample grid could not be reserved.
+    AllocationFailed,
+}
+
+impl fmt::Display for AnalysisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SampleLimitExceeded { requested, maximum } => {
+                write!(f, "se solicitaron {requested} muestras, máximo {maximum}")
+            }
+            Self::SampleCountOverflow => {
+                write!(f, "la cantidad de puntos de análisis no es representable")
+            }
+            Self::AllocationFailed => write!(f, "no se pudo reservar memoria para las muestras"),
+        }
+    }
+}
 
 /// Tipo de característica encontrada por el análisis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,11 +123,33 @@ impl Default for AnalysisOptions {
 }
 
 /// Analiza una función explícita `y = f(x)`.
+///
+/// Esta API de compatibilidad devuelve una lista vacía si se rechaza el
+/// presupuesto de muestras; use [`try_analyze_function`] para el error.
 pub fn analyze_function(
     expr: &str,
     vars: &HashMap<String, f64>,
     opts: &AnalysisOptions,
 ) -> Vec<AnalysisResult> {
+    try_analyze_function(expr, vars, opts).unwrap_or_default()
+}
+
+/// Fallible variant of [`analyze_function`] with an explicit sampling budget.
+pub fn try_analyze_function(
+    expr: &str,
+    vars: &HashMap<String, f64>,
+    opts: &AnalysisOptions,
+) -> Result<Vec<AnalysisResult>, AnalysisError> {
+    let samples = opts.samples.max(4);
+    if samples > MAX_ANALYSIS_SAMPLES {
+        return Err(AnalysisError::SampleLimitExceeded {
+            requested: samples,
+            maximum: MAX_ANALYSIS_SAMPLES,
+        });
+    }
+    let point_count = samples
+        .checked_add(1)
+        .ok_or(AnalysisError::SampleCountOverflow)?;
     let mut results = Vec::new();
 
     if opts.find_y_intercept && opts.domain_min <= 0.0 && opts.domain_max >= 0.0 {
@@ -116,11 +167,18 @@ pub fn analyze_function(
     }
 
     if opts.find_asymptotes {
-        results.extend(find_asymptotes(expr, vars, opts));
+        results.extend(find_asymptotes(
+            expr,
+            vars,
+            opts.domain_min,
+            opts.domain_max,
+            samples,
+        ));
     }
 
-    let samples = opts.samples.max(4);
-    let mut xs = Vec::with_capacity(samples + 1);
+    let mut xs = Vec::new();
+    xs.try_reserve_exact(point_count)
+        .map_err(|_| AnalysisError::AllocationFailed)?;
     for i in 0..=samples {
         let t = i as f64 / samples as f64;
         let x = opts.domain_min + t * (opts.domain_max - opts.domain_min);
@@ -146,7 +204,7 @@ pub fn analyze_function(
         results.extend(extract_inflections(expr, vars, &xs, &ys, opts));
     }
 
-    results
+    Ok(results)
 }
 
 fn f64_or_nan(expr: &str, x: f64, vars: &HashMap<String, f64>) -> f64 {
@@ -404,64 +462,131 @@ fn extract_inflections(
 fn find_asymptotes(
     expr: &str,
     vars: &HashMap<String, f64>,
-    opts: &AnalysisOptions,
+    domain_min: f64,
+    domain_max: f64,
+    samples: usize,
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
 
-    // Asíntotas verticales: buscar discontinuidades infinitas o NaN.
-    let samples = opts.samples.max(4);
-    let mut prev_x = opts.domain_min;
-    let mut prev_finite: Option<f64> = None;
+    // Asíntotas verticales: un NaN solo indica que el dominio no está definido;
+    // para publicar una asíntota exigimos crecimiento bilateral al acercarnos.
+    let mut sampled = Vec::with_capacity(samples + 1);
     for i in 0..=samples {
-        let x = opts.domain_min + (i as f64 / samples as f64) * (opts.domain_max - opts.domain_min);
+        let x = domain_min + (i as f64 / samples as f64) * (domain_max - domain_min);
         let y = f64_or_nan(expr, x, vars);
+        sampled.push((x, y));
+    }
 
-        let is_bad = y.is_nan() || y.is_infinite();
-        if is_bad {
-            // Refinar la ubicación exacta de la asíntota entre prev_x y x.
-            let mut lo = prev_x;
-            let mut hi = x;
-            for _ in 0..40 {
-                let mid = (lo + hi) * 0.5;
-                let vm = f64_or_nan(expr, mid, vars);
-                if vm.is_nan() || vm.is_infinite() {
-                    hi = mid;
-                } else {
-                    lo = mid;
-                }
-            }
-            let asymptote_x = (lo + hi) * 0.5;
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::VerticalAsymptote,
-                point: Point2::new(asymptote_x, 0.0),
-                value: None,
-                secondary: None,
-                label: format!("Asíntota vertical: x = {:.4}", asymptote_x),
-            });
-            prev_finite = None;
-        } else if prev_finite.is_none() && prev_x < x {
-            // Saltamos de una región inválida a una válida: la discontinuidad está justo antes.
-            let asymptote_x = (prev_x + x) * 0.5;
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::VerticalAsymptote,
-                point: Point2::new(asymptote_x, 0.0),
-                value: None,
-                secondary: None,
-                label: format!("Asíntota vertical: x = {:.4}", asymptote_x),
-            });
+    let proves_vertical_growth = |candidate: f64, interval_width: f64| {
+        let precision = f64::EPSILON * candidate.abs().max(1.0) * 32.0;
+        let near_offset = (interval_width.abs() * 1e-6).max(precision);
+        let far_offset = (interval_width.abs() * 0.1).max(near_offset * 32.0);
+        let left_near = f64_or_nan(expr, candidate - near_offset, vars);
+        let right_near = f64_or_nan(expr, candidate + near_offset, vars);
+        let left_far = f64_or_nan(expr, candidate - far_offset, vars);
+        let right_far = f64_or_nan(expr, candidate + far_offset, vars);
+        [left_near, right_near, left_far, right_far]
+            .iter()
+            .all(|value| value.is_finite())
+            && left_near.abs() > left_far.abs().max(1.0) * 8.0
+            && right_near.abs() > right_far.abs().max(1.0) * 8.0
+    };
+
+    let mut vertical_candidates = Vec::new();
+    for pair in sampled.windows(2) {
+        let (lo, flo) = pair[0];
+        let (hi, fhi) = pair[1];
+        if !flo.is_finite()
+            || !fhi.is_finite()
+            || flo == 0.0
+            || fhi == 0.0
+            || flo.is_sign_negative() == fhi.is_sign_negative()
+        {
+            continue;
         }
 
-        if y.is_finite() {
-            prev_finite = Some(y);
-            prev_x = x;
+        let mut left = lo;
+        let mut right = hi;
+        let mut f_left = flo;
+        let mut root = false;
+        for _ in 0..48 {
+            let mid = (left + right) * 0.5;
+            let f_mid = f64_or_nan(expr, mid, vars);
+            if !f_mid.is_finite() {
+                left = mid;
+                right = mid;
+                break;
+            }
+            if f_mid == 0.0 {
+                root = true;
+                break;
+            }
+            if f_mid.is_sign_negative() == f_left.is_sign_negative() {
+                left = mid;
+                f_left = f_mid;
+            } else {
+                right = mid;
+            }
+        }
+        let candidate = (left + right) * 0.5;
+        if !root && proves_vertical_growth(candidate, hi - lo) {
+            vertical_candidates.push(candidate);
         }
     }
 
-    // Asíntotas horizontales: límites en ±∞.
-    let large = 1e6_f64;
-    let y_pos = f64_or_nan(expr, large, vars);
-    let y_neg = f64_or_nan(expr, -large, vars);
-    if y_pos.is_finite() {
+    for window in sampled.windows(3) {
+        let (left_x, left_y) = window[0];
+        let (candidate, middle_y) = window[1];
+        let (right_x, right_y) = window[2];
+        if !middle_y.is_finite()
+            && left_y.is_finite()
+            && right_y.is_finite()
+            && proves_vertical_growth(candidate, right_x - left_x)
+        {
+            vertical_candidates.push(candidate);
+        }
+    }
+
+    vertical_candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    vertical_candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+    for asymptote_x in vertical_candidates {
+        results.push(AnalysisResult {
+            feature: AnalysisFeature::VerticalAsymptote,
+            point: Point2::new(asymptote_x, 0.0),
+            value: None,
+            secondary: None,
+            label: format!("Asíntota vertical: x = {:.4}", asymptote_x),
+        });
+    }
+
+    // Asíntotas horizontales: una muestra finita no demuestra un límite. Las
+    // muestras separadas por tres órdenes de magnitud deben estabilizarse.
+    const LIMIT_SAMPLES: [f64; 3] = [1e9, 1e12, 1e15];
+    const LIMIT_ABS_TOLERANCE: f64 = 1e-7;
+    const LIMIT_REL_TOLERANCE: f64 = 1e-9;
+    let horizontal_limit = |direction: f64| {
+        let values: Option<Vec<f64>> = LIMIT_SAMPLES
+            .iter()
+            .map(|scale| {
+                let value = f64_or_nan(expr, direction * scale, vars);
+                value.is_finite().then_some(value)
+            })
+            .collect();
+        let values = values?;
+        let limit = *values.last()?;
+        let scale = values
+            .iter()
+            .fold(1.0_f64, |maximum, value| maximum.max(value.abs()));
+        let tolerance = LIMIT_ABS_TOLERANCE + LIMIT_REL_TOLERANCE * scale;
+        values
+            .iter()
+            .all(|value| (value - limit).abs() <= tolerance)
+            .then_some(limit)
+    };
+
+    let y_pos = horizontal_limit(1.0);
+    let y_neg = horizontal_limit(-1.0);
+    if let Some(y_pos) = y_pos {
         results.push(AnalysisResult {
             feature: AnalysisFeature::HorizontalAsymptote,
             point: Point2::new(0.0, y_pos),
@@ -470,7 +595,9 @@ fn find_asymptotes(
             label: format!("Asíntota horizontal: y = {:.4}", y_pos),
         });
     }
-    if y_neg.is_finite() && (y_neg - y_pos).abs() > 1e-3 {
+    if let Some(y_neg) = y_neg
+        .filter(|y_neg| y_pos.map_or(true, |y_pos| (y_neg - y_pos).abs() > LIMIT_ABS_TOLERANCE))
+    {
         results.push(AnalysisResult {
             feature: AnalysisFeature::HorizontalAsymptote,
             point: Point2::new(0.0, y_neg),
@@ -630,19 +757,13 @@ pub fn analyze_parametric_curve2d(
     if features.contains(&AnalysisFeature::LocalMaximum)
         || features.contains(&AnalysisFeature::LocalMinimum)
     {
-        results.extend(find_extrema(
-            expr_x,
-            "t",
-            "X",
-            &|x, y| Point2::new(x, y),
-            &|t| eval_y(t),
-        ));
+        results.extend(find_extrema(expr_x, "t", "X", &Point2::new, &eval_y));
         results.extend(find_extrema(
             expr_y,
             "t",
             "Y",
             &|y, x| Point2::new(x, y),
-            &|t| eval_x(t),
+            &eval_x,
         ));
     }
 
@@ -996,6 +1117,108 @@ pub fn analyze_vector_field2d(
     results
 }
 
+/// Máximo orden admitido por las APIs públicas de Taylor.
+pub const MAX_TAYLOR_ORDER: usize = 64;
+/// Máximo de nodos que puede tener una derivada intermedia de Taylor.
+pub const MAX_TAYLOR_AST_NODES: usize = 32_768;
+/// Trabajo acumulado máximo de una expansión de Taylor, medido en nodos.
+pub const MAX_TAYLOR_WORK_UNITS: usize = 131_072;
+
+// Cada regla de derivación nativa emite una cantidad acotada de subárboles
+// clonados. El factor conservador se verifica antes de materializar `diff`.
+const MAX_TAYLOR_DERIVATIVE_NODE_GROWTH: usize = 64;
+
+fn validate_taylor_order(order: usize) -> Result<(), String> {
+    if order > MAX_TAYLOR_ORDER {
+        return Err(format!(
+            "Taylor order {order} exceeds maximum {MAX_TAYLOR_ORDER}"
+        ));
+    }
+    Ok(())
+}
+
+/// Calcula coeficientes de Taylor desde un AST sin permitir expansiones
+/// intermedias que superen los presupuestos públicos de nodos o trabajo.
+pub fn taylor_coefficients_from_ast(
+    expression: &Expr,
+    variable: &str,
+    center: f64,
+    order: usize,
+) -> Result<Vec<f64>, String> {
+    validate_taylor_order(order)?;
+    if !center.is_finite() {
+        return Err("Taylor center must be finite".to_string());
+    }
+
+    let initial_nodes = expression.node_count();
+    if initial_nodes > MAX_TAYLOR_AST_NODES {
+        return Err(format!(
+            "Taylor AST node budget exceeded: {initial_nodes} nodes, maximum {MAX_TAYLOR_AST_NODES}"
+        ));
+    }
+
+    let capacity = order
+        .checked_add(1)
+        .ok_or_else(|| "Taylor order overflowed coefficient capacity".to_string())?;
+    let mut coefficients = Vec::with_capacity(capacity);
+    let mut current = expression.simplify();
+    let mut work_units = 0usize;
+    let mut factorial = 1.0f64;
+
+    for degree in 0..=order {
+        let current_nodes = current.node_count();
+        work_units = work_units
+            .checked_add(current_nodes)
+            .ok_or_else(|| "Taylor work budget overflowed".to_string())?;
+        if work_units > MAX_TAYLOR_WORK_UNITS {
+            return Err(format!(
+                "Taylor work budget exceeded: {work_units} units, maximum {MAX_TAYLOR_WORK_UNITS}"
+            ));
+        }
+
+        let value = current.eval_at(variable, center);
+        if !value.is_finite() {
+            return Err(format!(
+                "Taylor expression is not finite at {variable} = {center}"
+            ));
+        }
+        coefficients.push(value / factorial);
+
+        if degree == order {
+            break;
+        }
+
+        let derivative_upper_bound = current_nodes
+            .checked_mul(MAX_TAYLOR_DERIVATIVE_NODE_GROWTH)
+            .ok_or_else(|| "Taylor derivative node budget overflowed".to_string())?;
+        if derivative_upper_bound > MAX_TAYLOR_AST_NODES {
+            return Err(format!(
+                "Taylor derivative expansion exceeds AST node budget: at most {derivative_upper_bound} nodes, maximum {MAX_TAYLOR_AST_NODES}"
+            ));
+        }
+        let projected_work = work_units
+            .checked_add(derivative_upper_bound)
+            .ok_or_else(|| "Taylor work budget overflowed".to_string())?;
+        if projected_work > MAX_TAYLOR_WORK_UNITS {
+            return Err(format!(
+                "Taylor work budget exceeded: projected {projected_work} units, maximum {MAX_TAYLOR_WORK_UNITS}"
+            ));
+        }
+
+        current = current.diff(variable).simplify();
+        if current.node_count() > MAX_TAYLOR_AST_NODES {
+            return Err(format!(
+                "Taylor derivative exceeds AST node budget: {} nodes, maximum {MAX_TAYLOR_AST_NODES}",
+                current.node_count()
+            ));
+        }
+        work_units = projected_work;
+        factorial *= (degree + 1) as f64;
+    }
+
+    Ok(coefficients)
+}
+
 /// Calcula los coeficientes del polinomio de Taylor de orden `n` alrededor de `center`.
 pub fn taylor_coefficients(
     expr: &str,
@@ -1003,16 +1226,11 @@ pub fn taylor_coefficients(
     center: f64,
     order: usize,
 ) -> Result<Vec<f64>, String> {
-    let mut coeffs = Vec::with_capacity(order + 1);
-    let mut f_expr = expr.to_string();
-    for k in 0..=order {
-        let val = eval_function_with_vars(&f_expr, center, vars)?;
-        let fact = (1..=k).fold(1.0, |acc, n| acc * n as f64);
-        coeffs.push(val / fact);
-        // derivada numérica de la expresión actual
-        f_expr = format!("deriv({})", f_expr);
-    }
-    Ok(coeffs)
+    validate_taylor_order(order)?;
+    let ast = parse_ast(expr)
+        .map_err(|error| format!("No se pudo calcular Taylor de '{expr}': {error}"))?;
+    let ast = ast.substitute_vars(vars, &["x"]);
+    taylor_coefficients_from_ast(&ast, "x", center, order)
 }
 
 /// Genera una cadena legible para el polinomio de Taylor.
@@ -1022,6 +1240,7 @@ pub fn taylor_series_string(
     center: f64,
     order: usize,
 ) -> Result<String, String> {
+    validate_taylor_order(order)?;
     let coeffs = taylor_coefficients(expr, vars, center, order)?;
     let mut terms = Vec::new();
     for (k, c) in coeffs.iter().enumerate() {
@@ -1058,6 +1277,7 @@ pub fn taylor_series_string(
 pub fn analyze_line(
     start: Point2,
     end: Point2,
+    kind: LineKind,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
@@ -1068,16 +1288,17 @@ pub fn analyze_line(
     }
 
     if features.contains(&AnalysisFeature::YIntercept) {
-        // y = 0 => start.y + t*dy = 0
-        if dy.abs() > 1e-15 {
-            let t = -start.y / dy;
-            if (0.0..=1.0).contains(&t) {
+        // x = 0 => start.x + t*dx = 0
+        if dx.abs() > 1e-15 {
+            let t = -start.x / dx;
+            if kind.contains_t(t) {
+                let y = start.y + t * dy;
                 results.push(AnalysisResult {
                     feature: AnalysisFeature::YIntercept,
-                    point: Point2::new(0.0, start.y + t * dy),
-                    value: Some(0.0),
+                    point: Point2::new(0.0, y),
+                    value: Some(y),
                     secondary: None,
-                    label: format!("Intersección Y: (0.00, {:.4})", start.y + t * dy),
+                    label: format!("Intersección Y: (0.00, {:.4})", y),
                 });
             }
         }
@@ -1085,17 +1306,17 @@ pub fn analyze_line(
 
     if (features.contains(&AnalysisFeature::XIntercept)
         || features.contains(&AnalysisFeature::Root))
-        && dx.abs() > 1e-15
+        && dy.abs() > 1e-15
     {
-        let t = -start.x / dx;
-        if (0.0..=1.0).contains(&t) {
-            let y = start.y + t * dy;
+        let t = -start.y / dy;
+        if kind.contains_t(t) {
+            let x = start.x + t * dx;
             results.push(AnalysisResult {
                 feature: AnalysisFeature::XIntercept,
-                point: Point2::new(start.x + t * dx, 0.0),
-                value: Some(y),
+                point: Point2::new(x, 0.0),
+                value: Some(0.0),
                 secondary: None,
-                label: format!("Intersección X: ({:.4}, 0.00)", start.x + t * dx),
+                label: format!("Intersección X: ({:.4}, 0.00)", x),
             });
         }
     }
@@ -1182,10 +1403,50 @@ pub fn analyze_circle(
     results
 }
 
-/// Elipse rotada: vértices y cortes con el eje Y. Los cortes exactos con
-/// el eje X para una elipse rotada por `angle` requieren resolver la
-/// cuadrática implícita; aquí emitimos los vértices canónicos y los cortes
-/// cuando la elipse no está rotada, suficientes para los snapshots de UI.
+fn real_quadratic_roots(a: f64, b: f64, c: f64) -> Vec<f64> {
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return Vec::new();
+    }
+    let scale = a.abs().max(b.abs()).max(c.abs()).max(1.0);
+    let a = a / scale;
+    let b = b / scale;
+    let c = c / scale;
+    let coefficient_tolerance = 64.0 * f64::EPSILON;
+
+    if a.abs() <= coefficient_tolerance {
+        if b.abs() <= coefficient_tolerance {
+            return Vec::new();
+        }
+        let root = -c / b;
+        return root.is_finite().then_some(root).into_iter().collect();
+    }
+
+    let discriminant = b * b - 4.0 * a * c;
+    let discriminant_tolerance =
+        64.0 * f64::EPSILON * (b * b + (4.0 * a * c).abs()).max(f64::MIN_POSITIVE);
+    if discriminant < -discriminant_tolerance {
+        return Vec::new();
+    }
+    if discriminant.abs() <= discriminant_tolerance {
+        let root = -b / (2.0 * a);
+        return root.is_finite().then_some(root).into_iter().collect();
+    }
+
+    let sqrt_discriminant = discriminant.max(0.0).sqrt();
+    let q = -0.5 * (b + sqrt_discriminant.copysign(b));
+    if q == 0.0 {
+        return Vec::new();
+    }
+    let mut roots = vec![q / a, c / q];
+    roots.retain(|root| root.is_finite());
+    roots.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    roots.dedup_by(|left, right| {
+        (*left - *right).abs() <= 1e-12 * left.abs().max(right.abs()).max(1.0)
+    });
+    roots
+}
+
+/// Elipse rotada: extremos verticales y cortes analíticos con ambos ejes.
 pub fn analyze_ellipse(
     center: Point2,
     rx: f64,
@@ -1198,205 +1459,281 @@ pub fn analyze_ellipse(
         return results;
     }
     let (s, c) = angle.sin_cos();
-    let rotate = |p: Point2| Point2::new(p.x * c + p.y * s, -p.x * s + p.y * c);
+    let rx2 = rx * rx;
+    let ry2 = ry * ry;
+    if !rx2.is_finite() || !ry2.is_finite() || rx2 == 0.0 || ry2 == 0.0 {
+        return results;
+    }
+    let mxx = c * c / rx2 + s * s / ry2;
+    let mxy = s * c * (1.0 / rx2 - 1.0 / ry2);
+    let myy = s * s / rx2 + c * c / ry2;
 
-    if features.contains(&AnalysisFeature::LocalMaximum)
-        || features.contains(&AnalysisFeature::LocalMinimum)
+    if features.contains(&AnalysisFeature::XIntercept) || features.contains(&AnalysisFeature::Root)
     {
-        for p in [Point2::new(rx, 0.0), Point2::new(-rx, 0.0)] {
-            let r = rotate(p);
+        let dy = -center.y;
+        for offset in real_quadratic_roots(mxx, 2.0 * mxy * dy, myy * dy * dy - 1.0) {
+            let x = center.x + offset;
+            if x.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::XIntercept,
+                    point: Point2::new(x, 0.0),
+                    value: Some(0.0),
+                    secondary: None,
+                    label: format!("Intersección X: ({x:.4}, 0.00)"),
+                });
+            }
+        }
+    }
+
+    if features.contains(&AnalysisFeature::YIntercept) {
+        let dx = -center.x;
+        for offset in real_quadratic_roots(myy, 2.0 * mxy * dx, mxx * dx * dx - 1.0) {
+            let y = center.y + offset;
+            if y.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::YIntercept,
+                    point: Point2::new(0.0, y),
+                    value: Some(y),
+                    secondary: None,
+                    label: format!("Intersección Y: (0.00, {y:.4})"),
+                });
+            }
+        }
+    }
+
+    let y_amplitude = (rx * s).hypot(ry * c);
+    if y_amplitude.is_finite() && y_amplitude > 0.0 {
+        let local_x = rx2 * s / y_amplitude;
+        let local_y = ry2 * c / y_amplitude;
+        let maximum = Point2::new(
+            center.x + local_x * c - local_y * s,
+            center.y + local_x * s + local_y * c,
+        );
+        let minimum = Point2::new(2.0 * center.x - maximum.x, 2.0 * center.y - maximum.y);
+        if features.contains(&AnalysisFeature::LocalMaximum) {
             results.push(AnalysisResult {
                 feature: AnalysisFeature::LocalMaximum,
-                point: Point2::new(center.x + r.x, center.y + r.y),
-                value: None,
+                point: maximum,
+                value: Some(maximum.y),
                 secondary: None,
-                label: format!("Vértice: ({:.4}, {:.4})", center.x + r.x, center.y + r.y),
+                label: format!("Máximo Y: ({:.4}, {:.4})", maximum.x, maximum.y),
             });
         }
-        for p in [Point2::new(0.0, ry), Point2::new(0.0, -ry)] {
-            let r = rotate(p);
+        if features.contains(&AnalysisFeature::LocalMinimum) {
             results.push(AnalysisResult {
                 feature: AnalysisFeature::LocalMinimum,
-                point: Point2::new(center.x + r.x, center.y + r.y),
-                value: None,
+                point: minimum,
+                value: Some(minimum.y),
                 secondary: None,
-                label: format!("Vértice: ({:.4}, {:.4})", center.x + r.x, center.y + r.y),
+                label: format!("Mínimo Y: ({:.4}, {:.4})", minimum.x, minimum.y),
             });
         }
-    }
-
-    if features.contains(&AnalysisFeature::YIntercept) && angle.abs() < 1e-9 {
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::YIntercept,
-            point: Point2::new(0.0, center.y + ry),
-            value: Some(center.y + ry),
-            secondary: None,
-            label: format!("Intersección Y: (0.00, {:.4})", center.y + ry),
-        });
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::YIntercept,
-            point: Point2::new(0.0, center.y - ry),
-            value: Some(center.y - ry),
-            secondary: None,
-            label: format!("Intersección Y: (0.00, {:.4})", center.y - ry),
-        });
-    }
-
-    if (features.contains(&AnalysisFeature::XIntercept)
-        || features.contains(&AnalysisFeature::Root))
-        && angle.abs() < 1e-9
-    {
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::XIntercept,
-            point: Point2::new(center.x + rx, 0.0),
-            value: Some(0.0),
-            secondary: None,
-            label: format!("Intersección X: ({:.4}, 0.00)", center.x + rx),
-        });
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::XIntercept,
-            point: Point2::new(center.x - rx, 0.0),
-            value: Some(0.0),
-            secondary: None,
-            label: format!("Intersección X: ({:.4}, 0.00)", center.x - rx),
-        });
     }
 
     results
 }
 
-/// Parábola: cortes con ejes cartesianos.
+/// Parábola rotada: cortes con ejes y extremo vertical cuando existe.
 pub fn analyze_parabola(
     vertex: Point2,
     p: f64,
+    angle: f64,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
-    if p.abs() < 1e-15 {
+    if !p.is_finite() || p.abs() < 1e-15 || !angle.is_finite() {
         return results;
     }
-    // Parábola vertical y^2 = 4p(x - vx) + vy^2 ... simplificamos al caso
-    // canónico (vértice en origen, abre hacia arriba): y = x^2 / (4p).
+    let (s, c) = angle.sin_cos();
+
     if features.contains(&AnalysisFeature::XIntercept) || features.contains(&AnalysisFeature::Root)
     {
-        // y = 0 => x = 0 en sistema alineado
-        if vertex.y.abs() < 1e-12 {
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::XIntercept,
-                point: Point2::new(vertex.x, 0.0),
-                value: Some(0.0),
-                secondary: None,
-                label: format!("Intersección X: ({:.4}, 0.00)", vertex.x),
-            });
+        let vy = vertex.y;
+        for offset in real_quadratic_roots(
+            c * c,
+            s * (4.0 * p - 2.0 * c * vy),
+            s * s * vy * vy + 4.0 * p * c * vy,
+        ) {
+            let x = vertex.x + offset;
+            if x.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::XIntercept,
+                    point: Point2::new(x, 0.0),
+                    value: Some(0.0),
+                    secondary: None,
+                    label: format!("Intersección X: ({x:.4}, 0.00)"),
+                });
+            }
         }
     }
+
     if features.contains(&AnalysisFeature::YIntercept) {
-        // x = 0 => y = vertex.y
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::YIntercept,
-            point: Point2::new(0.0, vertex.y),
-            value: Some(vertex.y),
-            secondary: None,
-            label: format!("Intersección Y: (0.00, {:.4})", vertex.y),
-        });
+        let vx = vertex.x;
+        for offset in real_quadratic_roots(
+            s * s,
+            -2.0 * s * c * vx - 4.0 * p * c,
+            c * c * vx * vx - 4.0 * p * s * vx,
+        ) {
+            let y = vertex.y + offset;
+            if y.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::YIntercept,
+                    point: Point2::new(0.0, y),
+                    value: Some(y),
+                    secondary: None,
+                    label: format!("Intersección Y: (0.00, {y:.4})"),
+                });
+            }
+        }
     }
-    if features.contains(&AnalysisFeature::LocalMinimum) && p > 0.0 {
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::LocalMinimum,
-            point: vertex,
-            value: Some(vertex.y),
-            secondary: None,
-            label: format!("Vértice: ({:.4}, {:.4})", vertex.x, vertex.y),
-        });
-    }
-    if features.contains(&AnalysisFeature::LocalMaximum) && p < 0.0 {
-        results.push(AnalysisResult {
-            feature: AnalysisFeature::LocalMaximum,
-            point: vertex,
-            value: Some(vertex.y),
-            secondary: None,
-            label: format!("Vértice: ({:.4}, {:.4})", vertex.x, vertex.y),
-        });
+
+    if c.abs() > 1e-12 {
+        let t = -2.0 * p * s / c;
+        let local_y = t * t / (4.0 * p);
+        let point = Point2::new(
+            vertex.x + t * c - local_y * s,
+            vertex.y + t * s + local_y * c,
+        );
+        if point.x.is_finite() && point.y.is_finite() {
+            let feature = if c / p > 0.0 {
+                AnalysisFeature::LocalMinimum
+            } else {
+                AnalysisFeature::LocalMaximum
+            };
+            if features.contains(&feature) {
+                let label = if feature == AnalysisFeature::LocalMinimum {
+                    "Mínimo Y"
+                } else {
+                    "Máximo Y"
+                };
+                results.push(AnalysisResult {
+                    feature,
+                    point,
+                    value: Some(point.y),
+                    secondary: None,
+                    label: format!("{label}: ({:.4}, {:.4})", point.x, point.y),
+                });
+            }
+        }
     }
     results
 }
 
-/// Hipérbola: cortes con ejes cartesianos (asíntotas como oblicuas).
+/// Hipérbola rotada: cortes, asíntotas y extremos verticales por rama.
 pub fn analyze_hyperbola(
     center: Point2,
     a: f64,
     b: f64,
     horizontal: bool,
+    angle: f64,
     features: &[AnalysisFeature],
 ) -> Vec<AnalysisResult> {
     let mut results = Vec::new();
-    if a <= 0.0 || b <= 0.0 {
+    if a <= 0.0 || b <= 0.0 || !angle.is_finite() {
         return results;
     }
-    if horizontal {
-        // (x-cx)^2/a^2 - (y-cy)^2/b^2 = 1
-        // y=0 => (x-cx)^2 = a^2 => x = cx ± a
-        if features.contains(&AnalysisFeature::XIntercept)
-            || features.contains(&AnalysisFeature::Root)
-        {
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::XIntercept,
-                point: Point2::new(center.x + a, 0.0),
-                value: Some(0.0),
-                secondary: None,
-                label: format!("Intersección X: ({:.4}, 0.00)", center.x + a),
-            });
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::XIntercept,
-                point: Point2::new(center.x - a, 0.0),
-                value: Some(0.0),
-                secondary: None,
-                label: format!("Intersección X: ({:.4}, 0.00)", center.x - a),
-            });
-        }
-        if features.contains(&AnalysisFeature::YIntercept) {
-            // x=0 => -((cy)^2)/b^2 = 1 => sin solución salvo cy imaginario
-        }
-        if features.contains(&AnalysisFeature::ObliqueAsymptote) {
-            // y = ±(b/a) * (x - cx) + cy
-            let m = b / a;
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::ObliqueAsymptote,
-                point: Point2::new(center.x, center.y),
-                value: Some(m),
-                secondary: Some(Point2::new(1.0, m)),
-                label: format!(
-                    "Asíntota: y = {:.4}·(x - {:.4}) + {:.4}",
-                    m, center.x, center.y
-                ),
-            });
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::ObliqueAsymptote,
-                point: Point2::new(center.x, center.y),
-                value: Some(-m),
-                secondary: Some(Point2::new(1.0, -m)),
-                label: format!(
-                    "Asíntota: y = {:.4}·(x - {:.4}) + {:.4}",
-                    -m, center.x, center.y
-                ),
-            });
-        }
+    let (s, c) = angle.sin_cos();
+    let (transverse_x, transverse_y, conjugate_x, conjugate_y) = if horizontal {
+        (c, s, -s, c)
     } else {
-        // (y-cy)^2/a^2 - (x-cx)^2/b^2 = 1
-        if features.contains(&AnalysisFeature::YIntercept) {
+        (-s, c, c, s)
+    };
+    let a2 = a * a;
+    let b2 = b * b;
+    if !a2.is_finite() || !b2.is_finite() || a2 == 0.0 || b2 == 0.0 {
+        return results;
+    }
+    let mxx = transverse_x * transverse_x / a2 - conjugate_x * conjugate_x / b2;
+    let mxy = transverse_x * transverse_y / a2 - conjugate_x * conjugate_y / b2;
+    let myy = transverse_y * transverse_y / a2 - conjugate_y * conjugate_y / b2;
+
+    if features.contains(&AnalysisFeature::XIntercept) || features.contains(&AnalysisFeature::Root)
+    {
+        let dy = -center.y;
+        for offset in real_quadratic_roots(mxx, 2.0 * mxy * dy, myy * dy * dy - 1.0) {
+            let x = center.x + offset;
+            if x.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::XIntercept,
+                    point: Point2::new(x, 0.0),
+                    value: Some(0.0),
+                    secondary: None,
+                    label: format!("Intersección X: ({x:.4}, 0.00)"),
+                });
+            }
+        }
+    }
+
+    if features.contains(&AnalysisFeature::YIntercept) {
+        let dx = -center.x;
+        for offset in real_quadratic_roots(myy, 2.0 * mxy * dx, mxx * dx * dx - 1.0) {
+            let y = center.y + offset;
+            if y.is_finite() {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::YIntercept,
+                    point: Point2::new(0.0, y),
+                    value: Some(y),
+                    secondary: None,
+                    label: format!("Intersección Y: (0.00, {y:.4})"),
+                });
+            }
+        }
+    }
+
+    if mxx < 0.0 {
+        let dy = a * b * (-mxx).sqrt();
+        let dx = -(mxy / mxx) * dy;
+        let upper = Point2::new(center.x + dx, center.y + dy);
+        let lower = Point2::new(center.x - dx, center.y - dy);
+        if upper.x.is_finite() && upper.y.is_finite() && lower.x.is_finite() && lower.y.is_finite()
+        {
+            if features.contains(&AnalysisFeature::LocalMinimum) {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::LocalMinimum,
+                    point: upper,
+                    value: Some(upper.y),
+                    secondary: None,
+                    label: format!("Mínimo Y: ({:.4}, {:.4})", upper.x, upper.y),
+                });
+            }
+            if features.contains(&AnalysisFeature::LocalMaximum) {
+                results.push(AnalysisResult {
+                    feature: AnalysisFeature::LocalMaximum,
+                    point: lower,
+                    value: Some(lower.y),
+                    secondary: None,
+                    label: format!("Máximo Y: ({:.4}, {:.4})", lower.x, lower.y),
+                });
+            }
+        }
+    }
+
+    if features.contains(&AnalysisFeature::ObliqueAsymptote) {
+        for sign in [-1.0, 1.0] {
+            let direction_x = a * transverse_x + sign * b * conjugate_x;
+            let direction_y = a * transverse_y + sign * b * conjugate_y;
+            if !direction_x.is_finite() || !direction_y.is_finite() {
+                continue;
+            }
+            let secondary = Point2::new(center.x + direction_x, center.y + direction_y);
+            let (value, label) = if direction_x.abs() < 1e-12 {
+                (None, format!("Asíntota vertical: x = {:.4}", center.x))
+            } else {
+                let slope = direction_y / direction_x;
+                (
+                    Some(slope),
+                    format!(
+                        "Asíntota: y = {:.4}·(x - {:.4}) + {:.4}",
+                        slope, center.x, center.y
+                    ),
+                )
+            };
             results.push(AnalysisResult {
-                feature: AnalysisFeature::YIntercept,
-                point: Point2::new(0.0, center.y + a),
-                value: Some(center.y + a),
-                secondary: None,
-                label: format!("Intersección Y: (0.00, {:.4})", center.y + a),
-            });
-            results.push(AnalysisResult {
-                feature: AnalysisFeature::YIntercept,
-                point: Point2::new(0.0, center.y - a),
-                value: Some(center.y - a),
-                secondary: None,
-                label: format!("Intersección Y: (0.00, {:.4})", center.y - a),
+                feature: AnalysisFeature::ObliqueAsymptote,
+                point: center,
+                value,
+                secondary: Some(secondary),
+                label,
             });
         }
     }
@@ -1495,12 +1832,30 @@ pub fn analyze_intersection(
     vars: &HashMap<String, f64>,
 ) -> Vec<Point2> {
     match (a, b) {
-        (IntersectionCurve::Line { s: s1, e: e1 }, IntersectionCurve::Line { s: s2, e: e2 }) => {
-            line_line_intersection(*s1, *e1, *s2, *e2)
-        }
-        (IntersectionCurve::Line { s, e }, IntersectionCurve::Circle { center, radius })
-        | (IntersectionCurve::Circle { center, radius }, IntersectionCurve::Line { s, e }) => {
+        (
+            IntersectionCurve::Line {
+                s: s1,
+                e: e1,
+                kind: kind1,
+            },
+            IntersectionCurve::Line {
+                s: s2,
+                e: e2,
+                kind: kind2,
+            },
+        ) => line_line_intersection(*s1, *e1, *s2, *e2)
+            .into_iter()
+            .filter(|point| {
+                kind1.contains_t(line_param_at_point(*point, *s1, *e1))
+                    && kind2.contains_t(line_param_at_point(*point, *s2, *e2))
+            })
+            .collect(),
+        (IntersectionCurve::Line { s, e, kind }, IntersectionCurve::Circle { center, radius })
+        | (IntersectionCurve::Circle { center, radius }, IntersectionCurve::Line { s, e, kind }) => {
             line_circle_intersection(*s, *e, *center, *radius)
+                .into_iter()
+                .filter(|point| kind.contains_t(line_param_at_point(*point, *s, *e)))
+                .collect()
         }
         (
             IntersectionCurve::Circle {
@@ -1512,9 +1867,12 @@ pub fn analyze_intersection(
                 radius: r2,
             },
         ) => circle_circle_intersection(*c1, *r1, *c2, *r2),
-        (IntersectionCurve::Function { expr }, IntersectionCurve::Line { s, e })
-        | (IntersectionCurve::Line { s, e }, IntersectionCurve::Function { expr }) => {
+        (IntersectionCurve::Function { expr }, IntersectionCurve::Line { s, e, kind })
+        | (IntersectionCurve::Line { s, e, kind }, IntersectionCurve::Function { expr }) => {
             function_line_intersection(expr, *s, *e, view_bounds, vars)
+                .into_iter()
+                .filter(|point| kind.contains_t(line_param_at_point(*point, *s, *e)))
+                .collect()
         }
         (IntersectionCurve::Function { expr: e1 }, IntersectionCurve::Function { expr: e2 }) => {
             function_function_intersection(e1, e2, view_bounds, vars)
@@ -1527,9 +1885,18 @@ pub fn analyze_intersection(
 /// Se mantiene minimal: solo los tipos con discriminante analítico.
 #[derive(Debug, Clone)]
 pub enum IntersectionCurve<'a> {
-    Line { s: Point2, e: Point2 },
-    Circle { center: Point2, radius: f64 },
-    Function { expr: &'a str },
+    Line {
+        s: Point2,
+        e: Point2,
+        kind: LineKind,
+    },
+    Circle {
+        center: Point2,
+        radius: f64,
+    },
+    Function {
+        expr: &'a str,
+    },
 }
 
 fn line_line_intersection(s1: Point2, e1: Point2, s2: Point2, e2: Point2) -> Vec<Point2> {
@@ -1903,7 +2270,11 @@ pub fn arc_length(expr: &str, a: f64, b: f64) -> Result<f64, String> {
         let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
         (1.0 + dp * dp).sqrt()
     };
-    Ok(tool_simpson(g, a, b, TOOL_SAMPLES))
+    let length = tool_simpson(g, a, b, TOOL_SAMPLES);
+    if !length.is_finite() {
+        return Err("la longitud de arco no es finita".to_string());
+    }
+    Ok(length)
 }
 
 /// Curvatura de `f(x)` en `x = x0`: `κ = |f''(x0)| / (1 + f'(x0)²)^(3/2)`.
@@ -1944,7 +2315,11 @@ pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
         let y = eval_function(expr, xv).unwrap_or(f64::NAN);
         y * y
     };
-    Ok(std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES))
+    let volume = std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES);
+    if !volume.is_finite() {
+        return Err("el volumen de revolución no es finito".to_string());
+    }
+    Ok(volume)
 }
 
 /// Área de la superficie de revolución de `f(x)` alrededor del eje X en
@@ -1964,7 +2339,11 @@ pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> 
         let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
         2.0 * std::f64::consts::PI * y.abs() * (1.0 + dp * dp).sqrt()
     };
-    Ok(tool_simpson(g, a, b, TOOL_SAMPLES))
+    let surface = tool_simpson(g, a, b, TOOL_SAMPLES);
+    if !surface.is_finite() {
+        return Err("la superficie de revolución no es finita".to_string());
+    }
+    Ok(surface)
 }
 
 #[cfg(test)]
@@ -1973,6 +2352,25 @@ mod tests {
 
     fn empty_vars() -> HashMap<String, f64> {
         HashMap::new()
+    }
+
+    #[test]
+    fn taylor_apis_reject_orders_above_the_public_limit() {
+        assert!(taylor_coefficients("x", &empty_vars(), 0.0, 65).is_err());
+        assert!(taylor_series_string("x", &empty_vars(), 0.0, 65).is_err());
+    }
+
+    #[test]
+    fn taylor_analysis_rejects_growth_before_expanding_an_accepted_order() {
+        let expression = std::iter::repeat("sin(x)")
+            .take(16)
+            .collect::<Vec<_>>()
+            .join("*");
+
+        let error = taylor_coefficients(&expression, &empty_vars(), 0.0, 64)
+            .expect_err("accepted orders still require a bounded derivative workload");
+
+        assert!(error.contains("budget"), "unexpected error: {error}");
     }
 
     #[test]
@@ -2043,6 +2441,59 @@ mod tests {
     }
 
     #[test]
+    fn asymptote_analysis_does_not_mistake_finite_samples_for_limits() {
+        for expression in ["x", "sin(x)", "log(x)"] {
+            let results = analyze_function(expression, &empty_vars(), &AnalysisOptions::default());
+            assert!(
+                results
+                    .iter()
+                    .all(|result| result.feature != AnalysisFeature::HorizontalAsymptote),
+                "{expression} must not gain a horizontal asymptote from one finite sample"
+            );
+        }
+
+        let rational = analyze_function("1/x", &empty_vars(), &AnalysisOptions::default());
+        assert!(rational.iter().any(|result| {
+            result.feature == AnalysisFeature::HorizontalAsymptote
+                && result.value.is_some_and(|value| value.abs() < 1e-7)
+        }));
+    }
+
+    #[test]
+    fn vertical_asymptotes_require_unbounded_behavior_on_both_sides() {
+        let square_root = analyze_function("sqrt(x)", &empty_vars(), &AnalysisOptions::default());
+        assert!(square_root
+            .iter()
+            .all(|result| result.feature != AnalysisFeature::VerticalAsymptote));
+
+        let shifted_pole = analyze_function(
+            "1 / (x - 0.12345)",
+            &empty_vars(),
+            &AnalysisOptions::default(),
+        );
+        assert!(shifted_pole.iter().any(|result| {
+            result.feature == AnalysisFeature::VerticalAsymptote
+                && (result.point.x - 0.12345).abs() < 1e-6
+        }));
+    }
+
+    #[test]
+    fn function_analysis_rejects_unbounded_samples_before_allocating() {
+        let options = AnalysisOptions {
+            samples: usize::MAX,
+            ..AnalysisOptions::default()
+        };
+        assert!(matches!(
+            try_analyze_function("x", &empty_vars(), &options),
+            Err(AnalysisError::SampleLimitExceeded {
+                requested: usize::MAX,
+                maximum: MAX_ANALYSIS_SAMPLES,
+            })
+        ));
+        assert!(analyze_function("x", &empty_vars(), &options).is_empty());
+    }
+
+    #[test]
     fn test_analyze_circle_intersects_axis() {
         // (x-2)^2 + (y-1)^2 = 9
         let results = analyze_circle(
@@ -2073,6 +2524,145 @@ mod tests {
     }
 
     #[test]
+    fn conic_axis_intercepts_use_the_translated_equations() {
+        let ellipse = analyze_ellipse(
+            Point2::new(2.0, 0.0),
+            1.0,
+            1.0,
+            0.0,
+            &[AnalysisFeature::YIntercept],
+        );
+        assert!(ellipse
+            .iter()
+            .all(|result| result.feature != AnalysisFeature::YIntercept));
+
+        let parabola = analyze_parabola(
+            Point2::new(0.0, -1.0),
+            1.0,
+            0.0,
+            &[AnalysisFeature::XIntercept],
+        );
+        let parabola_roots: Vec<f64> = parabola.iter().map(|result| result.point.x).collect();
+        assert!(parabola_roots.iter().any(|x| (*x - 2.0).abs() < 1e-12));
+        assert!(parabola_roots.iter().any(|x| (*x + 2.0).abs() < 1e-12));
+
+        let hyperbola = analyze_hyperbola(
+            Point2::new(0.0, 2.0),
+            1.0,
+            1.0,
+            true,
+            0.0,
+            &[AnalysisFeature::XIntercept],
+        );
+        let hyperbola_roots: Vec<f64> = hyperbola.iter().map(|result| result.point.x).collect();
+        assert!(hyperbola_roots
+            .iter()
+            .any(|x| (*x - 5.0_f64.sqrt()).abs() < 1e-12));
+        assert!(hyperbola_roots
+            .iter()
+            .any(|x| (*x + 5.0_f64.sqrt()).abs() < 1e-12));
+    }
+
+    #[test]
+    fn rotated_conic_analysis_matches_the_render_transform() {
+        let angle = std::f64::consts::FRAC_PI_4;
+        let ellipse = analyze_ellipse(
+            Point2::new(0.0, 0.0),
+            3.0,
+            2.0,
+            angle,
+            &[
+                AnalysisFeature::XIntercept,
+                AnalysisFeature::YIntercept,
+                AnalysisFeature::LocalMaximum,
+                AnalysisFeature::LocalMinimum,
+            ],
+        );
+        let expected_axis = (72.0_f64 / 13.0).sqrt();
+        let expected_maximum = Point2::new(5.0 / 26.0_f64.sqrt(), 26.0_f64.sqrt() / 2.0);
+        assert!(ellipse.iter().any(|result| {
+            result.feature == AnalysisFeature::XIntercept
+                && (result.point.x - expected_axis).abs() < 1e-12
+        }));
+        assert!(ellipse.iter().any(|result| {
+            result.feature == AnalysisFeature::YIntercept
+                && (result.point.y - expected_axis).abs() < 1e-12
+        }));
+        assert!(ellipse.iter().any(|result| {
+            result.feature == AnalysisFeature::LocalMaximum
+                && result.point.distance(&expected_maximum) < 1e-12
+        }));
+
+        let parabola = analyze_parabola(
+            Point2::new(0.0, 0.0),
+            1.0,
+            angle,
+            &[
+                AnalysisFeature::XIntercept,
+                AnalysisFeature::YIntercept,
+                AnalysisFeature::LocalMinimum,
+            ],
+        );
+        let expected_parabola_minimum =
+            Point2::new(-(3.0 * 2.0_f64.sqrt() / 2.0), -(2.0_f64.sqrt() / 2.0));
+        assert!(parabola.iter().any(|result| {
+            result.feature == AnalysisFeature::XIntercept
+                && (result.point.x + 4.0 * 2.0_f64.sqrt()).abs() < 1e-12
+        }));
+        assert!(parabola.iter().any(|result| {
+            result.feature == AnalysisFeature::YIntercept
+                && (result.point.y - 4.0 * 2.0_f64.sqrt()).abs() < 1e-12
+        }));
+        assert!(parabola.iter().any(|result| {
+            result.feature == AnalysisFeature::LocalMinimum
+                && result.point.distance(&expected_parabola_minimum) < 1e-12
+        }));
+
+        let hyperbola = analyze_hyperbola(
+            Point2::new(0.0, 0.0),
+            2.0,
+            1.0,
+            true,
+            angle,
+            &[
+                AnalysisFeature::XIntercept,
+                AnalysisFeature::YIntercept,
+                AnalysisFeature::LocalMaximum,
+                AnalysisFeature::LocalMinimum,
+            ],
+        );
+        let expected_hyperbola_minimum =
+            Point2::new(5.0 * 6.0_f64.sqrt() / 6.0, 6.0_f64.sqrt() / 2.0);
+        assert!(hyperbola.iter().all(|result| {
+            result.feature != AnalysisFeature::XIntercept
+                && result.feature != AnalysisFeature::YIntercept
+        }));
+        assert!(hyperbola.iter().any(|result| {
+            result.feature == AnalysisFeature::LocalMinimum
+                && result.point.distance(&expected_hyperbola_minimum) < 1e-12
+        }));
+    }
+
+    #[test]
+    fn line_analysis_uses_the_correct_axis_equations() {
+        let results = analyze_line(
+            Point2::new(-1.0, 2.0),
+            Point2::new(1.0, 4.0),
+            LineKind::Segment,
+            &[AnalysisFeature::XIntercept, AnalysisFeature::YIntercept],
+        );
+
+        assert!(results.iter().any(|result| {
+            result.feature == AnalysisFeature::YIntercept
+                && result.point.x.abs() < 1e-12
+                && (result.point.y - 3.0).abs() < 1e-12
+        }));
+        assert!(results
+            .iter()
+            .all(|result| result.feature != AnalysisFeature::XIntercept));
+    }
+
+    #[test]
     fn test_analyze_polygon_centroid() {
         let tri = vec![
             Point2::new(0.0, 0.0),
@@ -2099,12 +2689,71 @@ mod tests {
             &IntersectionCurve::Line {
                 s: Point2::new(0.0, -1.0),
                 e: Point2::new(1.0, 1.0),
+                kind: LineKind::Line,
             },
             view,
             &empty_vars(),
         );
         assert!(!pts.is_empty(), "se esperaba al menos un punto");
         assert!(pts.iter().any(|p| (p.x - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn intersection_analysis_does_not_extend_segments() {
+        let view = (-5.0, 5.0, -5.0, 5.0);
+        let points = analyze_intersection(
+            &IntersectionCurve::Line {
+                s: Point2::new(0.0, 0.0),
+                e: Point2::new(1.0, 0.0),
+                kind: LineKind::Segment,
+            },
+            &IntersectionCurve::Line {
+                s: Point2::new(2.0, -1.0),
+                e: Point2::new(2.0, 1.0),
+                kind: LineKind::Segment,
+            },
+            view,
+            &empty_vars(),
+        );
+
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn intersection_analysis_filters_circle_function_and_ray_line_candidates() {
+        let view = (-5.0, 5.0, -5.0, 5.0);
+        let segment = IntersectionCurve::Line {
+            s: Point2::new(2.0, 0.0),
+            e: Point2::new(3.0, 0.0),
+            kind: LineKind::Segment,
+        };
+        let circle = IntersectionCurve::Circle {
+            center: Point2::new(0.0, 0.0),
+            radius: 1.0,
+        };
+        assert!(analyze_intersection(&segment, &circle, view, &empty_vars()).is_empty());
+
+        let function = IntersectionCurve::Function { expr: "x^2" };
+        let horizontal_segment = IntersectionCurve::Line {
+            s: Point2::new(2.0, 1.0),
+            e: Point2::new(3.0, 1.0),
+            kind: LineKind::Segment,
+        };
+        assert!(
+            analyze_intersection(&function, &horizontal_segment, view, &empty_vars()).is_empty()
+        );
+
+        let ray = IntersectionCurve::Line {
+            s: Point2::new(1.0, 0.0),
+            e: Point2::new(2.0, 0.0),
+            kind: LineKind::Ray,
+        };
+        let vertical_line = IntersectionCurve::Line {
+            s: Point2::new(0.0, -1.0),
+            e: Point2::new(0.0, 1.0),
+            kind: LineKind::Line,
+        };
+        assert!(analyze_intersection(&ray, &vertical_line, view, &empty_vars()).is_empty());
     }
 
     #[test]

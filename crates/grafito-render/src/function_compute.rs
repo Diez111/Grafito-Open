@@ -9,7 +9,9 @@
 //! If an expression uses operations that are not supported by the bytecode
 //! machine, compilation fails and the caller falls back to the CPU evaluator.
 
-use crate::implicit_compute::{compile_expr, BytecodeProgram, CompileError};
+use crate::implicit_compute::{
+    compile_expr, f32_bounds_have_precision, BytecodeProgram, CompileError,
+};
 use grafito_core::function_sampling;
 use grafito_core::object::{FunctionObj, FunctionSamples};
 use std::collections::HashMap;
@@ -210,6 +212,10 @@ impl FunctionComputePipeline {
         compile_function_expr(&ast, variables, &mut prog).ok()?;
 
         let (x_min, x_max) = domain;
+        let min_step = (x_max - x_min).abs() / grid_size.max(1) as f64;
+        if !f32_bounds_have_precision(&[x_min, x_max], min_step) {
+            return None;
+        }
         let params = FunctionParamsUniform {
             x_min: x_min as f32,
             x_max: x_max as f32,
@@ -383,11 +389,9 @@ pub fn maybe_compute_function_on_gpu(
         .enumerate()
         .map(|(i, y)| {
             let x = x_min + i as f64 * dx;
-            let y_opt = if y.is_finite() && y.abs() < 1e6 {
-                Some(y)
-            } else {
-                None
-            };
+            // GPU results are already f32; retain every finite sample and let the
+            // geometry builder apply its view-aware screen-space bounds.
+            let y_opt = y.is_finite().then_some(y);
             (x, y_opt)
         })
         .collect();

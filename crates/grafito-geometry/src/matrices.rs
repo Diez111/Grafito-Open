@@ -2,6 +2,36 @@ use std::fmt;
 
 use nalgebra::{linalg::SymmetricEigen, DMatrix};
 
+/// Límite por dimensión para evitar asignaciones densas no acotadas.
+pub const MAX_MATRIX_DIMENSION: usize = 1_000;
+/// Límite total de elementos para matrices públicas densas.
+pub const MAX_MATRIX_ELEMENTS: usize = 1_000_000;
+
+fn matrix_len(rows: usize, cols: usize) -> Option<usize> {
+    if rows > MAX_MATRIX_DIMENSION || cols > MAX_MATRIX_DIMENSION {
+        return None;
+    }
+    rows.checked_mul(cols)
+        .filter(|&elements| elements <= MAX_MATRIX_ELEMENTS)
+}
+
+fn dimension_relative_epsilon(rows: usize, cols: usize) -> f64 {
+    f64::EPSILON * rows.max(cols).max(1) as f64
+}
+
+fn singular_value_tolerance(rows: usize, cols: usize, singular_values: &[f64]) -> f64 {
+    let spectral_norm = singular_values.iter().copied().fold(0.0_f64, f64::max);
+    dimension_relative_epsilon(rows, cols) * spectral_norm
+}
+
+fn numerical_rank_from_singular_values(rows: usize, cols: usize, singular_values: &[f64]) -> usize {
+    let tolerance = singular_value_tolerance(rows, cols, singular_values);
+    singular_values
+        .iter()
+        .filter(|value| value.abs() > tolerance)
+        .count()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matrix {
     pub rows: usize,
@@ -11,26 +41,45 @@ pub struct Matrix {
 
 impl Matrix {
     pub fn new(rows: usize, cols: usize, data: Vec<f64>) -> Option<Self> {
-        if data.len() != rows * cols {
+        if data.len() != matrix_len(rows, cols)? {
             return None;
         }
         Some(Self { rows, cols, data })
     }
 
-    pub fn zeros(rows: usize, cols: usize) -> Self {
-        Self {
+    /// Construye una matriz nula dentro de los límites públicos de dimensión.
+    pub fn try_zeros(rows: usize, cols: usize) -> Option<Self> {
+        let elements = matrix_len(rows, cols)?;
+        Some(Self {
             rows,
             cols,
-            data: vec![0.0; rows * cols],
+            data: vec![0.0; elements],
+        })
+    }
+
+    pub fn zeros(rows: usize, cols: usize) -> Self {
+        Self::try_zeros(rows, cols).unwrap_or_else(|| Self {
+            rows: 0,
+            cols: 0,
+            data: Vec::new(),
+        })
+    }
+
+    /// Construye una matriz identidad dentro de los límites públicos de dimensión.
+    pub fn try_identity(n: usize) -> Option<Self> {
+        let mut matrix = Self::try_zeros(n, n)?;
+        for i in 0..n {
+            matrix.data[i * n + i] = 1.0;
         }
+        Some(matrix)
     }
 
     pub fn identity(n: usize) -> Self {
-        let mut m = Self::zeros(n, n);
-        for i in 0..n {
-            m.data[i * n + i] = 1.0;
-        }
-        m
+        Self::try_identity(n).unwrap_or_else(|| Self {
+            rows: 0,
+            cols: 0,
+            data: Vec::new(),
+        })
     }
 
     pub fn from_rows(rows: Vec<Vec<f64>>) -> Option<Self> {
@@ -42,12 +91,9 @@ impl Matrix {
         if rows.iter().any(|row| row.len() != c) {
             return None;
         }
+        matrix_len(r, c)?;
         let data: Vec<f64> = rows.into_iter().flatten().collect();
-        Some(Self {
-            rows: r,
-            cols: c,
-            data,
-        })
+        Self::new(r, c, data)
     }
 
     pub fn get(&self, r: usize, c: usize) -> f64 {
@@ -131,7 +177,7 @@ impl Matrix {
         if self.cols != other.rows {
             return None;
         }
-        let mut result = Matrix::zeros(self.rows, other.cols);
+        let mut result = Matrix::try_zeros(self.rows, other.cols)?;
         for i in 0..self.rows {
             for j in 0..other.cols {
                 let mut sum = 0.0;
@@ -168,6 +214,12 @@ impl Matrix {
             return None;
         }
         let n = self.rows;
+        if n == 0 {
+            return Some(1.0);
+        }
+        let Some(pivot_tolerance) = full_rank_tolerance(self) else {
+            return Some(0.0);
+        };
         if n == 1 {
             return Some(self.data[0]);
         }
@@ -201,7 +253,7 @@ impl Matrix {
                 }
                 sign *= -1.0;
             }
-            if lu.get(col, col).abs() < 1e-15 {
+            if lu.get(col, col).abs() <= pivot_tolerance {
                 return Some(0.0);
             }
             for row in (col + 1)..n {
@@ -224,7 +276,10 @@ impl Matrix {
             return None;
         }
         let n = self.rows;
-        let mut aug = Matrix::zeros(n, 2 * n);
+        let pivot_tolerance = full_rank_tolerance(self)?;
+        let identity = Matrix::try_identity(n)?;
+        let augmented_cols = n.checked_mul(2)?;
+        let mut aug = Matrix::try_zeros(n, augmented_cols)?;
         for i in 0..n {
             for j in 0..n {
                 aug.set(i, j, self.get(i, j));
@@ -239,14 +294,14 @@ impl Matrix {
                 }
             }
             aug.data.swap_ranges(
-                col * 2 * n..(col + 1) * 2 * n,
-                max_row * 2 * n..(max_row + 1) * 2 * n,
+                col * augmented_cols..(col + 1) * augmented_cols,
+                max_row * augmented_cols..(max_row + 1) * augmented_cols,
             );
             let pivot = aug.get(col, col);
-            if pivot.abs() < 1e-15 {
+            if pivot.abs() <= pivot_tolerance {
                 return None;
             }
-            for j in 0..2 * n {
+            for j in 0..augmented_cols {
                 aug.set(col, j, aug.get(col, j) / pivot);
             }
             for row in 0..n {
@@ -254,19 +309,19 @@ impl Matrix {
                     continue;
                 }
                 let factor = aug.get(row, col);
-                for j in 0..2 * n {
+                for j in 0..augmented_cols {
                     let v = aug.get(row, j) - factor * aug.get(col, j);
                     aug.set(row, j, v);
                 }
             }
         }
-        let mut result = Matrix::zeros(n, n);
+        let mut result = Matrix::try_zeros(n, n)?;
         for i in 0..n {
             for j in 0..n {
                 result.set(i, j, aug.get(i, n + j));
             }
         }
-        Some(result)
+        has_acceptable_backward_error(self, &result, &identity).then_some(result)
     }
 
     pub fn trace(&self) -> Option<f64> {
@@ -304,7 +359,9 @@ pub fn solve_linear_system(a: &Matrix, b: &Matrix) -> Option<Matrix> {
     }
     let n = a.rows;
     let m = b.cols;
-    let mut aug = Matrix::zeros(n, n + m);
+    let pivot_tolerance = full_rank_tolerance(a)?;
+    let augmented_cols = n.checked_add(m)?;
+    let mut aug = Matrix::try_zeros(n, augmented_cols)?;
     for i in 0..n {
         for j in 0..n {
             aug.set(i, j, a.get(i, j));
@@ -321,14 +378,14 @@ pub fn solve_linear_system(a: &Matrix, b: &Matrix) -> Option<Matrix> {
             }
         }
         aug.data.swap_ranges(
-            col * (n + m)..(col + 1) * (n + m),
-            max_row * (n + m)..(max_row + 1) * (n + m),
+            col * augmented_cols..(col + 1) * augmented_cols,
+            max_row * augmented_cols..(max_row + 1) * augmented_cols,
         );
         let pivot = aug.get(col, col);
-        if pivot.abs() < 1e-15 {
+        if pivot.abs() <= pivot_tolerance {
             return None;
         }
-        for j in 0..(n + m) {
+        for j in 0..augmented_cols {
             aug.set(col, j, aug.get(col, j) / pivot);
         }
         for row in 0..n {
@@ -336,19 +393,19 @@ pub fn solve_linear_system(a: &Matrix, b: &Matrix) -> Option<Matrix> {
                 continue;
             }
             let factor = aug.get(row, col);
-            for j in 0..(n + m) {
+            for j in 0..augmented_cols {
                 let v = aug.get(row, j) - factor * aug.get(col, j);
                 aug.set(row, j, v);
             }
         }
     }
-    let mut result = Matrix::zeros(n, m);
+    let mut result = Matrix::try_zeros(n, m)?;
     for i in 0..n {
         for j in 0..m {
             result.set(i, j, aug.get(i, n + j));
         }
     }
-    Some(result)
+    has_acceptable_backward_error(a, &result, b).then_some(result)
 }
 
 // ============================================================================
@@ -373,6 +430,42 @@ fn from_nalgebra(nmat: &DMatrix<f64>) -> Matrix {
     Matrix { rows, cols, data }
 }
 
+fn full_rank_tolerance(m: &Matrix) -> Option<f64> {
+    if m.rows == 0 || m.cols == 0 {
+        return Some(0.0);
+    }
+    let dense = to_nalgebra(m);
+    let singular_values = dense.svd(false, false).singular_values;
+    let tolerance = singular_value_tolerance(m.rows, m.cols, singular_values.as_slice());
+    (numerical_rank_from_singular_values(m.rows, m.cols, singular_values.as_slice())
+        == m.rows.min(m.cols))
+    .then_some(tolerance)
+}
+
+fn infinity_norm(m: &Matrix) -> f64 {
+    (0..m.rows)
+        .map(|row| (0..m.cols).map(|col| m.get(row, col).abs()).sum())
+        .fold(0.0_f64, f64::max)
+}
+
+fn has_acceptable_backward_error(a: &Matrix, x: &Matrix, b: &Matrix) -> bool {
+    let Some(residual) = a.mul(x).and_then(|product| product.sub(b)) else {
+        return false;
+    };
+    let residual_norm = infinity_norm(&residual);
+    let denominator = infinity_norm(a) * infinity_norm(x) + infinity_norm(b);
+    if !residual_norm.is_finite() || !denominator.is_finite() {
+        return false;
+    }
+    if denominator == 0.0 {
+        return residual_norm == 0.0;
+    }
+
+    let backward_error = residual_norm / denominator;
+    let operation_size = a.rows.max(a.cols).max(b.cols);
+    backward_error <= 32.0 * dimension_relative_epsilon(operation_size, operation_size)
+}
+
 /// Comprueba si una matriz densa es simétrica (dentro de una tolerancia
 /// relativa a su mayor valor absoluto).
 fn is_symmetric_dense(m: &DMatrix<f64>) -> bool {
@@ -395,7 +488,7 @@ fn is_symmetric_dense(m: &DMatrix<f64>) -> bool {
 /// Base del espacio nulo de una matriz densa vía SVD: vectores fila de V^T
 /// asociados a valores singulares cercanos a cero. Cada vector tiene longitud
 /// igual al número de columnas de `m`.
-fn null_space_basis_dense(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
+fn null_space_basis_dense(m: &DMatrix<f64>) -> Vec<Vec<f64>> {
     let ncols = m.ncols();
     if ncols == 0 || m.nrows() == 0 {
         return Vec::new();
@@ -406,8 +499,7 @@ fn null_space_basis_dense(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
         None => return Vec::new(),
     };
     let svs = &svd.singular_values;
-    let max_sv = svs.iter().copied().fold(0.0f64, f64::max).max(1e-300);
-    let thr = tol.max(1e-12 * max_sv);
+    let thr = singular_value_tolerance(m.nrows(), m.ncols(), svs.as_slice());
     let rank = svs.iter().filter(|s| s.abs() > thr).count();
     let expected_nullity = ncols.saturating_sub(rank);
     let mut basis = Vec::new();
@@ -430,12 +522,16 @@ fn null_space_basis_dense(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
 fn null_space_basis_rref(m: &DMatrix<f64>, tol: f64) -> Vec<Vec<f64>> {
     let nrows = m.nrows();
     let ncols = m.ncols();
-    let scale = m.amax().max(1.0);
-    let eps = tol.max(1e-12 * scale);
+    let scale = m.amax();
+    let eps = if scale == 0.0 { 0.0 } else { tol / scale };
     let mut a = vec![vec![0.0; ncols]; nrows];
     for r in 0..nrows {
         for c in 0..ncols {
-            a[r][c] = m[(r, c)];
+            a[r][c] = if scale == 0.0 {
+                m[(r, c)]
+            } else {
+                m[(r, c)] / scale
+            };
         }
     }
 
@@ -512,8 +608,9 @@ pub fn eigenvalues(m: &Matrix) -> Option<Vec<(f64, f64)>> {
 
 /// Autovectores con sus autovalores asociados: `(vector, parte_real, parte_imag)`.
 /// Para matrices simétricas usa `SymmetricEigen` (autovalores y autovectores
-/// reales, normalizados). Para matrices generales, cada autovalor real obtiene
-/// su autovector del espacio nulo de `(A - λI)`; para autovalores complejos
+/// reales, normalizados). Para matrices generales, cada autoespacio real aporta
+/// una base independiente del espacio nulo de `(A - λI)`; una matriz defectiva
+/// puede devolver menos vectores que su dimensión. Para autovalores complejos
 /// `λ = a + bi` se resuelve el sistema real de `2n × 2n`
 /// `[A-aI, bI; -bI, A-aI]` y se devuelve la parte real `u` del autovector
 /// complejo `u + w·i`.
@@ -536,22 +633,48 @@ pub fn eigenvectors(m: &Matrix) -> Option<Vec<(Vec<f64>, f64, f64)>> {
     }
 
     let eig = nmat.complex_eigenvalues();
-    let tol = 1e-9;
+    let matrix_scale = nmat.amax();
+    let eigenvalue_tolerance = |left: f64, right: f64| {
+        64.0 * dimension_relative_epsilon(n, n) * matrix_scale.max(left.abs()).max(right.abs())
+    };
+    let mut handled = vec![false; eig.len()];
     let mut result = Vec::with_capacity(n);
-    for c in &eig {
+    for index in 0..eig.len() {
+        if handled[index] {
+            continue;
+        }
+        let c = eig[index];
         let re = c.re;
         let im = c.im;
-        if im.abs() < tol {
+        if im.abs() <= eigenvalue_tolerance(re, im) {
+            let mut multiplicity = 0;
+            for (other_index, other) in eig.iter().enumerate() {
+                if handled[other_index] {
+                    continue;
+                }
+                let other_tolerance = eigenvalue_tolerance(re, other.re);
+                if other.im.abs() <= other_tolerance && (other.re - re).abs() <= other_tolerance {
+                    handled[other_index] = true;
+                    multiplicity += 1;
+                }
+            }
             let mut a_shifted = nmat.clone();
             for i in 0..n {
                 a_shifted[(i, i)] -= re;
             }
-            let basis = null_space_basis_dense(&a_shifted, tol);
-            let vec = basis.into_iter().next().unwrap_or_else(|| vec![0.0; n]);
-            result.push((vec, re, 0.0));
+            let basis = null_space_basis_dense(&a_shifted);
+            result.extend(
+                basis
+                    .into_iter()
+                    .take(multiplicity)
+                    .map(|vector| (vector, re, 0.0)),
+            );
         } else {
+            handled[index] = true;
             // Sistema real 2n×2n para el par complejo conjugado.
-            let mut big = DMatrix::zeros(2 * n, 2 * n);
+            let doubled_n = n.checked_mul(2)?;
+            matrix_len(doubled_n, doubled_n)?;
+            let mut big = DMatrix::zeros(doubled_n, doubled_n);
             for i in 0..n {
                 for j in 0..n {
                     let aij = nmat[(i, j)];
@@ -561,7 +684,7 @@ pub fn eigenvectors(m: &Matrix) -> Option<Vec<(Vec<f64>, f64, f64)>> {
                     big[(n + i, n + j)] = aij - if i == j { re } else { 0.0 };
                 }
             }
-            let basis = null_space_basis_dense(&big, tol);
+            let basis = null_space_basis_dense(&big);
             let vec = if let Some(full) = basis.into_iter().next() {
                 full.into_iter().take(n).collect()
             } else {
@@ -617,6 +740,9 @@ pub fn cholesky(m: &Matrix) -> Option<Matrix> {
         return None;
     }
     let nmat = to_nalgebra(m);
+    if !is_symmetric_dense(&nmat) {
+        return None;
+    }
     let chol = nmat.cholesky()?;
     Some(from_nalgebra(&chol.l()))
 }
@@ -628,10 +754,11 @@ pub fn rank(m: &Matrix) -> Option<usize> {
     }
     let nmat = to_nalgebra(m);
     let svd = nmat.svd(false, false);
-    let svs = &svd.singular_values;
-    let max_sv = svs.iter().copied().fold(0.0f64, f64::max).max(1e-300);
-    let thr = 1e-9 * max_sv;
-    Some(svs.iter().filter(|s| s.abs() > thr).count())
+    Some(numerical_rank_from_singular_values(
+        m.rows,
+        m.cols,
+        svd.singular_values.as_slice(),
+    ))
 }
 
 /// Norma de Frobenius: `sqrt(Σ a_ij^2)`.
@@ -670,7 +797,7 @@ pub fn condition_number(m: &Matrix) -> Option<f64> {
     }
     let max_sv = svs[0].abs();
     let min_sv = svs.iter().map(|s| s.abs()).fold(f64::INFINITY, f64::min);
-    let thr = 1e-12 * max_sv.max(1.0);
+    let thr = singular_value_tolerance(m.rows, m.cols, svs.as_slice());
     if min_sv <= thr {
         Some(f64::INFINITY)
     } else {
@@ -686,20 +813,19 @@ pub fn null_space(m: &Matrix) -> Option<Vec<Vec<f64>>> {
         return None;
     }
     let nmat = to_nalgebra(m);
-    Some(null_space_basis_dense(&nmat, 1e-9))
+    Some(null_space_basis_dense(&nmat))
 }
 
 pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option<String> {
+    if order > crate::analysis::MAX_TAYLOR_ORDER {
+        return None;
+    }
     use crate::ast::parse_ast;
     let ast = parse_ast(expr).ok()?;
+    let coefficients =
+        crate::analysis::taylor_coefficients_from_ast(&ast, var, center, order).ok()?;
     let mut terms = Vec::new();
-    let mut current = ast.clone();
-    let mut factorial = 1.0f64;
-    for n in 0..=order {
-        if n > 0 {
-            factorial *= n as f64;
-        }
-        let coeff = current.eval_at(var, center) / factorial;
+    for (n, coeff) in coefficients.into_iter().enumerate() {
         if coeff.abs() > 1e-12 {
             let term = if (center).abs() < 1e-12 {
                 if n == 0 {
@@ -709,25 +835,20 @@ pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option
                 } else {
                     format!("{}*{}^{}", format_coeff(coeff), var, n)
                 }
+            } else if n == 0 {
+                format_coeff(coeff)
+            } else if n == 1 {
+                format!("{}*({}-{})", format_coeff(coeff), var, format_f64(center))
             } else {
-                if n == 0 {
-                    format_coeff(coeff)
-                } else if n == 1 {
-                    format!("{}*({}-{})", format_coeff(coeff), var, format_f64(center))
-                } else {
-                    format!(
-                        "{}*({}-{})^{}",
-                        format_coeff(coeff),
-                        var,
-                        format_f64(center),
-                        n
-                    )
-                }
+                format!(
+                    "{}*({}-{})^{}",
+                    format_coeff(coeff),
+                    var,
+                    format_f64(center),
+                    n
+                )
             };
             terms.push(term);
-        }
-        if n < order {
-            current = current.diff(var);
         }
     }
     if terms.is_empty() {
@@ -781,6 +902,12 @@ mod tests {
     }
 
     #[test]
+    fn constructors_reject_overflowing_and_excessive_dimensions() {
+        assert!(Matrix::new(usize::MAX, 2, Vec::new()).is_none());
+        assert!(Matrix::new(1025, 1024, vec![0.0; 1025 * 1024]).is_none());
+    }
+
+    #[test]
     fn test_determinant_2x2() {
         let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![3.0, 4.0]]).unwrap();
         assert_eq!(m.determinant(), Some(-2.0));
@@ -829,6 +956,21 @@ mod tests {
     }
 
     #[test]
+    fn taylor_series_rejects_orders_above_the_public_limit() {
+        assert_eq!(taylor_series("x", "x", 0.0, 65), None);
+    }
+
+    #[test]
+    fn taylor_series_rejects_accepted_orders_that_exceed_the_ast_budget() {
+        let expression = std::iter::repeat("sin(x)")
+            .take(16)
+            .collect::<Vec<_>>()
+            .join("*");
+
+        assert_eq!(taylor_series(&expression, "x", 0.0, 64), None);
+    }
+
+    #[test]
     fn test_eigenvalues_diagonal() {
         let m = Matrix::from_rows(vec![vec![2.0, 0.0], vec![0.0, 3.0]]).unwrap();
         let eig = eigenvalues(&m).unwrap();
@@ -874,6 +1016,41 @@ mod tests {
             for_3.0[0].abs() < 1e-8 && for_3.0[1].abs() > 0.9,
             "autovector de 3 no paralelo a [0,1]: {:?}",
             for_3.0
+        );
+    }
+
+    #[test]
+    fn eigenvectors_preserve_the_full_basis_for_repeated_real_eigenvalues() {
+        let m = Matrix::from_rows(vec![
+            vec![2.0, 0.0, 1.0],
+            vec![0.0, 2.0, 0.0],
+            vec![0.0, 0.0, 3.0],
+        ])
+        .unwrap();
+
+        let vectors = eigenvectors(&m).unwrap();
+        let repeated = vectors
+            .iter()
+            .filter(|(_, re, im)| (*re - 2.0).abs() < 1e-9 && im.abs() < 1e-9)
+            .collect::<Vec<_>>();
+
+        assert_eq!(repeated.len(), 2);
+        assert!(
+            (repeated[0].0[0] * repeated[1].0[1] - repeated[0].0[1] * repeated[1].0[0]).abs()
+                > 1e-9,
+            "los autovectores repetidos deben ser linealmente independientes: {repeated:?}"
+        );
+    }
+
+    #[test]
+    fn eigenvectors_do_not_invent_a_missing_vector_for_a_defective_matrix() {
+        let m = Matrix::from_rows(vec![vec![1.0, 1.0], vec![0.0, 1.0]]).unwrap();
+        let vectors = eigenvectors(&m).unwrap();
+
+        assert_eq!(
+            vectors.len(),
+            1,
+            "una matriz de Jordan sólo tiene un autovector"
         );
     }
 
@@ -983,6 +1160,12 @@ mod tests {
     fn test_cholesky_not_spd() {
         // Matriz no definida positiva (autovalor negativo)
         let m = Matrix::from_rows(vec![vec![1.0, 2.0], vec![2.0, 1.0]]).unwrap();
+        assert!(cholesky(&m).is_none());
+    }
+
+    #[test]
+    fn cholesky_rejects_nonsymmetric_inputs_instead_of_factoring_one_triangle() {
+        let m = Matrix::from_rows(vec![vec![4.0, 2.0], vec![3.0, 3.0]]).unwrap();
         assert!(cholesky(&m).is_none());
     }
 

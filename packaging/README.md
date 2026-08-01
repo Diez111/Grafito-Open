@@ -1,90 +1,96 @@
 # Grafito - Empaquetado
 
-Este directorio contiene scripts para empaquetar Grafito en diferentes formatos.
+Este directorio contiene los empaquetadores locales de Grafito para Debian y
+Windows. Ambos compilan el workspace bloqueado por `Cargo.lock`.
 
-## Archivos generados
-
-- `grafito-icon.svg` - Icono vectorial (fuente)
-- `grafito-icon-{16,32,48,64,128,256,512}.png` - Iconos rasterizados
-
-## Empaquetado para Linux (.deb)
+## Debian (`.deb`)
 
 ### Requisitos
-- `dpkg-deb` (incluido en Debian/Ubuntu)
-- Binario compilado en `target/release/grafito`
 
-### Construir el paquete
+- Rust 1.81 o posterior y `build-essential`.
+- `dpkg-dev` y `dpkg-deb`.
+- `libgmp-dev`, `libmpfr-dev`, `libmpc-dev`, `m4`, `pkg-config` y
+  `libdbus-1-dev`.
+- Opcionalmente, `desktop-file-utils` y `lintian` para validaciones adicionales.
+
 ```bash
+sudo apt-get install build-essential dpkg-dev libgmp-dev libmpfr-dev \
+  libmpc-dev m4 pkg-config libdbus-1-dev desktop-file-utils lintian
 cd packaging
 ./build-deb.sh
 ```
 
-El paquete se generará en `packaging/build/grafito_1.1.4-beta_amd64.deb`
+El resultado es `packaging/build/grafito_<version>_<arquitectura>.deb`. Las
+versiones preliminares usan `~` según el orden de versiones de Debian; por
+ejemplo, Cargo `1.2.20-beta` produce Debian `1.2.20~beta`.
 
-### Instalar
+`dpkg-shlibdeps` calcula `Depends` desde el ELF terminado, incluidas las
+versiones mínimas de bibliotecas realmente enlazadas. Esto hace honesto al
+paquete, pero no vuelve antiguo al binario: un `.deb` local conserva el piso de
+glibc y demás bibliotecas del host donde se compiló. Para soportar una
+distribución antigua hay que compilar y probar en esa distribución o en una
+base igual de antigua.
+
+Instalación y desinstalación:
+
 ```bash
-sudo dpkg -i build/grafito_1.1.4-beta_amd64.deb
+sudo apt install ./build/grafito_*.deb
+sudo apt remove grafito
 ```
 
-### Desinstalar
-```bash
-sudo dpkg -r grafito
-```
+El paquete instala `/usr/bin/grafito`, el lanzador de escritorio, iconos hicolor
+y documentación. `postinst` actualiza las cachés después de instalar y
+`postrm` lo hace después de retirar los archivos.
 
-## Empaquetado para Windows (.exe)
+## Windows (`.exe` GNU)
 
 ### Requisitos
-- `mingw-w64` - Compilador cruzado para Windows
-- `rustup` - Gestor de toolchains de Rust
 
-### Instalar mingw-w64
-```bash
-sudo apt-get install mingw-w64
-```
+- `rustup`.
+- La cadena `mingw-w64`, incluidos `gcc`, `ar`, `windres` y `objdump`.
+- Wine es opcional, pero si está instalado el script exige que
+  `grafito.exe --help` cargue y termine correctamente bajo Wine.
 
-### Construir el ejecutable
 ```bash
+sudo apt-get install mingw-w64 wine
 cd packaging
-chmod +x build-exe.sh
 ./build-exe.sh
 ```
 
-El ejecutable se generará en `target/x86_64-pc-windows-gnu/release/grafito.exe`
+El resultado principal es
+`target/x86_64-pc-windows-gnu/release/grafito.exe`. El script comprueba que el
+PE use el subsistema GUI y tenga recursos, recorre sus importaciones y las de
+cualquier DLL copiada, y coloca junto al EXE los runtimes MinGW no pertenecientes
+al sistema. Una importación no resuelta hace fallar el empaquetado; no se declara
+que un EXE sea autónomo sólo porque haya enlazado.
 
-### Notas
-- El ejecutable de Windows es autónomo (no requiere instalación)
-- Incluye todas las dependencias de GTK3 embebidas
-- Tamaño aproximado: ~30 MB
+El icono, el manifiesto DPI y la información de versión se incrustan durante la
+compilación tanto con GNU como con MSVC. El smoke `--help` valida carga y cierre,
+no la creación de una ventana ni el funcionamiento de GPU en Windows real.
 
-## Estructura del paquete .deb
+## Releases etiquetados
 
-```
-/usr/bin/grafito                          - Binario principal
-/usr/share/applications/grafito.desktop   - Archivo de launcher
-/usr/share/icons/hicolor/*/apps/grafito.png - Iconos en diferentes tamaños
-```
+El workflow de release publica los archivos comprimidos, un
+`grafito-windows-x64.exe` directo y un `grafito-linux-x64.deb` directo. El `.deb`
+de release se compila en Ubuntu 22.04; no se promete compatibilidad con bases
+anteriores. El EXE etiquetado se compila nativamente con MSVC en Windows, no con
+el ABI GNU del script local; el workflow fuerza el CRT estático, rechaza
+importaciones directas de `VCRUNTIME`, `MSVCP` o UCRT dinámico, y comprueba su
+subsistema, recursos, metadatos y arranque `--help`. También publica un SBOM SPDX JSON y
+`SHA256SUMS.txt`, que cubre los archivos directos, archivos comprimidos y SBOM.
 
-## Icono
+Los artefactos actuales no tienen firma Authenticode, firma Debian ni firma del
+manifiesto de checksums. El repositorio privado tampoco emite todavía una
+atestación de procedencia firmada; el SBOM y los checksums son inspeccionables,
+pero no sustituyen esas firmas.
 
-El icono fue diseñado con estilo GNOME moderno:
-- Fondo azul con gradiente
-- Curva de función amarilla
-- Ejes y puntos destacados
-- Bordes redondeados
+## Iconos y versión
 
-Archivos fuente: `grafito-icon.svg`
-
-## Versionado
-
-Versión actual: `1.1.4-beta`
-
-Para actualizar la versión:
-1. Editar `Cargo.toml` (campo `version` en `[workspace.package]`)
-2. Reconstruir el paquete con `./build-deb.sh` (la versión se lee
-   automáticamente del `Cargo.toml`).
+Los PNG se encuentran en `assets/grafito-icon-{16,32,48,64,128,256,512}.png`
+y la fuente vectorial en `assets/grafito-icon.svg`. La versión se lee de
+`[workspace.package]` en `Cargo.toml`; no se mantiene una segunda versión en
+los scripts.
 
 ## Licencia
 
-Ver [LICENSE](../LICENSE) en el directorio raíz del proyecto. Grafito está
-distribuido bajo la **GNU General Public License, versión 3 o (a su
-elección) cualquier versión posterior**.
+Ver [LICENSE](../LICENSE). Grafito se distribuye bajo GPL-3.0-or-later.

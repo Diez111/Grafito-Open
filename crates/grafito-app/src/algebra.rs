@@ -2,10 +2,45 @@
 //! and command input preview.
 
 use crate::{commands, GrafitoApp, ViewMode};
-use egui::{Color32, Key};
+use egui::Color32;
 use grafito_core::{GeoObject, ObjectId};
-use grafito_ui::icons::{draw_icon, Icon};
+use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
+use grafito_ui::tokens::RADIUS_MD;
+
+pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 = egui::Vec2::new(28.0, 24.0);
+
+pub(crate) fn variable_meta_for_display(
+    document: &grafito_core::Document,
+    name: &str,
+) -> grafito_core::VariableMeta {
+    document
+        .variable_meta(name)
+        .cloned()
+        .unwrap_or(grafito_core::VariableMeta {
+            position: grafito_geometry::Point2::new(0.0, 0.0),
+            min: -5.0,
+            max: 5.0,
+            step: 0.1,
+            visible: true,
+            animating: false,
+            animation_speed: 1.0,
+            animation_mode: grafito_core::AnimationMode::PingPong,
+        })
+}
+
+pub(crate) fn apply_variable_meta_panel_edit(
+    document: &mut grafito_core::Document,
+    name: &str,
+    candidate: grafito_core::VariableMeta,
+    snapshot: &mut crate::app::DeferredPanelSnapshot,
+) -> Result<bool, String> {
+    let Some(before) = document.try_replace_variable_meta_with_previous(name, candidate)? else {
+        return Ok(false);
+    };
+    snapshot.capture_successful_replacement(before);
+    Ok(true)
+}
 
 fn color32_from_object_color(color: grafito_geometry::Color, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -20,16 +55,54 @@ fn is_internal_trig_name(name: &str) -> bool {
     name == "TrigGraph" || name == "TrigValue" || name == "trig_angle" || name.starts_with("trig_")
 }
 
+fn regular_polychoron_summary(polychoron: &grafito_core::RegularPolychoron4DObj) -> String {
+    let name = match polychoron.kind {
+        grafito_geometry::RegularPolychoron::Pentachoron => "Pentácoron 4D",
+        grafito_geometry::RegularPolychoron::Tesseract => "Teseracto 4D",
+        grafito_geometry::RegularPolychoron::SixteenCell => "16-celda 4D",
+        grafito_geometry::RegularPolychoron::TwentyFourCell => "24-celda 4D",
+        grafito_geometry::RegularPolychoron::OneTwentyCell => "120-celda 4D",
+        grafito_geometry::RegularPolychoron::SixHundredCell => "600-celda 4D",
+    };
+    format!(
+        "{name} centrado y proyectado · escala={:.2}",
+        polychoron.scale
+    )
+}
+
+fn regular_polytope_nd_summary(polytope: &grafito_core::RegularPolytopeNDObj) -> String {
+    let family = match polytope.family {
+        grafito_geometry::RegularPolytopeFamily::Simplex => "Símplex",
+        grafito_geometry::RegularPolytopeFamily::Hypercube => "Hipercubo",
+        grafito_geometry::RegularPolytopeFamily::CrossPolytope => "Politopo cruzado",
+    };
+    format!(
+        "{family} {}D centrado y proyectado · escala={:.2}",
+        polytope.dimension, polytope.scale
+    )
+}
+
 pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
     match obj {
-        GeoObject::Function(f) => f.expr.clone(),
+        GeoObject::Function(f) => f.fit.as_ref().map_or_else(
+            || f.expr.clone(),
+            |fit| {
+                format!(
+                    "{} · {} · RMSE={:.3} · R²={:.3}",
+                    f.expr,
+                    fit.kind.display_name(),
+                    fit.diagnostics.rmse,
+                    fit.diagnostics.r_squared
+                )
+            },
+        ),
         GeoObject::Point(p) => format!("({:.2}, {:.2})", p.position.x, p.position.y),
         GeoObject::Line(l) => {
             let dx = l.end.x - l.start.x;
             let dy = l.end.y - l.start.y;
             let len = (dx * dx + dy * dy).sqrt();
             format!(
-                "({:.2}, {:.2}) ↔ ({:.2}, {:.2})  L={:.3}",
+                "({:.2}, {:.2}) <-> ({:.2}, {:.2})  L={:.3}",
                 l.start.x, l.start.y, l.end.x, l.end.y, len
             )
         }
@@ -69,6 +142,9 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             };
             format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
         }
+        GeoObject::Pencil(p) if p.is_dynamic_locus() => {
+            format!("Locus: {} puntos", p.points.len())
+        }
         GeoObject::Pencil(p) => format!("{} puntos", p.points.len()),
         GeoObject::Point3D(p) => format!(
             "({:.2}, {:.2}, {:.2})",
@@ -83,6 +159,12 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
             let vol = c.size * c.size * c.size;
             format!("size={:.2}  V={:.3}", c.size, vol)
         }
+        GeoObject::Tetrahedron3D(t) => {
+            let vol = t.edge_length.powi(3) / (6.0 * 2.0_f64.sqrt());
+            format!("edge={:.2}  V={:.3}", t.edge_length, vol)
+        }
+        GeoObject::RegularPolychoron4D(polychoron) => regular_polychoron_summary(polychoron),
+        GeoObject::RegularPolytopeND(polytope) => regular_polytope_nd_summary(polytope),
         GeoObject::Cylinder3D(cy) => {
             let dx = cy.top_center.x - cy.base_center.x;
             let dy = cy.top_center.y - cy.base_center.y;
@@ -126,6 +208,12 @@ pub(crate) fn object_expression_summary(obj: &GeoObject) -> String {
         GeoObject::ScatterPlot(s) => format!("{} puntos", s.xs.len().min(s.ys.len())),
         GeoObject::BoxPlot(b) => format!("{} datos", b.data.len()),
         GeoObject::RegressionLine(r) => format!("y = {:.3}x + {:.3}", r.slope, r.intercept),
+        GeoObject::DataTable(table) => format!(
+            "{} pares · {} / {}",
+            table.xs.len(),
+            table.x_name,
+            table.y_name
+        ),
         GeoObject::PhasePortrait(p) => format!("({}, {})", p.expr_dx, p.expr_dy),
         _ => String::new(),
     }
@@ -139,14 +227,18 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     let obj_label = obj.label().to_string();
     let obj_name = obj.name().to_string();
     let obj_vis = obj.is_visible();
-    let obj_col = color32_from_object_color(obj.color(), 255);
+    let obj_supports_visibility = !matches!(obj, GeoObject::DataTable(_));
+    let obj_col = color32_from_object_color(
+        obj.color(),
+        (obj.color().a.clamp(0.0, 1.0) * 255.0).round() as u8,
+    );
     let obj_expr = object_expression_summary(obj);
 
     let is_sel = app.selected_object == Some(oid);
     let frame_fill = if is_sel {
         theme.accent_muted
     } else {
-        theme.panel_bg
+        theme.button_bg
     };
     let border = if is_sel {
         egui::Stroke::new(1.0, theme.accent)
@@ -159,7 +251,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     ui.add_space(4.0);
     egui::Frame::none()
         .fill(frame_fill)
-        .rounding(8.0)
+        .rounding(RADIUS_MD)
         .stroke(border)
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
@@ -168,6 +260,9 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (del_rect, del_resp) =
                         ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                    del_resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Eliminar objeto")
+                    });
                     if ui.is_rect_visible(del_rect) {
                         draw_icon(
                             ui.painter(),
@@ -180,25 +275,41 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                         delete = true;
                     }
 
-                    let (eye_rect, eye_resp) =
-                        ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
-                    if ui.is_rect_visible(eye_rect) {
-                        draw_icon(
-                            ui.painter(),
-                            eye_rect.shrink(4.0),
-                            if obj_vis { Icon::Eye } else { Icon::EyeOff },
-                            theme.text_secondary,
-                        );
-                    }
-                    if eye_resp.on_hover_text("Visibilidad").clicked() {
-                        if let Some(o) = app.document.get_object_mut(oid) {
-                            o.set_visible(!obj_vis);
-                            app.document.bump_version();
+                    if obj_supports_visibility {
+                        let (eye_rect, eye_resp) =
+                            ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                        eye_resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "Cambiar visibilidad del objeto",
+                            )
+                        });
+                        if ui.is_rect_visible(eye_rect) {
+                            draw_icon(
+                                ui.painter(),
+                                eye_rect.shrink(4.0),
+                                if obj_vis { Icon::Eye } else { Icon::EyeOff },
+                                theme.text_secondary,
+                            );
                         }
+                        if eye_resp.on_hover_text("Visibilidad").clicked() {
+                            app.save_state();
+                            if let Some(o) = app.document.get_object_mut(oid) {
+                                o.set_visible(!obj_vis);
+                                app.document.bump_version();
+                            }
+                        }
+                    } else {
+                        ui.add_space(28.0);
                     }
 
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let dot_alpha = if obj_vis { 255u8 } else { 80u8 };
+                        let dot_alpha = if obj_vis {
+                            obj_col.a()
+                        } else {
+                            obj_col.a().min(80)
+                        };
                         let dot_col = Color32::from_rgba_unmultiplied(
                             obj_col.r(),
                             obj_col.g(),
@@ -206,7 +317,14 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                             dot_alpha,
                         );
                         let (dot_r, dot_resp) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
+                            ui.allocate_exact_size(OBJECT_COLOR_TARGET_SIZE, egui::Sense::click());
+                        dot_resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "Cambiar color del objeto",
+                            )
+                        });
                         ui.painter().circle_filled(dot_r.center(), 6.0, dot_col);
                         if dot_resp.hovered() {
                             ui.painter().circle_stroke(
@@ -216,17 +334,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                             );
                         }
                         if dot_resp.on_hover_text("Cambiar color").clicked() {
-                            let obj_color = app
-                                .document
-                                .get_object(oid)
-                                .map(|o| o.color())
-                                .unwrap_or_else(|| {
-                                    grafito_geometry::Color::new(1.0, 1.0, 1.0, 1.0)
-                                });
-                            app.active_color_picker = Some((
-                                oid,
-                                grafito_ui::color_picker::HsvColorPicker::new(obj_color),
-                            ));
+                            app.open_object_color_picker(oid);
                             row_clicked = true;
                         }
                         ui.add_space(5.0);
@@ -263,6 +371,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
         app.selected_object = if is_sel { None } else { Some(oid) };
     }
     if delete {
+        app.save_state();
         app.document.remove_object(oid);
         if app.selected_object == Some(oid) {
             app.selected_object = None;
@@ -272,6 +381,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
 }
 
 pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let theme = current_theme(ctx);
     let accent = theme.accent;
     let alg_fill = theme.panel_bg;
@@ -285,6 +395,33 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     .resizable(true)
     .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
     .show(ctx, |ui| {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Álgebra")
+                    .color(accent)
+                    .size(16.0)
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new(format!("{} objetos", app.document.object_count()))
+                    .color(theme.text_tertiary)
+                    .size(11.0),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if action_icon_button(
+                    ui,
+                    Icon::Close,
+                    theme.text_secondary,
+                    "Ocultar panel de Álgebra",
+                )
+                .clicked()
+                {
+                    app.left_drawer_open = false;
+                }
+            });
+        });
+        ui.add_space(6.0);
         // Input row in-panel: es la affordance principal para "agregar cosas"
         // en el panel de Álgebra. Editar aquí equivale a la barra inferior
         // (ambas usan `app.input_text`); lo dejamos visible acá porque es
@@ -296,17 +433,21 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
                     ui.add_space(3.0);
-                    let r = ui.add_sized(
+                    let response = crate::ui::draw_command_input(
+                        ui,
+                        app,
+                        "algebra_panel",
                         [ui.available_width(), 22.0],
-                        egui::TextEdit::singleline(&mut app.input_text)
-                            .hint_text("Entrada...")
-                            .frame(false)
-                            .text_color(txt_col));
-                    app.preview_object = None;
-                    if !app.input_text.is_empty() {
+                        "Entrada...",
+                        false,
+                    );
+                    if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    if app.input_text.is_empty() {
+                        app.preview_object = None;
+                    }
+                    if response.submitted {
                         let time = ui.ctx().input(|i| i.time);
                         app.submit_input_text(time);
                     }
@@ -332,9 +473,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         continue;
                     }
 
-                    // El Pencil es una herramienta de dibujo libre, no un
-                    // objeto analizable: no debe aparecer en el panel de álgebra.
-                    if matches!(obj, grafito_core::GeoObject::Pencil(_)) {
+                    // El Pencil libre no es analizable; un Locus usa el mismo
+                    // almacenamiento de polilínea pero sí es una construcción.
+                    if matches!(obj, grafito_core::GeoObject::Pencil(pencil) if !pencil.is_dynamic_locus()) {
                         continue;
                     }
 
@@ -343,7 +484,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         (o_col.r * 255.0).clamp(0.0, 255.0) as u8,
                         (o_col.g * 255.0).clamp(0.0, 255.0) as u8,
                         (o_col.b * 255.0).clamp(0.0, 255.0) as u8,
-                        255,
+                        (o_col.a.clamp(0.0, 1.0) * 255.0).round() as u8,
                     );
                     let expr = match obj {
                         grafito_core::GeoObject::Function(f) => f.expr.clone(),
@@ -353,7 +494,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             let dy = l.end.y - l.start.y;
                             let len = (dx * dx + dy * dy).sqrt();
                             format!(
-                                "({:.2}, {:.2}) ↔ ({:.2}, {:.2})  L={:.3}",
+                                "({:.2}, {:.2}) <-> ({:.2}, {:.2})  L={:.3}",
                                 l.start.x, l.start.y, l.end.x, l.end.y, len
                             )
                         }
@@ -400,6 +541,9 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             };
                             format!("{} vértices  P={:.3}  A={:.3}", n, perim, area)
                         }
+                        grafito_core::GeoObject::Pencil(p) if p.is_dynamic_locus() => {
+                            format!("Locus: {} puntos", p.points.len())
+                        }
                         grafito_core::GeoObject::Pencil(p) => format!("{} puntos", p.points.len()),
                         grafito_core::GeoObject::Point3D(p) => format!("({:.2}, {:.2}, {:.2})", p.position.x, p.position.y, p.position.z),
                         grafito_core::GeoObject::Sphere3D(s) => {
@@ -410,6 +554,16 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         grafito_core::GeoObject::Cube3D(c) => {
                             let vol = c.size * c.size * c.size;
                             format!("size={:.2}  V={:.3}", c.size, vol)
+                        }
+                        grafito_core::GeoObject::Tetrahedron3D(t) => {
+                            let vol = t.edge_length.powi(3) / (6.0 * 2.0_f64.sqrt());
+                            format!("edge={:.2}  V={:.3}", t.edge_length, vol)
+                        }
+                        grafito_core::GeoObject::RegularPolychoron4D(polychoron) => {
+                            regular_polychoron_summary(polychoron)
+                        }
+                        grafito_core::GeoObject::RegularPolytopeND(polytope) => {
+                            regular_polytope_nd_summary(polytope)
                         }
                         grafito_core::GeoObject::Cylinder3D(cy) => {
                             let dx = cy.top_center.x - cy.base_center.x;
@@ -470,6 +624,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::vec2(28.0, 24.0),
                                     egui::Sense::click(),
                                 );
+                                del_resp.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        "Eliminar objeto",
+                                    )
+                                });
                                 if ui.is_rect_visible(del_rect) {
                                     draw_icon(ui.painter(), del_rect.shrink(4.0), Icon::Delete, theme.text_secondary);
                                 }
@@ -480,6 +641,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::vec2(28.0, 24.0),
                                     egui::Sense::click(),
                                 );
+                                eye_resp.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        "Cambiar visibilidad del objeto",
+                                    )
+                                });
                                 if ui.is_rect_visible(eye_rect) {
                                     draw_icon(
                                         ui.painter(),
@@ -489,6 +657,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     );
                                 }
                                 if eye_resp.on_hover_text("Visibilidad").clicked() {
+                                    snapshot.capture(&app.document);
                                     if let Some(o) = app.document.get_object_mut(oid) {
                                         let v = o.is_visible(); o.set_visible(!v);
                                     }
@@ -496,18 +665,24 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                                 // Left-side controls in remaining space
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    let dot_alpha = if obj_vis { 255u8 } else { 80u8 };
+                                    let dot_alpha = if obj_vis { obj_col.a() } else { obj_col.a().min(80) };
                                     let dot_col = Color32::from_rgba_unmultiplied(
                                         obj_col.r(), obj_col.g(), obj_col.b(), dot_alpha);
-                                    let (dot_r, dot_resp) = ui.allocate_exact_size(egui::vec2(12.0,12.0), egui::Sense::click());
+                                    let (dot_r, dot_resp) = ui.allocate_exact_size(OBJECT_COLOR_TARGET_SIZE, egui::Sense::click());
+                                    dot_resp.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            true,
+                                            "Cambiar color del objeto",
+                                        )
+                                    });
                                     ui.painter().circle_filled(dot_r.center(), 6.0, dot_col);
                                     if dot_resp.hovered() {
                                         ui.painter().circle_stroke(dot_r.center(), 6.0, egui::Stroke::new(1.0, Color32::WHITE));
                                     }
                                     let dot_resp = dot_resp.on_hover_text("Cambiar color");
                                     if dot_resp.clicked() {
-                                        let obj_color = app.document.get_object(oid).map(|o| o.color()).unwrap_or_else(|| grafito_geometry::Color::new(1.0, 1.0, 1.0, 1.0));
-                                        app.active_color_picker = Some((oid, grafito_ui::color_picker::HsvColorPicker::new(obj_color)));
+                                        app.open_object_color_picker(oid);
                                         row_clicked = true;
                                     }
                                     ui.add_space(5.0);
@@ -528,68 +703,96 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         });
 
                         // Properties Panel (Inline)
-                        if is_sel {
-                            // Property sliders
-                            if let Some(obj) = app.document.get_object_mut(oid) {
+                        if is_sel && app.current_view != ViewMode::D3 {
+                            // Edit a detached copy so idle controls cannot bump the
+                            // document revision while an assistant request is pending.
+                            if let Some(mut edited) = app.document.get_object(oid).cloned() {
                                 ui.add_space(2.0);
                                 ui.scope(|ui| {
                                     // Sin overrides de light mode: confiamos en
                                     // los tokens del theme LIGHT definidos en
                                     // grafito-ui/src/theme.rs.
-                                    match obj {
+                                    match &mut edited {
                                         GeoObject::Line(l) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Circle(c) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Function(f) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point(p) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pt").size(10.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point3D(p) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("●").size(10.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pt").size(10.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Polygon(poly) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("〰").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Pencil(pencil) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("✏").size(12.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pen").size(12.0).color(Color32::from_gray(130)));
                                                 ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true));
                                             });
                                         }
                                         _ => {}
                                     }
                                 });
+                                let changed = app
+                                    .document
+                                    .get_object(oid)
+                                    .is_some_and(|object| object != &edited);
+                                match crate::panels::apply_object_panel_edit_with_previous(
+                                    &mut app.document,
+                                    oid,
+                                    changed,
+                                    |object| *object = edited,
+                                ) {
+                                    Ok(Some(before)) => {
+                                        snapshot.capture_successful_replacement(before);
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        let message = format!("Propiedades: {error}");
+                                        app.cas_result = message.clone();
+                                        app.notify(message, grafito_ui::toast::ToastKind::Error);
+                                    }
+                                }
                             }
+                        } else if is_sel {
+                            ui.add_space(2.0);
+                            ui.label(
+                                egui::RichText::new("Abrí el Inspector para editar este objeto 3D.")
+                                    .color(theme.text_tertiary)
+                                    .size(11.0),
+                            );
                         }
                     });
 
@@ -599,6 +802,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.add_space(2.0);
             }
             if let Some(id) = delete_id {
+                snapshot.capture(&app.document);
                 app.document.remove_object(id);
                 if app.selected_object == Some(id) { app.selected_object = None; }
             }
@@ -618,28 +822,14 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 for (name, val) in &vars {
                     let mut v = *val;
 
-                    // Asegurar que exista la meta-data de la variable (valores por defecto)
-                    if !app.document.variable_meta.contains_key(name) {
-                        app.document.variable_meta.insert(
-                            name.clone(),
-                            grafito_core::VariableMeta {
-                                position: grafito_geometry::Point2::new(0.0, 0.0),
-                                min: -5.0,
-                                max: 5.0,
-                                step: 0.1,
-                                visible: true,
-                                animating: false,
-                                animation_speed: 1.0,
-                            },
-                        );
-                    }
-
-                    let (mut animating, mut min, mut max, step, mut speed) = {
-                        let Some(meta) = app.document.variable_meta.get(name) else {
-                            continue;
-                        };
-                        (meta.animating, meta.min, meta.max, meta.step, meta.animation_speed)
-                    };
+                    let metadata = variable_meta_for_display(&app.document, name);
+                    let (mut animating, mut min, mut max, step, mut speed) = (
+                        metadata.animating,
+                        metadata.min,
+                        metadata.max,
+                        metadata.step,
+                        metadata.animation_speed,
+                    );
 
                     egui::Frame::none()
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
@@ -651,21 +841,64 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     ui.label(egui::RichText::new(format!("{}    {}", name, val_str)).size(14.0).color(txt_col));
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.menu_button("⚙", |ui| {
+                                        let settings_id = ui.make_persistent_id(("variable_settings", name));
+                                        let settings_button = action_icon_button(
+                                            ui,
+                                            Icon::Settings,
+                                            theme.text_secondary,
+                                            "Configurar rango de la variable",
+                                        );
+                                        if settings_button.clicked() {
+                                            ui.memory_mut(|mem| mem.toggle_popup(settings_id));
+                                        }
+                                        egui::popup::popup_below_widget(
+                                            ui,
+                                            settings_id,
+                                            &settings_button,
+                                            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                                            |ui| {
+                                            ui.set_min_width(180.0);
                                             ui.horizontal(|ui| {
                                                 ui.label("Min:");
-                                                ui.add(egui::DragValue::new(&mut min).speed(0.1));
+                                                let max_limit = if max.is_finite() {
+                                                    max
+                                                } else {
+                                                    f64::INFINITY
+                                                };
+                                                ui.add(
+                                                    egui::DragValue::new(&mut min)
+                                                        .speed(0.1)
+                                                        .range(f64::NEG_INFINITY..=max_limit)
+                                                        .clamp_existing_to_range(false),
+                                                );
                                             });
                                             ui.horizontal(|ui| {
                                                 ui.label("Max:");
-                                                ui.add(egui::DragValue::new(&mut max).speed(0.1));
+                                                let min_limit = if min.is_finite() {
+                                                    min
+                                                } else {
+                                                    f64::NEG_INFINITY
+                                                };
+                                                ui.add(
+                                                    egui::DragValue::new(&mut max)
+                                                        .speed(0.1)
+                                                        .range(min_limit..=f64::INFINITY)
+                                                        .clamp_existing_to_range(false),
+                                                );
                                             });
+                                            if !min.is_finite() || !max.is_finite() || min >= max {
+                                                ui.colored_label(
+                                                    Color32::RED,
+                                                    "El mínimo debe ser finito y menor que el máximo.",
+                                                );
+                                            }
                                             ui.separator();
                                             if ui.button("Borrar").clicked() {
                                                 var_to_delete = Some(name.clone());
                                                 ui.close_menu();
                                             }
-                                        });
+                                        },
+                                        );
 
                                         // Selector de velocidad
                                         let speed_abs = speed.abs();
@@ -690,13 +923,15 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             });
 
                                         // Play/Pause button
-                                        let icon_str = if animating { "⏸" } else { "▶" };
                                         let tooltip = if animating { "Detener animación" } else { "Animar variable" };
-                                        let btn = egui::Button::new(
-                                            egui::RichText::new(icon_str).size(16.0).color(if animating { theme.accent } else { theme.text_secondary })
-                                        ).frame(false);
-
-                                        if ui.add(btn).on_hover_text(tooltip).clicked() {
+                                        if action_icon_button(
+                                            ui,
+                                            if animating { Icon::Pause } else { Icon::Play },
+                                            if animating { theme.accent } else { theme.text_secondary },
+                                            tooltip,
+                                        )
+                                        .clicked()
+                                        {
                                             animating = !animating;
                                             if speed == 0.0 { speed = 1.0; } // Ensure it moves when played
                                         }
@@ -706,56 +941,92 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 ui.add_space(4.0);
 
                                 // Bottom row: min, slider, max
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(format!("{}", min)).size(12.0));
+                                if min.is_finite() && max.is_finite() && min < max {
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!("{}", min)).size(12.0));
 
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
 
-                                        let mut sl_resp = None;
-                                        ui.scope(|ui| {
-                                            ui.visuals_mut().selection.bg_fill = theme.text_primary;
+                                            let mut sl_resp = None;
+                                            ui.scope(|ui| {
+                                                let visuals = ui.visuals_mut();
+                                                visuals.selection.bg_fill = theme.accent;
 
-                                        let mut slider = egui::Slider::new(&mut v, min..=max)
-                                            .show_value(false)
-                                            .trailing_fill(true);
+                                            let mut slider = egui::Slider::new(&mut v, min..=max)
+                                                .show_value(false)
+                                                .clamping(egui::SliderClamping::Edits)
+                                                .trailing_fill(true);
 
-                                        if !animating {
-                                            slider = slider.step_by(step);
-                                        }
-
-                                        let slider_width = ui.available_width().max(50.0);
-                                        sl_resp = Some(ui.add_sized([slider_width, ui.spacing().interact_size.y], slider));
-                                    });
-
-                                        if let Some(sl_resp) = sl_resp {
-                                            if sl_resp.dragged() && animating {
-                                                animating = false;
+                                            if !animating {
+                                                slider = slider.step_by(step);
                                             }
-                                            if sl_resp.changed() && !animating {
-                                                app.document.set_variable(name.clone(), v);
-                                                app.document.recompute_bound_parameters();
+
+                                            let slider_width = ui.available_width().max(50.0);
+                                            sl_resp = Some(ui.add_sized([slider_width, ui.spacing().interact_size.y], slider));
+                                        });
+
+                                            if let Some(sl_resp) = sl_resp {
+                                                if sl_resp.dragged() && animating {
+                                                    animating = false;
+                                                }
+                                                if sl_resp.changed() && !animating {
+                                                    snapshot.capture(&app.document);
+                                                    if let Err(error) =
+                                                        app.document.try_set_variable(name.clone(), v)
+                                                    {
+                                                        let message = format!("Variable: {error}");
+                                                        app.cas_result = message.clone();
+                                                        app.notify(message, grafito_ui::toast::ToastKind::Error);
+                                                    }
+                                                }
                                             }
-                                        }
+                                        });
                                     });
-                                });
+                                } else {
+                                    ui.colored_label(
+                                        Color32::RED,
+                                        "Corrige el rango antes de editar el valor.",
+                                    );
+                                }
                             });
                         });
 
-                    if let Some(meta) = app.document.variable_meta.get_mut(name) {
-                        meta.animating = animating;
-                        meta.min = min;
-                        meta.max = max;
-                        meta.animation_speed = speed;
+                    let meta_changed = metadata.animating != animating
+                        || metadata.min != min
+                        || metadata.max != max
+                        || metadata.animation_speed != speed;
+                    if meta_changed {
+                        let mut candidate = metadata;
+                        candidate.animating = animating;
+                        candidate.min = min;
+                        candidate.max = max;
+                        candidate.animation_speed = speed;
+                        if let Err(error) = apply_variable_meta_panel_edit(
+                            &mut app.document,
+                            name,
+                            candidate,
+                            &mut snapshot,
+                        ) {
+                            let message = format!("Variable: {error}");
+                            app.cas_result = message.clone();
+                            app.notify(message, grafito_ui::toast::ToastKind::Error);
+                        }
                     }
 
                     ui.add_space(2.0);
                     ui.separator();
                 }
                 if let Some(to_del) = var_to_delete {
+                    snapshot.capture(&app.document);
                     app.document.remove_variable(&to_del);
                 }
             }
         });
     });
+    let _ = snapshot.save_if_semantically_changed(
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+    );
 }

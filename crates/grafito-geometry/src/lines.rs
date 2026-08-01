@@ -1,6 +1,40 @@
 //! Line, ray and segment utilities.
 
 use crate::{Point2, AABB};
+use serde::{Deserialize, Serialize};
+
+/// Extensión del objeto definido por dos puntos parametrizado como
+/// `start + t * (end - start)`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineKind {
+    /// Segmento finito entre ambos extremos.
+    #[default]
+    Segment,
+    /// Recta infinita que pasa por ambos puntos.
+    Line,
+    /// Semirrecta que comienza en `start` y pasa por `end`.
+    Ray,
+}
+
+impl LineKind {
+    /// Indica si el parámetro pertenece a la extensión geométrica.
+    pub fn contains_t(self, t: f64) -> bool {
+        match self {
+            Self::Segment => (0.0..=1.0).contains(&t),
+            Self::Ray => t >= 0.0,
+            Self::Line => true,
+        }
+    }
+
+    /// Restringe un parámetro al punto más cercano de la extensión.
+    pub fn clamp_t(self, t: f64) -> f64 {
+        match self {
+            Self::Segment => t.clamp(0.0, 1.0),
+            Self::Ray => t.max(0.0),
+            Self::Line => t,
+        }
+    }
+}
 
 /// Perpendicular distance from `p` to the infinite line through `a` and `b`.
 pub fn distance_point_to_line(p: Point2, a: Point2, b: Point2) -> f64 {
@@ -66,8 +100,32 @@ fn liang_barsky(
     t_min: f64,
     t_max: f64,
 ) -> Option<(Point2, Point2)> {
+    if !a.x.is_finite()
+        || !a.y.is_finite()
+        || !b.x.is_finite()
+        || !b.y.is_finite()
+        || !rect.min.x.is_finite()
+        || !rect.min.y.is_finite()
+        || !rect.max.x.is_finite()
+        || !rect.max.y.is_finite()
+        || rect.min.x > rect.max.x
+        || rect.min.y > rect.max.y
+    {
+        return None;
+    }
+
     let dx = b.x - a.x;
     let dy = b.y - a.y;
+
+    // Finite endpoints can still overflow while calculating their direction.
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+
+    if dx.abs() < 1e-12 && dy.abs() < 1e-12 {
+        return (a.x >= rect.min.x && a.x <= rect.max.x && a.y >= rect.min.y && a.y <= rect.max.y)
+            .then_some((a, a));
+    }
 
     let p = [-dx, dx, -dy, dy];
     let q = [
@@ -99,10 +157,10 @@ fn liang_barsky(
         return None;
     }
 
-    Some((
-        Point2::new(a.x + t0 * dx, a.y + t0 * dy),
-        Point2::new(a.x + t1 * dx, a.y + t1 * dy),
-    ))
+    let start = Point2::new(a.x + t0 * dx, a.y + t0 * dy);
+    let end = Point2::new(a.x + t1 * dx, a.y + t1 * dy);
+    (start.x.is_finite() && start.y.is_finite() && end.x.is_finite() && end.y.is_finite())
+        .then_some((start, end))
 }
 
 /// Clip the infinite line through `a` and `b` to `rect`.
@@ -171,6 +229,38 @@ mod tests {
 
         // Ray starting outside, pointing away: no intersection
         assert!(clip_ray_to_rect(Point2::new(-1.0, 1.0), Point2::new(-2.0, 1.0), rect).is_none());
+    }
+
+    #[test]
+    fn degenerate_infinite_lines_clip_to_their_finite_point() {
+        let rect = AABB::new(Point2::new(0.0, 0.0), Point2::new(2.0, 2.0));
+        let point = Point2::new(1.0, 1.0);
+
+        for clipped in [
+            clip_line_to_rect(point, point, rect),
+            clip_ray_to_rect(point, point, rect),
+        ] {
+            let (start, end) = clipped.expect("a point inside the rectangle should remain visible");
+            assert!(start.x.is_finite() && start.y.is_finite());
+            assert!(end.x.is_finite() && end.y.is_finite());
+            assert_eq!(start, point);
+            assert_eq!(end, point);
+        }
+    }
+
+    #[test]
+    fn clipping_extreme_finite_endpoints_omits_overflowing_directions() {
+        let rect = AABB::new(Point2::new(-1.0, -1.0), Point2::new(1.0, 1.0));
+        let a = Point2::new(-f64::MAX, 0.0);
+        let b = Point2::new(f64::MAX, 0.0);
+
+        for clipped in [
+            clip_line_to_rect(a, b, rect),
+            clip_ray_to_rect(a, b, rect),
+            clip_segment_to_rect(a, b, rect),
+        ] {
+            assert!(clipped.is_none());
+        }
     }
 
     #[test]

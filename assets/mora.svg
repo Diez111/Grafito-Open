@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="mora-body" x1="35" y1="20" x2="94" y2="111" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#59428D"/>
+    </linearGradient>
+    <linearGradient id="mora-face" x1="44" y1="34" x2="85" y2="91" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEE9FF"/>
+      <stop offset="1" stop-color="#C8BDF3"/>
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="55" fill="#8066BF" fill-opacity=".12"/>
+  <circle cx="64" cy="64" r="52" stroke="#AA95E8" stroke-opacity=".72" stroke-width="2"/>
+  <path d="M39 51 43 23l17 17c3-1 5-1 8-1s5 0 8 1l17-17 4 28c5 7 8 16 8 26 0 26-17 37-41 37S23 103 23 77c0-10 3-19 8-26l8-28Z" fill="url(#mora-body)" stroke="#332754" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M40 60c0-16 10-27 24-27s24 11 24 27v20c0 16-10 28-24 28S40 96 40 80V60Z" fill="url(#mora-face)"/>
+  <path d="M40 61c0-17 10-28 24-28s24 11 24 28" stroke="#332754" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="49" cy="65" r="12" fill="#F8F7FF" stroke="#332754" stroke-width="3"/>
+  <circle cx="79" cy="65" r="12" fill="#F8F7FF" stroke="#332754" stroke-width="3"/>
+  <circle cx="51" cy="66" r="5" fill="#332754"/>
+  <circle cx="77" cy="66" r="5" fill="#332754"/>
+  <circle cx="53" cy="64" r="1.5" fill="#FFF"/>
+  <circle cx="79" cy="64" r="1.5" fill="#FFF"/>
+  <path d="m64 72-5 7h10l-5-7Z" fill="#F1B962" stroke="#332754" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M47 84c5 7 11 10 17 10s12-3 17-10" stroke="#332754" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M43 95c7-4 13-5 21-5s14 1 21 5v12c-7 5-14 7-21 7s-14-2-21-7V95Z" fill="#433369" stroke="#332754" stroke-width="2.5" stroke-linejoin="round"/>
+  <path d="M50 103c5-10 9 10 14 0s9 10 14 0" stroke="#F6D374" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M20 66c5-10 13-16 23-17M85 39c12 3 19 12 22 24" stroke="#E6DEFF" stroke-width="2" stroke-linecap="round" stroke-dasharray="3 5"/>
+  <circle cx="21" cy="64" r="3" fill="#F6D374"/>
+  <circle cx="106" cy="65" r="3" fill="#F6D374"/>
+</svg>
