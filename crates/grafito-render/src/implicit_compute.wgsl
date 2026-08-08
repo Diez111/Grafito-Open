@@ -382,7 +382,19 @@ fn eval_bytecode(x: f32, y: f32) -> f32 {
             }
             case OP_CLAMP: {
                 sp = sp - 3;
-                stack[sp] = clamp(stack[sp], stack[sp + 1], stack[sp + 2]);
+                let lower = stack[sp + 1];
+                let upper = stack[sp + 2];
+                if operand == 0u
+                    && lower <= upper
+                    && abs(lower) <= 3.40282347e+38f
+                    && abs(upper) <= 3.40282347e+38f
+                {
+                    if stack[sp] < lower { stack[sp] = lower; }
+                    if stack[sp] > upper { stack[sp] = upper; }
+                } else {
+                    var z = 0.0;
+                    stack[sp] = z / z;
+                }
                 sp = sp + 1;
             }
             case OP_LT: {

@@ -1,6 +1,7 @@
 use grafito_core::{
     deserialize_document, serialize_document, AnimationMode, CasWorksheetStatus, CircleObj,
     DataTableObj, Document, FitMetadata, Fractal2DObj, FunctionObj, GeoObject, PencilObj, PointObj,
+    VariableMeta,
 };
 use grafito_geometry::{
     statistics::{fit_xy, FitKind},
@@ -313,7 +314,7 @@ fn loading_reconciles_stale_spreadsheet_variable_ownership() {
 }
 
 #[test]
-fn spreadsheet_metadata_survives_a_valid_formula_update() {
+fn spreadsheet_formula_updates_do_not_accept_animation_metadata() {
     let mut document = Document::new();
     document
         .set_spreadsheet_cell(0, 0, "1".to_string())
@@ -323,11 +324,7 @@ fn spreadsheet_metadata_survives_a_valid_formula_update() {
         .expect("initial formula resolves");
     document
         .configure_variable_animation("A1", 0.0, 10.0, 1.0, AnimationMode::Loop)
-        .expect("spreadsheet variable accepts valid metadata");
-    let metadata = document
-        .variable_meta("A1")
-        .cloned()
-        .expect("fixture metadata exists");
+        .expect_err("spreadsheet source must reject animation metadata");
 
     document
         .set_spreadsheet_cell(0, 0, "2 + 3".to_string())
@@ -337,9 +334,9 @@ fn spreadsheet_metadata_survives_a_valid_formula_update() {
         .expect("updated formula resolves");
 
     assert_eq!(document.get_variable("A1"), Some(5.0));
-    assert_eq!(document.variable_meta("A1"), Some(&metadata));
+    assert!(document.variable_meta("A1").is_none());
     grafito_core::validation::validate_document(&document)
-        .expect("resolved spreadsheet metadata remains valid");
+        .expect("resolved spreadsheet document remains valid");
 }
 
 #[test]
@@ -354,13 +351,6 @@ fn staged_spreadsheet_batch_uses_final_sources_without_mutating_the_live_documen
     document
         .recompute_spreadsheet_variables()
         .expect("initial spreadsheet resolves");
-    document
-        .configure_variable_animation("B1", 0.0, 10.0, 1.0, AnimationMode::Loop)
-        .expect("B1 accepts metadata");
-    let metadata = document
-        .variable_meta("B1")
-        .cloned()
-        .expect("fixture metadata exists");
     let before = serde_json::to_value(&document).expect("document should serialize");
     let version_before = document.version;
 
@@ -375,7 +365,7 @@ fn staged_spreadsheet_batch_uses_final_sources_without_mutating_the_live_documen
     );
     assert_eq!(staged.get_variable("A1"), None);
     assert_eq!(staged.get_variable("B1"), Some(2.0));
-    assert_eq!(staged.variable_meta("B1"), Some(&metadata));
+    assert!(staged.variable_meta("B1").is_none());
     assert_eq!(staged.version, version_before.wrapping_add(1));
 }
 
@@ -717,6 +707,21 @@ fn spreadsheet_cells_reject_animation_metadata_and_clear_cleanly() {
     assert!(document
         .configure_variable_animation("A1", 0.0, 10.0, 1.0, AnimationMode::Loop)
         .is_err());
+    assert!(document
+        .try_replace_variable_meta_with_previous(
+            "A1",
+            VariableMeta {
+                position: Point2::new(0.0, 0.0),
+                min: 0.0,
+                max: 10.0,
+                step: 0.1,
+                visible: true,
+                animating: true,
+                animation_speed: 1.0,
+                animation_mode: AnimationMode::Loop,
+            },
+        )
+        .is_err());
 
     document
         .set_spreadsheet_cell(0, 0, String::new())
@@ -747,9 +752,7 @@ fn unresolved_spreadsheet_cells_reserve_their_labels() {
 
     assert_eq!(document.get_variable("A1"), None);
     assert!(document.variable_meta("A1").is_none());
-    assert!(document
-        .try_set_variable("A1".to_string(), 2.0)
-        .is_err());
+    assert!(document.try_set_variable("A1".to_string(), 2.0).is_err());
     assert!(document
         .configure_variable_animation("A1", 0.0, 10.0, 1.0, AnimationMode::Loop)
         .is_err());
@@ -761,6 +764,43 @@ fn unresolved_spreadsheet_cells_reserve_their_labels() {
         .expect("invalid spreadsheet formula document remains valid");
     let serialized = serialize_document(&document).expect("invalid spreadsheet formula serializes");
     deserialize_document(&serialized).expect("invalid spreadsheet formula deserializes");
+}
+
+#[test]
+fn legacy_spreadsheet_animation_metadata_is_ignored() {
+    let mut document = Document::new();
+    document.set_variable("phase".to_string(), 0.0);
+    document
+        .set_spreadsheet_cell(0, 0, "1".to_string())
+        .expect("fixture cell is in range");
+    document
+        .recompute_spreadsheet_variables()
+        .expect("fixture formula resolves");
+    document
+        .configure_variable_animation("phase", 0.0, 1.0, 1.0, AnimationMode::Loop)
+        .expect("independent variable is animatable");
+
+    let mut serialized: serde_json::Value =
+        serde_json::from_str(&serialize_document(&document).expect("fixture document serializes"))
+            .expect("fixture envelope parses");
+    let mut legacy_metadata = serialized["document"]["variable_meta"]["phase"].clone();
+    legacy_metadata["animation_mode"] =
+        serde_json::to_value(AnimationMode::PingPong).expect("animation mode serializes");
+    serialized["document"]["variable_meta"]["A1"] = legacy_metadata;
+    let mut loaded =
+        deserialize_document(&serde_json::to_string(&serialized).expect("legacy fixture encodes"))
+            .expect("legacy spreadsheet metadata remains loadable");
+
+    assert!(loaded.variable_meta("A1").is_some());
+    assert!(loaded.advance_variable_animations(0.25));
+    assert_eq!(loaded.get_variable("A1"), Some(1.0));
+    assert_eq!(
+        loaded
+            .variable_meta("A1")
+            .expect("legacy metadata remains available")
+            .animation_speed,
+        1.0
+    );
 }
 
 #[test]

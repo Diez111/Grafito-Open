@@ -1413,18 +1413,113 @@ fn spreadsheet_coordinate_points_reject_direct_moves_and_reconcile_on_load() {
         before
     );
 
-    let Some(GeoObject::Point(point_object)) = document.get_object_mut(point) else {
+    let mut legacy = document.clone();
+    let Some(GeoObject::Point(point_object)) = legacy.get_object_mut(point) else {
         panic!("coordinate point remains available");
     };
     point_object.position = Point2::new(3.0, 4.0);
     let reopened = deserialize_document(
-        &serialize_document(&document).expect("legacy-mismatched coordinate point serializes"),
+        &serde_json::to_string(&legacy).expect("legacy-mismatched coordinate point encodes"),
     )
     .expect("coordinate source reconciles during load");
     assert!(matches!(
         reopened.get_object(point),
         Some(GeoObject::Point(point_object)) if point_object.position == Point2::new(1.0, 2.0)
     ));
+}
+
+#[test]
+fn loading_prunes_coordinate_ownership_of_constructed_points() {
+    let mut document = Document::new();
+    let left = document.add_point(Point2::new(0.0, 0.0));
+    let right = document.add_point(Point2::new(2.0, 0.0));
+    let (constructed, _) = document
+        .try_add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)).with_label("A1")),
+            "Midpoint",
+            &[left, right],
+        )
+        .expect("constructed A1 point is valid");
+    document
+        .set_spreadsheet_cell(0, 0, "(1, 2)".to_string())
+        .expect("coordinate source is in range");
+
+    let mut serialized: serde_json::Value =
+        serde_json::from_str(&serialize_document(&document).expect("fixture document serializes"))
+            .expect("fixture envelope parses");
+    serialized["document"]["spreadsheet_coordinate_points"]["A1"] =
+        serde_json::to_value(constructed).expect("constructed point id serializes");
+    let mut loaded = deserialize_document(
+        &serde_json::to_string(&serialized).expect("malformed ownership fixture encodes"),
+    )
+    .expect("constructed coordinate ownership is safely pruned");
+
+    assert_eq!(loaded.spreadsheet_coordinate_point("A1"), None);
+    assert!(matches!(
+        loaded.get_object(constructed),
+        Some(GeoObject::Point(point)) if point.position == Point2::new(1.0, 0.0)
+    ));
+}
+
+#[test]
+fn raw_coordinate_source_updates_cannot_serialize_stale_owner_geometry() {
+    let mut document = Document::new()
+        .stage_spreadsheet_cell_edits(&[(0, 0, "(1, 2)".to_string())])
+        .expect("coordinate cell should stage");
+    let point = document
+        .spreadsheet_coordinate_point("A1")
+        .expect("coordinate cell owns its point");
+
+    document
+        .set_spreadsheet_cell(0, 0, "(3, 4)".to_string())
+        .expect("raw source update is in range");
+
+    assert!(serialize_document(&document).is_err());
+    assert!(matches!(
+        document.get_object(point),
+        Some(GeoObject::Point(point)) if point.position == Point2::new(1.0, 2.0)
+    ));
+}
+
+#[test]
+fn sparse_row_padding_preserves_source_less_legacy_coordinate_owners() {
+    let mut document = Document::new();
+    let point = document.add_object(GeoObject::Point(
+        PointObj::new(Point2::new(1.0, 2.0)).with_label("A1"),
+    ));
+    document.set_spreadsheet_coordinate_point("A1".to_string(), point);
+    document
+        .set_spreadsheet_cell(0, 1, "1".to_string())
+        .expect("B1 source is in range");
+
+    let mut loaded = deserialize_document(
+        &serialize_document(&document).expect("sparse legacy owner serializes"),
+    )
+    .expect("sparse legacy owner deserializes");
+
+    assert_eq!(loaded.spreadsheet_coordinate_point("A1"), Some(point));
+    assert!(matches!(
+        loaded.get_object(point),
+        Some(GeoObject::Point(point)) if point.position == Point2::new(1.0, 2.0)
+    ));
+}
+
+#[test]
+fn raw_coordinate_source_clear_removes_its_owner() {
+    let mut document = Document::new()
+        .stage_spreadsheet_cell_edits(&[(0, 0, "(1, 2)".to_string())])
+        .expect("coordinate cell should stage");
+    let point = document
+        .spreadsheet_coordinate_point("A1")
+        .expect("coordinate cell owns its point");
+
+    document
+        .set_spreadsheet_cell(0, 0, String::new())
+        .expect("raw clear is in range");
+
+    assert_eq!(document.spreadsheet_coordinate_point("A1"), None);
+    assert!(document.get_object(point).is_none());
+    serialize_document(&document).expect("cleared coordinate source serializes");
 }
 
 #[test]

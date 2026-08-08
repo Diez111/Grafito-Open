@@ -190,15 +190,18 @@ fn staging_rejects_writes_to_unresolved_spreadsheet_cell_labels() {
     let before = snapshot(&document);
     let plan = ProposedPlan::new(
         document_context(&document).basis(),
-        vec![AssistantOperation::SetVariable {
-            name: "A1".into(),
-            value: 2.0,
-        }, AssistantOperation::CreateGraph {
-            expression: "x".into(),
-            variable: "x".into(),
-            domain_min: -1.0,
-            domain_max: 1.0,
-        }],
+        vec![
+            AssistantOperation::SetVariable {
+                name: "A1".into(),
+                value: 2.0,
+            },
+            AssistantOperation::CreateGraph {
+                expression: "x".into(),
+                variable: "x".into(),
+                domain_min: -1.0,
+                domain_max: 1.0,
+            },
+        ],
     );
 
     assert!(harness::stage(&document, &plan).is_err());

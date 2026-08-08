@@ -44,10 +44,10 @@ jobs:
           grep -F -- "## [$version]" CHANGELOG.md >/dev/null || { echo "CHANGELOG.md has no $version entry" >&2; exit 1; }
           git rev-parse --verify --quiet "${tag_ref}^{tag}" >/dev/null || { echo "release tag must be annotated" >&2; exit 1; }
           tag_commit="$(git rev-parse --verify "${tag_ref}^{commit}")"
-          main_commit="$(git rev-parse --verify refs/remotes/origin/main^{commit})"
+          main_commit="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
 
           git merge-base --is-ancestor "$tag_commit" "$main_commit" || { echo "release tag is not on main" >&2; exit 1; }
-          [[ "$tag_commit" == "$(git rev-parse HEAD^{commit})" ]] || { echo "checkout is not the tagged release commit" >&2; exit 1; }
+          [[ "$tag_commit" == "$(git rev-parse 'HEAD^{commit}')" ]] || { echo "checkout is not the tagged release commit" >&2; exit 1; }
 
           if [[ "$version" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
@@ -145,16 +145,20 @@ jobs:
           if ($smoke.ExitCode -ne 0) { throw "grafito.exe --help exited with $($smoke.ExitCode)" }
 
       - name: Package
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          ARTIFACT: ${{ matrix.artifact }}
+          TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
+          cp "target/$TARGET/release/$ARTIFACT" dist/
           cp README.md CHANGELOG.md LICENSE dist/ 2>/dev/null || true
           cd dist
-          if [[ "${{ matrix.archive }}" == *.zip ]]; then
-            cp "${{ matrix.artifact }}" ../grafito-windows-x64.exe
-            7z a ../${{ matrix.archive }} *
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            cp "$ARTIFACT" ../grafito-windows-x64.exe
+            7z a "../$ARCHIVE" ./*
           else
-            tar czf ../${{ matrix.archive }} *
+            tar czf "../$ARCHIVE" ./*
           fi
         shell: bash
 
@@ -169,7 +173,10 @@ jobs:
           binary="$extract_dir/grafito"
           [[ -x "$binary" ]]
           ldd "$binary" | tee grafito-linux-ldd.txt
-          ! grep -F 'not found' grafito-linux-ldd.txt
+          if grep -Fq 'not found' grafito-linux-ldd.txt; then
+            echo "Linux archive has unresolved runtime dependencies" >&2
+            exit 1
+          fi
           grep -Eq '^[[:space:]]*libdbus-1\.so\.3[[:space:]]+=>' grafito-linux-ldd.txt
           "$binary" --help
 
@@ -213,7 +220,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          source_date_epoch="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH="$source_date_epoch"
           packaging/build-deb.sh
           shopt -s nullglob
           packages=(packaging/build/*.deb)

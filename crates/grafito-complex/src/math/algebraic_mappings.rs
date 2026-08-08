@@ -372,11 +372,10 @@ fn parse_linear_in_z(s: &str) -> Option<(Complex64, Complex64)> {
     // coef_str puede ser "z", "<num>*z"
     let a = if coef_str == "z" {
         Complex64::new(1.0, 0.0)
-    } else if let Some(rest) = coef_str.strip_suffix("*z") {
+    } else {
+        let rest = coef_str.strip_suffix("*z")?;
         let v = rest.parse::<f64>().ok()?;
         Complex64::new(v, 0.0)
-    } else {
-        return None;
     };
     let b = if const_str.is_empty() {
         Complex64::new(0.0, 0.0)

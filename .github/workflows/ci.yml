@@ -264,7 +264,7 @@ jobs:
           sudo apt-get install -y shellcheck
           GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - name: Lint GitHub Actions workflows
-        run: "$RUNNER_TEMP/bin/actionlint"
+        run: "${RUNNER_TEMP}/bin/actionlint"
       - name: Parse and lint package scripts
         run: |
           bash -n packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh

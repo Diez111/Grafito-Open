@@ -1675,19 +1675,12 @@ fn spreadsheet_draft_edits_remain_local_until_one_committed_snapshot() {
 }
 
 #[test]
-fn spreadsheet_commit_preserves_valid_metadata_and_records_one_undo() {
+fn spreadsheet_commit_recomputes_sources_and_records_one_undo() {
     use std::collections::HashMap;
 
     let mut document = crate::app::initial_document();
     crate::panels::apply_spreadsheet_cell_edit(&mut document, 0, 0, "1".to_string())
         .expect("seed spreadsheet variable");
-    document
-        .configure_variable_animation("A1", 0.0, 10.0, 1.0, grafito_core::AnimationMode::Loop)
-        .expect("spreadsheet variable accepts valid metadata");
-    let metadata = document
-        .variable_meta("A1")
-        .cloned()
-        .expect("fixture metadata exists");
     let before = serde_json::to_value(&document).expect("document should serialize");
     let mut edit_buffers = HashMap::new();
     let mut undo_stack = Vec::new();
@@ -1711,7 +1704,7 @@ fn spreadsheet_commit_preserves_valid_metadata_and_records_one_undo() {
     .expect("valid spreadsheet commit succeeds"));
 
     assert_eq!(document.get_variable("A1"), Some(2.0));
-    assert_eq!(document.variable_meta("A1"), Some(&metadata));
+    assert!(document.variable_meta("A1").is_none());
     grafito_core::validation::validate_document(&document)
         .expect("committed spreadsheet document remains valid");
     assert!(edit_buffers.is_empty());
@@ -5076,19 +5069,12 @@ fn spreadsheet_draft_save_writes_staged_state_before_one_live_commit() {
 }
 
 #[test]
-fn spreadsheet_draft_save_preserves_dependent_metadata_from_the_final_batch_state() {
+fn spreadsheet_draft_save_uses_the_final_batch_state() {
     let mut document = crate::app::initial_document();
     crate::panels::apply_spreadsheet_cell_edit(&mut document, 0, 0, "1".to_string())
         .expect("seed A1");
     crate::panels::apply_spreadsheet_cell_edit(&mut document, 0, 1, "A1 + 1".to_string())
         .expect("seed B1 dependency");
-    document
-        .configure_variable_animation("B1", 0.0, 10.0, 1.0, grafito_core::AnimationMode::Loop)
-        .expect("B1 accepts metadata");
-    let metadata = document
-        .variable_meta("B1")
-        .cloned()
-        .expect("fixture metadata exists");
     let before = document.clone();
     let mut drafts =
         std::collections::HashMap::from([((0, 0), String::new()), ((0, 1), "2".to_string())]);
@@ -5110,7 +5096,7 @@ fn spreadsheet_draft_save_preserves_dependent_metadata_from_the_final_batch_stat
             assert_eq!(staged.get_spreadsheet_cell(0, 1), "2");
             assert_eq!(staged.get_variable("A1"), None);
             assert_eq!(staged.get_variable("B1"), Some(2.0));
-            assert_eq!(staged.variable_meta("B1"), Some(&metadata));
+            assert!(staged.variable_meta("B1").is_none());
             Ok(())
         },
     )
@@ -5120,7 +5106,7 @@ fn spreadsheet_draft_save_preserves_dependent_metadata_from_the_final_batch_stat
     assert_eq!(writer_calls.get(), 1);
     assert_eq!(document.get_variable("A1"), None);
     assert_eq!(document.get_variable("B1"), Some(2.0));
-    assert_eq!(document.variable_meta("B1"), Some(&metadata));
+    assert!(document.variable_meta("B1").is_none());
     assert!(drafts.is_empty());
     assert_eq!(undo_stack.len(), 1);
     assert_eq!(
@@ -5174,17 +5160,12 @@ fn spreadsheet_draft_save_reconciles_coordinate_objects_from_final_batch_sources
 }
 
 #[test]
-fn spreadsheet_draft_save_prunes_metadata_missing_from_the_final_batch_state() {
+fn spreadsheet_draft_save_clears_unresolved_final_batch_variables() {
     let mut document = crate::app::initial_document();
     crate::panels::apply_spreadsheet_cell_edit(&mut document, 0, 0, "1".to_string())
         .expect("seed A1");
     crate::panels::apply_spreadsheet_cell_edit(&mut document, 0, 1, "2".to_string())
         .expect("seed B1");
-    for label in ["A1", "B1"] {
-        document
-            .configure_variable_animation(label, 0.0, 10.0, 1.0, grafito_core::AnimationMode::Loop)
-            .expect("spreadsheet variable accepts metadata");
-    }
     let mut drafts =
         std::collections::HashMap::from([((0, 0), String::new()), ((0, 1), "(".to_string())]);
     let mut undo_stack = Vec::new();

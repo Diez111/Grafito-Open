@@ -808,6 +808,13 @@ impl Document {
     where
         F: FnOnce(&mut PointObj) -> Result<(), String>,
     {
+        if self
+            .spreadsheet_coordinate_points
+            .values()
+            .any(|point_id| *point_id == id)
+        {
+            return Err("spreadsheet coordinate points must be edited in their cell".to_string());
+        }
         if !self.constraints.is_free(&id)
             || !matches!(self.objects.get(&id), Some(GeoObject::Point(_)))
         {
@@ -3472,13 +3479,6 @@ impl Document {
         self.re_evaluate_constraints_in_place(&order)
     }
 
-    /// Recalcula expresiones ligadas y propaga sólo los objetos que cambiaron.
-    /// La captura de Locus queda dentro de la reevaluación post-estabilización.
-    fn stabilize_bound_parameter_changes(&mut self) -> Result<(), String> {
-        let changed = self.recompute_bound_parameters_with_changes();
-        self.propagate_changed_roots(&changed)
-    }
-
     fn commit_variable_mutation<F>(&mut self, mutate: F) -> Result<(), String>
     where
         F: FnOnce(&mut Self),
@@ -3516,6 +3516,9 @@ impl Document {
         name: &str,
         candidate: VariableMeta,
     ) -> Result<Option<Self>, String> {
+        if self.is_spreadsheet_owned_variable(name) {
+            return Err("Spreadsheet-owned variables must be edited in their cell".to_string());
+        }
         if !self.variables.contains_key(name) {
             return Ok(None);
         }
@@ -3554,6 +3557,9 @@ impl Document {
         let name = name.trim();
         if name.is_empty() {
             return Err("Animation variable name must not be empty".into());
+        }
+        if self.is_spreadsheet_owned_variable(name) {
+            return Err("Spreadsheet-owned variables must be edited in their cell".into());
         }
         if !min.is_finite() || !max.is_finite() || !speed.is_finite() {
             return Err("Animation bounds and speed must be finite".into());
@@ -3611,7 +3617,8 @@ impl Document {
 
         let mut changes = Vec::new();
         for (name, meta) in &self.variable_meta {
-            if !meta.animating
+            if self.is_spreadsheet_owned_variable(name)
+                || !meta.animating
                 || meta.animation_speed == 0.0
                 || !meta.animation_speed.is_finite()
                 || !meta.min.is_finite()
@@ -3664,7 +3671,7 @@ impl Document {
                 meta.animation_speed = speed;
             }
         }
-        if let Err(error) = staged.stabilize_bound_parameter_changes() {
+        if let Err(error) = staged.recompute_spreadsheet_variables() {
             log::warn!("Animation update rejected: {error}");
             return false;
         }
@@ -3698,7 +3705,13 @@ impl Document {
 
     /// Indica si el valor de una variable es derivado de una celda de spreadsheet.
     pub fn is_spreadsheet_owned_variable(&self, name: &str) -> bool {
-        self.spreadsheet_variables.contains(name)
+        let Some((row, column)) = Self::spreadsheet_coordinate_cell_indices(name) else {
+            return false;
+        };
+        self.spreadsheet
+            .get(row)
+            .and_then(|cells| cells.get(column))
+            .is_some_and(|value| !value.trim().is_empty())
     }
 
     /// Devuelve los metadatos inmutables de una variable, si fueron configurados.
@@ -3970,6 +3983,7 @@ impl Document {
 
     fn is_valid_spreadsheet_coordinate_owner(&self, cell: &str, point_id: ObjectId) -> bool {
         Self::spreadsheet_coordinate_cell_indices(cell).is_some()
+            && self.constraints.is_free(&point_id)
             && matches!(
                 self.objects.get(&point_id),
                 Some(GeoObject::Point(point)) if point.label == cell
@@ -4019,16 +4033,51 @@ impl Document {
         }
     }
 
+    /// Reconciles persisted coordinate-owned points from their present cell
+    /// sources. Source-less legacy owners remain intact because no cell source
+    /// exists to authoritatively replace them.
+    pub(crate) fn reconcile_spreadsheet_coordinate_points_from_sources(
+        &mut self,
+    ) -> Result<(), String> {
+        self.prune_spreadsheet_coordinate_points();
+        let cells: Vec<String> = self.spreadsheet_coordinate_points.keys().cloned().collect();
+        let mut changed_points = Vec::new();
+        let mut changed_point_ids = HashSet::new();
+
+        for cell in cells {
+            let Some((row, column)) = Self::spreadsheet_coordinate_cell_indices(&cell) else {
+                continue;
+            };
+            let Some(value) = self
+                .spreadsheet
+                .get(row)
+                .and_then(|cells| cells.get(column))
+                .filter(|value| !value.trim().is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            self.reconcile_spreadsheet_coordinate_point_in_place(
+                &cell,
+                &value,
+                &mut changed_points,
+                &mut changed_point_ids,
+            )?;
+        }
+
+        self.propagate_changed_roots(&changed_points)
+    }
+
     /// Validate persisted spreadsheet ownership before it is allowed to claim a
     /// point as a coordinate-cell generated object.
     pub(crate) fn validate_spreadsheet_coordinate_points(&self) -> Result<(), String> {
         let mut owned_points = HashSet::new();
         for (cell, point_id) in &self.spreadsheet_coordinate_points {
-            if Self::spreadsheet_coordinate_cell_indices(cell).is_none() {
+            let Some((row, column)) = Self::spreadsheet_coordinate_cell_indices(cell) else {
                 return Err(format!(
                     "Spreadsheet coordinate owner key '{cell}' is invalid"
                 ));
-            }
+            };
             let Some(GeoObject::Point(point)) = self.objects.get(point_id) else {
                 return Err(format!(
                     "Spreadsheet coordinate owner '{cell}' is not a point"
@@ -4039,6 +4088,28 @@ impl Document {
                     "Spreadsheet coordinate owner '{cell}' does not match point label '{}',",
                     point.label
                 ));
+            }
+            if !self.constraints.is_free(point_id) {
+                return Err(format!(
+                    "Spreadsheet coordinate owner '{cell}' must reference a free point"
+                ));
+            }
+            if let Some(source) = self
+                .spreadsheet
+                .get(row)
+                .and_then(|cells| cells.get(column))
+                .filter(|source| !source.trim().is_empty())
+            {
+                let Some(position) = Self::parse_spreadsheet_coordinate(source) else {
+                    return Err(format!(
+                        "Spreadsheet coordinate owner '{cell}' has no coordinate cell source"
+                    ));
+                };
+                if point.position != position {
+                    return Err(format!(
+                        "Spreadsheet coordinate owner '{cell}' does not match its cell source"
+                    ));
+                }
             }
             if !owned_points.insert(*point_id) {
                 return Err(format!(
@@ -4055,9 +4126,16 @@ impl Document {
         col: usize,
         value: String,
     ) -> Result<(), String> {
+        let clears_coordinate_owner = value.trim().is_empty();
         let edits = [(row, col, value)];
         Self::validate_spreadsheet_cell_edit_batch(&edits)?;
+        let label = Self::spreadsheet_cell_label(row, col);
         self.set_spreadsheet_cell_sources_in_place(&edits);
+        if clears_coordinate_owner {
+            if let Some(point_id) = self.spreadsheet_coordinate_point(&label) {
+                let _ = self.remove_object(point_id);
+            }
+        }
         Ok(())
     }
 

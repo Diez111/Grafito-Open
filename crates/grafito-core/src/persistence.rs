@@ -110,7 +110,9 @@ pub fn deserialize_document(json: &str) -> Result<Document, DocumentPersistenceE
     document
         .recompute_spreadsheet_variables()
         .map_err(DocumentPersistenceError::SemanticValidation)?;
-    document.prune_spreadsheet_coordinate_points();
+    document
+        .reconcile_spreadsheet_coordinate_points_from_sources()
+        .map_err(DocumentPersistenceError::SemanticValidation)?;
     validate_document(&document).map_err(DocumentPersistenceError::SemanticValidation)?;
     document.spatial_dirty = true;
     Ok(document)

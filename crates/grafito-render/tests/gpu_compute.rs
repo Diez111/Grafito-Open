@@ -136,7 +136,8 @@ fn required_vulkan_function_evaluator_matches_cpu_edge_semantics() {
         "atanh(x + 2)",
         "0.0000001 / (x + 0.000000000001)",
         "round(x - 0.5)",
-        "clamp(x, 1, -1)",
+        "clamp(x, 1, -1) + 2",
+        "clamp(x, 1.00000001, 1) + 2",
     ] {
         let values = compute
             .evaluate_expr(
@@ -280,7 +281,8 @@ fn required_vulkan_implicit_evaluator_matches_cpu_edge_semantics() {
         "atanh(x + 2)",
         "0.0000001 / (x + 0.000000000001)",
         "round(x - 0.5)",
-        "clamp(x, 1, -1)",
+        "clamp(x, 1, -1) + 2",
+        "clamp(x, 1.00000001, 1) + 2",
     ] {
         let curve = ImplicitCurveObj::new(expr, "0", RelationOperator::Eq);
         let rows = compute
@@ -324,14 +326,14 @@ fn required_vulkan_parametric_evaluator_matches_cpu_edge_semantics() {
         assert_gpu_matches_cpu_parametric(y, "round(t - 0.5)", t, "parametric round");
     }
 
-    let invalid_clamp = ParametricCurve2DObj::new("clamp(t, 1, -1)", "0", 0.0, 1.0);
+    let invalid_clamp = ParametricCurve2DObj::new("clamp(t, 1.00000001, 1) + 2", "0", 0.0, 1.0);
     let samples = compute
         .evaluate_curve_2d(&gpu.device, &gpu.queue, &invalid_clamp, 1, &HashMap::new())
         .expect("supported parametric curve must execute on the GPU");
     for (index, (x, _)) in samples.into_iter().enumerate() {
         assert_gpu_matches_cpu_parametric(
             x,
-            "clamp(t, 1, -1)",
+            "clamp(t, 1.00000001, 1) + 2",
             index as f64,
             "parametric invalid clamp",
         );
@@ -465,7 +467,8 @@ fn required_vulkan_vector_evaluator_matches_cpu_edge_semantics() {
         ("0.0000001 / (x + 0.000000000001)", "asin(y + 2)"),
         ("acos(x + 2)", "acosh(y)"),
         ("atanh(x + 2)", "0"),
-        ("clamp(x, 1, -1)", "0"),
+        ("clamp(x, 1, -1) + 2", "0"),
+        ("clamp(x, 1.00000001, 1) + 2", "0"),
     ] {
         let field = VectorField2DObj::new(u_expr, v_expr);
         let samples = compute
@@ -503,7 +506,8 @@ fn required_vulkan_fill_evaluator_matches_cpu_edge_semantics() {
             RelationOperator::Greater,
         ),
         ("round(x - 0.5)", RelationOperator::GreaterEq),
-        ("clamp(x, 1, -1)", RelationOperator::Greater),
+        ("clamp(x, 1, -1)", RelationOperator::Less),
+        ("clamp(x, 1.00000001, 1)", RelationOperator::Greater),
     ] {
         let lhs = grafito_geometry::expr::prepare_function_ast(expr, &HashMap::new(), &["x", "y"])
             .expect("test expression must parse");
@@ -532,6 +536,83 @@ fn required_vulkan_fill_evaluator_matches_cpu_edge_semantics() {
             "fill evaluator disagrees with CPU for {expr}"
         );
     }
+}
+
+#[test]
+fn required_vulkan_scalar_evaluators_reject_nonfinite_clamp_bounds() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let variables = HashMap::from([("upper".to_string(), f64::INFINITY)]);
+
+    let function = FunctionComputePipeline::new(&gpu.device, &gpu.queue, 1);
+    let values = function
+        .evaluate_expr(
+            &gpu.device,
+            &gpu.queue,
+            "clamp(x, -1, upper) + 2",
+            (0.0, 1.0),
+            1,
+            &variables,
+        )
+        .expect("nonfinite clamp function should execute on the GPU");
+    assert!(values.iter().all(|value| value.is_nan()));
+
+    let implicit = ImplicitComputePipeline::new(&gpu.device, &gpu.queue, 1);
+    let curve = ImplicitCurveObj::new("clamp(x, -1, upper)", "0", RelationOperator::Eq);
+    let rows = implicit
+        .evaluate(
+            &gpu.device,
+            &gpu.queue,
+            &curve,
+            (0.0, 1.0, 0.0, 1.0),
+            1,
+            &variables,
+        )
+        .expect("nonfinite clamp implicit curve should execute on the GPU");
+    assert!(rows.iter().flatten().all(|value| value.is_nan()));
+
+    let parametric = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 1, 1);
+    let curve = ParametricCurve2DObj::new("clamp(t, -1, upper)", "0", 0.0, 1.0);
+    let samples = parametric
+        .evaluate_curve_2d(&gpu.device, &gpu.queue, &curve, 1, &variables)
+        .expect("nonfinite clamp parametric curve should execute on the GPU");
+    assert!(samples.iter().all(|(x, _)| x.is_nan()));
+
+    let vector = VectorComputePipeline::new(&gpu.device, &gpu.queue, 1);
+    let field = VectorField2DObj::new("clamp(x, -1, upper)", "0");
+    let samples = vector
+        .evaluate(
+            &gpu.device,
+            &gpu.queue,
+            &field,
+            (0.0, 1.0, 0.0, 1.0),
+            1,
+            &variables,
+        )
+        .expect("nonfinite clamp vector field should execute on the GPU");
+    assert!(samples.iter().all(|(_, _, u, _)| u.is_nan()));
+
+    let fill = FillComputePipeline::new(&gpu.device, &gpu.queue);
+    let lhs = grafito_geometry::expr::prepare_function_ast(
+        "clamp(x, -1, upper)",
+        &variables,
+        &["x", "y"],
+    )
+    .expect("nonfinite clamp fill expression must parse");
+    let pixels = fill
+        .evaluate_fill(
+            &gpu.device,
+            &gpu.queue,
+            &lhs,
+            &grafito_geometry::ast::Expr::Const(0.0),
+            RelationOperator::Less,
+            (0.0, 1.0, 0.0, 1.0),
+            (1, 1),
+            &variables,
+        )
+        .expect("nonfinite clamp fill should execute on the GPU");
+    assert_eq!(pixels[3], 0);
 }
 
 #[test]

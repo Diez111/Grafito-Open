@@ -12,7 +12,7 @@
 use grafito_core::object::{ImplicitCurveObj, RelationOperator};
 use grafito_core::RenderQuality;
 use grafito_geometry::ViewTransform;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub use grafito_core::implicit_curve::{
     marching_squares_from_grid, MAX_IMPLICIT_GRID_SIZE, MAX_MARCHING_SQUARES_SEGMENTS,
@@ -20,6 +20,7 @@ pub use grafito_core::implicit_curve::{
 
 /// Matches `STACK_SIZE` in each scalar WGSL bytecode interpreter.
 const GPU_SCALAR_STACK_SIZE: i32 = 32;
+const CLAMP_FORCE_INVALID_OPERAND: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -109,6 +110,8 @@ pub(crate) fn f32_bounds_have_precision(values: &[f64], min_step: f64) -> bool {
 pub(crate) enum CompileError {
     UnsupportedNode(String),
     UnsupportedVariable(String),
+    RuntimeClampBounds,
+    PrecisionLoss,
     StackTooDeep,
     TooManyConstants,
 }
@@ -119,6 +122,12 @@ impl std::fmt::Display for CompileError {
             CompileError::UnsupportedNode(n) => write!(f, "unsupported AST node: {}", n),
             CompileError::UnsupportedVariable(v) => {
                 write!(f, "variable '{}' not available on GPU evaluator", v)
+            }
+            CompileError::RuntimeClampBounds => {
+                write!(f, "clamp bounds must be static for GPU evaluation")
+            }
+            CompileError::PrecisionLoss => {
+                write!(f, "clamp bounds lose ordering when narrowed to f32")
             }
             CompileError::StackTooDeep => write!(f, "expression too deep for GPU stack"),
             CompileError::TooManyConstants => write!(f, "too many constants for GPU buffer"),
@@ -318,10 +327,35 @@ pub(crate) fn compile_expr_with_mapping(
             prog.code.push(Op::Atan2.encode(0));
         }
         Expr::Clamp(a, lo, hi) => {
+            let mut bound_variables = HashSet::new();
+            lo.get_variables(&mut bound_variables);
+            hi.get_variables(&mut bound_variables);
+            if !bound_variables.is_empty() {
+                return Err(CompileError::RuntimeClampBounds);
+            }
+
+            let lower = lo.eval_at("", 0.0);
+            let upper = hi.eval_at("", 0.0);
+            let force_invalid = !lower.is_finite() || !upper.is_finite() || lower > upper;
+            if !force_invalid {
+                let narrowed_lower = lower as f32;
+                let narrowed_upper = upper as f32;
+                if !narrowed_lower.is_finite()
+                    || !narrowed_upper.is_finite()
+                    || (lower < upper && narrowed_lower == narrowed_upper)
+                {
+                    return Err(CompileError::PrecisionLoss);
+                }
+            }
+
             compile_expr_with_mapping(a, document_vars, var_map, prog)?;
             compile_expr_with_mapping(lo, document_vars, var_map, prog)?;
             compile_expr_with_mapping(hi, document_vars, var_map, prog)?;
-            prog.code.push(Op::Clamp.encode(0));
+            prog.code.push(Op::Clamp.encode(if force_invalid {
+                CLAMP_FORCE_INVALID_OPERAND
+            } else {
+                0
+            }));
         }
         Expr::Lt(a, b) => {
             compile_expr_with_mapping(a, document_vars, var_map, prog)?;
@@ -889,6 +923,38 @@ mod tests {
         assert!(matches!(
             compile_expr(&expression, &HashMap::new(), &mut program),
             Err(CompileError::UnsupportedNode(_))
+        ));
+    }
+
+    #[test]
+    fn compiler_rejects_clamps_with_runtime_bounds() {
+        let expression = grafito_geometry::expr::prepare_function_ast(
+            "clamp(x, x + 1, x)",
+            &HashMap::new(),
+            &["x"],
+        )
+        .expect("runtime-bound clamp must parse");
+        let mut program = BytecodeProgram::default();
+
+        assert!(matches!(
+            compile_expr(&expression, &HashMap::new(), &mut program),
+            Err(CompileError::RuntimeClampBounds)
+        ));
+    }
+
+    #[test]
+    fn compiler_rejects_valid_clamp_bounds_that_collapse_to_f32() {
+        let expression = grafito_geometry::expr::prepare_function_ast(
+            "clamp(x, 1, 1.00000001)",
+            &HashMap::new(),
+            &["x"],
+        )
+        .expect("near-equal clamp must parse");
+        let mut program = BytecodeProgram::default();
+
+        assert!(matches!(
+            compile_expr(&expression, &HashMap::new(), &mut program),
+            Err(CompileError::PrecisionLoss)
         ));
     }
 }
