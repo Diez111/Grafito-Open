@@ -177,6 +177,8 @@ pub struct AssistantPanelState {
     pub agent_ledger: Option<String>,
     /// Animación generada por el motor externo, para reproducir en el chat.
     pub media: Option<AssistantMedia>,
+    /// Verdadero mientras el job de animación está en curso (progreso en vivo).
+    pub anim_progress: bool,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
@@ -253,6 +255,7 @@ impl Default for AssistantPanelState {
             media: None,
             media_textures: Vec::new(),
             media_textures_ready: false,
+            anim_progress: false,
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -1765,11 +1768,48 @@ fn draw_panel_contents(
             if state.is_pending {
                 draw_pending_indicator(ui, state, visuals);
             }
+            if state.anim_progress {
+                draw_animation_progress(ui, state, visuals);
+            }
             if let Some(media) = &state.media {
                 draw_media_card(ui, media, state);
             }
         });
     action
+}
+
+/// Tarjeta en vivo mientras se genera la animación (progreso sin fricción).
+fn draw_animation_progress(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    visuals: AssistantVisuals,
+) {
+    let theme = current_theme(ui.ctx());
+    let _ = visuals;
+    let time = ui.input(|input| input.time);
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::same(SPACE_SM))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let pulse = ((time * 3.0).sin() + 1.0) * 0.5;
+                let color = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 5.0, color);
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(
+                    egui::RichText::new("Generando animación…")
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                ));
+            });
+        });
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(48));
+    let _ = state;
 }
 
 /// Reproductor de animación (GIF-like) en el chat.
@@ -2292,17 +2332,6 @@ fn draw_assistant_composer(
                 {
                     action = Some(AssistantUiAction::Submit);
                 }
-                ui.add_enabled_ui(!state.is_pending && !state.is_importing_image, |ui| {
-                    if ui
-                        .add(egui::Button::new("Animá").small())
-                        .on_hover_text(
-                            "Genera y reproduce una animación didáctica del objeto/expresión (requiere el plugin j-space/engine).",
-                        )
-                        .clicked()
-                    {
-                        action = Some(AssistantUiAction::RunAnimation);
-                    }
-                });
             });
             if input_bytes > request_budget.max_input_chars * 3 / 4 {
                 let input_color = if input_bytes > request_budget.max_input_chars {

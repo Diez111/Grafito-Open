@@ -31,6 +31,9 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 - **Tema macOS**: paleta pulida de macOS en claro y oscuro (acento azul #0A84FF/#007AFF, paneles translúcidos suaves, canvas #f5f5f7), conservando la legibilidad (contraste AA) y la profundidad de las superficies.
 - **Iconos minimalistas**: subconjunto redibujado a mano (pizarra, flecha, más/menos, formas, cuaderno, compás) en estilo monocromo adaptable a claro/oscuro.
 - **AGENTS.md**: comandos de verificación y convenciones para agentes.
+- **Pizarra fluida**: el trazo del lápiz se dibuja **en vivo** mientras arrastrás (antes solo aparecía al soltar), con repintado a 60 fps durante el gesto para una interacción natural.
+- **IA que entiende la pizarra**: botón «IA» en la pizarra envía una descripción estructurada del dibujo al asistente (DeepSeek V4 Flash) y lo explica; el análisis sigue funcionando con el overlay abierto y queda listo el seam para un modelo de visión ultra barato (MiniMax/MiMo 2.5-VL) sin tocar el flujo del usuario.
+- **Animaciones sin fricción**: se quitó el botón «Animá» del compositor (diseño pobre e innecesario); ahora la IA genera la animación sola cuando le pedís «animá…», con **progreso en vivo en el chat**, los jobs del motor externo tienen timeouts cortos (2s idle / 15s job) para caer al generador nativo, y la animación **siempre aparece** (nunca queda colgada).
 
 #### Cambiado
 - **Eficiencia del transporte remoto**: el cliente HTTP bloqueante ahora es compartido entre peticiones (pool de conexiones reutilizado con timeout por petición), en lugar de crear un `Client` por llamada.

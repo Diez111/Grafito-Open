@@ -181,6 +181,20 @@ impl WhiteboardSession {
         for element in self.doc.elements() {
             draw_element(painter, element, rect, self);
         }
+        // Trazo en vivo del lápiz: se dibuja mientras se arrastra (natural).
+        if self.tool == WhiteboardTool::Pencil && !self.pencil_points.is_empty() {
+            let accent = theme.accent;
+            let stroke = Stroke::new(2.0 * self.zoom as f32, Color32::from_rgb(55, 55, 55));
+            for pair in self.pencil_points.windows(2) {
+                let a = self.screen_from_world(pair[0], rect);
+                let b = self.screen_from_world(pair[1], rect);
+                painter.line_segment([a, b], stroke);
+            }
+            if self.pencil_points.len() == 1 {
+                let p = self.screen_from_world(self.pencil_points[0], rect);
+                painter.circle_filled(p, 1.5 * self.zoom as f32, accent);
+            }
+        }
         if let Some(preview) = self.interaction.preview() {
             draw_element(painter, &preview, rect, self);
         }
@@ -198,6 +212,10 @@ impl WhiteboardSession {
     }
 
     pub fn handle_canvas_input(&mut self, rect: Rect, ui: &egui::Ui) {
+        if ui.ctx().input(|input| input.pointer.any_down()) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
         let response = ui.interact(
             rect,
             egui::Id::new("whiteboard_canvas"),
@@ -304,11 +322,12 @@ fn draw_element(
     }
 }
 
-fn draw_toolbar(ui: &mut egui::Ui, session: &mut WhiteboardSession, open: &mut bool) {
+fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let theme = current_theme(ui.ctx());
     let mut selected_tool: Option<WhiteboardTool> = None;
     let mut clear = false;
     let mut close = false;
+    let mut ask_ai = false;
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -321,6 +340,7 @@ fn draw_toolbar(ui: &mut egui::Ui, session: &mut WhiteboardSession, open: &mut b
             color: Color32::from_black_alpha(40),
         })
         .show(ui, |ui| {
+            let session = &app.whiteboard;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(
@@ -356,6 +376,16 @@ fn draw_toolbar(ui: &mut egui::Ui, session: &mut WhiteboardSession, open: &mut b
                     }
                 }
                 ui.separator();
+                if action_icon_button(
+                    ui,
+                    Icon::Search,
+                    theme.accent,
+                    "Entender este dibujo con IA",
+                )
+                .clicked()
+                {
+                    ask_ai = true;
+                }
                 if action_icon_button(ui, Icon::Delete, theme.text_secondary, "Limpiar").clicked() {
                     clear = true;
                 }
@@ -367,18 +397,34 @@ fn draw_toolbar(ui: &mut egui::Ui, session: &mut WhiteboardSession, open: &mut b
             });
         });
     if let Some(tool) = selected_tool {
-        session.set_tool(tool);
+        app.whiteboard.set_tool(tool);
     }
     if clear {
-        session.clear();
+        app.whiteboard.clear();
     }
     if close {
-        *open = false;
+        app.whiteboard_open = false;
+    }
+    if ask_ai {
+        // El asistente «ve» el dibujo por su descripción estructurada y lo
+        // explica con DeepSeek V4 Flash (seam listo para un modelo de visión
+        // barato como MiniMax/MiMo 2.5-VL sin tocar el flujo del usuario).
+        let description = app.whiteboard.doc.describe();
+        app.assistant.problem =
+            format!("Entendé este dibujo de la pizarra de Grafito y explicámelo: {description}");
+        app.start_local_assistant_request(ui.ctx());
+        app.notify(
+            "Pidiendo análisis de la pizarra…",
+            grafito_ui::toast::ToastKind::Info,
+        );
     }
 }
 
 pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
+    // El asistente sigue avanzando (y el análisis de la pizarra se resuelve)
+    // aunque el overlay esté a pantalla completa.
+    app.sync_assistant_for_frame(ctx);
     egui::CentralPanel::default()
         .frame(egui::Frame::none().fill(theme.canvas_bg))
         .show(ctx, |ui| {
@@ -388,7 +434,7 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                 .order(egui::Order::Foreground)
                 .interactable(true)
                 .show(ctx, |ui| {
-                    draw_toolbar(ui, &mut app.whiteboard, &mut app.whiteboard_open);
+                    draw_toolbar(ui, app);
                 });
             app.whiteboard.handle_canvas_input(rect, ui);
             app.whiteboard.draw(ui, rect);

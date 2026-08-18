@@ -164,6 +164,69 @@ impl WhiteboardDoc {
         self.elements.clear();
         self.selected = None;
     }
+
+    /// Descripción estructurada compacta del contenido (para análisis con IA).
+    /// Esta proyección de texto permite al asistente «ver» la pizarra sin
+    /// enviar píxeles; un modelo de visión barato podría sustituirla luego.
+    pub fn describe(&self) -> String {
+        let mut strokes = 0usize;
+        let mut shapes = 0usize;
+        let mut arrows = 0usize;
+        let mut texts = Vec::new();
+        for element in &self.elements {
+            match element {
+                WhiteboardElement::Stroke { points, .. } => {
+                    strokes += 1;
+                    let _ = points;
+                }
+                WhiteboardElement::Rectangle { .. } | WhiteboardElement::Ellipse { .. } => {
+                    shapes += 1;
+                }
+                WhiteboardElement::Arrow { .. } => arrows += 1,
+                WhiteboardElement::Text { text, .. } => {
+                    if !text.trim().is_empty() {
+                        texts.push(format!("\"{text}\""));
+                    }
+                }
+            }
+        }
+        if self.elements.is_empty() {
+            return "(pizarra vacía)".to_string();
+        }
+        let mut description = format!(
+            "{} trazos, {} formas (rectángulos/elipses), {} flechas",
+            strokes, shapes, arrows
+        );
+        if !texts.is_empty() {
+            description.push_str(", textos: ");
+            description.push_str(&texts.join(", "));
+        }
+        let (min, max) = self
+            .elements
+            .iter()
+            .filter_map(|element| element.bounds())
+            .fold(
+                (
+                    (f64::INFINITY, f64::INFINITY),
+                    (f64::NEG_INFINITY, f64::NEG_INFINITY),
+                ),
+                |acc, (elem_min, elem_max)| {
+                    let ((amin, bmin), (amax, bmax)) = acc;
+                    (
+                        (amin.min(elem_min.0), bmin.min(elem_min.1)),
+                        (amax.max(elem_max.0), bmax.max(elem_max.1)),
+                    )
+                },
+            );
+        if (max.0 - min.0).is_finite() && (max.1 - min.1).is_finite() {
+            description.push_str(&format!(
+                " en un área de {}×{} unidades",
+                (max.0 - min.0).abs().round(),
+                (max.1 - min.1).abs().round()
+            ));
+        }
+        description
+    }
 }
 
 /// Densifica un trazo con interpolación Catmull-Rom para suavizar la pluma.

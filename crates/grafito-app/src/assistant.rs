@@ -424,12 +424,14 @@ impl GrafitoApp {
             match job.receiver.try_recv() {
                 Ok(Ok(media)) => {
                     self.assistant_runtime.anim_job = None;
+                    self.assistant.anim_progress = false;
                     self.assistant.set_media(Some(media.clone()), ctx);
                     self.notify("Animación lista.", ToastKind::Success);
                     ctx.request_repaint();
                 }
                 Ok(Err(error)) => {
                     self.assistant_runtime.anim_job = None;
+                    self.assistant.anim_progress = false;
                     self.assistant.set_media(None, ctx);
                     let message = format!("No se pudo generar la animación: {error}");
                     self.notify(&message, ToastKind::Error);
@@ -439,6 +441,7 @@ impl GrafitoApp {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.assistant_runtime.anim_job = None;
+                    self.assistant.anim_progress = false;
                     ctx.request_repaint();
                 }
             }
@@ -595,7 +598,15 @@ impl GrafitoApp {
         action: AssistantUiAction,
     ) {
         match action {
-            AssistantUiAction::Submit => self.start_local_assistant_request(ctx),
+            AssistantUiAction::Submit => {
+                // La IA anima sola cuando le pedís «animá…»: se muestra el
+                // progreso en el chat y la tarjeta se reproduce al terminar.
+                let wants_animation = self.assistant.problem.to_lowercase().contains("anim");
+                self.start_local_assistant_request(ctx);
+                if wants_animation {
+                    self.run_assistant_animation(ctx);
+                }
+            }
             AssistantUiAction::AuthorizeRemote => {
                 self.start_authorized_remote_assistant_request(ctx)
             }
@@ -1174,6 +1185,10 @@ impl GrafitoApp {
                     let config = grafito_anim::EngineConfig {
                         command: engine_section.command,
                         working_dir: Some(work_dir.clone()),
+                        // Timeouts cortos: si el motor no responde, se cae al
+                        // generador nativo para que «Animá» nunca se quede colgado.
+                        idle_timeout: std::time::Duration::from_secs(2),
+                        job_timeout: std::time::Duration::from_secs(15),
                         ..Default::default()
                     };
                     match grafito_anim::run_job(&config, &request, None, |_| {}) {
@@ -1195,6 +1210,7 @@ impl GrafitoApp {
             let _ = std::fs::remove_dir_all(&work_dir);
             repaint.request_repaint();
         });
+        self.assistant.anim_progress = true;
         self.assistant_runtime.anim_job = Some(AssistantAnimJob { receiver });
         self.notify("Generando animación…", ToastKind::Info);
     }
@@ -1322,7 +1338,7 @@ impl GrafitoApp {
         })
     }
 
-    fn start_local_assistant_request(&mut self, ctx: &egui::Context) {
+    pub(crate) fn start_local_assistant_request(&mut self, ctx: &egui::Context) {
         if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
