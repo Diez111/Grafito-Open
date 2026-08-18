@@ -218,8 +218,7 @@ fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             (0, "Álgebra"),
             (1, "Herramientas"),
             (2, "CAS"),
-            (3, "Datos"),
-            (4, "Vista"),
+            (3, "Vista"),
         ] {
             let selected = app.compact_drawer_open && app.sidebar_tab == tab;
             if ui.selectable_label(selected, label).clicked() {
@@ -438,7 +437,6 @@ pub(crate) fn draw_top_bar(
             "Herramientas de construcción y análisis",
         ),
         ("CAS", Icon::Analyze, "Cálculo simbólico paso a paso"),
-        ("Datos", Icon::Grid, "Estadística y análisis de datos"),
         ("Vista", Icon::Eye, "Cuadrícula, ejes y estilo"),
     ];
     if show_sidebar {

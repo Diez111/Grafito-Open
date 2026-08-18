@@ -24,6 +24,7 @@ pub(crate) struct LocalXYTable {
     pub ys: Vec<f64>,
 }
 
+#[allow(dead_code)] // Panel de estadística sin entrada en la UI (TODO: reactivar).
 pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -380,6 +381,7 @@ mod local_data_import_tests {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Panel de estadística sin entrada en la UI.
 pub(crate) struct StatisticsSummary {
     pub sum: Option<f64>,
     pub mean: f64,
@@ -394,6 +396,7 @@ pub(crate) struct StatisticsSummary {
     pub iqr: f64,
 }
 
+#[allow(dead_code)] // Solo usado por el panel de estadística (sin UI activa).
 fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     if fraction <= 0.0 || a == b {
         return a;
@@ -411,6 +414,7 @@ fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     }
 }
 
+#[allow(dead_code)] // Solo usado por el panel de estadística (sin UI activa).
 pub(crate) fn statistics_summary(data: &[f64]) -> Result<StatisticsSummary, String> {
     if data.is_empty() {
         return Err("Estadística: se requiere al menos un dato".to_string());
@@ -1384,6 +1388,7 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
+#[allow(dead_code)] // Panel sin entrada en la UI desde que se quitó la pestaña «Datos».
 pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 

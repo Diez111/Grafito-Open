@@ -328,6 +328,7 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let mut clear = false;
     let mut close = false;
     let mut ask_ai = false;
+    let mut toggle_assistant = false;
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -378,6 +379,20 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
                 ui.separator();
                 if action_icon_button(
                     ui,
+                    Icon::Settings,
+                    if app.show_whiteboard_assistant {
+                        theme.accent
+                    } else {
+                        theme.text_secondary
+                    },
+                    "Asistente (mostrar/ocultar)",
+                )
+                .clicked()
+                {
+                    toggle_assistant = true;
+                }
+                if action_icon_button(
+                    ui,
                     Icon::Search,
                     theme.accent,
                     "Entender este dibujo con IA",
@@ -405,6 +420,9 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     if close {
         app.whiteboard_open = false;
     }
+    if toggle_assistant {
+        app.show_whiteboard_assistant = !app.show_whiteboard_assistant;
+    }
     if ask_ai {
         // El asistente «ve» el dibujo por su descripción estructurada y lo
         // explica con DeepSeek V4 Flash (seam listo para un modelo de visión
@@ -425,6 +443,23 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
     // El asistente sigue avanzando (y el análisis de la pizarra se resuelve)
     // aunque el overlay esté a pantalla completa.
     app.sync_assistant_for_frame(ctx);
+
+    // Asistente visible dentro de la pizarra (y ocultable desde la toolbar).
+    if app.show_whiteboard_assistant {
+        let visuals = grafito_ui::assistant::AssistantVisuals {
+            mora_texture: app.mora_texture.as_ref().map(egui::TextureHandle::id),
+        };
+        let action = grafito_ui::assistant::draw_assistant_panel(
+            ctx,
+            &mut app.assistant,
+            0.0,
+            visuals,
+            &mut app.assistant_blocks_cache,
+        );
+        if let Some(action) = action {
+            app.handle_assistant_action(ctx, action);
+        }
+    }
     egui::CentralPanel::default()
         .frame(egui::Frame::none().fill(theme.canvas_bg))
         .show(ctx, |ui| {

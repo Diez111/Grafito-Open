@@ -1194,6 +1194,8 @@ pub struct GrafitoApp {
     /// Overlay de pizarra nativa (estilo macOS).
     pub whiteboard_open: bool,
     pub whiteboard: crate::whiteboard_ui::WhiteboardSession,
+    /// Asistente visible (y ocultable) dentro de la pizarra.
+    pub show_whiteboard_assistant: bool,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<ChangeSet>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
@@ -1685,6 +1687,7 @@ impl GrafitoApp {
             assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
             whiteboard_open: false,
             whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
+            show_whiteboard_assistant: true,
             recent_files: Vec::new(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
@@ -3869,20 +3872,14 @@ impl eframe::App for GrafitoApp {
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
                     2 => crate::panels::draw_cas_panel(self, ctx),
-                    3 => match self.perspective {
-                        Perspective::Probability
-                        | Perspective::Statistics
-                        | Perspective::DataAnalysis => {
-                            crate::panels::draw_statistics_panel(self, ctx)
-                        }
-                        _ => crate::panels::draw_empty_panel(self, ctx),
-                    },
-                    4 => crate::panels::draw_view_panel(self, ctx),
+                    3 => crate::panels::draw_view_panel(self, ctx),
                     _ => crate::panels::draw_empty_panel(self, ctx),
                 }
             }
 
-            crate::ui::draw_bottom_bar(self, ctx, shell.show_bottom_input);
+            // La barra «Entrada…» inferior se quitó del layout: los comandos
+            // matemáticos se cargan por la sección algebraica.
+            crate::ui::draw_bottom_bar(self, ctx, false);
 
             // Los drawers laterales reservan toda la altura antes del teclado.
             // Así el teclado queda limitado a la columna central y no recorta

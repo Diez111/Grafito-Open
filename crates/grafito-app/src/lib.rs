@@ -426,10 +426,10 @@ impl LeftPanelContent {
         match self {
             LeftPanelContent::Algebra
             | LeftPanelContent::AlgebraAndCas
-            | LeftPanelContent::Complex => 0,
+            | LeftPanelContent::Complex
+            | LeftPanelContent::Stats => 0,
             LeftPanelContent::Tools | LeftPanelContent::Attractor => 1,
             LeftPanelContent::Cas => 2,
-            LeftPanelContent::Stats => 3,
         }
     }
 }
