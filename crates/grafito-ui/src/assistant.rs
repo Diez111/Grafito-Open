@@ -1422,30 +1422,35 @@ pub fn draw_assistant_settings_window(
     }
     let mut open = state.settings_open;
     let mut action = None;
-    let shows_fusion_fallback =
-        state.provider == ProviderProfile::OpenCodeGo && state.model == OPENCODE_DEFAULT_MODEL;
-    let window_size = match (state.use_api_key(), shows_fusion_fallback) {
-        (true, true) => egui::vec2(390.0, 266.0),
-        (true, false) => egui::vec2(390.0, 214.0),
-        (false, true) => egui::vec2(390.0, 184.0),
-        (false, false) => egui::vec2(390.0, 132.0),
-    };
+    // Ventana auto-dimensionada (nunca fija): el contenido nunca desborda y
+    // si es alto, hace scroll en lugar de cortarse o salirse de pantalla.
     egui::Window::new("Configuración del asistente")
+        .id(egui::Id::new("assistant_settings_window"))
         .open(&mut open)
         .resizable(false)
+        .default_width(400.0)
+        .max_height(ui_viewport_height(ctx))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .fixed_size(window_size)
         .show(ctx, |ui| {
             if !state.key_status_checked && state.use_api_key() {
                 state.key_status_checked = true;
                 action = Some(AssistantUiAction::LoadApiKey);
             }
-            if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
-                action = Some(settings_action);
-            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
+                        action = Some(settings_action);
+                    }
+                });
         });
     state.settings_open = open;
     action
+}
+
+/// Alto útil de la ventana (máximo para el scroll del panel de configuración).
+fn ui_viewport_height(ctx: &egui::Context) -> f32 {
+    (ctx.screen_rect().height() * 0.8).min(560.0)
 }
 
 fn draw_assistant_settings_contents(
@@ -2214,21 +2219,50 @@ fn draw_mora_avatar(
                 egui::Color32::WHITE,
             );
         } else {
-            painter.circle_stroke(
-                avatar_rect.center(),
-                avatar_rect.width() * 0.43,
-                egui::Stroke::new((avatar_rect.width() * 0.06).max(1.0), theme.accent),
-            );
-            painter.text(
-                avatar_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "M",
-                egui::FontId::proportional(avatar_rect.width() * 0.46),
-                theme.accent_strong,
-            );
+            // Avatar blob personalizado (inspirado en blobatar, dibujado a
+            // mano): forma orgánica suave con ojos, adaptado al tema.
+            draw_blob_avatar(&painter, avatar_rect, theme);
         }
     }
     response.on_hover_text(MORA_ACCESSIBLE_LABEL)
+}
+
+/// Dibuja el avatar blob de Mora: forma orgánica cerrada con borde acento,
+/// ojos y un destello, adaptada al tema claro/oscuro.
+fn draw_blob_avatar(painter: &egui::Painter, rect: egui::Rect, theme: &crate::theme::Theme) {
+    let center = rect.center();
+    let radius = rect.width() * 0.42;
+    let steps = 26;
+    let mut points = Vec::with_capacity(steps);
+    for index in 0..steps {
+        let t = index as f32 / steps as f32 * std::f32::consts::TAU;
+        // Blob: amplitud variable para un contorno orgánico y suave.
+        let wobble = 1.0 + 0.13 * (t * 3.0).sin() + 0.07 * (t * 5.0 + 1.0).cos();
+        points.push(center + egui::vec2(t.cos() * radius * wobble, t.sin() * radius * wobble));
+    }
+    painter.add(egui::Shape::convex_polygon(
+        points.clone(),
+        theme.accent_muted,
+        egui::Stroke::NONE,
+    ));
+    painter.add(egui::Shape::closed_line(
+        points,
+        egui::Stroke::new((rect.width() * 0.05).max(1.5), theme.accent),
+    ));
+    let eye_offset = rect.width() * 0.18;
+    let eye_y = center.y - rect.width() * 0.04;
+    let eye_r = rect.width() * 0.085;
+    for eye in [
+        egui::pos2(center.x - eye_offset, eye_y),
+        egui::pos2(center.x + eye_offset, eye_y),
+    ] {
+        painter.circle_filled(eye, eye_r, theme.accent_strong);
+        painter.circle_filled(
+            eye + egui::vec2(eye_r * 0.35, -eye_r * 0.35),
+            eye_r * 0.3,
+            theme.canvas_bg,
+        );
+    }
 }
 
 fn mora_avatar_scale(active: bool, time: f64) -> f32 {
