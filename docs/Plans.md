@@ -99,3 +99,20 @@ Entregas (TDD):
 | F.7 | Plugin J-Space por defecto (ledger+band), permiso completo (respuestas en línea automáticas), hoja de cálculo eliminada de la UI, asistente más ancho (400px) y plugins del sistema en el paquete. | cc:完了 |
 | F.8 | Pendiente de wiring en la app: fila de actividad de tools, modo agente visual y modo tutor con planes multi-paso. | cc:TODO |
 
+
+<!-- harness-loop state (adaptado a DeepSeek Harness): marca cc:WIP del ciclo en curso y cc:TODO del backlog. Cada ciclo = 1 tarea verificada (fmt+clippy+test) + commit. -->
+
+## harness-loop
+
+### Backlog (cc:TODO, en orden)
+| id | Tarea | DoD (definición de hecho) | Estado |
+|---|---|---|---|
+| P6.a | Ra cha y dominio en grafito-profile: `streak` (aciertos consecutivos) e histórico de dominio por rama | `record_outcome` actualiza streak; `memory()` menciona la racha; tests | cc:完了 |
+| P6.b | Fechas/histórico de dominio por rama y racha visibles en la tarjeta Tutores | memory() y tarjeta muestran evolución; tests | cc:TODO |
+| P4 | Perf render 3D/2D: LOD de mallas por distancia, cache de texturas por hash, `request_repaint` diferido en hot path | clippy 0, tests verdes; medición de mejora | cc:TODO |
+| Px.i18n | i18n ES/EN de la UI (strings en ES hoy; tablas de idioma + selección) | selector de idioma; strings con claves; tests | cc:TODO |
+| P7 | Auditoría continua de bugs/errores (pasadas por módulo) | cada hallazgo corregido verificado; sin panics/retoques pendientes | cc:TODO |
+
+### Checkpoints
+- Ciclo 1 (#P6.a): racha + mejor racha en grafito-profile (10 tests) -> commit listo. Siguiente WIP: P6.b (racha/histórico en la tarjeta).
+

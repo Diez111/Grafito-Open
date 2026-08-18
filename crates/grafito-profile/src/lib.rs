@@ -60,6 +60,10 @@ pub struct StudentProfile {
     pub branches: Vec<BranchState>,
     pub history: Vec<StudyEvent>,
     pub exams: Vec<ExamResult>,
+    /// Racha actual de aciertos consecutivos (se reinicia con un fallo).
+    pub streak: u32,
+    /// Mejor racha histórica de aciertos consecutivos.
+    pub best_streak: u32,
 }
 
 impl StudentProfile {
@@ -98,12 +102,15 @@ impl StudentProfile {
         if correct {
             branch.mastery += 0.15 * (1.0 - branch.mastery);
             self.xp = self.xp.saturating_add(10);
+            self.streak = self.streak.saturating_add(1);
+            self.best_streak = self.best_streak.max(self.streak);
             if branch.mastery >= 0.8 && !branch.covered {
                 branch.covered = true;
                 self.xp = self.xp.saturating_add(40);
             }
         } else {
             branch.mastery *= 0.95;
+            self.streak = 0;
         }
         branch.last_study_epoch = Some(epoch);
         self.push_event(StudyEvent {
@@ -173,9 +180,10 @@ impl StudentProfile {
         let covered = self.branches.iter().filter(|b| b.covered).count();
         let pct = covered as f32 / self.branches.len().max(1) as f32 * 100.0;
         let mut text = format!(
-            "Nivel {}, XP {}. Cobertura: {covered}/{} ({pct:.0}%).\n",
+            "Nivel {}, XP {}. Racha: {}. Cobertura: {covered}/{} ({pct:.0}%).\n",
             self.level,
             self.xp,
+            self.streak,
             self.branches.len()
         );
         for branch in &self.branches {
@@ -269,6 +277,19 @@ mod tests {
         }
         assert!(profile.branches[0].mastery.is_finite());
         assert!(profile.branches[0].mastery >= 0.0 && profile.branches[0].mastery <= 1.0);
+    }
+
+    #[test]
+    fn streak_rises_on_correct_and_resets_on_failure() {
+        let mut profile = StudentProfile::new("Racha");
+        for _ in 0..3 {
+            profile.record_outcome("algebra", "Álgebra", 1, true);
+        }
+        assert_eq!(profile.streak, 3);
+        assert_eq!(profile.best_streak, 3);
+        profile.record_outcome("algebra", "Álgebra", 1, false);
+        assert_eq!(profile.streak, 0);
+        assert_eq!(profile.best_streak, 3, "la mejor se conserva");
     }
 
     #[test]
