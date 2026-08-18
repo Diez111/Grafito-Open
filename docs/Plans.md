@@ -108,11 +108,11 @@ Entregas (TDD):
 | id | Tarea | DoD (definición de hecho) | Estado |
 |---|---|---|---|
 | P6.a | Ra cha y dominio en grafito-profile: `streak` (aciertos consecutivos) e histórico de dominio por rama | `record_outcome` actualiza streak; `memory()` menciona la racha; tests | cc:完了 |
-| P6.b | Fechas/histórico de dominio por rama y racha visibles en la tarjeta Tutores | memory() y tarjeta muestran evolución; tests | cc:TODO |
+| P6.b | Fechas/histórico de dominio por rama y racha visibles en la tarjeta Tutores | memory() y tarjeta muestran evolución; tests | cc:完了 |
 | P4 | Perf render 3D/2D: LOD de mallas por distancia, cache de texturas por hash, `request_repaint` diferido en hot path | clippy 0, tests verdes; medición de mejora | cc:TODO |
 | Px.i18n | i18n ES/EN de la UI (strings en ES hoy; tablas de idioma + selección) | selector de idioma; strings con claves; tests | cc:TODO |
 | P7 | Auditoría continua de bugs/errores (pasadas por módulo) | cada hallazgo corregido verificado; sin panics/retoques pendientes | cc:TODO |
 
 ### Checkpoints
-- Ciclo 1 (#P6.a): racha + mejor racha en grafito-profile (10 tests) -> commit listo. Siguiente WIP: P6.b (racha/histórico en la tarjeta).
+- Ciclo 2 (#P6.b): racha visible en la tarjeta Tutor (🔥) -> commit listo. Siguiente: P4 (perf render 3D/2D) o P6.c (histórico de dominio por rama).
 
