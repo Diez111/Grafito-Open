@@ -39,6 +39,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 - **Barra «Entrada…» inferior oculta**: los comandos matemáticos se cargan por la sección algebraica; se deja de dibujar la barra inferior redundante, manteniendo la entrada del drawer y la paleta.
 - **Zoom 3D sin límites artificiales**: el rango de distancia de la cámara 3D pasa de 0.5–200 a **0.1–5000** con plano lejano de 10000 (y near coherente), así podés acercarte 5x más y alejarte 25x más sin que el recorte por far corte la escena; tests de clipping ajustados a la nueva profundidad.
 - **Asistente con diseño editorial y telemetría**: se elimina el estilo de burbuja tipo WhatsApp (tarjetas neutras separadas por rol), los encabezados y textos quedan **centrados**, y cada respuesta del asistente muestra su **telemetría de salida** («~N token de salida (est.)») al estilo del harness; el rol usa acento para distinguir agente/usuario.
+- **Fusión de modelos corregida**: se elimina toda referencia a “minimax-m3”. La configuración ahora parte de **DeepSeek Flash** como modelo de razonamiento por defecto (siempre el más barato y suficiente) y añade **MiMo 2.5-VL (Xiaomi)** como modelo multimodal/visión para imágenes y vídeo; DeepSeek Flash reintenta y corrige cuando una respuesta falla. Constantes, payloads, copy de la UI y tests realineados.
 
 #### Cambiado
 - **Eficiencia del transporte remoto**: el cliente HTTP bloqueante ahora es compartido entre peticiones (pool de conexiones reutilizado con timeout por petición), en lugar de crear un `Client` por llamada.

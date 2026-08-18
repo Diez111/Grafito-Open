@@ -41,12 +41,15 @@ const ASSISTANT_REVEAL_MAX_SECONDS: f64 = 1.5;
 const MAX_FOCUSED_CONTEXT_PREVIEW_CHARS: usize = 160;
 const MORA_NAME: &str = "Mora";
 const MORA_ACCESSIBLE_LABEL: &str = "Mora, asistente matemático";
-const OPENCODE_DEFAULT_MODEL: &str = "minimax-m3";
+// Fusión recomendada: **DeepSeek Flash** para TODO razonamiento lógico
+// (siempre el más barato) y **MiMo 2.5-VL** (Xiaomi) para capacidades de
+// visión, video y multimodal que DeepSeek no cubre.
+const OPENCODE_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 const OLLAMA_DEFAULT_MODEL: &str = "llama3.2";
 const OPENCODE_MODELS: &[&str] = &[
-    "deepseek-v4-pro",
     "deepseek-v4-flash",
-    "minimax-m3",
+    "deepseek-v4-pro",
+    "mimo-2.5-vl",
     "fusion",
     "glm-5.2",
 ];
@@ -185,7 +188,8 @@ pub struct AssistantPanelState {
     media_textures_ready: bool,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
-    /// Autoriza explícitamente una revisión Fusion tras una propuesta M3 fallida.
+    /// Autoriza explícitamente una revisión con el modelo de razonamiento
+    /// (DeepSeek Flash) tras una propuesta fallida.
     pub allow_fusion_fallback: bool,
     /// Problema pegado o escrito por el usuario.
     pub problem: String,
@@ -1248,7 +1252,8 @@ pub enum AssistantUiAction {
     ApplyProposedPlan,
     /// Solicitar una única corrección para una propuesta que el preflight descartó.
     RetryProposalCorrection,
-    /// Persistir el permiso explícito para usar Fusion como fallback de MiniMax M3.
+    /// Persistir el permiso explícito para repetir con DeepSeek Flash como
+    /// fallback de razonamiento cuando la primera respuesta falla.
     FusionFallbackChanged,
     /// Descartar la conversación local actual.
     ClearConversation,
@@ -1465,13 +1470,13 @@ fn draw_assistant_settings_contents(
                 !state.is_pending,
                 egui::Checkbox::new(
                     &mut state.allow_fusion_fallback,
-                    "Permitir revisión Fusion si una propuesta M3 falla",
+                    "Reintentar con DeepSeek Flash si la respuesta falla",
                 ),
             )
             .changed();
         ui.label(
             egui::RichText::new(
-                "Fusion reconsulta MiniMax M3 y DeepSeek v4 Pro sin adjuntos ni Apply automático.",
+                "DeepSeek Flash razona y corrige sin adjuntos ni Apply automático; MiMo 2.5-VL cubre visión/video.",
             )
             .color(theme.text_tertiary)
             .size(TYPE_XS),
@@ -4284,10 +4289,10 @@ mod tests {
 
         assert!(choices.contains(&"kept-model".to_string()));
         assert!(choices.contains(&"deepseek-v4-pro".to_string()));
-        assert!(choices.contains(&"minimax-m3".to_string()));
+        assert!(choices.contains(&"mimo-2.5-vl".to_string()));
         assert!(choices.contains(&"fusion".to_string()));
         assert!(!choices.iter().any(|model| model.contains("kimi")));
-        assert!(!choices.iter().any(|model| model.contains("mimo")));
+        assert!(choices.iter().any(|model| model.contains("mimo"))); // MiMo 2.5-VL (visión)
         assert_eq!(
             choices.iter().filter(|model| *model == "glm-5.2").count(),
             1
@@ -4712,7 +4717,8 @@ mod tests {
 
     #[test]
     fn minimax_m3_accepts_images_but_fusion_does_not() {
-        assert!(model_allows_image_attachment("minimax-m3"));
+        // MiMo 2.5-VL es el modelo multimodal (visión) de la fusión.
+        assert!(model_allows_image_attachment("mimo-2.5-vl"));
         assert!(!model_allows_image_attachment("fusion"));
     }
 

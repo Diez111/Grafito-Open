@@ -42,7 +42,7 @@ const MAX_MODEL_IDENTIFIER_CHARS: usize = 256;
 const CUSTOM_API_KEY_PREFIX: &str = "GRAFITO_ASSISTANT_CUSTOM_";
 const CUSTOM_API_KEY_SUFFIX: &str = "_API_KEY";
 const MAX_CUSTOM_API_KEY_REFERENCE_LEN: usize = 128;
-const OPENCODE_MINIMAX_MODEL: &str = "minimax-m3";
+const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
@@ -914,7 +914,8 @@ fn remote_protocol(settings: &ProviderSettings) -> RemoteProtocol {
         return RemoteProtocol::OpenAiChatCompletions;
     }
     match settings.model.as_str() {
-        OPENCODE_MINIMAX_MODEL => RemoteProtocol::AnthropicMessages,
+        // MiMo 2.5-VL viaja con el protocolo Anthropic Messages del proveedor.
+        OPENCODE_VISION_MODEL => RemoteProtocol::AnthropicMessages,
         OPENCODE_FUSION_MODEL => RemoteProtocol::Fusion,
         _ => RemoteProtocol::OpenAiChatCompletions,
     }
@@ -1165,7 +1166,7 @@ pub fn build_chat_completion_payload(
     }))
 }
 
-/// Construye un payload Anthropic Messages para `minimax-m3` sin incluir claves.
+/// Construye un payload Anthropic Messages para `mimo-2.5-vl` sin incluir claves.
 pub fn build_anthropic_messages_payload(
     settings: &ProviderSettings,
     request: &AssistantRequest,
@@ -1219,7 +1220,7 @@ pub fn build_anthropic_messages_payload(
     }
     messages.push(json!({"role": "user", "content": content}));
     Ok(json!({
-        "model": OPENCODE_MINIMAX_MODEL,
+        "model": OPENCODE_VISION_MODEL,
         "max_tokens": completion_token_limit(&request.budget),
         "system": remote_system_prompt(request),
         "messages": messages,
@@ -1982,7 +1983,7 @@ mod tests {
         let request = request("2 + 2");
         let chat_settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local");
         let messages_settings =
-            ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, OPENCODE_MINIMAX_MODEL);
+            ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, OPENCODE_VISION_MODEL);
 
         assert!(matches!(
             build_chat_completion_payload(&chat_settings, &request),
@@ -2427,7 +2428,7 @@ mod tests {
 
         let response = request_anthropic_completion(
             endpoint,
-            json!({"model": OPENCODE_MINIMAX_MODEL, "messages": []}),
+            json!({"model": OPENCODE_VISION_MODEL, "messages": []}),
             Some("test-key"),
             &CancellationToken::default(),
             Duration::from_secs(1),
@@ -2449,7 +2450,7 @@ mod tests {
             let draft_bytes = draft_stream.read(&mut draft_buffer).unwrap();
             let draft_request = String::from_utf8_lossy(&draft_buffer[..draft_bytes]);
             assert!(draft_request.starts_with("POST /messages HTTP/1.1"));
-            assert!(draft_request.contains("\"model\":\"minimax-m3\""));
+            assert!(draft_request.contains("\"model\":\"mimo-2.5-vl\""));
             assert!(!draft_request.contains("previous question"));
             assert!(!draft_request.contains("previous answer"));
             let draft_body = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"uncorrected draft"}]}"#;

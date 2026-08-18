@@ -210,7 +210,7 @@ fn opencode_go_uses_the_official_base_and_chat_completion_path() {
 
 #[test]
 fn opencode_go_derives_the_official_anthropic_messages_path_for_minimax() {
-    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3");
+    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl");
 
     assert_eq!(
         messages_endpoint(&settings).unwrap().as_str(),
@@ -221,12 +221,12 @@ fn opencode_go_derives_the_official_anthropic_messages_path_for_minimax() {
 #[test]
 fn minimax_payload_uses_anthropic_messages_without_a_secret() {
     let request = remote_request("2 + 2");
-    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3");
+    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl");
 
     let payload = build_anthropic_messages_payload(&settings, &request).unwrap();
     let rendered = payload.to_string();
 
-    assert_eq!(payload["model"], "minimax-m3");
+    assert_eq!(payload["model"], "mimo-2.5-vl");
     assert_eq!(payload["messages"][0]["role"], "user");
     assert!(payload["system"]
         .as_str()
@@ -255,12 +255,11 @@ fn repair_requests_reject_images_in_openai_and_anthropic_payloads() {
     assert!(openai_error.contains("repair requests cannot include images"));
 
     let anthropic_settings =
-        ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3").with_capabilities(
-            ProviderCapabilities {
+        ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl")
+            .with_capabilities(ProviderCapabilities {
                 vision: true,
                 ..ProviderProfile::OpenCodeGo.capabilities()
-            },
-        );
+            });
     let anthropic_error = build_anthropic_messages_payload(&anthropic_settings, &request)
         .expect_err("a repair request must never serialize Anthropic image blocks");
     assert!(anthropic_error.contains("repair requests cannot include images"));
@@ -276,7 +275,7 @@ fn minimax_payload_transmits_validated_images_as_anthropic_base64_blocks() {
     request
         .attachments
         .push(ImageAttachment::new("image/jpeg", jpeg_bytes(1, 1), 1, 1));
-    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3")
+    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl")
         .with_capabilities(ProviderCapabilities {
             vision: true,
             ..ProviderProfile::OpenCodeGo.capabilities()
@@ -312,7 +311,7 @@ fn image_payload_reencodes_pixels_without_png_text_or_jpeg_exif_metadata() {
     request
         .attachments
         .push(ImageAttachment::new("image/jpeg", jpeg.clone(), 1, 1));
-    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3")
+    let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl")
         .with_capabilities(ProviderCapabilities {
             vision: true,
             ..ProviderProfile::OpenCodeGo.capabilities()
@@ -390,7 +389,7 @@ fn minimax_image_payload_requires_capability_and_consent_and_fusion_stays_text_o
     request
         .attachments
         .push(ImageAttachment::new("image/png", png_bytes(1, 1), 1, 1));
-    let minimax = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "minimax-m3");
+    let minimax = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl");
 
     assert!(build_anthropic_messages_payload(&minimax, &request).is_err());
     request.image_upload_consent = true;

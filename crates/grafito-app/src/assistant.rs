@@ -29,7 +29,9 @@ use std::sync::mpsc::{sync_channel, Receiver, TryRecvError};
 const MAX_REMOTE_PROPOSAL_PREFLIGHTS: usize = 4;
 const MAX_ASSISTANT_PROPOSAL_CORRECTIONS: u8 = 2;
 const MAX_ASSISTANT_CORRECTION_SOURCE_BYTES: usize = 2_048;
-const OPENCODE_MINIMAX_MODEL: &str = "minimax-m3";
+/// Modelo multimodal/visión (Xiaomi MiMo 2.5-VL); el razonamiento usa
+/// DeepSeek Flash por defecto (el más barato y suficiente).
+const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
 const ASSISTANT_CORRECTION_INSTRUCTION: &str = "\n\nUna propuesta gráfica anterior no superó la verificación local. Conservá la intención de la solicitud y regenerá una respuesta completa y autocontenida con un bloque grafito o un bloque grafito-scene de 2 a 8 comandos ejecutables. Si necesitás un parámetro escalar nuevo, incluí antes un único bloque grafito-param con una asignación finita. Usá exclusivamente la sintaxis exacta del catálogo; no inventes comandos ni emitas acciones de archivo, red, sistema o Script.";
 
@@ -1291,7 +1293,7 @@ impl GrafitoApp {
         if route == AssistantRemoteRoute::FusionFallback {
             if !fusion_fallback_allowed
                 || settings.profile != ProviderProfile::OpenCodeGo
-                || settings.model != OPENCODE_MINIMAX_MODEL
+                || settings.model != OPENCODE_VISION_MODEL
             {
                 return Err(
                     "La revisión remota adicional no está autorizada para la configuración actual."
@@ -2234,7 +2236,7 @@ fn can_use_fusion_fallback(
 ) -> bool {
     fallback_allowed
         && provider == ProviderProfile::OpenCodeGo
-        && selected_model == OPENCODE_MINIMAX_MODEL
+        && selected_model == OPENCODE_VISION_MODEL
 }
 
 fn assistant_expected_syntax(command: &str) -> Vec<String> {
@@ -3307,7 +3309,7 @@ mod tests {
         let state = AssistantPanelState::default();
 
         assert_eq!(state.provider, ProviderProfile::OpenCodeGo);
-        assert_eq!(state.model, "minimax-m3");
+        assert_eq!(state.model, "deepseek-v4-flash");
         assert!(!state.allow_fusion_fallback);
     }
 
@@ -3570,7 +3572,7 @@ mod tests {
             ProviderProfile::OpenCodeGo,
             "deepseek-v4-pro",
             ProviderProfile::OpenCodeGo,
-            "minimax-m3"
+            "deepseek-v4-flash"
         ));
     }
 

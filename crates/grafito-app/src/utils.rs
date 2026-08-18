@@ -54,7 +54,7 @@ const fn default_assistant_provider() -> ProviderProfile {
 }
 
 fn default_assistant_model() -> String {
-    "minimax-m3".into()
+    "deepseek-v4-flash".into()
 }
 
 impl Default for AppConfig {
@@ -141,7 +141,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(config.assistant_provider, ProviderProfile::OpenCodeGo);
-        assert_eq!(config.assistant_model, "minimax-m3");
+        assert_eq!(config.assistant_model, "deepseek-v4-flash");
         assert!(!config.allow_fusion_fallback);
     }
 }
