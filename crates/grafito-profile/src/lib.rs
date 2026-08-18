@@ -2,6 +2,8 @@
 //! tutor-orquestador «Mora» usa para adaptar el plan, ir ramificando y medir
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
+pub mod exam;
+
 use serde::{Deserialize, Serialize};
 
 /// Límites explícitos para que la memoria nunca crezca sin cota.

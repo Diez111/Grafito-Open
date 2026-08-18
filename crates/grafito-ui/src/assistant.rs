@@ -1293,6 +1293,8 @@ pub enum AssistantUiAction {
     LearnCorrect,
     /// Feedback del usuario: la última explicación no le sirvió.
     LearnIncorrect,
+    /// Tomar un mini-examen (3 preguntas) de la rama recomendada.
+    RunMiniExam,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -1720,6 +1722,13 @@ fn draw_tutor_card(
                         .clicked()
                     {
                         action = Some(AssistantUiAction::AskNextTopic);
+                    }
+                    if ui
+                        .add(egui::Button::new("Examen +3").small())
+                        .on_hover_text("Mini-examen de 3 preguntas de la rama recomendada")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::RunMiniExam);
                     }
                     ui.label(
                         egui::RichText::new(format!("Próximo: {}", state.tutor_next))

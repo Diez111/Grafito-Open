@@ -757,6 +757,7 @@ impl GrafitoApp {
             }
             AssistantUiAction::LearnCorrect => self.record_learning(true),
             AssistantUiAction::LearnIncorrect => self.record_learning(false),
+            AssistantUiAction::RunMiniExam => self.run_mini_exam(ctx),
         }
     }
 
@@ -1176,6 +1177,31 @@ impl GrafitoApp {
     }
 
     /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
+    /// Genera y envía un mini-examen (3 preguntas) de la rama recomendada.
+    fn run_mini_exam(&mut self, ctx: &egui::Context) {
+        let branch = self
+            .profile
+            .recommend_next()
+            .first()
+            .cloned()
+            .map(|branch| (branch.id.clone(), branch.name.clone()))
+            .or_else(|| {
+                self.profile
+                    .branches
+                    .first()
+                    .map(|branch| (branch.id.clone(), branch.name.clone()))
+            });
+        let (id, name) = branch.unwrap_or_else(|| ("algebra".to_string(), "Álgebra".to_string()));
+        let questions = grafito_profile::exam::mini_exam_questions(&id);
+        let mut prompt = format!("Tomame un mini-examen de {name} (rama {id}). Preguntas:\n\n");
+        for (index, question) in questions.iter().enumerate() {
+            prompt.push_str(&format!("{}. {question}\n", index + 1));
+        }
+        prompt.push_str("\nRespondé una por una y al final corregime cada una.");
+        self.assistant.problem = prompt;
+        self.start_local_assistant_request(ctx);
+    }
+
     /// Clasifica el contenido de la última explicación en una rama del plan.
     fn learning_branch(&self) -> (&'static str, &'static str) {
         let text = self
