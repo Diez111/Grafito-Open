@@ -436,6 +436,8 @@ impl GrafitoApp {
             .first()
             .map(|branch| branch.name.clone())
             .unwrap_or_default();
+        self.assistant.tutor_streak = self.profile.streak;
+        self.assistant.tutor_best_streak = self.profile.best_streak;
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {

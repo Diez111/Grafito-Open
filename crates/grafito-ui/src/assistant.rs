@@ -187,6 +187,8 @@ pub struct AssistantPanelState {
     pub tutor_covered: usize,
     pub tutor_total: usize,
     pub tutor_next: String,
+    pub tutor_streak: u32,
+    pub tutor_best_streak: u32,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
@@ -269,6 +271,8 @@ impl Default for AssistantPanelState {
             tutor_covered: 0,
             tutor_total: 0,
             tutor_next: String::new(),
+            tutor_streak: 0,
+            tutor_best_streak: 0,
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -1717,6 +1721,14 @@ fn draw_tutor_card(
                             .color(theme.text_secondary)
                             .size(TYPE_XS),
                     );
+                    if state.tutor_streak > 1 {
+                        ui.label(
+                            egui::RichText::new(format!("🔥 racha {}", state.tutor_streak))
+                                .color(theme.accent)
+                                .size(TYPE_XS)
+                                .strong(),
+                        );
+                    }
                 });
             });
             if !state.tutor_next.is_empty() {
