@@ -500,7 +500,14 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             app.whiteboard.backspace_text();
         }
     }
-    ctx.request_repaint();
+    // Cadencia adaptativa: el trazo fluye a ~60fps mientras hay algún botón
+    // presionado; en reposo baja a 10fps para no quemar la batería (P4/consumo).
+    let busy = ctx.input(|input| input.pointer.any_down());
+    ctx.request_repaint_after(std::time::Duration::from_millis(if busy {
+        16
+    } else {
+        100
+    }));
 }
 
 #[cfg(test)]
