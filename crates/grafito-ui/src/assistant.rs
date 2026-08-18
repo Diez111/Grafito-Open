@@ -2438,9 +2438,10 @@ fn conversation_turn_appearance(
     is_user: bool,
 ) -> ConversationTurnAppearance {
     if is_user {
+        // Sin burbuja tipo WhatsApp: tarjeta neutra con el rol en acento.
         ConversationTurnAppearance {
-            fill: theme.accent_muted,
-            stroke: theme.accent.gamma_multiply(0.7),
+            fill: theme.panel_bg,
+            stroke: theme.separator,
             role_color: theme.accent_strong,
         }
     } else {
@@ -2479,18 +2480,30 @@ fn draw_conversation_turn(
                     .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
                 format!("{MORA_NAME} · {}", origin.public_label())
             };
-            ui.label(
-                egui::RichText::new(label)
-                    .color(appearance.role_color)
-                    .size(TYPE_SM)
-                    .strong(),
-            );
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .color(appearance.role_color)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+            });
             ui.add_space(SPACE_SM);
             if is_user {
                 draw_inline_text(ui, &turn.content);
             } else {
                 action =
                     draw_assistant_response(ui, &turn.content, proposal_state, reveal_clip, cache);
+                ui.add_space(SPACE_XS);
+                // Telemetría tipo harness: estimación de salida del turno.
+                let est_tokens = (turn.content.chars().count() / 4).max(1);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("~{est_tokens} token de salida (est.)"))
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
+                    );
+                });
             }
             ui.add_space(SPACE_SM);
             ui.allocate_ui_with_layout(
@@ -3818,7 +3831,9 @@ mod tests {
         let user = conversation_turn_appearance(&crate::theme::DARK, true);
         let assistant = conversation_turn_appearance(&crate::theme::DARK, false);
 
-        assert_eq!(user.fill, crate::theme::DARK.accent_muted);
+        // Estilo editorial: sin burbuja WhatsApp; roles separados por color de
+        // rol y borde, con tarjetas neutras pero distinguibles.
+        assert_eq!(user.fill, crate::theme::DARK.panel_bg);
         assert_eq!(assistant.fill, crate::theme::DARK.input_bar_bg);
         assert_eq!(user.role_color, crate::theme::DARK.accent_strong);
         assert_eq!(assistant.role_color, crate::theme::DARK.text_primary);

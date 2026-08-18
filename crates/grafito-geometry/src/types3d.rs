@@ -503,7 +503,7 @@ impl Default for Camera3D {
             target: Vec3::ZERO,
             fov: 60.0,
             near: 0.1,
-            far: 1000.0,
+            far: 10000.0,
             aspect: 1.6,
         }
     }
@@ -537,7 +537,9 @@ impl Camera3D {
         if factor.is_nan() || factor.is_infinite() || factor <= 1e-4 {
             return;
         }
-        self.distance = (self.distance * factor).clamp(0.5, 200.0);
+        // Rango amplio y continuo: acercarse 5x más que antes y alejarse
+        // 25x más, sin bloquearse, coherente con los planos near/far.
+        self.distance = (self.distance * factor).clamp(0.1, 5000.0);
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {

@@ -262,7 +262,7 @@ fn picker_respects_frustum_clipping_and_surface_fallback_bounds() {
     let mut just_beyond_far = grafito_core::Document::new();
     just_beyond_far
         .try_add_object(GeoObject::Point3D(Point3DObj::new(Point3D::new(
-            -991.0, 0.0, 0.0,
+            -9991.0, 0.0, 0.0,
         ))))
         .expect("point just beyond the default far plane");
     assert_eq!(
@@ -280,7 +280,7 @@ fn picker_respects_frustum_clipping_and_surface_fallback_bounds() {
     clipped_fallback
         .try_add_object(GeoObject::VectorField3D(
             VectorField3DObj::new("1", "0", "0").with_bounds(
-                (-992.0, -991.0),
+                (-9992.0, -9991.0),
                 (-1.0, 1.0),
                 (-1.0, 1.0),
             ),

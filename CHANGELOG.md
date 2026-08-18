@@ -37,6 +37,8 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 - **Pizarra con asistente integrado**: el asistente aparece dentro del modo pizarra (panel derecho, ocultable con un botón en la toolbar); el análisis con IA del dibujo funciona con el overlay abierto.
 - **Pestaña «Datos» eliminada**: se quita la pestaña del sidebar y su panel vacío («Sin panel aquí»); el menú Paneles se reordena (Álgebra, Herramientas, CAS, Vista). El código del panel de estadística queda anotado sin entrada en la UI (reactivable).
 - **Barra «Entrada…» inferior oculta**: los comandos matemáticos se cargan por la sección algebraica; se deja de dibujar la barra inferior redundante, manteniendo la entrada del drawer y la paleta.
+- **Zoom 3D sin límites artificiales**: el rango de distancia de la cámara 3D pasa de 0.5–200 a **0.1–5000** con plano lejano de 10000 (y near coherente), así podés acercarte 5x más y alejarte 25x más sin que el recorte por far corte la escena; tests de clipping ajustados a la nueva profundidad.
+- **Asistente con diseño editorial y telemetría**: se elimina el estilo de burbuja tipo WhatsApp (tarjetas neutras separadas por rol), los encabezados y textos quedan **centrados**, y cada respuesta del asistente muestra su **telemetría de salida** («~N token de salida (est.)») al estilo del harness; el rol usa acento para distinguir agente/usuario.
 
 #### Cambiado
 - **Eficiencia del transporte remoto**: el cliente HTTP bloqueante ahora es compartido entre peticiones (pool de conexiones reutilizado con timeout por petición), en lugar de crear un `Client` por llamada.
