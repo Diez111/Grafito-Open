@@ -1767,6 +1767,8 @@ fn draw_tutor_card(
             });
             if !state.tutor_next.is_empty() {
                 ui.add_space(SPACE_XS);
+                // Botones en su propia fila; la recomendación aparte y envuelta
+                // para que no desborde en paneles angostos (fix de overflow).
                 ui.horizontal(|ui| {
                     if ui
                         .add(egui::Button::new("¿Qué sigo estudiando?").small())
@@ -1781,20 +1783,23 @@ fn draw_tutor_card(
                     {
                         action = Some(AssistantUiAction::RunMiniExam);
                     }
-                    let next = if state.tutor_last_activity.is_empty() {
-                        format!("Próximo: {}", state.tutor_next)
-                    } else {
-                        format!(
-                            "Próximo: {} · última: {}",
-                            state.tutor_next, state.tutor_last_activity
-                        )
-                    };
-                    ui.label(
+                });
+                let next = if state.tutor_last_activity.is_empty() {
+                    format!("Próximo: {}", state.tutor_next)
+                } else {
+                    format!(
+                        "Próximo: {} · última: {}",
+                        state.tutor_next, state.tutor_last_activity
+                    )
+                };
+                ui.add(
+                    egui::Label::new(
                         egui::RichText::new(next)
                             .color(theme.text_secondary)
                             .size(TYPE_XS),
-                    );
-                });
+                    )
+                    .wrap(),
+                );
             }
             if state.tutor_domain_samples.len() >= 2 {
                 ui.add_space(SPACE_SM);
