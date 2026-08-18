@@ -101,3 +101,54 @@ for msrv_file in \
 done
 
 echo "Packaging fixtures passed."
+
+# --- Grafito logo must ship in the Debian package ---
+build_deb="$PROJECT_ROOT/packaging/build-deb.sh"
+
+grep -Fq 'hicolor/scalable/apps' "$build_deb" || {
+    echo "build-deb.sh does not stage the scalable icon directory" >&2
+    exit 1
+}
+grep -Fq 'grafito-icon.svg' "$build_deb" || {
+    echo "build-deb.sh does not install the scalable Grafito logo" >&2
+    exit 1
+}
+grep -Fq 'ERROR: missing icon asset' "$build_deb" || {
+    echo "build-deb.sh does not abort when an icon asset is missing" >&2
+    exit 1
+}
+
+# Every declared PNG size must exist as an asset and match the deb staging.
+for icon_size in 16 32 48 64 128 256 512; do
+    [[ -f "$PROJECT_ROOT/assets/grafito-icon-${icon_size}x${icon_size}.png" ]] || {
+        echo "missing icon asset grafito-icon-${icon_size}x${icon_size}.png" >&2
+        exit 1
+    }
+    grep -Fq "grafito-icon-${icon_size}x${icon_size}.png" "$build_deb" || {
+        echo "build-deb.sh does not stage the ${icon_size}x${icon_size} icon" >&2
+        exit 1
+    }
+done
+[[ -f "$PROJECT_ROOT/assets/grafito-icon.svg" ]] || {
+    echo "missing scalable asset grafito-icon.svg" >&2
+    exit 1
+}
+
+desktop_icon="$(sed -n 's/^Icon=//p' "$PROJECT_ROOT/packaging/debian/grafito.desktop" | head -1)"
+[[ -n "$desktop_icon" && "$desktop_icon" == "grafito" ]] || {
+    echo "desktop entry must reference the grafito icon name" >&2
+    exit 1
+}
+grep -Fq 'Icon=' "$PROJECT_ROOT/packaging/debian/grafito.desktop"
+
+# Default assistant plugins must ship in the package (e.g. j-space).
+grep -Fq 'usr/share/grafito/plugins' "$build_deb" || {
+    echo "build-deb.sh does not stage default assistant plugins" >&2
+    exit 1
+}
+[[ -f "$PROJECT_ROOT/plugins/j-space/grafito-plugin.toml" ]] || {
+    echo "the default j-space plugin is missing" >&2
+    exit 1
+}
+
+echo "Packaging fixtures passed."

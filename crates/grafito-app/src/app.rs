@@ -746,116 +746,6 @@ pub(crate) fn commit_object_insertions(
     Ok(ids)
 }
 
-pub(crate) struct SpreadsheetEditState<'a> {
-    pub undo_stack: &'a mut Vec<Document>,
-    pub redo_stack: &'a mut Vec<ChangeSet>,
-    pub edit_buffers: &'a mut std::collections::HashMap<(usize, usize), String>,
-}
-
-/// Holds spreadsheet text locally until the editor explicitly commits it. This
-/// keeps incomplete coordinate syntax from mutating its generated geometry.
-pub(crate) fn commit_spreadsheet_edit(
-    document: &mut Document,
-    state: SpreadsheetEditState<'_>,
-    row: usize,
-    column: usize,
-    value: String,
-    commit: bool,
-) -> Result<bool, String> {
-    let key = (row, column);
-    let current_value = document.get_spreadsheet_cell(row, column);
-    if !commit {
-        if value == current_value {
-            state.edit_buffers.remove(&key);
-        } else {
-            state.edit_buffers.insert(key, value);
-        }
-        return Ok(false);
-    }
-
-    if value == current_value {
-        state.edit_buffers.remove(&key);
-        return Ok(false);
-    }
-
-    if !crate::panels::spreadsheet_edit_is_committable(document, row, column, &value) {
-        state.edit_buffers.insert(key, value);
-        return Ok(false);
-    }
-
-    let before = document.clone();
-    match crate::panels::apply_spreadsheet_cell_edit(document, row, column, value.clone()) {
-        Ok(()) => {
-            state.edit_buffers.remove(&key);
-            if documents_semantically_differ(&before, document) {
-                push_history_snapshot(state.undo_stack, state.redo_stack, before);
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-        Err(error) => {
-            state.edit_buffers.insert(key, value);
-            Err(error)
-        }
-    }
-}
-
-pub(crate) fn spreadsheet_drafts_are_dirty(
-    document: &Document,
-    edit_buffers: &std::collections::HashMap<(usize, usize), String>,
-) -> bool {
-    edit_buffers
-        .iter()
-        .any(|(&(row, column), value)| document.get_spreadsheet_cell(row, column) != value.as_str())
-}
-
-fn stage_spreadsheet_drafts_for_save(
-    document: &Document,
-    edit_buffers: &std::collections::HashMap<(usize, usize), String>,
-) -> Result<Document, String> {
-    let mut drafts = edit_buffers
-        .iter()
-        .filter_map(|(&(row, column), value)| {
-            (document.get_spreadsheet_cell(row, column) != value.as_str()).then_some((
-                row,
-                column,
-                value.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    drafts.sort_by_key(|(row, column, _)| (*row, *column));
-
-    document.stage_spreadsheet_cell_edits(&drafts)
-}
-
-pub(crate) fn save_document_with_spreadsheet_drafts<F>(
-    document: &mut Document,
-    edit_buffers: &mut std::collections::HashMap<(usize, usize), String>,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
-    writer: F,
-) -> Result<bool, String>
-where
-    F: FnOnce(&Document) -> Result<(), String>,
-{
-    let changed = spreadsheet_drafts_are_dirty(document, edit_buffers);
-    if !changed {
-        writer(document)?;
-        edit_buffers.clear();
-        return Ok(false);
-    }
-
-    let staged = stage_spreadsheet_drafts_for_save(document, edit_buffers)?;
-    writer(&staged)?;
-
-    let before = document.clone();
-    *document = staged;
-    edit_buffers.clear();
-    push_history_snapshot(undo_stack, redo_stack, before);
-    Ok(true)
-}
-
 /// Removes an object as part of one eraser gesture, snapshotting only the
 /// first actual deletion so no-op strokes leave redo history intact.
 pub(crate) fn erase_object_for_stroke(
@@ -1269,11 +1159,11 @@ pub struct GrafitoApp {
     pub preview_object: Option<GeoObject>,
     pub input_text: String,
     /// Texto de celdas aún no confirmado; nunca se reconcilia con geometría.
-    pub spreadsheet_edit_buffers: std::collections::HashMap<(usize, usize), String>,
+
     /// Solicita foco para la primera entrada de comandos visible del próximo frame.
     pub(crate) command_input_focus_requested: bool,
     pub cas_result: String,
-    pub show_spreadsheet: bool,
+
     pub keyboard_tab: usize,
     pub keyboard_visible: bool,
     /// Fuerza temporalmente el teclado completo en una ventana corta.
@@ -1295,6 +1185,15 @@ pub struct GrafitoApp {
     pub(crate) mora_texture: Option<egui::TextureHandle>,
     /// Evita volver a decodificar el recurso embebido si el fallback ya fue necesario.
     pub(crate) mora_texture_load_attempted: bool,
+    /// Registry de plugins del asistente, cargado una sola vez.
+    pub(crate) plugin_registry: Option<grafito_plugins::PluginRegistry>,
+    /// Guarda si ya se intentó cargar los plugins una vez.
+    pub(crate) plugins_loaded: bool,
+    /// Cache de bloques del transcript del asistente (persistente entre frames).
+    pub(crate) assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache,
+    /// Overlay de pizarra nativa (estilo macOS).
+    pub whiteboard_open: bool,
+    pub whiteboard: crate::whiteboard_ui::WhiteboardSession,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<ChangeSet>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
@@ -1638,7 +1537,6 @@ impl GrafitoApp {
         self.selected_object = None;
         self.preview_object = None;
         self.input_text.clear();
-        self.spreadsheet_edit_buffers.clear();
         self.command_input_focus_requested = false;
         self.cas_result.clear();
         self.cas_history.clear();
@@ -1735,6 +1633,8 @@ impl GrafitoApp {
         let mut assistant = grafito_ui::assistant::AssistantPanelState::default();
         assistant.apply_preferences(config.assistant_provider, config.assistant_model.clone());
         assistant.allow_fusion_fallback = config.allow_fusion_fallback;
+        assistant.full_permission = config.assistant_full_permission;
+        assistant.agent_mode = config.assistant_agent_mode;
 
         let snapshot_version = document.version;
         let snapshot_render_quality = document.render_quality;
@@ -1765,10 +1665,8 @@ impl GrafitoApp {
             selected_object: None,
             preview_object: None,
             input_text: String::new(),
-            spreadsheet_edit_buffers: std::collections::HashMap::new(),
             command_input_focus_requested: false,
             cas_result: String::new(),
-            show_spreadsheet: false,
             keyboard_tab: 0,
             keyboard_visible: DEFAULT_KEYBOARD_VISIBLE,
             keyboard_expanded: false,
@@ -1782,6 +1680,11 @@ impl GrafitoApp {
             splash_logo: None,
             mora_texture: None,
             mora_texture_load_attempted: false,
+            plugin_registry: None,
+            plugins_loaded: false,
+            assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
+            whiteboard_open: false,
+            whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
             recent_files: Vec::new(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
@@ -1848,6 +1751,9 @@ impl GrafitoApp {
 
     /// Persiste preferencias de interfaz; las claves del asistente viven sólo en el llavero.
     pub(crate) fn save_app_config(&self) {
+        // Se conservan los toggles de plugins ya persistidos; los cambios de
+        // plugins se guardan en su propia ruta en assistant.rs.
+        let existing = load_config();
         save_config(&AppConfig {
             dark_mode: self.dark_mode,
             show_grid: self.show_grid,
@@ -1856,6 +1762,10 @@ impl GrafitoApp {
             assistant_provider: self.assistant.provider,
             assistant_model: self.assistant.model.clone(),
             allow_fusion_fallback: self.assistant.allow_fusion_fallback,
+            assistant_full_permission: self.assistant.full_permission,
+            assistant_agent_mode: self.assistant.agent_mode,
+            enabled_plugins: existing.enabled_plugins,
+            disabled_plugins: existing.disabled_plugins,
         });
     }
 
@@ -2091,11 +2001,9 @@ impl GrafitoApp {
     }
 
     fn request_document_action(&mut self, action: DocumentAction, ctx: &egui::Context) {
-        let has_drafts =
-            spreadsheet_drafts_are_dirty(&self.document, &self.spreadsheet_edit_buffers);
         if let DocumentActionRequest::Proceed(action) =
             self.document_lifecycle
-                .request_action(action, &self.document, has_drafts)
+                .request_action(action, &self.document, false)
         {
             self.perform_document_action(action, ctx);
         }
@@ -2143,11 +2051,6 @@ impl GrafitoApp {
             {
                 None
             }
-            Some(
-                crate::RightPanelContent::Spreadsheet
-                | crate::RightPanelContent::Data
-                | crate::RightPanelContent::Regression,
-            ) if !self.show_spreadsheet => None,
             other => other,
         }
     }
@@ -2520,13 +2423,7 @@ impl GrafitoApp {
             return SaveAttempt::Cancelled;
         };
 
-        let result = save_document_with_spreadsheet_drafts(
-            &mut self.document,
-            &mut self.spreadsheet_edit_buffers,
-            &mut self.undo_stack,
-            &mut self.redo_stack,
-            |staged| write_document_to_path(staged, &path),
-        );
+        let result = write_document_to_path(&self.document, &path);
         match result {
             Ok(_) => {
                 let pending_action = self
@@ -2708,14 +2605,6 @@ impl GrafitoApp {
         self.sidebar_tab = layout.left_panel.default_sidebar_tab();
         self.left_drawer_open = true;
         self.compact_drawer_open = false;
-        // Panel derecho: la hoja de cálculo lateral se muestra sólo cuando la
-        // perspectiva la solicita explícitamente.
-        self.show_spreadsheet = matches!(
-            layout.right_panel,
-            Some(crate::RightPanelContent::Spreadsheet)
-                | Some(crate::RightPanelContent::Data)
-                | Some(crate::RightPanelContent::Regression)
-        );
         // Panel derecho: Protocolo de Construcción se muestra sólo cuando la
         // perspectiva lo solicita explícitamente.
         self.show_construction_protocol = matches!(
@@ -3690,6 +3579,11 @@ impl eframe::App for GrafitoApp {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("app_update");
 
+        if self.whiteboard_open {
+            crate::whiteboard_ui::draw_whiteboard_overlay(self, ctx);
+            return;
+        }
+
         self.handle_native_close_request(ctx);
 
         if self.is_view_changing {
@@ -3976,13 +3870,14 @@ impl eframe::App for GrafitoApp {
                     },
                     2 => crate::panels::draw_cas_panel(self, ctx),
                     3 => match self.perspective {
-                        Perspective::Probability | Perspective::Statistics => {
+                        Perspective::Probability
+                        | Perspective::Statistics
+                        | Perspective::DataAnalysis => {
                             crate::panels::draw_statistics_panel(self, ctx)
                         }
-                        _ => crate::panels::draw_table_panel(self, ctx),
+                        _ => crate::panels::draw_empty_panel(self, ctx),
                     },
-                    4 => crate::panels::draw_spreadsheet_panel(self, ctx),
-                    5 => crate::panels::draw_view_panel(self, ctx),
+                    4 => crate::panels::draw_view_panel(self, ctx),
                     _ => crate::panels::draw_empty_panel(self, ctx),
                 }
             }
@@ -4017,18 +3912,11 @@ impl eframe::App for GrafitoApp {
                     Some(RightPanelContent::ConstructionProtocol) => {
                         crate::panels::draw_construction_protocol(self, ctx);
                     }
-                    Some(panel @ (RightPanelContent::Spreadsheet | RightPanelContent::Data)) => {
-                        debug_assert!(panel.uses_spreadsheet_editor());
-                        crate::panels::draw_right_spreadsheet(self, ctx);
-                    }
                     Some(RightPanelContent::Regression) => {
                         crate::panels::draw_right_regression_panel(self, ctx);
                     }
                     Some(RightPanelContent::Properties) => {
                         crate::panels::draw_right_properties_panel(self, ctx);
-                    }
-                    Some(RightPanelContent::Table) => {
-                        crate::panels::draw_right_table_panel(self, ctx);
                     }
                     Some(RightPanelContent::DomainColoring) => {
                         crate::panels::draw_right_domain_coloring_panel(self, ctx);

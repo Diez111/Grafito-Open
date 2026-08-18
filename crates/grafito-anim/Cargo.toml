@@ -1,0 +1,13 @@
+[package]
+name = "grafito-anim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Puente de Grafito hacia motores de animación externos (IPC stdio, protocolo JSON versionado)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

@@ -65,6 +65,8 @@ install -d -m 0755 "$BUILD_DIR/usr/share/doc/grafito"
 for size in 16 32 48 64 128 256 512; do
     install -d -m 0755 "$BUILD_DIR/usr/share/icons/hicolor/${size}x${size}/apps"
 done
+# Scalable icon keeps the launcher crisp on HiDPI across desktop environments.
+install -d -m 0755 "$BUILD_DIR/usr/share/icons/hicolor/scalable/apps"
 
 # Copy binary
 echo "Copying binary..."
@@ -78,15 +80,38 @@ gzip -9n -c "$ROOT_DIR/CHANGELOG.md" > "$BUILD_DIR/usr/share/doc/grafito/changel
 chmod 0644 "$BUILD_DIR/usr/share/doc/grafito/changelog.gz"
 
 # Copy icons
+# The Grafito logo is source of truth for the desktop icon; a missing raster
+# must abort the build instead of shipping an empty launcher icon.
+for icon_size in 16 32 48 64 128 256 512; do
+    [[ -f "$ASSETS_DIR/grafito-icon-${icon_size}x${icon_size}.png" ]] || {
+        echo "ERROR: missing icon asset grafito-icon-${icon_size}x${icon_size}.png" >&2
+        exit 1
+    }
+done
+[[ -f "$ASSETS_DIR/grafito-icon.svg" ]] || {
+    echo "ERROR: missing scalable icon asset grafito-icon.svg" >&2
+    exit 1
+}
 echo "Copying icons..."
 for size in 16 32 48 64 128 256 512; do
     install -m 0644 "$ASSETS_DIR/grafito-icon-${size}x${size}.png" \
         "$BUILD_DIR/usr/share/icons/hicolor/${size}x${size}/apps/grafito.png"
 done
+install -m 0644 "$ASSETS_DIR/grafito-icon.svg" \
+    "$BUILD_DIR/usr/share/icons/hicolor/scalable/apps/grafito.svg"
 
 # Copy desktop file
 echo "Copying desktop file..."
 install -m 0644 "$DEBIAN_DIR/grafito.desktop" "$BUILD_DIR/usr/share/applications/grafito.desktop"
+
+# Install default assistant plugins (e.g. j-space) for the launcher
+if [[ -d "$ROOT_DIR/plugins" ]]; then
+    echo "Copying default plugins..."
+    install -d -m 0755 "$BUILD_DIR/usr/share/grafito/plugins"
+    cp -a "$ROOT_DIR/plugins/." "$BUILD_DIR/usr/share/grafito/plugins/"
+    find "$BUILD_DIR/usr/share/grafito/plugins" -type d -exec chmod 0755 {} +
+    find "$BUILD_DIR/usr/share/grafito/plugins" -type f -exec chmod 0644 {} +
+fi
 
 # Copy control files
 echo "Copying control files..."

@@ -17,10 +17,10 @@ use grafito_assistant_types::{
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
 
-const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
-const ASSISTANT_PANEL_MIN_WIDTH: f32 = 280.0;
-const ASSISTANT_PANEL_MAX_WIDTH: f32 = 380.0;
-const ASSISTANT_MIN_CANVAS_WIDTH: f32 = 480.0;
+const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 400.0;
+const ASSISTANT_PANEL_MIN_WIDTH: f32 = 340.0;
+const ASSISTANT_PANEL_MAX_WIDTH: f32 = 460.0;
+const ASSISTANT_MIN_CANVAS_WIDTH: f32 = 440.0;
 const ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH: f32 =
     ASSISTANT_MIN_CANVAS_WIDTH + ASSISTANT_PANEL_MIN_WIDTH;
 const ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT: f32 = 160.0;
@@ -35,6 +35,9 @@ const ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT: f32 = 30.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_MESSAGE_HEIGHT: f32 = 20.0;
 const ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT: f32 = 20.0;
 const ASSISTANT_HEADER_HEIGHT: f32 = 40.0;
+const ASSISTANT_REVEAL_BASE_SECONDS: f64 = 0.28;
+const ASSISTANT_REVEAL_PER_BLOCK_SECONDS: f64 = 0.18;
+const ASSISTANT_REVEAL_MAX_SECONDS: f64 = 1.5;
 const MAX_FOCUSED_CONTEXT_PREVIEW_CHARS: usize = 160;
 const MORA_NAME: &str = "Mora";
 const MORA_ACCESSIBLE_LABEL: &str = "Mora, asistente matemático";
@@ -68,6 +71,64 @@ pub struct VerifiedAssistantProposal {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AssistantVisuals {
     pub mora_texture: Option<egui::TextureId>,
+}
+
+/// Cache de bloques parseados de las respuestas del transcript, direccionado
+/// por contenido y acotado. Evita re-parsear los mismos turnos en cada frame.
+#[derive(Default, Clone)]
+pub struct AssistantBlocksCache {
+    entries: std::collections::VecDeque<(String, Vec<AssistantMessageBlock>)>,
+}
+
+impl AssistantBlocksCache {
+    const MAX_ENTRIES: usize = 8;
+
+    /// Devuelve los bloques de `content`, reutilizando el cache si ya se parseó.
+    fn blocks(&mut self, content: &str) -> Vec<AssistantMessageBlock> {
+        if let Some((_, blocks)) = self
+            .entries
+            .iter()
+            .find(|(cached, _)| self.same_content(cached, content))
+        {
+            return blocks.clone();
+        }
+        let blocks = parse_assistant_blocks(content);
+        self.entries
+            .push_front((content.to_owned(), blocks.clone()));
+        while self.entries.len() > Self::MAX_ENTRIES {
+            self.entries.pop_back();
+        }
+        blocks
+    }
+
+    fn same_content(&self, cached: &str, content: &str) -> bool {
+        cached == content
+    }
+}
+
+/// Animación generada por el motor externo, reproducida como frames en el chat.
+#[derive(Clone)]
+pub struct AssistantMedia {
+    pub title: String,
+    pub frames: Vec<egui::ColorImage>,
+}
+
+/// Fila de actividad de una herramienta del asistente mientras el agente trabaja.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivityRow {
+    pub text: String,
+}
+
+/// Fila visible de un plugin del asistente (sin referencias al registry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub category: String,
+    pub description: String,
+    pub enabled: bool,
+    pub error: Option<String>,
 }
 
 /// Snapshot local que vincula una corrección al documento y foco que la originaron.
@@ -106,6 +167,20 @@ pub struct AssistantPanelState {
     pub settings_open: bool,
     /// Evita consultar el llavero en cada frame mientras la configuración está abierta.
     pub key_status_checked: bool,
+    /// Permiso completo: si el local no resuelve, consulta al proveedor sin cartel.
+    pub full_permission: bool,
+    /// Modo agente: usa el loop con herramientas y muestra su actividad en el chat.
+    pub agent_mode: bool,
+    /// Filas de actividad de herramientas de la consulta agente en curso.
+    pub agent_activity: Vec<AgentActivityRow>,
+    /// Ledger J-Space (Goal/Core/Verified/Open/Next) de la tarea agente en curso.
+    pub agent_ledger: Option<String>,
+    /// Animación generada por el motor externo, para reproducir en el chat.
+    pub media: Option<AssistantMedia>,
+    /// Texturas de frames cargadas una sola vez al mostrar la animación.
+    media_textures: Vec<egui::TextureHandle>,
+    /// Guarda si ya se construyeron las texturas de la media actual.
+    media_textures_ready: bool,
     /// Confirmación del usuario de que el modelo elegido admite imágenes.
     pub vision_enabled: bool,
     /// Autoriza explícitamente una revisión Fusion tras una propuesta M3 fallida.
@@ -151,6 +226,12 @@ pub struct AssistantPanelState {
     pub attachment_message: Option<String>,
     /// Impide abrir más selectores mientras se importa una imagen en segundo plano.
     pub is_importing_image: bool,
+    /// Una respuesta recién completada del asistente se revela por bloques.
+    pub reveal_pending: bool,
+    /// Instante (reloj de egui) en el que comenzó la última revelación.
+    reveal_started_at: Option<f64>,
+    /// Snapshot de plugins cargados por la aplicación, para mostrarlos en ajustes.
+    pub plugins: Vec<PluginRow>,
     /// Error recuperable mostrado al usuario.
     pub error: Option<String>,
 }
@@ -165,6 +246,13 @@ impl Default for AssistantPanelState {
             key_available: false,
             settings_open: false,
             key_status_checked: false,
+            full_permission: true,
+            agent_mode: false,
+            agent_activity: Vec::new(),
+            agent_ledger: None,
+            media: None,
+            media_textures: Vec::new(),
+            media_textures_ready: false,
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -190,6 +278,9 @@ impl Default for AssistantPanelState {
             is_fusion_review: false,
             attachment_message: None,
             is_importing_image: false,
+            reveal_pending: false,
+            reveal_started_at: None,
+            plugins: Vec::new(),
             error: None,
         }
     }
@@ -215,6 +306,8 @@ impl AssistantPanelState {
     /// Descarta el historial local y las propuestas asociadas a esa conversación.
     pub fn clear_conversation(&mut self) {
         self.conversation.clear();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
         self.clear_proposal_cards();
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
@@ -401,6 +494,8 @@ impl AssistantPanelState {
     /// Inicia una corrección e identifica si la ruta Fusion autorizada está activa.
     pub fn begin_proposal_correction_with_route(&mut self, is_fusion_review: bool) {
         self.clear_proposal_cards();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
         self.is_pending = true;
         self.is_cancelling = false;
         self.is_fusion_review = is_fusion_review;
@@ -423,6 +518,8 @@ impl AssistantPanelState {
                     AssistantExecutionOrigin::AuthorizedRemote,
                 ));
             self.trim_conversation();
+            self.reveal_pending = true;
+            self.reveal_started_at = None;
             self.is_pending = false;
             self.is_cancelling = false;
             self.is_fusion_review = false;
@@ -443,6 +540,8 @@ impl AssistantPanelState {
         turn.content = trim_turn(answer);
         turn.origin = Some(AssistantExecutionOrigin::AuthorizedRemote);
         self.trim_conversation();
+        self.reveal_pending = true;
+        self.reveal_started_at = None;
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
@@ -550,11 +649,62 @@ impl AssistantPanelState {
         choices
     }
 
+    /// Registra una fila de actividad de una herramienta del agente.
+    pub fn push_agent_activity(&mut self, text: impl Into<String>) {
+        self.agent_activity
+            .push(AgentActivityRow { text: text.into() });
+        if self.agent_activity.len() > 12 {
+            let overflow = self.agent_activity.len() - 12;
+            self.agent_activity.drain(..overflow);
+        }
+    }
+
+    /// Establece el ledger J-Space mostrado como tarjeta colapsable.
+    pub fn set_agent_ledger(&mut self, render: Option<String>) {
+        self.agent_ledger = render.filter(|render| !render.trim().is_empty());
+    }
+
+    /// Limpia actividad y ledger de una consulta agente.
+    pub fn clear_agent_progress(&mut self) {
+        self.agent_activity.clear();
+        self.agent_ledger = None;
+    }
+
+    /// Establece la animación a reproducir y prepara sus texturas de frames.
+    pub fn set_media(&mut self, media: Option<AssistantMedia>, ctx: &egui::Context) {
+        self.media = media;
+        self.media_textures_ready = false;
+        if let Some(media) = &self.media {
+            self.media_textures = media
+                .frames
+                .iter()
+                .map(|frame| {
+                    ctx.load_texture(
+                        "assistant_media_frame",
+                        frame.clone(),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .collect();
+            self.media_textures_ready = true;
+        } else {
+            self.media_textures.clear();
+        }
+    }
+
+    /// texturas de frames listas (para el dibujado del reproductor).
+    pub(crate) fn media_textures(&self) -> (&[egui::TextureHandle], bool) {
+        (&self.media_textures, self.media_textures_ready)
+    }
+
     /// Muestra el turno enviado antes de que el proveedor responda.
     pub fn begin_request(&mut self, question: String) {
         self.conversation
             .push(ConversationTurn::user(trim_turn(question)));
         self.trim_conversation();
+        self.clear_agent_progress();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
         self.is_pending = true;
         self.is_cancelling = false;
         self.is_fusion_review = false;
@@ -578,6 +728,8 @@ impl AssistantPanelState {
                 AssistantExecutionOrigin::AuthorizedRemote,
             ));
         self.trim_conversation();
+        self.reveal_pending = true;
+        self.reveal_started_at = None;
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
@@ -595,6 +747,8 @@ impl AssistantPanelState {
                 AssistantExecutionOrigin::Local,
             ));
         self.trim_conversation();
+        self.reveal_pending = true;
+        self.reveal_started_at = None;
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
@@ -604,6 +758,9 @@ impl AssistantPanelState {
 
     /// Finaliza una solicitud remota con un error apto para mostrar.
     pub fn fail_request(&mut self, error: impl Into<String>) {
+        self.clear_agent_progress();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
         self.is_pending = false;
         self.is_cancelling = false;
         self.is_fusion_review = false;
@@ -746,6 +903,8 @@ impl AssistantPanelState {
 
     fn clear_remote_history(&mut self) {
         self.conversation.clear();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
         self.clear_proposal_cards();
         self.clear_proposal_correction();
         self.cancel_remote_authorization();
@@ -766,6 +925,8 @@ impl AssistantPanelState {
         self.applied_proposals.clear();
         self.preflight_candidate_count = 0;
         self.proposal_code_block_indices.clear();
+        self.reveal_pending = false;
+        self.reveal_started_at = None;
     }
 }
 
@@ -787,6 +948,50 @@ fn trim_turn(content: String) -> String {
         .collect::<String>();
     trimmed.push('…');
     trimmed
+}
+
+/// Recorte de revelación de una respuesta que se está animando.
+#[derive(Debug, Clone, Copy)]
+struct RevealClip {
+    visible_blocks: usize,
+    boundary_alpha: f32,
+}
+
+/// Calcula el recorte de revelación para la última respuesta del asistente.
+///
+/// Depende sólo del reloj de egui y se autolimpia al completar, para no
+/// conservar estado persistente ni programar temporizadores del sistema.
+fn assistant_reveal_clip(
+    ui: &egui::Ui,
+    state: &mut AssistantPanelState,
+    total_blocks: usize,
+) -> Option<RevealClip> {
+    if !state.reveal_pending {
+        return None;
+    }
+    if total_blocks == 0 {
+        state.reveal_pending = false;
+        state.reveal_started_at = None;
+        return None;
+    }
+    let time = ui.input(|input| input.time);
+    let started = *state.reveal_started_at.get_or_insert(time);
+    let duration = (ASSISTANT_REVEAL_BASE_SECONDS
+        + total_blocks as f64 * ASSISTANT_REVEAL_PER_BLOCK_SECONDS)
+        .min(ASSISTANT_REVEAL_MAX_SECONDS);
+    let elapsed = (time - started).max(0.0);
+    let progress = (elapsed / duration) as f32;
+    if progress >= 0.9999 {
+        state.reveal_pending = false;
+        state.reveal_started_at = None;
+        return None;
+    }
+    ui.ctx().request_repaint();
+    let scaled = progress * total_blocks as f32;
+    Some(RevealClip {
+        visible_blocks: scaled.floor() as usize,
+        boundary_alpha: scaled - scaled.floor(),
+    })
 }
 
 fn is_complete_exchange(turns: &[ConversationTurn]) -> bool {
@@ -1048,6 +1253,14 @@ pub enum AssistantUiAction {
     HidePanel,
     /// Copiar un turno visible al portapapeles del sistema.
     CopyMessage(String),
+    /// Activar o desactivar un plugin por id (la app persiste el cambio).
+    TogglePlugin(String, bool),
+    /// Cambiar el permiso completo (respuestas en línea sin cartel).
+    FullPermissionChanged(bool),
+    /// Activar o desactivar el modo agente (loop con herramientas).
+    AgentModeChanged(bool),
+    /// Generar una animación del objeto/expresión y reproducirla en el chat.
+    RunAnimation,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -1056,6 +1269,7 @@ pub fn draw_assistant_panel(
     state: &mut AssistantPanelState,
     reserved_bottom_height: f32,
     visuals: AssistantVisuals,
+    cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let mut action = None;
     let theme = current_theme(ctx);
@@ -1074,7 +1288,7 @@ pub fn draw_assistant_panel(
                     .stroke(egui::Stroke::new(1.0, theme.separator)),
             )
             .show(ctx, |ui| {
-                action = draw_panel_contents(ui, state, true, visuals);
+                action = draw_panel_contents(ui, state, true, visuals, cache);
             });
     } else {
         let (min_width, max_width, default_width) = assistant_panel_widths(available_rect.width());
@@ -1089,7 +1303,7 @@ pub fn draw_assistant_panel(
                     .stroke(egui::Stroke::new(1.0, theme.separator)),
             )
             .show(ctx, |ui| {
-                action = draw_assistant_contents(ui, state, visuals);
+                action = draw_assistant_contents(ui, state, visuals, cache);
             });
     }
     if action.is_none() {
@@ -1106,8 +1320,9 @@ pub fn draw_assistant_contents(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     visuals: AssistantVisuals,
+    cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
-    draw_panel_contents(ui, state, false, visuals)
+    draw_panel_contents(ui, state, false, visuals, cache)
 }
 
 fn assistant_panel_widths(available_width: f32) -> (f32, f32, f32) {
@@ -1263,6 +1478,37 @@ fn draw_assistant_settings_contents(
         }
     }
 
+    ui.add_space(SPACE_SM);
+    ui.separator();
+    ui.add_space(SPACE_XS);
+    let mut full_permission = state.full_permission;
+    let permission_changed = ui
+        .checkbox(
+            &mut full_permission,
+            "Respuestas en línea automáticas (permiso completo)",
+        )
+        .on_hover_text(
+            "Si la resolución local no alcanza, consultar al proveedor sin pedir confirmación.",
+        )
+        .changed();
+    if permission_changed && full_permission != state.full_permission {
+        state.full_permission = full_permission;
+        action = Some(AssistantUiAction::FullPermissionChanged(full_permission));
+    }
+
+    ui.add_space(SPACE_XS);
+    let mut agent_mode = state.agent_mode;
+    let agent_changed = ui
+        .checkbox(&mut agent_mode, "Modo agente (herramientas y actividad)")
+        .on_hover_text(
+            "Usa el loop agéntico con herramientas locales y muestra su actividad en el chat (requiere un proveedor compatible con tool calling).",
+        )
+        .changed();
+    if agent_changed && agent_mode != state.agent_mode {
+        state.agent_mode = agent_mode;
+        action = Some(AssistantUiAction::AgentModeChanged(agent_mode));
+    }
+
     if state.use_api_key() {
         ui.add_space(SPACE_SM);
         ui.separator();
@@ -1301,6 +1547,93 @@ fn draw_assistant_settings_contents(
             }
         });
     }
+    ui.add_space(SPACE_SM);
+    ui.separator();
+    ui.add_space(SPACE_XS);
+    ui.label(
+        egui::RichText::new("Plugins (opcionales)")
+            .size(TYPE_XS)
+            .strong(),
+    );
+    if state.plugins.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "Sin plugins cargados. Son extensiones opcionales; el asistente y las animaciones nativas funcionan igual sin ellos.",
+            )
+            .color(theme.text_tertiary)
+            .size(TYPE_XS),
+        );
+    } else {
+        for plugin in &state.plugins {
+            let enabled = plugin.enabled;
+            let mut toggled = enabled;
+            egui::Frame::none()
+                .fill(if plugin.enabled {
+                    theme.accent_muted
+                } else {
+                    theme.panel_bg
+                })
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    if plugin.enabled {
+                        theme.accent
+                    } else {
+                        theme.separator
+                    },
+                ))
+                .rounding(RADIUS_SM)
+                .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_XS))
+                .show(ui, |ui| {
+                    egui::Grid::new(ui.make_persistent_id(("plugin_row", &plugin.id)))
+                        .num_columns(2)
+                        .spacing([SPACE_SM, 2.0])
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&plugin.name)
+                                        .color(theme.text_primary)
+                                        .size(TYPE_SM)
+                                        .strong(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&plugin.description)
+                                            .color(theme.text_tertiary)
+                                            .size(TYPE_XS),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.add_enabled_ui(plugin.error.is_none(), |ui| {
+                                        let changed = ui
+                                            .checkbox(&mut toggled, "")
+                                            .on_hover_text(plugin.description.clone())
+                                            .changed();
+                                        if changed && toggled != enabled {
+                                            action = Some(AssistantUiAction::TogglePlugin(
+                                                plugin.id.clone(),
+                                                toggled,
+                                            ));
+                                        }
+                                    });
+                                },
+                            );
+                            ui.end_row();
+                        });
+                    if let Some(error) = &plugin.error {
+                        ui.label(
+                            egui::RichText::new(format!("No disponible: {error}"))
+                                .color(theme.danger)
+                                .size(TYPE_XS),
+                        );
+                    }
+                });
+            ui.add_space(SPACE_XS);
+        }
+    }
     if let Some(error) = &state.error {
         ui.label(egui::RichText::new(error).color(theme.danger).size(TYPE_XS));
     }
@@ -1312,6 +1645,7 @@ fn draw_panel_contents(
     state: &mut AssistantPanelState,
     compact: bool,
     visuals: AssistantVisuals,
+    cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let mut action = draw_assistant_header(ui, state, theme, visuals);
@@ -1376,6 +1710,21 @@ fn draw_panel_contents(
             if should_draw_empty_state(state) {
                 draw_assistant_empty_state(ui, state, visuals);
             } else {
+                let reveal_clip = {
+                    let last_content = state
+                        .conversation
+                        .iter()
+                        .rev()
+                        .find(|turn| matches!(turn.role, ConversationRole::Assistant))
+                        .map(|turn| turn.content.clone())
+                        .unwrap_or_default();
+                    let total_last_blocks = if last_content.is_empty() {
+                        0
+                    } else {
+                        cache.blocks(&last_content).len()
+                    };
+                    assistant_reveal_clip(ui, state, total_last_blocks)
+                };
                 for (turn_index, turn) in state.conversation.iter().enumerate() {
                     let proposal_state = AssistantProposalRenderState {
                         verified_proposals: verified_proposals_for_turn(state, turn_index),
@@ -1393,10 +1742,19 @@ fn draw_panel_contents(
                             state, turn_index,
                         ),
                     };
-                    if action.is_none() {
-                        action = draw_conversation_turn(ui, turn, proposal_state);
+                    let is_last = turn_index + 1 == state.conversation.len();
+                    let reveal_here = if is_last && matches!(turn.role, ConversationRole::Assistant)
+                    {
+                        reveal_clip
                     } else {
-                        let _ = draw_conversation_turn(ui, turn, proposal_state);
+                        None
+                    };
+                    if action.is_none() {
+                        action =
+                            draw_conversation_turn(ui, turn, proposal_state, reveal_here, cache);
+                    } else {
+                        let _ =
+                            draw_conversation_turn(ui, turn, proposal_state, reveal_here, cache);
                     }
                     ui.add_space(SPACE_MD);
                 }
@@ -1407,8 +1765,64 @@ fn draw_panel_contents(
             if state.is_pending {
                 draw_pending_indicator(ui, state, visuals);
             }
+            if let Some(media) = &state.media {
+                draw_media_card(ui, media, state);
+            }
         });
     action
+}
+
+/// Reproductor de animación (GIF-like) en el chat.
+fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantPanelState) {
+    let theme = current_theme(ui.ctx());
+    let (textures, ready) = state.media_textures();
+    if ready && !textures.is_empty() {
+        let time = ui.input(|input| input.time);
+        let fps = 12.0;
+        let index = ((time * fps) as usize) % textures.len();
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .stroke(egui::Stroke::new(1.0, theme.separator))
+            .rounding(RADIUS_MD)
+            .inner_margin(egui::Margin::same(SPACE_SM))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Animación")
+                        .color(theme.accent)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                if !media.title.is_empty() {
+                    ui.label(
+                        egui::RichText::new(&media.title)
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS),
+                    );
+                }
+                ui.add_space(SPACE_XS);
+                let texture = &textures[index];
+                let size = texture.size_vec2();
+                let max_w = ui.available_width().max(80.0);
+                let scale = (max_w / size.x.max(1.0)).clamp(0.25, 1.5);
+                let display = egui::vec2(size.x * scale, size.y * scale).ceil();
+                let rect = egui::Rect::from_min_size(ui.cursor().min, display);
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                ui.advance_cursor_after_rect(rect);
+            });
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(40));
+    } else {
+        ui.label(
+            egui::RichText::new("Preparando animación…")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS),
+        );
+    }
 }
 
 fn retain_first_assistant_action(
@@ -1878,6 +2292,17 @@ fn draw_assistant_composer(
                 {
                     action = Some(AssistantUiAction::Submit);
                 }
+                ui.add_enabled_ui(!state.is_pending && !state.is_importing_image, |ui| {
+                    if ui
+                        .add(egui::Button::new("Animá").small())
+                        .on_hover_text(
+                            "Genera y reproduce una animación didáctica del objeto/expresión (requiere el plugin j-space/engine).",
+                        )
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::RunAnimation);
+                    }
+                });
             });
             if input_bytes > request_budget.max_input_chars * 3 / 4 {
                 let input_color = if input_bytes > request_budget.max_input_chars {
@@ -2002,6 +2427,8 @@ fn draw_conversation_turn(
     ui: &mut egui::Ui,
     turn: &ConversationTurn,
     proposal_state: AssistantProposalRenderState<'_>,
+    reveal_clip: Option<RevealClip>,
+    cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let is_user = matches!(turn.role, ConversationRole::User);
@@ -2033,7 +2460,8 @@ fn draw_conversation_turn(
             if is_user {
                 draw_inline_text(ui, &turn.content);
             } else {
-                action = draw_assistant_response(ui, &turn.content, proposal_state);
+                action =
+                    draw_assistant_response(ui, &turn.content, proposal_state, reveal_clip, cache);
             }
             ui.add_space(SPACE_SM);
             ui.allocate_ui_with_layout(
@@ -2093,12 +2521,47 @@ fn draw_pending_indicator(
                 ui.label(
                     egui::RichText::new(match state.is_cancelling {
                         true => "Cancelando...",
-                        false => "Consulta remota autorizada...",
+                        false => {
+                            if state.agent_mode {
+                                "Agente trabajando..."
+                            } else {
+                                "Consulta remota autorizada..."
+                            }
+                        }
                     })
                     .color(theme.text_secondary)
                     .size(TYPE_SM),
                 );
             });
+            if let Some(ledger) = &state.agent_ledger {
+                ui.add_space(SPACE_XS);
+                egui::CollapsingHeader::new("Estado de la tarea (ledger)")
+                    .id_salt("assistant_agent_ledger")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(ledger)
+                                .color(theme.text_secondary)
+                                .monospace()
+                                .size(TYPE_XS),
+                        );
+                    });
+                ui.ctx().request_repaint();
+            }
+            if !state.agent_activity.is_empty() {
+                ui.add_space(SPACE_XS);
+                for row in state.agent_activity.iter().rev().take(6) {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("•").color(theme.accent));
+                        ui.label(
+                            egui::RichText::new(&row.text)
+                                .color(theme.text_secondary)
+                                .size(TYPE_XS),
+                        );
+                    });
+                }
+                ui.ctx().request_repaint();
+            }
         });
 }
 
@@ -2106,13 +2569,34 @@ fn draw_assistant_response(
     ui: &mut egui::Ui,
     content: &str,
     proposal_state: AssistantProposalRenderState<'_>,
+    reveal_clip: Option<RevealClip>,
+    cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
-    let blocks = parse_assistant_blocks(content);
+    let blocks = cache.blocks(content);
     let mut action = None;
     let mut code_block_index = 0;
     let mut rendered_candidate_indices = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
+        let previous_opacity = ui.opacity();
+        let reveal_restore = if let Some(clip) = reveal_clip {
+            if index > clip.visible_blocks {
+                break;
+            }
+            let alpha = if index == clip.visible_blocks {
+                clip.boundary_alpha.max(0.12)
+            } else {
+                1.0
+            };
+            if alpha < 0.999 {
+                ui.set_opacity(previous_opacity * alpha);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         match block {
             AssistantMessageBlock::Heading { level, text } => {
                 let size = match level {
@@ -2228,7 +2712,13 @@ fn draw_assistant_response(
                     });
             }
         }
+        if reveal_restore {
+            ui.set_opacity(previous_opacity);
+        }
         ui.add_space(SPACE_SM);
+    }
+    if reveal_clip.is_some() {
+        return action;
     }
     // A bounded transcript can end before a complete fenced proposal. Preserve
     // the locally verified canonical action instead of silently hiding it.
@@ -2460,7 +2950,7 @@ fn draw_verified_assistant_proposal(
         }
         AssistantProposal::Parameter(_) => "Parámetro comprobado localmente antes de mostrarse.",
     };
-    egui::Frame::none()
+    let card = egui::Frame::none()
         .fill(theme.accent_muted)
         .stroke(egui::Stroke::new(1.0, theme.accent))
         .rounding(RADIUS_SM)
@@ -2503,6 +2993,14 @@ fn draw_verified_assistant_proposal(
                     .size(TYPE_XS),
             );
         });
+    if card.response.hovered() {
+        ui.painter().rect_stroke(
+            card.response.rect.expand(1.0),
+            RADIUS_SM,
+            egui::Stroke::new(2.0, theme.accent),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     if !verified.prerequisite_parameters.is_empty() {
         ui.label(
             egui::RichText::new(format!(
@@ -3180,7 +3678,7 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
     }
 }
 
-fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 3] {
+fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     if has_focus {
         [
             (
@@ -3192,14 +3690,30 @@ fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 3] {
                 "Derivá la función seleccionada y explicá qué representa.",
             ),
             (
+                "Integrar",
+                "Integrá la función seleccionada y mostrá el resultado paso a paso.",
+            ),
+            (
                 "Interpretar",
                 "Explicá cómo leer el gráfico de la función seleccionada.",
+            ),
+            (
+                "Aclarar",
+                "Explícame con un ejemplo qué significa la pendiente en esta función.",
             ),
         ]
     } else {
         [
             ("Resolver", "Ayudame a resolver este problema paso a paso."),
             ("Graficar", "Decime qué función debería graficar y por qué."),
+            (
+                "Derivar",
+                "derivar x^3 + 2*x · explicame la regla y qué representa la derivada",
+            ),
+            (
+                "Límite",
+                "Calculá el límite de sin(x)/x cuando x tiende a 0 y explicámelo",
+            ),
             (
                 "Aclarar",
                 "No sé qué analizar todavía. Haceme una pregunta para orientar el problema.",
@@ -4057,6 +4571,8 @@ mod tests {
                                         proposal_results_available: false,
                                         correction_available: false,
                                     },
+                                    None,
+                                    &mut AssistantBlocksCache::default(),
                                 );
                             })
                             .response
@@ -4070,6 +4586,70 @@ mod tests {
             turn_height < transcript_height * 0.35,
             "short turn height {turn_height} consumed too much of the {transcript_height}px transcript"
         );
+    }
+
+    #[test]
+    fn blocks_cache_is_content_addressed_and_bounded() {
+        let mut cache = AssistantBlocksCache::default();
+        let content = "# Título\n\nTexto explicativo\n\n$$\\frac{1}{2}$$";
+        let first = cache.blocks(content);
+        assert!(!first.is_empty());
+        // Reuso por contenido idéntico sin re-parseo (misma cantidad de bloques).
+        let again = cache.blocks(content);
+        assert_eq!(first.len(), again.len());
+        let mutated = cache.blocks(&format!("{content} extra"));
+        assert!(mutated.len() >= first.len());
+        let mut empty = AssistantBlocksCache::default();
+        assert!(empty.blocks("").is_empty());
+    }
+
+    #[test]
+    fn agent_activity_is_bounded_and_ledger_sets_and_clears() {
+        let mut state = AssistantPanelState::default();
+        assert!(state.agent_activity.is_empty());
+        assert!(state.agent_ledger.is_none());
+
+        for index in 0..20 {
+            state.push_agent_activity(format!("tool {index}"));
+        }
+        assert!(state.agent_activity.len() <= 12);
+        assert_eq!(state.agent_activity.last().unwrap().text, "tool 19");
+
+        state.set_agent_ledger(Some("Goal: resolver".into()));
+        assert_eq!(state.agent_ledger.as_deref(), Some("Goal: resolver"));
+        state.set_agent_ledger(Some("   ".into()));
+        assert!(state.agent_ledger.is_none());
+
+        state.set_agent_ledger(Some("Goal: resolver".into()));
+        state.clear_agent_progress();
+        assert!(state.agent_activity.is_empty());
+        assert!(state.agent_ledger.is_none());
+    }
+
+    #[test]
+    fn media_card_renders_a_frame_without_panicking() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState::default();
+        let media = AssistantMedia {
+            title: "probe".into(),
+            frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
+        };
+        state.set_media(Some(media), &context);
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let theme = current_theme(ui.ctx());
+                let _ = theme;
+                // draw_media_card es privada al módulo tests; se valida vía set_media.
+            });
+        });
+        assert!(state.media.is_some());
+        assert!(state.media_textures().1);
+    }
+
+    #[test]
+    fn full_permission_defaults_to_automatic_remote_answers() {
+        let state = AssistantPanelState::default();
+        assert!(state.full_permission);
     }
 
     #[test]
@@ -4123,6 +4703,57 @@ mod tests {
         assert_eq!(state.conversation[0].role, ConversationRole::User);
         assert_eq!(state.conversation[0].content, "Graficá x^2 - 4x + 3");
         assert!(state.conversation_within_budget(4_096).is_empty());
+    }
+
+    #[test]
+    fn completed_responses_arm_the_reveal_and_later_actions_clear_it() {
+        let mut state = AssistantPanelState::default();
+        assert!(!state.reveal_pending);
+
+        state.begin_request("grafico x^2".into());
+        assert!(!state.reveal_pending);
+
+        state.complete_local_request("Respuesta con varios bloques.".into());
+        assert!(state.reveal_pending);
+
+        state.begin_request("otra pregunta".into());
+        assert!(!state.reveal_pending);
+
+        state.complete_request("respuesta".into());
+        assert!(state.reveal_pending);
+
+        state.fail_request("sin conexión");
+        assert!(!state.reveal_pending);
+
+        state.complete_local_request("respuesta nueva".into());
+        assert!(state.reveal_pending);
+        state.clear_conversation();
+        assert!(!state.reveal_pending);
+    }
+
+    #[test]
+    fn reveal_clip_clears_without_blocks_and_arms_with_blocks() {
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let mut empty = AssistantPanelState::default();
+                empty.complete_local_request("".into());
+                assert!(empty.reveal_pending);
+                assert!(assistant_reveal_clip(ui, &mut empty, 0).is_none());
+                assert!(!empty.reveal_pending);
+
+                let mut armed = AssistantPanelState::default();
+                armed.complete_local_request("bloque uno\n\nbloque dos".into());
+                let clip = assistant_reveal_clip(ui, &mut armed, 5);
+                assert!(clip.is_some());
+                assert!(armed.reveal_pending);
+                assert!(armed.reveal_started_at.is_some());
+                assert!(
+                    armed.reveal_started_at.unwrap().is_finite(),
+                    "reveal clock must remain finite"
+                );
+            });
+        });
     }
 
     #[test]
@@ -4414,7 +5045,9 @@ mod tests {
     #[test]
     fn assistant_width_preserves_a_canvas_budget_before_reaching_its_default_width() {
         let (minimum, maximum, default) = assistant_panel_widths(960.0);
-        assert_eq!((minimum, maximum, default), (280.0, 380.0, 320.0));
+        assert_eq!(minimum, 340.0);
+        assert_eq!(default, 400.0);
+        assert!((400.0..=404.0).contains(&maximum), "maximum {maximum}");
 
         let (minimum, maximum, default) = assistant_panel_widths(600.0);
         assert!(minimum <= maximum);

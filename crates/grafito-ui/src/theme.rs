@@ -257,7 +257,7 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     grid_minor: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(26, 29, 37, 228),
+    panel_bg: Color32::from_rgba_unmultiplied(28, 28, 30, 230),
     toolbar_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 236),
     input_bar_bg: Color32::from_rgba_unmultiplied(32, 38, 52, 240),
     sidebar_bg: Color32::from_rgba_unmultiplied(24, 28, 38, 228),
@@ -293,7 +293,7 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     text_label: Color32::from_gray(120),
 
     // Acentos y estados
-    accent: Color32::from_rgb(94, 139, 255),
+    accent: Color32::from_rgb(10, 132, 255),
     accent_muted: Color32::from_rgb(37, 55, 92),
     accent_strong: Color32::from_rgb(120, 165, 255),
     success: Color32::from_rgb(46, 212, 122),
@@ -335,13 +335,13 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
 /// Tema claro. Ver `DARK`.
 pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Theme {
     // Canvas y superficie
-    canvas_bg: Color32::from_rgb(250, 250, 252),
+    canvas_bg: Color32::from_rgb(245, 245, 247),
     canvas_grid_minor: Color32::from_rgb(232, 232, 236),
     grid_line: Color32::from_rgba_unmultiplied(0, 0, 0, 25),
     grid_minor: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
 
     // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 228),
+    panel_bg: Color32::from_rgba_unmultiplied(246, 246, 248, 230),
     toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 236),
     input_bar_bg: Color32::from_rgba_unmultiplied(245, 247, 252, 242),
     sidebar_bg: Color32::from_rgba_unmultiplied(248, 250, 255, 230),
@@ -376,7 +376,7 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     text_label: Color32::from_gray(120),
 
     // Acentos y estados
-    accent: Color32::from_rgb(36, 97, 252),
+    accent: Color32::from_rgb(0, 122, 255),
     accent_muted: Color32::from_rgba_unmultiplied(38, 99, 255, 70),
     accent_strong: Color32::from_rgb(20, 70, 220),
     success: Color32::from_rgb(0, 110, 60),

@@ -84,3 +84,18 @@ Este plan sustituye el roadmap heredado. La prioridad es convertir las capacidad
 | C.1 | Incorporar torre numérica exacta y de precisión arbitraria. [tdd:required] | Integer/Rational/BigFloat/Complex preservan precisión solicitada y pasan corpus exacto. | 1.1, 1.2 | cc:TODO |
 | C.2 | Crear IR simbólico canónico con assumptions, ramas e intervalos certificados. [tdd:required] | Simplificaciones conservan dominio; el intervalo contiene el oráculo en el corpus certificado. | C.1 | cc:TODO |
 | C.3 | Añadir álgebra polinómica, solve, cálculo simbólico, transformadas y API headless cancelable. [tdd:required] | 21.000 casos simbólicos y 20.000 puntos numéricos cumplen el corpus C; ningún comando bloquea UI. | C.2, A.2 | cc:TODO |
+## Fase F: Asistente agéntico, plugins y pedagogía (2026-08)
+
+Entregas (TDD):
+
+| Task | Contenido | Estado |
+|------|-----------|--------|
+| F.1 | Núcleo agéntico en Rust (grafito-agent): loop acotado, schema de tools, router de modelos (fast/reasoner/audit) inspirado en deepseek-harness. | cc:完了 |
+| F.2 | Adaptador de red con tool calling y herramientas seguras (evaluate_expr, grafito_docs, ask_user) administradas por grafito-assistant::agent; eventos de actividad. | cc:完了 |
+| F.3 | Sistema de plugins declarativo (grafito-plugins): manifiesto grafito-plugin.toml, validación fail-closed, fingerprint y activación; UI en ajustes del asistente; instrucciones inyectadas al system prompt. | cc:完了 |
+| F.4 | Motor de animaciones externo (grafito-anim): puente IPC stdio con protocolo JSON v1, presupuestos y validación de rutas; plugin Python/Manim con fallback sin dependencias. | cc:完了 |
+| F.5 | Animaciones de UI del asistente: revelado por bloques, elevación de tarjetas y transiciones deterministas al reloj de egui. | cc:完了 |
+| F.6 | Eficiencia del transporte (cliente compartido) y logotipo garantizado en el .deb (hicolor + scalable, build fail-closed). | cc:完了 |
+| F.7 | Plugin J-Space por defecto (ledger+band), permiso completo (respuestas en línea automáticas), hoja de cálculo eliminada de la UI, asistente más ancho (400px) y plugins del sistema en el paquete. | cc:完了 |
+| F.8 | Pendiente de wiring en la app: fila de actividad de tools, modo agente visual y modo tutor con planes multi-paso. | cc:TODO |
+

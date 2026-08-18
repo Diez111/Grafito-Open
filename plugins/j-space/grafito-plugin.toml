@@ -1,0 +1,18 @@
+[plugin]
+id = "j-space"
+name = "J-Space (ledger y gating de tarea)"
+version = "1.0.0"
+category = "skills"
+description = "Reimplementación del patrón J-Space: ledger Goal/Core/Verified/Open/Next, gating fast/full/loop, primera persona funcional y monitor→control. Inspirado en el reporte DeepSeek V4 × J-Space Capability Realization (Tiger3807861189)."
+activation = "auto"
+min_app_version = "1.2.20"
+
+[instructions]
+files = ["j-space.md"]
+budget_bytes = 4096
+
+[[tools]]
+id = "evaluate_expr"
+
+[[tools]]
+id = "grafito_docs"

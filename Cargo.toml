@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-complex"]
+members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-plugins", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex"]
 resolver = "2"
 
 [workspace.package]
@@ -22,6 +22,9 @@ rust-version = "1.81"
 
 [workspace.dependencies]
 # Core
+grafito-agent = { path = "crates/grafito-agent" }
+grafito-anim = { path = "crates/grafito-anim" }
+grafito-plugins = { path = "crates/grafito-plugins" }
 grafito-core = { path = "crates/grafito-core" }
 grafito-command = { path = "crates/grafito-command" }
 grafito-geometry = { path = "crates/grafito-geometry" }
@@ -29,6 +32,7 @@ grafito-render = { path = "crates/grafito-render" }
 grafito-ui = { path = "crates/grafito-ui" }
 grafito-assistant = { path = "crates/grafito-assistant" }
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
+grafito-whiteboard = { path = "crates/grafito-whiteboard" }
 
 # Window & GPU
 eframe = "0.29"
@@ -69,6 +73,8 @@ sha2 = "0.10"
 # Utilities
 uuid = { version = "=1.20.0", features = ["v4", "serde"] }
 thiserror = "1.0"
+toml = "0.8"
+gif = "0.13"
 log = "0.4"
 env_logger = "0.11"
 # RUSTSEC-2026-0190 is fixed in 1.0.103; pin the minimum safe release.

@@ -5,6 +5,42 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.2.21-beta] - Unreleased
+
+#### Añadido
+- **Núcleo agéntico en Rust (`grafito-agent`)**: integración de las capacidades del DeepSeek Harness en el asistente — schema de herramientas (`ToolSchema`/`ToolCall`/`ToolResult`), loop de agente acotado (`run_agent`) con presupuesto de turnos, timeout global y cancelación cooperativa, y enrutamiento de modelos por tarea (`ModelRoute` fast/reasoner/audit) con normalización de acentos.
+- **Adaptador de red con tool calling (`grafito-assistant::agent`)**: nuevo transporte OpenAI-compatible con `tools`, parsing de `tool_calls`, y herramientas seguras (`evaluate_expr`, `grafito_docs`, `ask_user` con consentimiento) que nunca mutan el documento ni acceden a archivos; `request_agent_on_worker` expone eventos de actividad.
+- **Sistema de plugins declarativos (`grafito-plugins`)**: manifiestos `grafito-plugin.toml` (instrucciones, tools, comandos, escenas y motores externos), validación fail-closed, registry con fingerprints y activación auto/manual, más UI en la configuración del asistente para listar y activar/desactivar plugins.
+- **Instrucciones de plugins en el system prompt**: `AssistantRequest.system_instructions` acotada se inyecta en los payloads OpenAI/Anthropic/Fusion para dar contexto pedagógico a cada consulta.
+- **Motor de animaciones externo (`grafito-anim`)**: puente IPC sobre stdio con protocolo JSON v1 (handshake, jobs, progreso, artefactos, errores), validación de rutas dentro del directorio de trabajo y presupuestos; incluye el plugin `manim_engine` (Python/Manim) con fallback sin dependencias.
+- **Animaciones de UI del asistente**: las respuestas se revelan por bloques con fade determinista al reloj de egui, tarjetas verificadas con elevación al hover y resaltes de acción.
+- **Plugin J-Space por defecto** (`plugins/j-space`): ledger de tarea Goal/Core/Verified/Open/Next, gating fast/full/loop (`TaskBand`) y primera persona funcional con done-check, reimplementados en `grafito-agent` (`JSpaceLedger`, `run_agent_with_ledger`) e inyectados al contexto del agente.
+- **Permiso completo para el asistente**: con `assistant_full_permission` (default ON) la consulta remota arranca automáticamente cuando la resolución local no alcanza y hay proveedor listo — sin cartel de autorización; el consentimiento de imágenes se otorga automático (la capacidad de visión del modelo sigue siendo un requisito real).
+- **Asistente más ancho por defecto**: el panel pasa de 320px a 400px (rango 340–460) y la cuadrícula de canvas conserva presupuesto real.
+- **Modo agente en la UI (F.8)**: toggle en configuración; cuando está activo, el asistente usa el loop con herramientas seguras y muestra en el chat la **actividad de cada tool** y una tarjeta **colapsable con el ledger J-Space** mientras trabaja (resultados con `done-check`, cancelación cooperativa).
+- **Corpus semilla del solver (Fase A)**: 31 casos de referencia versionados (aritmética, lineal, cuadrática, rechazos y gráfica) en `crates/grafito-assistant/tests/solver_corpus.rs`.
+- **Solver local pedagógico con CAS nativo**: el asistente resuelve sin red `derivar/derivada de`, `integrar/integral de` y `límite de … en n` usando `grafito-geometry::symbolic` (derivada, integral y límite), con pasos que citan la regla del CAS; prompts de ejemplo pedagógicos en el estado vacío.
+- **Animaciones reproducidas en el chat**: botón «Animá» invoca el motor externo (`grafito-anim` + plugin j-space/engine), decodifica el GIF y lo reproduce como frames en vivo en la tarjeta de animación del asistente (con límites y degradación clara si el motor no está instalado).
+- **Tabla de valores eliminada**: se retira la tabla x|f(x) del panel derecho y del drawer (perspectivas Álgebra-CAS y Cálculo pasan a sin panel derecho); la pestaña «Datos» conserva estadística. El comando `DataTable` (objeto de datos para regresión) se mantiene.
+- **Inspector y UX**: estado vacío del inspector y panel vacío centrados verticalmente, texto de ayuda más claro, y pestaña de datos renombrada a «Datos».
+- **Diálogo de guardado robusto**: el diálogo Guardar/Descartar/Cancelar vuelve a estar siempre centrado y con ancho fijo, scroll acotado para textos largos, texto envuelto y botones alineados a la derecha con «Guardar» primario (id explícito para evitar posiciones recordadas).
+- **Asistente consciente del motor**: el ambito de capacidades ahora nombra el CAS simbólico (derivada, integral, límite, Taylor, Solve, Factor) y aclara qué resuelve el motor local sin red, además de los análisis numéricos y las perspectivas.
+- **Animaciones siempre visibles**: el botón «Animá» ya no exige instalar nada — si el motor externo (j-space/engine + Manim) no está, Grafito genera la animación **nativa en Rust** (recta tangente deslizante sobre parábola) y la reproduce igual en el chat.
+- **UI de plugins pulida**: filas tipo tarjeta con nombre/descripción y toggle a la derecha, mensaje aclarando que son opcionales y que el asistente y las animaciones nativas funcionan sin ellos.
+- **Pizarra nativa (tipo Excalidraw)**: overlay a pantalla completa con toolbar flotante redondeada estilo macOS, lienzo con grid/pan/zoom, herramientas Lápiz/Rectángulo/Elipse/Flecha/Texto/Borrador/Seleccionar, limpiar y cerrar (Esc). Botón «Pizarra» en la barra superior. Modelo en el crate `grafito-whiteboard` (headless, testeado).
+- **Tema macOS**: paleta pulida de macOS en claro y oscuro (acento azul #0A84FF/#007AFF, paneles translúcidos suaves, canvas #f5f5f7), conservando la legibilidad (contraste AA) y la profundidad de las superficies.
+- **Iconos minimalistas**: subconjunto redibujado a mano (pizarra, flecha, más/menos, formas, cuaderno, compás) en estilo monocromo adaptable a claro/oscuro.
+- **AGENTS.md**: comandos de verificación y convenciones para agentes.
+
+#### Cambiado
+- **Eficiencia del transporte remoto**: el cliente HTTP bloqueante ahora es compartido entre peticiones (pool de conexiones reutilizado con timeout por petición), en lugar de crear un `Client` por llamada.
+- **Empaquetado `.deb`**: el logotipo de Grafito es fuente de verdad del ícono del escritorio; el build falla si falta y además instala la variante scalable (`hicolor/scalable/apps/grafito.svg`), con pruebas de empaquetado para el ícono y el `.desktop`.
+- **Hoja de cálculo eliminada**: se quita la entrada "Hoja"/spreadsheet de la UI (drawer, tool, panel derecho y estados de edición); el formato de documento conserva los campos legacy para abrir documentos antiguos.
+- **Plugins del sistema**: los plugins por defecto se instalan en el paquete (`/usr/share/grafito/plugins`) y la app los carga junto a la carpeta del usuario (`PluginRegistry::load_many`).
+
+#### Corregido
+- **Instalación del logotipo**: el paquete del instalador ahora incluye explícitamente el ícono SVG scalable y verifica la presencia de cada tamaño antes de empaquetar (evita distribuir launcher sin logo).
+
 ## [1.2.20-beta] - 2026-07-12
 
 #### Añadido

@@ -2,8 +2,8 @@
 //! and the floating color-picker dialog.
 
 use crate::app::{
-    ActiveColorPicker, AutocompleteItem, ColorPickerTarget, DeferredPanelSnapshot, FileCommand,
-    UnsavedDecision,
+    ActiveColorPicker, AutocompleteItem, ColorPickerTarget, DeferredPanelSnapshot, DocumentAction,
+    FileCommand, UnsavedDecision,
 };
 use crate::{GrafitoApp, Perspective, ViewMode, WorkspaceDockTab};
 use egui::{Align2, Color32};
@@ -218,9 +218,8 @@ fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             (0, "Álgebra"),
             (1, "Herramientas"),
             (2, "CAS"),
-            (3, "Tabla"),
-            (4, "Hoja"),
-            (5, "Vista"),
+            (3, "Datos"),
+            (4, "Vista"),
         ] {
             let selected = app.compact_drawer_open && app.sidebar_tab == tab;
             if ui.selectable_label(selected, label).clicked() {
@@ -374,6 +373,20 @@ pub(crate) fn draw_top_bar(
                             LIGHT.apply(ui.ctx());
                         }
                     }
+                    if action_icon_button(
+                        ui,
+                        Icon::Whiteboard,
+                        if app.whiteboard_open {
+                            accent
+                        } else {
+                            grafito_ui::theme::current_theme(ui.ctx()).text_secondary
+                        },
+                        "Pizarra libre (dibujo tipo Excalidraw)",
+                    )
+                    .clicked()
+                    {
+                        app.whiteboard_open = !app.whiteboard_open;
+                    }
                     if show_right_drawer_toggle
                         && action_icon_button(
                             ui,
@@ -425,8 +438,7 @@ pub(crate) fn draw_top_bar(
             "Herramientas de construcción y análisis",
         ),
         ("CAS", Icon::Analyze, "Cálculo simbólico paso a paso"),
-        ("Tabla", Icon::Grid, "Tabla de valores x|f(x), estadística"),
-        ("Hoja", Icon::Histogram, "Hoja de cálculo y datos"),
+        ("Datos", Icon::Grid, "Estadística y análisis de datos"),
         ("Vista", Icon::Eye, "Cuadrícula, ejes y estilo"),
     ];
     if show_sidebar {
@@ -841,31 +853,22 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
     let mut open = true;
     let mut decision = None;
     egui::Window::new("Cambios sin guardar")
+        .id(egui::Id::new("unsaved_changes_dialog"))
         .collapsible(false)
         .resizable(false)
+        .default_width(420.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .order(egui::Order::Foreground)
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.label(action.prompt_message());
-            if let Some(error) = &save_error {
-                ui.add_space(6.0);
-                ui.colored_label(
-                    current_theme(ui.ctx()).danger,
-                    format!("No se pudo guardar: {error}"),
-                );
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancelar").clicked() {
-                    decision = Some(UnsavedDecision::Cancel);
-                }
-                if ui.button("Descartar").clicked() {
-                    decision = Some(UnsavedDecision::Discard);
-                }
-                if ui.button("Guardar").clicked() {
-                    decision = Some(UnsavedDecision::Save);
-                }
-            });
+            egui::ScrollArea::vertical()
+                .max_height(ui.ctx().screen_rect().height() * 0.6)
+                .show(ui, |ui| {
+                    ui.set_min_width(380.0);
+                    egui::Frame::none().show(ui, |ui| {
+                        dialog_contents(ui, action, save_error.as_ref(), &mut decision);
+                    });
+                });
         });
     if !open && decision.is_none() {
         decision = Some(UnsavedDecision::Cancel);
@@ -873,6 +876,45 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
     if let Some(decision) = decision {
         app.queue_unsaved_decision(decision);
     }
+}
+
+fn dialog_contents(
+    ui: &mut egui::Ui,
+    action: DocumentAction,
+    save_error: Option<&String>,
+    decision: &mut Option<UnsavedDecision>,
+) {
+    ui.add(egui::Label::new(
+        egui::RichText::new("Guardar cambios antes de continuar?")
+            .size(16.0)
+            .strong(),
+    ));
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(egui::RichText::new(action.prompt_message()).size(13.0)).wrap());
+    if let Some(error) = save_error {
+        ui.add_space(6.0);
+        ui.colored_label(
+            current_theme(ui.ctx()).danger,
+            format!("No se pudo guardar: {error}"),
+        );
+    }
+    ui.add_space(14.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 30.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if ui.button("Guardar").clicked() {
+                *decision = Some(UnsavedDecision::Save);
+            }
+            if ui.button("Descartar").clicked() {
+                *decision = Some(UnsavedDecision::Discard);
+            }
+            if ui.button("Cancelar").clicked() {
+                *decision = Some(UnsavedDecision::Cancel);
+            }
+        },
+    );
 }
 
 fn draw_autocomplete_popup(

@@ -67,6 +67,13 @@ pub enum Icon {
     Midpoint,
     Perpendicular,
     Tangent,
+    // Iconos minimalistas adicionales (redibujados, estilo Grafito)
+    Whiteboard,
+    ArrowRight,
+    PlusMinus,
+    Shapes,
+    Notebook,
+    DrawCompass,
 
     // Análisis y medida
     Distance,
@@ -184,6 +191,12 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Midpoint => icon_midpoint(painter, inner, color, stroke_thick),
         Icon::Perpendicular => icon_perpendicular(painter, inner, color, stroke_thick),
         Icon::Tangent => icon_tangent(painter, inner, color, stroke_thick),
+        Icon::Whiteboard => icon_whiteboard(painter, inner, color, stroke_thick),
+        Icon::ArrowRight => icon_arrow_right(painter, inner, color, stroke_thick),
+        Icon::PlusMinus => icon_plus_minus(painter, inner, color, stroke_thick),
+        Icon::Shapes => icon_shapes(painter, inner, color, stroke_thick),
+        Icon::Notebook => icon_notebook(painter, inner, color, stroke_thick),
+        Icon::DrawCompass => icon_draw_compass(painter, inner, color, stroke_thick),
 
         Icon::Distance => icon_distance(painter, inner, color, stroke_thick),
         Icon::Angle => icon_angle(painter, inner, color, stroke_thick),
@@ -1626,9 +1639,170 @@ fn icon_check(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     );
 }
 
+/// Pizarra minimalista (rectángulo + base).
+fn icon_whiteboard(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let tl = pos2(r.min.x + 0.12 * r.width(), r.min.y + 0.18 * r.height());
+    let br = pos2(r.max.x - 0.12 * r.width(), r.max.y - 0.3 * r.height());
+    painter.rect_stroke(Rect::from_min_max(tl, br), 0.0, stroke);
+    painter.line_segment(
+        [
+            pos2(r.min.x + 0.24 * r.width(), r.min.y + 0.42 * r.height()),
+            pos2(r.max.x - 0.24 * r.width(), r.min.y + 0.42 * r.height()),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(r.min.x + 0.12 * r.width(), r.max.y - 0.1 * r.height()),
+            pos2(r.max.x - 0.12 * r.width(), r.max.y - 0.1 * r.height()),
+        ],
+        stroke,
+    );
+}
+
+/// Flecha simple hacia la derecha.
+fn icon_arrow_right(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let y = r.center().y;
+    let tip_x = r.max.x - 0.14 * r.width();
+    painter.line_segment(
+        [pos2(r.min.x + 0.12 * r.width(), y), pos2(tip_x, y)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(tip_x - 0.18 * r.width(), y - 0.22 * r.height()),
+            pos2(tip_x, y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(tip_x - 0.18 * r.width(), y + 0.22 * r.height()),
+            pos2(tip_x, y),
+        ],
+        stroke,
+    );
+}
+
+/// Más y menos lado a lado (matemática).
+fn icon_plus_minus(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let y = r.center().y;
+    let plus_x = r.min.x + 0.3 * r.width();
+    painter.line_segment(
+        [
+            pos2(plus_x - 0.16 * r.width(), y),
+            pos2(plus_x + 0.16 * r.width(), y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(plus_x, y - 0.2 * r.height()),
+            pos2(plus_x, y + 0.2 * r.height()),
+        ],
+        stroke,
+    );
+    let minus_x = r.max.x - 0.3 * r.width();
+    painter.line_segment(
+        [
+            pos2(minus_x - 0.16 * r.width(), y),
+            pos2(minus_x + 0.16 * r.width(), y),
+        ],
+        stroke,
+    );
+}
+
+/// Círculo, triángulo y rectángulo (formas).
+fn icon_shapes(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let circle_center = pos2(r.max.x - 0.25 * r.width(), r.min.y + 0.34 * r.height());
+    painter.circle_stroke(circle_center, 0.16 * r.height(), stroke);
+    let rect = Rect::from_min_max(
+        pos2(r.min.x + 0.12 * r.width(), r.min.y + 0.55 * r.height()),
+        pos2(r.min.x + 0.42 * r.width(), r.max.y - 0.14 * r.height()),
+    );
+    painter.rect_stroke(rect, 0.0, stroke);
+    let apex = pos2(r.max.x - 0.3 * r.width(), r.min.y + 0.62 * r.height());
+    let left = pos2(r.max.x - 0.44 * r.width(), r.max.y - 0.16 * r.height());
+    let right = pos2(r.max.x - 0.16 * r.width(), r.max.y - 0.16 * r.height());
+    painter.line_segment([apex, left], stroke);
+    painter.line_segment([left, right], stroke);
+    painter.line_segment([right, apex], stroke);
+}
+
+/// Cuaderno con lomo y líneas.
+fn icon_notebook(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let tl = pos2(r.min.x + 0.28 * r.width(), r.min.y + 0.14 * r.height());
+    let br = pos2(r.max.x - 0.12 * r.width(), r.max.y - 0.14 * r.height());
+    painter.rect_stroke(Rect::from_min_max(tl, br), 0.0, stroke);
+    painter.line_segment(
+        [
+            pos2(tl.x, r.min.y + 0.35 * r.height()),
+            pos2(br.x, r.min.y + 0.35 * r.height()),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(tl.x, r.min.y + 0.5 * r.height()),
+            pos2(br.x, r.min.y + 0.5 * r.height()),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            pos2(tl.x, r.min.y + 0.65 * r.height()),
+            pos2((tl.x + br.x) / 2.0, r.min.y + 0.65 * r.height()),
+        ],
+        stroke,
+    );
+}
+
+/// Compás de dibujo: pata vertical y dos brazos.
+fn icon_draw_compass(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
+    let top_x = r.center().x;
+    let joint = pos2(top_x, r.min.y + 0.42 * r.height());
+    painter.line_segment([pos2(top_x, r.min.y + 0.12 * r.height()), joint], stroke);
+    painter.line_segment(
+        [
+            joint,
+            pos2(r.min.x + 0.16 * r.width(), r.max.y - 0.18 * r.height()),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            joint,
+            pos2(r.max.x - 0.16 * r.width(), r.max.y - 0.18 * r.height()),
+        ],
+        stroke,
+    );
+    painter.circle_stroke(joint, 0.09 * r.height(), stroke);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minimalist_icons_render_without_panicking() {
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let painter = ui.painter();
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(24.0, 24.0));
+                for icon in [
+                    Icon::Whiteboard,
+                    Icon::ArrowRight,
+                    Icon::PlusMinus,
+                    Icon::Shapes,
+                    Icon::Notebook,
+                    Icon::DrawCompass,
+                ] {
+                    draw_icon(painter, rect, icon, egui::Color32::WHITE);
+                }
+            });
+        });
+    }
 
     #[test]
     fn icon_enum_variants_compile() {
@@ -1660,6 +1834,12 @@ mod tests {
         let _ = Icon::Midpoint;
         let _ = Icon::Perpendicular;
         let _ = Icon::Tangent;
+        let _ = Icon::Whiteboard;
+        let _ = Icon::ArrowRight;
+        let _ = Icon::PlusMinus;
+        let _ = Icon::Shapes;
+        let _ = Icon::Notebook;
+        let _ = Icon::DrawCompass;
         let _ = Icon::Distance;
         let _ = Icon::Angle;
         let _ = Icon::Area;

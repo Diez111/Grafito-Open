@@ -1,0 +1,11 @@
+[package]
+name = "grafito-whiteboard"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Modelo puro de pizarra de dibujo libre (estilo Excalidraw) para Grafito: trazos, formas, flechas, texto y borrado"
+
+[dependencies]

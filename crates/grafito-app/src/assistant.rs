@@ -9,8 +9,8 @@ use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
     AssistantRequest, AssistantResponse, AttachmentLimits, ImmutableDocumentContext,
     LocalAssistantStatus, ProposedPlan, ProviderCapabilities, ProviderProfile,
-    REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
-    REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
+    REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES,
+    REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES, REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
 };
 use grafito_command::assistant_proposals::{
     assistant_fenced_proposals, execute_assistant_command, execute_assistant_parameter,
@@ -85,6 +85,8 @@ pub(crate) struct AssistantRuntime {
     model_job: Option<AssistantModelJob>,
     model_refresh_queued: bool,
     image_job: Option<AssistantImageJob>,
+    agent_job: Option<AssistantAgentJob>,
+    anim_job: Option<AssistantAnimJob>,
     session_api_key: Option<SessionApiKey>,
 }
 
@@ -110,7 +112,23 @@ impl AssistantRuntime {
     }
 
     fn remote_request_slot_is_free(&self) -> bool {
-        self.remote_job.is_none() && self.proposal_job.is_none()
+        self.remote_job.is_none() && self.proposal_job.is_none() && self.agent_job.is_none()
+    }
+
+    fn cancel_stale_agent_job(
+        &mut self,
+        current_provider: ProviderProfile,
+        current_model: &str,
+    ) -> bool {
+        if let Some(job) = self.agent_job.as_ref() {
+            if !job.cancellation.is_cancelled()
+                && !accepts_remote_result(current_provider, current_model, job.provider, &job.model)
+            {
+                job.cancellation.cancel();
+                return true;
+            }
+        }
+        false
     }
 
     fn cancel_stale_remote_job(
@@ -323,6 +341,25 @@ struct AssistantImageJob {
     receiver: Receiver<Result<grafito_assistant_types::ImageAttachment, String>>,
 }
 
+/// Mensaje del hilo del agente hacia la UI.
+enum AgentChannelMsg {
+    Event(grafito_agent::AgentEvent),
+    Done(Result<grafito_agent::loop_engine::AgentOutcome, String>),
+}
+
+/// Job que genera y carga una animación del motor externo.
+struct AssistantAnimJob {
+    receiver: std::sync::mpsc::Receiver<Result<grafito_ui::assistant::AssistantMedia, String>>,
+}
+
+/// Job del modo agente (loop con herramientas).
+struct AssistantAgentJob {
+    provider: ProviderProfile,
+    model: String,
+    cancellation: grafito_agent::loop_engine::Cancellation,
+    receiver: Receiver<AgentChannelMsg>,
+}
+
 struct FinishedRemoteJob {
     id: u64,
     provider: ProviderProfile,
@@ -383,10 +420,117 @@ impl GrafitoApp {
     /// host del asistente, incluso cuando su pestaña no es la visible.
     pub(crate) fn sync_assistant_for_frame(&mut self, ctx: &egui::Context) {
         self.poll_assistant_jobs(ctx);
+        if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
+            match job.receiver.try_recv() {
+                Ok(Ok(media)) => {
+                    self.assistant_runtime.anim_job = None;
+                    self.assistant.set_media(Some(media.clone()), ctx);
+                    self.notify("Animación lista.", ToastKind::Success);
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.assistant_runtime.anim_job = None;
+                    self.assistant.set_media(None, ctx);
+                    let message = format!("No se pudo generar la animación: {error}");
+                    self.notify(&message, ToastKind::Error);
+                    self.show_assistant_error(message);
+                    ctx.request_repaint();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.assistant_runtime.anim_job = None;
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if !self.plugins_loaded {
+            self.plugins_loaded = true;
+            self.load_assistant_plugins();
+        }
         self.assistant.focus = grafito_command::assistant_context::selected_function_focus(
             &self.document,
             self.selected_object,
         );
+    }
+
+    /// Carga una sola vez el registry de plugins y aplica las preferencias del usuario.
+    fn load_assistant_plugins(&mut self) {
+        let context = plugin_validation_context();
+        let config = crate::utils::load_config();
+        let mut registry = grafito_plugins::PluginRegistry::load_many(
+            &[
+                &crate::utils::plugins_dir(),
+                &crate::utils::user_data_plugins_dir(),
+                &crate::utils::system_plugins_dir(),
+            ],
+            &context,
+        );
+        for plugin in &mut registry.plugins {
+            let id = plugin.manifest.plugin.id.clone();
+            let automatic = plugin.manifest.plugin.activation != "manual";
+            plugin.enabled = if config.enabled_plugins.contains(&id) {
+                true
+            } else if config.disabled_plugins.contains(&id) {
+                false
+            } else {
+                automatic
+            };
+        }
+        self.plugin_registry = Some(registry);
+        self.refresh_plugin_snapshot();
+    }
+
+    /// Refresca el snapshot mostrado en la ventana de ajustes del asistente.
+    fn refresh_plugin_snapshot(&mut self) {
+        let Some(registry) = &self.plugin_registry else {
+            self.assistant.plugins.clear();
+            return;
+        };
+        self.assistant.plugins = registry
+            .plugins
+            .iter()
+            .map(|plugin| grafito_ui::assistant::PluginRow {
+                id: plugin.manifest.plugin.id.clone(),
+                name: plugin.manifest.plugin.name.clone(),
+                version: plugin.manifest.plugin.version.clone(),
+                category: plugin.manifest.plugin.category.clone(),
+                description: plugin.manifest.plugin.description.clone(),
+                enabled: plugin.enabled,
+                error: plugin.error.clone(),
+            })
+            .collect();
+    }
+
+    /// Instrucciones locales de los plugins activos, ajustadas al presupuesto.
+    fn plugin_instructions_budgeted(&self) -> String {
+        const PLUGIN_INSTRUCTION_CAP_BYTES: usize = 4 * 1024;
+        let Some(registry) = &self.plugin_registry else {
+            return String::new();
+        };
+        registry.instructions_bounded(
+            grafito_assistant_types::MAX_SYSTEM_INSTRUCTIONS_BYTES
+                .min(PLUGIN_INSTRUCTION_CAP_BYTES),
+        )
+    }
+
+    /// Activa o desactiva un plugin y persiste la preferencia.
+    fn toggle_assistant_plugin(&mut self, id: &str, enabled: bool) {
+        let Some(registry) = self.plugin_registry.as_mut() else {
+            return;
+        };
+        if !registry.set_enabled(id, enabled) {
+            return;
+        }
+        let mut config = crate::utils::load_config();
+        config.enabled_plugins.retain(|existing| existing != id);
+        config.disabled_plugins.retain(|existing| existing != id);
+        if enabled {
+            config.enabled_plugins.push(id.to_string());
+        } else {
+            config.disabled_plugins.push(id.to_string());
+        }
+        crate::utils::save_config(&config);
+        self.refresh_plugin_snapshot();
     }
 
     /// Dibuja el asistente como panel independiente fuera del workspace 3D.
@@ -402,6 +546,7 @@ impl GrafitoApp {
             &mut self.assistant,
             reserved_bottom_height,
             visuals,
+            &mut self.assistant_blocks_cache,
         ) {
             self.handle_assistant_action(ctx, action);
         }
@@ -428,8 +573,12 @@ impl GrafitoApp {
         }
         let visuals = self.assistant_visuals(ctx);
 
-        let mut action =
-            grafito_ui::assistant::draw_assistant_contents(ui, &mut self.assistant, visuals);
+        let mut action = grafito_ui::assistant::draw_assistant_contents(
+            ui,
+            &mut self.assistant,
+            visuals,
+            &mut self.assistant_blocks_cache,
+        );
         if action.is_none() {
             action =
                 grafito_ui::assistant::draw_assistant_settings_window(ctx, &mut self.assistant);
@@ -560,6 +709,16 @@ impl GrafitoApp {
                 ctx.copy_text(message);
                 self.notify("Mensaje copiado.", ToastKind::Info);
             }
+            AssistantUiAction::TogglePlugin(id, enabled) => {
+                self.toggle_assistant_plugin(&id, enabled)
+            }
+            AssistantUiAction::FullPermissionChanged(_) => {
+                self.save_app_config();
+            }
+            AssistantUiAction::AgentModeChanged(_) => {
+                self.save_app_config();
+            }
+            AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
         }
     }
 
@@ -771,6 +930,15 @@ impl GrafitoApp {
         };
         let mut request = AssistantRequest::remote(question.clone(), document_context);
         request.focus = focus;
+        let plugin_instructions = self.plugin_instructions_budgeted();
+        let plugin_instruction_bytes = if plugin_instructions.is_empty() {
+            0
+        } else {
+            plugin_instructions
+                .len()
+                .saturating_add(REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES)
+        };
+        request.system_instructions = plugin_instructions;
         let focus_bytes = request
             .focus
             .as_ref()
@@ -799,6 +967,7 @@ impl GrafitoApp {
             )
             .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
             .saturating_sub(repair_feedback_bytes)
+            .saturating_sub(plugin_instruction_bytes)
             .min(1_536);
         request.tool_catalog =
             grafito_command::assistant_context::assistant_tool_catalog(&question, catalog_budget);
@@ -821,7 +990,8 @@ impl GrafitoApp {
             )
             .saturating_sub(request.tool_catalog.len())
             .saturating_sub(catalog_overhead)
-            .saturating_sub(repair_feedback_bytes);
+            .saturating_sub(repair_feedback_bytes)
+            .saturating_sub(plugin_instruction_bytes);
         request.conversation = match history_before_turn {
             Some(target_turn) => self
                 .assistant
@@ -881,6 +1051,152 @@ impl GrafitoApp {
             cancellation,
             receiver,
         });
+    }
+
+    /// Lanza el modo agente (loop con herramientas seguras) en un hilo y
+    /// enruta sus eventos de actividad + resultado hacia la UI.
+    fn start_agent_assistant_job(&mut self, ctx: &egui::Context, launch: AssistantRemoteLaunch) {
+        let settings = launch.settings;
+        let request = launch.request;
+        let api_key = launch.api_key;
+        let provider = launch.provider;
+        let model = launch.model;
+        let question = launch.question;
+        self.assistant_runtime.next_request_id =
+            self.assistant_runtime.next_request_id.wrapping_add(1);
+        let _ = self.assistant_runtime.next_request_id;
+        let cancellation = grafito_agent::loop_engine::Cancellation::default();
+        let system = grafito_assistant::assistant_system_prompt(&request);
+        let prompt = grafito_assistant::assistant_remote_prompt(&request)
+            .unwrap_or_else(|_| question.clone());
+        let mut user_messages: Vec<serde_json::Value> = Vec::new();
+        for turn in &request.conversation {
+            let role = match turn.role {
+                grafito_assistant_types::ConversationRole::User => "user",
+                grafito_assistant_types::ConversationRole::Assistant => "assistant",
+            };
+            user_messages.push(serde_json::json!({"role": role, "content": turn.content}));
+        }
+        user_messages.push(serde_json::json!({"role": "user", "content": prompt}));
+        let tools = grafito_assistant::default_agent_tools();
+        let budget = grafito_agent::loop_engine::AgentBudget::default();
+        let goal = question
+            .chars()
+            .take(grafito_agent::ledger::MAX_LEDGER_GOAL_CHARS)
+            .collect::<String>();
+        let ledger = if grafito_agent::router::classify_band(&question)
+            == grafito_agent::router::TaskBand::LongRunning
+        {
+            Some(grafito_agent::ledger::JSpaceLedger::with_task(
+                goal,
+                "Analizar, verificar con tools y cerrar",
+            ))
+        } else {
+            None
+        };
+        let (outcome_handle, event_receiver) =
+            grafito_assistant::agent::request_agent_on_worker_with_ledger(
+                settings,
+                api_key,
+                system,
+                user_messages,
+                tools,
+                budget,
+                ledger,
+                cancellation.clone(),
+            );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            for event in event_receiver.iter() {
+                if sender.send(AgentChannelMsg::Event(event)).is_err() {
+                    break;
+                }
+            }
+            let outcome = outcome_handle
+                .join()
+                .unwrap_or_else(|_| Err("El agente terminó inesperadamente.".to_string()));
+            let _ = sender.send(AgentChannelMsg::Done(outcome));
+            repaint.request_repaint();
+        });
+        self.assistant_runtime.agent_job = Some(AssistantAgentJob {
+            provider,
+            model,
+            cancellation,
+            receiver,
+        });
+    }
+
+    /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
+    fn run_assistant_animation(&mut self, ctx: &egui::Context) {
+        if self.assistant_runtime.anim_job.is_some() || self.assistant.is_pending {
+            return;
+        }
+        // Motor externo si está configurado; si no (o si falla), se usa la
+        // animación nativa de Rust para que «Animá» siempre produzca algo.
+        let engine = self
+            .plugin_registry
+            .as_ref()
+            .and_then(|registry| registry.engines().into_iter().next().cloned());
+        let concept = self
+            .assistant
+            .focus
+            .as_ref()
+            .map(|focus| focus.summary.clone())
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| "derivada como pendiente".to_string());
+        let work_dir = std::env::temp_dir().join(format!(
+            "grafito_anim_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&work_dir);
+        let request = grafito_anim::AnimRequest {
+            template: "derivative-slope".into(),
+            concept,
+            params: std::collections::BTreeMap::new(),
+            spec: None,
+            export: grafito_anim::ExportFormat::Gif,
+            canvas: (720, 540),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let native = || grafito_ui::assistant::AssistantMedia {
+                title: "Derivada como pendiente (nativa)".into(),
+                frames: crate::anim_native::render_native_animation_frames(480, 360),
+            };
+            let result = match engine {
+                Some(engine_section) => {
+                    let config = grafito_anim::EngineConfig {
+                        command: engine_section.command,
+                        working_dir: Some(work_dir.clone()),
+                        ..Default::default()
+                    };
+                    match grafito_anim::run_job(&config, &request, None, |_| {}) {
+                        Ok(result) => match load_gif_frames(&result.media_path) {
+                            Ok(frames) if !frames.is_empty() => {
+                                Ok(grafito_ui::assistant::AssistantMedia {
+                                    title: "Derivada como pendiente".into(),
+                                    frames,
+                                })
+                            }
+                            _ => Ok(native()),
+                        },
+                        Err(_) => Ok(native()),
+                    }
+                }
+                None => Ok(native()),
+            };
+            let _ = sender.send(result);
+            let _ = std::fs::remove_dir_all(&work_dir);
+            repaint.request_repaint();
+        });
+        self.assistant_runtime.anim_job = Some(AssistantAnimJob { receiver });
+        self.notify("Generando animación…", ToastKind::Info);
     }
 
     fn start_remote_proposal_verification(
@@ -1048,7 +1364,18 @@ impl GrafitoApp {
                 }
             }
             LocalAssistantDisposition::NeedsRemoteAuthorization(reason) => {
-                self.assistant.stage_remote_authorization(question, reason);
+                if self.assistant.full_permission {
+                    if self.remote_provider_ready() {
+                        self.start_remote_assistant_for(ctx, question);
+                    } else {
+                        let message =
+                            "Configurá un proveedor (Ajustes del asistente) para respuestas en línea automáticas.";
+                        self.assistant.fail_request(message);
+                        self.notify(message, ToastKind::Info);
+                    }
+                } else {
+                    self.assistant.stage_remote_authorization(question, reason);
+                }
             }
             LocalAssistantDisposition::Rejected(error) => {
                 self.assistant.fail_request(error.clone());
@@ -1058,6 +1385,7 @@ impl GrafitoApp {
         ctx.request_repaint();
     }
 
+    /// Arranca la consulta remota tras un consentimiento explícito del cartel.
     fn start_authorized_remote_assistant_request(&mut self, ctx: &egui::Context) {
         if self.assistant.is_pending || !self.assistant_runtime.remote_request_slot_is_free() {
             return;
@@ -1069,12 +1397,27 @@ impl GrafitoApp {
         else {
             return;
         };
+        self.assistant.begin_authorized_remote_request();
+        self.start_remote_assistant_for(ctx, question);
+    }
+
+    /// Lanza la consulta remota con la pregunta dada, sin depender del cartel.
+    ///
+    /// Con permiso completo, el consentimiento de imágenes se otorga automático;
+    /// la capacidad de visión del modelo sigue siendo un requisito real.
+    fn start_remote_assistant_for(&mut self, ctx: &egui::Context, question: String) {
+        if !self.assistant_runtime.remote_request_slot_is_free() {
+            return;
+        }
         if !self.assistant.attachments.is_empty() {
             if !self.assistant.vision_enabled {
                 self.show_assistant_error(
                     "Confirmá que la configuración remota admite imágenes antes de enviarlas.",
                 );
                 return;
+            }
+            if self.assistant.full_permission {
+                self.assistant.image_upload_consent = true;
             }
             if !self.assistant.image_upload_consent {
                 self.show_assistant_error(
@@ -1119,27 +1462,26 @@ impl GrafitoApp {
             }
         };
 
-        let Some(question) = self.assistant.begin_authorized_remote_request() else {
-            return;
+        let launch = AssistantRemoteLaunch {
+            settings,
+            request,
+            api_key,
+            provider: self.assistant.provider,
+            model: self.assistant.model.clone(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: self.assistant.allow_fusion_fallback,
+            question: question.clone(),
+            document_revision,
+            document_digest,
+            focus,
+            correction_attempt: 0,
+            repair_target_turn: None,
         };
-        self.start_remote_assistant_job(
-            ctx,
-            AssistantRemoteLaunch {
-                settings,
-                request,
-                api_key,
-                provider: self.assistant.provider,
-                model: self.assistant.model.clone(),
-                route: AssistantRemoteRoute::SelectedModel,
-                fusion_fallback_allowed: self.assistant.allow_fusion_fallback,
-                question: question.clone(),
-                document_revision,
-                document_digest,
-                focus,
-                correction_attempt: 0,
-                repair_target_turn: None,
-            },
-        );
+        if self.assistant.agent_mode {
+            self.start_agent_assistant_job(ctx, launch);
+        } else {
+            self.start_remote_assistant_job(ctx, launch);
+        }
     }
 
     fn apply_proposed_assistant_plan(&mut self) {
@@ -1278,6 +1620,9 @@ impl GrafitoApp {
         } else if let Some(job) = &self.assistant_runtime.proposal_job {
             job.cancellation.cancel();
             cancelled = true;
+        } else if let Some(job) = &self.assistant_runtime.agent_job {
+            job.cancellation.cancel();
+            cancelled = true;
         }
         if cancelled {
             self.begin_cancelling_remote_request();
@@ -1292,6 +1637,9 @@ impl GrafitoApp {
         if self
             .assistant_runtime
             .cancel_stale_remote_job(self.assistant.provider, &self.assistant.model)
+            || self
+                .assistant_runtime
+                .cancel_stale_agent_job(self.assistant.provider, &self.assistant.model)
         {
             self.begin_cancelling_remote_request();
         }
@@ -1304,7 +1652,66 @@ impl GrafitoApp {
         {}
     }
 
+    /// Drena la actividad del modo agente y cierra el turno al terminar.
+    fn poll_assistant_agent(&mut self, ctx: &egui::Context) -> bool {
+        let Some(job) = self.assistant_runtime.agent_job.as_ref() else {
+            return false;
+        };
+        loop {
+            match job.receiver.try_recv() {
+                Ok(AgentChannelMsg::Event(event)) => match event {
+                    grafito_agent::AgentEvent::ToolStarted { name, .. } => {
+                        self.assistant
+                            .push_agent_activity(format!("usando {name}…"));
+                    }
+                    grafito_agent::AgentEvent::ToolFinished { name, ok } => {
+                        let marker = if ok { "✓" } else { "✗" };
+                        self.assistant
+                            .push_agent_activity(format!("{marker} {name}"));
+                    }
+                    grafito_agent::AgentEvent::Ledger { render } => {
+                        self.assistant.set_agent_ledger(Some(render));
+                    }
+                    grafito_agent::AgentEvent::Finalized { .. } => {}
+                },
+                Ok(AgentChannelMsg::Done(result)) => {
+                    if let Some(job) = self.assistant_runtime.agent_job.take() {
+                        let cancelled = job.cancellation.is_cancelled();
+                        if cancelled {
+                            self.fail_assistant_request(
+                                "La consulta agente se canceló antes de obtener una respuesta.",
+                            );
+                        } else {
+                            match result {
+                                Ok(outcome) => {
+                                    self.assistant.complete_request(outcome.final_text);
+                                }
+                                Err(error) => {
+                                    self.fail_assistant_request(remote_error_message(&error));
+                                }
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                    return true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if let Some(_job) = self.assistant_runtime.agent_job.take() {
+                        self.fail_assistant_request(
+                            "El agente terminó inesperadamente antes de responder.",
+                        );
+                    }
+                    ctx.request_repaint();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn poll_assistant_jobs(&mut self, ctx: &egui::Context) {
+        self.poll_assistant_agent(ctx);
         if let Some(completion) = self.assistant_runtime.take_finished_remote_job() {
             let FinishedRemoteJob {
                 id,
@@ -1605,6 +2012,17 @@ impl GrafitoApp {
         Ok(settings)
     }
 
+    /// Indica si el proveedor remoto configurado puede responder hoy.
+    fn remote_provider_ready(&mut self) -> bool {
+        let Ok(settings) = self.assistant_provider_settings() else {
+            return false;
+        };
+        match settings.profile {
+            ProviderProfile::OllamaLocal => true,
+            _ => self.assistant_api_key().is_ok(),
+        }
+    }
+
     fn assistant_api_key(&mut self) -> Result<Option<String>, String> {
         if self.assistant.provider == ProviderProfile::OllamaLocal {
             return Ok(None);
@@ -1674,6 +2092,99 @@ fn accepts_remote_context(
     current_context.revision == result_revision
         && current_context.digest == result_digest
         && current_focus == result_focus
+}
+
+/// Carga los frames de un GIF en ColorImage para reproducirlos en el chat.
+fn load_gif_frames(path: &str) -> Result<Vec<egui::ColorImage>, String> {
+    let file =
+        std::fs::File::open(path).map_err(|error| format!("no se pudo abrir el GIF: {error}"))?;
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options
+        .read_info(file)
+        .map_err(|error| format!("GIF inválido: {error}"))?;
+    let mut frames = Vec::new();
+    while let Some(frame) = decoder
+        .read_next_frame()
+        .map_err(|error| format!("GIF corrupto: {error}"))?
+    {
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        if width == 0 || height == 0 || width.saturating_mul(height) > 2_000_000 {
+            continue;
+        }
+        let buffer = &frame.buffer;
+        if buffer.len() < width.saturating_mul(height).saturating_mul(4) {
+            continue;
+        }
+        let mut image = egui::ColorImage::new([width, height], egui::Color32::TRANSPARENT);
+        for (index, pixel) in image.pixels.iter_mut().enumerate() {
+            let offset = index * 4;
+            *pixel = egui::Color32::from_rgba_unmultiplied(
+                buffer[offset],
+                buffer[offset + 1],
+                buffer[offset + 2],
+                buffer[offset + 3],
+            );
+        }
+        frames.push(image);
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod gif_loader_tests {
+    // Generation and decode are exercised against a real in-memory GIF.
+    #[test]
+    fn gif_loader_reads_bounded_rgba_frames() {
+        use gif::{Encoder, Frame, Repeat};
+
+        let mut rgba = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut rgba, 2, 2, &[]).unwrap();
+            encoder.set_repeat(Repeat::Finite(0)).unwrap();
+            for frame in [
+                vec![
+                    255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                ],
+                vec![
+                    0u8, 0, 255, 255, 255, 255, 0, 255, 0, 255, 0, 255, 255, 0, 255, 255,
+                ],
+            ] {
+                let mut rgba = frame;
+                encoder
+                    .write_frame(&Frame::from_rgba_speed(2, 2, rgba.as_mut_slice(), 10))
+                    .unwrap();
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("grafito_gif_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("probe.gif");
+        std::fs::write(&path, rgba).unwrap();
+
+        let frames = super::load_gif_frames(&path.to_string_lossy()).expect("decode frames");
+        assert!(!frames.is_empty());
+        for frame in &frames {
+            assert_eq!(frame.size, [2, 2]);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+fn plugin_validation_context() -> grafito_plugins::ValidationContext<'static> {
+    grafito_plugins::ValidationContext {
+        resolvable_command_ids: &|id| grafito_command::command_registry::resolve(id).is_some(),
+        known_tools: &["evaluate_expr", "grafito_docs", "ask_user"],
+        known_scenes: &[
+            "derivative-slope",
+            "concept-flow",
+            "graph-trace",
+            "riemann",
+            "fourier_partial",
+            "pythagorean",
+            "tetrahedron_rotate",
+        ],
+    }
 }
 
 fn assistant_correction_prompt(question: &str) -> String {

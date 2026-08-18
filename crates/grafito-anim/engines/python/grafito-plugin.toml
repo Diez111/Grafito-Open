@@ -1,0 +1,13 @@
+[plugin]
+id = "grafito.manim-engine"
+name = "Motor de animaciones (Manim)"
+version = "1.0.0"
+category = "engine"
+description = "Motor externo de animaciones matemáticas basado en Manim (con fallback sin dependencias). Necesita Python 3 y, opcionalmente, Manim instalado."
+activation = "manual"
+
+[engine]
+transport = "stdio"
+command = ["python3", "-u", "-m", "manim_engine"]
+protocol_version = 1
+capabilities = ["derivative-slope", "concept-flow", "graph-trace"]

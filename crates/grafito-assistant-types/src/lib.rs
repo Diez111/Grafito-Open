@@ -27,6 +27,9 @@ pub const REMOTE_FOCUS_PROMPT_PREFIX: &str =
     "\n\nFocused object (use this unless the user asks otherwise):\n";
 /// Bytes reservados para el encabezado remoto de un objeto enfocado.
 pub const REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES: usize = REMOTE_FOCUS_PROMPT_PREFIX.len();
+/// Tope del texto de instrucciones de plugins inyectado al system prompt.
+pub const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 16 * 1024;
+pub const REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES: usize = 32;
 /// Encabezado que el transporte añade antes del catálogo de herramientas relevante.
 pub const REMOTE_TOOL_CATALOG_PROMPT_PREFIX: &str =
     "\n\nRelevant Grafito tools (use only these exact signatures when applicable):\n";
@@ -910,6 +913,9 @@ pub struct AssistantRequest {
     /// Catálogo acotado de herramientas nativas relevantes para esta consulta.
     #[serde(default)]
     pub tool_catalog: String,
+    /// Instrucciones locales adicionales del usuario (plugins) para el system prompt.
+    #[serde(default)]
+    pub system_instructions: String,
     /// Diagnóstico local, opcional y acotado, para una única reparación remota.
     #[serde(default)]
     pub repair_feedback: Option<AssistantRepairFeedback>,
@@ -934,6 +940,7 @@ impl AssistantRequest {
             focus: None,
             conversation: Vec::new(),
             tool_catalog: String::new(),
+            system_instructions: String::new(),
             repair_feedback: None,
             budget: RequestBudget::default(),
             attachments: Vec::new(),
@@ -953,6 +960,9 @@ impl AssistantRequest {
     pub fn validate(&self, attachment_limits: &AttachmentLimits) -> Result<(), String> {
         if self.schema_version != ASSISTANT_SCHEMA_VERSION {
             return Err("assistant request schema version is unsupported".into());
+        }
+        if self.system_instructions.len() > MAX_SYSTEM_INSTRUCTIONS_BYTES {
+            return Err("assistant system instructions exceed the configured limit".into());
         }
         self.context.validate()?;
         self.budget.validate()?;
@@ -1013,6 +1023,12 @@ impl AssistantRequest {
                 0
             } else {
                 REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES
+            })
+            .saturating_add(self.system_instructions.len())
+            .saturating_add(if self.system_instructions.is_empty() {
+                0
+            } else {
+                REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES
             })
             .saturating_add(
                 self.repair_feedback

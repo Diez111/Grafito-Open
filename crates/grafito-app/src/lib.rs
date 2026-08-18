@@ -6,6 +6,7 @@
 //! módulos internos del crate.
 
 pub(crate) mod algebra;
+pub(crate) mod anim_native;
 pub(crate) mod app;
 pub(crate) mod assistant;
 pub(crate) mod assistant_credentials;
@@ -22,6 +23,7 @@ pub(crate) mod tool_dispatcher;
 pub mod tools_panel;
 pub(crate) mod ui;
 pub(crate) mod utils;
+pub(crate) mod whiteboard_ui;
 
 #[cfg(test)]
 mod tests;
@@ -206,7 +208,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::SmallD2,
                 left_panel: LeftPanelContent::AlgebraAndCas,
-                right_panel: Some(RightPanelContent::Table),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Curve, G::Analysis],
                 show_math_keyboard: true,
                 show_input_bar: true,
@@ -217,7 +219,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
                 left_panel: LeftPanelContent::Cas,
-                right_panel: Some(RightPanelContent::Table),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Curve, G::Analysis, G::Circle],
                 show_math_keyboard: true,
                 show_input_bar: true,
@@ -228,7 +230,7 @@ impl Perspective {
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::SmallD2,
                 left_panel: LeftPanelContent::Stats,
-                right_panel: Some(RightPanelContent::Data),
+                right_panel: None,
                 visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: true,
                 show_input_bar: true,
@@ -271,7 +273,7 @@ impl Perspective {
                 title: Self::title(self),
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
-                left_panel: LeftPanelContent::Spreadsheet,
+                left_panel: LeftPanelContent::Stats,
                 right_panel: Some(RightPanelContent::Regression),
                 visible_tool_groups: &[G::Move, G::Advanced],
                 show_math_keyboard: true,
@@ -410,8 +412,6 @@ pub enum LeftPanelContent {
     Complex,
     /// Atractores / parámetros dinámicos.
     Attractor,
-    /// Hoja de cálculo.
-    Spreadsheet,
     /// Herramientas de construcción.
     Tools,
 }
@@ -430,7 +430,6 @@ impl LeftPanelContent {
             LeftPanelContent::Tools | LeftPanelContent::Attractor => 1,
             LeftPanelContent::Cas => 2,
             LeftPanelContent::Stats => 3,
-            LeftPanelContent::Spreadsheet => 4,
         }
     }
 }
@@ -442,10 +441,6 @@ pub enum RightPanelContent {
     Properties,
     /// Protocolo de construcción.
     ConstructionProtocol,
-    /// Tabla de valores x|f(x).
-    Table,
-    /// Datos / hoja de cálculo lateral.
-    Data,
     /// Regresión y ajustes.
     Regression,
     /// Domain coloring / visualización compleja.
@@ -454,14 +449,6 @@ pub enum RightPanelContent {
     Parameters,
     /// Animación trigonométrica (círculo unitario).
     TrigAnimation,
-    /// Hoja de cálculo lateral.
-    Spreadsheet,
-}
-
-impl RightPanelContent {
-    pub(crate) const fn uses_spreadsheet_editor(self) -> bool {
-        matches!(self, Self::Data | Self::Spreadsheet)
-    }
 }
 
 /// Geometry 3D supports one dock instead of two competing right-side columns.

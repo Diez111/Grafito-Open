@@ -4,9 +4,11 @@
 //! ejecuta peticiones OpenAI-compatibles desde un hilo de trabajo; nunca se
 //! llama desde la UI ni persiste claves de API.
 
+pub mod agent;
 pub mod harness;
 
 use base64::Engine;
+use grafito_agent::schema::ToolSchema;
 use grafito_assistant_types::{
     AssistantOperation, AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole,
     DerivationStep, ImageAttachment, LocalAssistantStatus, PrivacyMode, ProposedPlan,
@@ -44,7 +46,7 @@ const OPENCODE_MINIMAX_MODEL: &str = "minimax-m3";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
-const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; CAS and calculus analysis; statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. Match the user's goal to the most useful area and mention relevant built-in perspectives when it helps. The per-request tool catalog remains authoritative for actionable graph syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
+const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
 const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied. Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands. When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
 const REMOTE_TETRAHEDRON_GUIDANCE: &str = "For a tetrahedron, emit exactly one one-line grafito block with Tetrahedron[x, y, z, edge] and finite literal values. Do not emit Polyhedron, NumericArray, or a grafito-scene block.";
@@ -77,6 +79,8 @@ pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
         };
         if problem.is_empty() {
             unsupported("Paste an arithmetic problem, a one-variable equation, or a graph request.")
+        } else if let Some(response) = solve_local_cas(problem, &request.budget) {
+            response
         } else if let Some(expression) = parse_graph_request(problem) {
             solve_graph_request(request, expression)
         } else if problem.contains('=') {
@@ -86,6 +90,155 @@ pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
         }
     };
     enforce_local_response_budget(response, &request.budget)
+}
+
+/// Resuelve pedagógicamente pedidos de derivada, integral y límite con el CAS
+/// nativo de grafito-geometry (sin red). Devuelve `None` si no es un pedido CAS.
+fn solve_local_cas(
+    problem: &str,
+    budget: &grafito_assistant_types::RequestBudget,
+) -> Option<AssistantResponse> {
+    let inline = || {
+        let lowered = problem.to_ascii_lowercase();
+        let derive = [
+            "derivar ",
+            "deriva ",
+            "derivada de ",
+            "derivá ",
+            "d/dx ",
+            "derivada de la funcion ",
+        ]
+        .iter()
+        .find_map(|prefix| {
+            lowered
+                .strip_prefix(prefix)
+                .map(|rest| (rest.to_owned(), prefix))
+        });
+        let integrate = [
+            "integrar ",
+            "integra ",
+            "integral de ",
+            "integral indefinida de ",
+            "∫ ",
+        ]
+        .iter()
+        .find_map(|prefix| {
+            lowered
+                .strip_prefix(prefix)
+                .map(|rest| (rest.to_owned(), prefix))
+        });
+        let limit = ["limite de ", "límite de ", "limit de "]
+            .iter()
+            .find_map(|prefix| {
+                lowered
+                    .strip_prefix(prefix)
+                    .map(|rest| (rest.to_owned(), prefix))
+            });
+        (derive, integrate, limit)
+    };
+    let (derive, integrate, limit) = inline();
+    if let Some((rest, prefix)) = derive {
+        let expression = rest
+            .split('=')
+            .next()
+            .unwrap_or(&rest)
+            .trim()
+            .trim_matches('.');
+        if expression.is_empty() || expression.len() > budget.max_input_chars {
+            return Some(unsupported(
+                "The derivative expression is empty or exceeds the local budget.",
+            ));
+        }
+        return Some(
+            match grafito_geometry::symbolic::derivative(expression, "x") {
+                Ok(result) => cas_solved(
+                    format!("d/dx({expression}) = {result}"),
+                    expression,
+                    &result,
+                    "Derivada simbólica (CAS nativo)",
+                ),
+                Err(error) => cas_unsupported(&error, prefix),
+            },
+        );
+    }
+    if let Some((rest, prefix)) = integrate {
+        let expression = rest
+            .split('=')
+            .next()
+            .unwrap_or(&rest)
+            .trim()
+            .trim_matches('.');
+        if expression.is_empty() || expression.len() > budget.max_input_chars {
+            return Some(unsupported(
+                "The integral expression is empty or exceeds the local budget.",
+            ));
+        }
+        return Some(
+            match grafito_geometry::symbolic::integrate(expression, "x") {
+                Ok(result) => cas_solved(
+                    format!("∫ {expression} dx = {result} + C"),
+                    expression,
+                    &format!("{result} + C"),
+                    "Integral simbólica (CAS nativo)",
+                ),
+                Err(error) => cas_unsupported(&error, prefix),
+            },
+        );
+    }
+    if let Some((rest, prefix)) = limit {
+        let (expression, at) = split_limit_problem(&rest);
+        if expression.is_empty() || expression.len() > budget.max_input_chars {
+            return Some(unsupported(
+                "The limit expression is empty or exceeds the local budget.",
+            ));
+        }
+        return Some(
+            match grafito_geometry::symbolic::limit(expression, "x", at) {
+                Ok(result) => cas_solved(
+                    format!("lim x→{at} de ({expression}) = {result}"),
+                    expression,
+                    &result,
+                    "Límite (CAS nativo, Richardson)",
+                ),
+                Err(error) => cas_unsupported(&error, prefix),
+            },
+        );
+    }
+    None
+}
+
+fn split_limit_problem(rest: &str) -> (&str, f64) {
+    for marker in ["cuando x->", "cuando x → ", "en ", "->"] {
+        if let Some(index) = rest.find(marker) {
+            let expression = rest[..index].trim();
+            let tail = rest[index + marker.len()..].trim();
+            if let Ok(at) = tail.parse::<f64>() {
+                return (expression, at);
+            }
+        }
+    }
+    (rest.trim(), 0.0)
+}
+
+fn cas_solved(answer: String, before: &str, after: &str, rule: &str) -> AssistantResponse {
+    AssistantResponse {
+        schema_version: grafito_assistant_types::ASSISTANT_SCHEMA_VERSION,
+        status: LocalAssistantStatus::Solved,
+        answer,
+        derivation: vec![DerivationStep {
+            before: before.to_string(),
+            after: after.to_string(),
+            rule: rule.into(),
+            verification: "Resultado del CAS nativo, reproducible sin red.".into(),
+        }],
+        plan: None,
+    }
+}
+
+fn cas_unsupported(error: &str, prefix: &str) -> AssistantResponse {
+    unsupported(format!(
+        "No pude resolver «{prefix}…» localmente con el CAS: {error}. Podés pedir la versión en línea."
+    ))
 }
 
 fn solve_arithmetic(problem: &str, request: &AssistantRequest) -> AssistantResponse {
@@ -993,9 +1146,7 @@ pub fn build_chat_completion_payload(
 
     let mut messages = vec![json!({
         "role": "system",
-        "content": format!(
-            "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
-        )
+        "content": remote_system_prompt(request)
     })];
     messages.extend(request.conversation.iter().map(|turn| {
         let role = match turn.role {
@@ -1070,9 +1221,7 @@ pub fn build_anthropic_messages_payload(
     Ok(json!({
         "model": OPENCODE_MINIMAX_MODEL,
         "max_tokens": completion_token_limit(&request.budget),
-        "system": format!(
-            "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
-        ),
+        "system": remote_system_prompt(request),
         "messages": messages,
     }))
 }
@@ -1129,6 +1278,66 @@ fn fusion_draft_byte_limit(request: &AssistantRequest, prompt: &str) -> Result<u
     Ok(available
         .min(request.budget.max_output_chars)
         .min(FUSION_MAX_DRAFT_BYTES))
+}
+
+/// System prompt base del asistente (interfaz pública, incluye plugins).
+pub fn assistant_system_prompt(request: &AssistantRequest) -> String {
+    remote_system_prompt(request)
+}
+
+/// Prompt rico de usuario (problema + focus + catálogo + reparación).
+pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, String> {
+    remote_prompt(request)
+}
+
+/// Tools seguras por defecto que el modo agente ofrece al modelo.
+pub fn default_agent_tools() -> Vec<ToolSchema> {
+    vec![
+        ToolSchema::new(
+            "evaluate_expr",
+            "Evalúa una expresión matemática con variables opcionales; devuelve un número finito o un error de dominio.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variables": {"type": "object", "additionalProperties": {"type": "number"}}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "grafito_docs",
+            "Devuelve el catálogo acotado de comandos verificados de Grafito que coinciden con una consulta.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+        ),
+        ToolSchema::new(
+            "ask_user",
+            "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"]
+            }),
+        )
+        .with_consent(true),
+    ]
+}
+
+/// System prompt base más las instrucciones locales de plugins, acotadas.
+fn remote_system_prompt(request: &AssistantRequest) -> String {
+    let base = format!(
+        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
+    );
+    let instructions = request.system_instructions.trim();
+    if instructions.is_empty() {
+        base
+    } else {
+        format!("{base}\n\nInstrucciones locales (plugins) para esta sesión:\n{instructions}")
+    }
 }
 
 fn remote_prompt(request: &AssistantRequest) -> Result<String, String> {
@@ -1243,12 +1452,8 @@ pub fn request_remote_models_with_api_key_on_worker(
             return Err("remote model request was cancelled".into());
         }
         let endpoint = models_endpoint(&settings)?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| "remote assistant HTTP client could not be created".to_string())?;
-        let mut call = client.get(endpoint);
+        let client = shared_http_client()?;
+        let mut call = client.get(endpoint).timeout(Duration::from_secs(15));
         if let Some(key) = api_key {
             if key.trim().is_empty() {
                 return Err("remote assistant API key is unavailable".into());
@@ -1477,8 +1682,8 @@ fn request_openai_completion(
     timeout: Duration,
     max_output_chars: usize,
 ) -> Result<RemoteCompletion, String> {
-    let client = remote_http_client(timeout)?;
-    let mut call = client.post(endpoint).json(&payload);
+    let client = shared_http_client()?;
+    let mut call = client.post(endpoint).json(&payload).timeout(timeout);
     if let Some(key) = api_key {
         if key.trim().is_empty() {
             return Err("remote assistant API key is unavailable".into());
@@ -1499,12 +1704,13 @@ fn request_anthropic_completion(
     let key = api_key
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| "remote assistant API key is unavailable".to_string())?;
-    let client = remote_http_client(timeout)?;
+    let client = shared_http_client()?;
     let call = client
         .post(endpoint)
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
-        .json(&payload);
+        .json(&payload)
+        .timeout(timeout);
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
@@ -1643,13 +1849,23 @@ fn response_content_error(reason: &str) -> String {
     format!("remote assistant response content is not displayable: {reason}")
 }
 
-fn remote_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "remote assistant HTTP client could not be created".to_string())?;
-    Ok(client)
+/// Cliente bloqueante compartido por todos los proveedores.
+///
+/// Se construye una única vez y su pool de conexiones se reutiliza entre
+/// peticiones, evitando el costo de TLS y de crear un `Client` por llamada.
+/// El timeout de cada petición se aplica sobre la `RequestBuilder`.
+fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| "remote assistant HTTP client could not be created".to_string())
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
 }
 
 fn completion_from_text(
@@ -1727,6 +1943,20 @@ mod tests {
     fn tetrahedron_prompt_requires_the_native_solid_command() {
         assert!(REMOTE_TETRAHEDRON_GUIDANCE.contains("Tetrahedron[x, y, z, edge]"));
         assert!(!REMOTE_TETRAHEDRON_GUIDANCE.contains("Segment3D"));
+    }
+
+    #[test]
+    fn remote_system_prompt_includes_bounded_plugin_instructions() {
+        let plain = request("consulta");
+        let mut request = request("consulta");
+        request.privacy_mode = PrivacyMode::RemoteAllowed;
+        request.system_instructions = "Usá notación pitagórica en las respuestas.".into();
+
+        let prompt = remote_system_prompt(&request);
+
+        assert!(prompt.contains("notación pitagórica"));
+        assert!(prompt.contains("Instrucciones locales (plugins)"));
+        assert!(!remote_system_prompt(&plain).contains("Instrucciones locales"));
     }
 
     #[test]
@@ -2077,6 +2307,13 @@ mod tests {
         assert!(validate_endpoint("http://localhost:11434/v1").is_err());
         assert!(validate_endpoint("https://api-key@example.com/v1").is_err());
         assert!(validate_endpoint("http://[::1]:11434/v1").is_ok());
+    }
+
+    #[test]
+    fn shared_http_client_reuses_a_single_client_instance() {
+        let first = shared_http_client().expect("shared client builds");
+        let second = shared_http_client().expect("shared client returns the cached instance");
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]

@@ -1,12 +1,12 @@
-//! Removable side panels: CAS, view settings, spreadsheet, and value table.
+//! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
-use crate::{commands, GrafitoApp};
+use crate::GrafitoApp;
 use egui::Color32;
 use grafito_core::{
-    CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId, PointObj,
+    CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId,
     RegularPolytopeNDObj, ScatterPlotObj,
 };
-use grafito_geometry::{Color, Point2, RegularPolychoron, RegularPolytopeFamily};
+use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, TYPE_BASE, TYPE_SM};
@@ -14,13 +14,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-type FuncInfo = (String, String, String, Option<f64>, Option<f64>);
-const MAX_VALUE_TABLE_POINTS: usize = 10_000;
-const MAX_VALUE_TABLE_DISPLAY_ROWS: usize = 500;
-const SPREADSHEET_CELL_WIDTH: f32 = 60.0;
-const SPREADSHEET_CELL_HEIGHT: f32 = 24.0;
-const SPREADSHEET_ROW_HEADER_WIDTH: f32 = 32.0;
-const SPREADSHEET_COLUMN_HEADER_HEIGHT: f32 = 24.0;
 const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,186 +22,6 @@ pub(crate) struct LocalXYTable {
     pub y_name: String,
     pub xs: Vec<f64>,
     pub ys: Vec<f64>,
-}
-
-pub(crate) fn spreadsheet_column_label(mut column: usize) -> String {
-    let mut label = String::new();
-    loop {
-        label.push(char::from(b'A' + (column % 26) as u8));
-        if column < 26 {
-            break;
-        }
-        column = column / 26 - 1;
-    }
-    label.chars().rev().collect()
-}
-
-fn spreadsheet_cell_label(row: usize, column: usize) -> String {
-    format!("{}{}", spreadsheet_column_label(column), row + 1)
-}
-
-/// A coordinate cell retains partial tuple syntax after it loses focus. Other
-/// cell text is committed normally so formulas can still be edited freely.
-pub(crate) fn spreadsheet_edit_is_committable(
-    document: &mut grafito_core::Document,
-    row: usize,
-    column: usize,
-    value: &str,
-) -> bool {
-    let label = spreadsheet_cell_label(row, column);
-    let owns_coordinate_point = document.spreadsheet_coordinate_point(&label).is_some();
-    !owns_coordinate_point
-        || !value.trim_start().starts_with('(')
-        || commands::parse_point_str(value)
-            .ok()
-            .is_some_and(|(x, y)| x.is_finite() && y.is_finite())
-}
-
-pub(crate) fn spreadsheet_visible_window(
-    viewport: egui::Rect,
-    rows: usize,
-    columns: usize,
-) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
-    fn visible_axis(
-        visible_min: f32,
-        visible_max: f32,
-        content_offset: f32,
-        item_size: f32,
-        item_count: usize,
-    ) -> std::ops::Range<usize> {
-        let first = ((visible_min - content_offset) / item_size)
-            .floor()
-            .max(0.0) as usize;
-        let last = ((visible_max - content_offset) / item_size).ceil().max(0.0) as usize;
-        first.saturating_sub(1).min(item_count)..last.saturating_add(1).min(item_count)
-    }
-
-    (
-        visible_axis(
-            viewport.min.y,
-            viewport.max.y,
-            SPREADSHEET_COLUMN_HEADER_HEIGHT,
-            SPREADSHEET_CELL_HEIGHT,
-            rows,
-        ),
-        visible_axis(
-            viewport.min.x,
-            viewport.max.x,
-            SPREADSHEET_ROW_HEADER_WIDTH,
-            SPREADSHEET_CELL_WIDTH,
-            columns,
-        ),
-    )
-}
-
-fn draw_virtual_spreadsheet(
-    ui: &mut egui::Ui,
-    scroll_id: &'static str,
-    rows: usize,
-    columns: usize,
-    header_color: Color32,
-    row_label_color: Color32,
-    mut draw_cell: impl FnMut(&mut egui::Ui, usize, usize),
-) {
-    let content_size = egui::vec2(
-        SPREADSHEET_ROW_HEADER_WIDTH + columns as f32 * SPREADSHEET_CELL_WIDTH,
-        SPREADSHEET_COLUMN_HEADER_HEIGHT + rows as f32 * SPREADSHEET_CELL_HEIGHT,
-    );
-
-    egui::ScrollArea::both()
-        .id_salt(scroll_id)
-        .auto_shrink([false; 2])
-        .show_viewport(ui, |ui, viewport| {
-            // Reserve the complete logical sheet while instantiating only the visible widgets.
-            ui.set_min_size(content_size);
-            let origin = ui.max_rect().min;
-            let (visible_rows, visible_columns) =
-                spreadsheet_visible_window(viewport, rows, columns);
-
-            if viewport.min.y < SPREADSHEET_COLUMN_HEADER_HEIGHT {
-                for column in visible_columns.clone() {
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(
-                            origin.x
-                                + SPREADSHEET_ROW_HEADER_WIDTH
-                                + column as f32 * SPREADSHEET_CELL_WIDTH,
-                            origin.y,
-                        ),
-                        egui::vec2(SPREADSHEET_CELL_WIDTH, SPREADSHEET_COLUMN_HEADER_HEIGHT),
-                    );
-                    ui.allocate_new_ui(
-                        egui::UiBuilder::new()
-                            .id_salt(("spreadsheet_column", column))
-                            .max_rect(rect),
-                        |ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    egui::RichText::new(spreadsheet_column_label(column))
-                                        .size(12.0)
-                                        .strong()
-                                        .color(header_color),
-                                );
-                            });
-                        },
-                    );
-                }
-            }
-
-            for row in visible_rows {
-                let y = origin.y
-                    + SPREADSHEET_COLUMN_HEADER_HEIGHT
-                    + row as f32 * SPREADSHEET_CELL_HEIGHT;
-                if viewport.min.x < SPREADSHEET_ROW_HEADER_WIDTH {
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(origin.x, y),
-                        egui::vec2(SPREADSHEET_ROW_HEADER_WIDTH, SPREADSHEET_CELL_HEIGHT),
-                    );
-                    ui.allocate_new_ui(
-                        egui::UiBuilder::new()
-                            .id_salt(("spreadsheet_row", row))
-                            .max_rect(rect),
-                        |ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(
-                                    egui::RichText::new((row + 1).to_string())
-                                        .size(11.0)
-                                        .color(row_label_color),
-                                );
-                            });
-                        },
-                    );
-                }
-
-                for column in visible_columns.clone() {
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(
-                            origin.x
-                                + SPREADSHEET_ROW_HEADER_WIDTH
-                                + column as f32 * SPREADSHEET_CELL_WIDTH,
-                            y,
-                        ),
-                        egui::vec2(SPREADSHEET_CELL_WIDTH, SPREADSHEET_CELL_HEIGHT),
-                    );
-                    ui.allocate_new_ui(
-                        egui::UiBuilder::new()
-                            .id_salt(("spreadsheet_cell", row, column))
-                            .max_rect(rect),
-                        |ui| draw_cell(ui, row, column),
-                    );
-                }
-            }
-        });
-}
-
-pub(crate) fn apply_spreadsheet_cell_edit(
-    document: &mut grafito_core::Document,
-    row: usize,
-    column: usize,
-    value: String,
-) -> Result<(), String> {
-    let staged = document.stage_spreadsheet_cell_edits(&[(row, column, value)])?;
-    *document = staged;
-    Ok(())
 }
 
 pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
@@ -757,102 +570,6 @@ fn color_picker_swatch(ui: &mut egui::Ui, color: Color, label: &str) -> egui::Re
     response.on_hover_text(label)
 }
 
-pub(crate) fn validate_value_table_range(
-    x_min_text: &str,
-    x_max_text: &str,
-    step_text: &str,
-) -> Result<(f64, f64, f64, usize), String> {
-    let x_min = x_min_text
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "Tabla: 'Desde' debe ser un número válido".to_string())?;
-    let x_max = x_max_text
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "Tabla: 'Hasta' debe ser un número válido".to_string())?;
-    let step = step_text
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| "Tabla: 'Paso' debe ser un número válido".to_string())?;
-
-    if !x_min.is_finite() || !x_max.is_finite() || !step.is_finite() {
-        return Err("Tabla: los valores deben ser finitos".to_string());
-    }
-    if x_max < x_min {
-        return Err("Tabla: 'Hasta' debe ser mayor o igual que 'Desde'".to_string());
-    }
-    if step <= 0.0 {
-        return Err("Tabla: 'Paso' debe ser mayor que 0".to_string());
-    }
-
-    let intervals = (x_max - x_min) / step;
-    if !intervals.is_finite() || intervals >= MAX_VALUE_TABLE_POINTS as f64 {
-        return Err(format!(
-            "Tabla: demasiados puntos; máximo {MAX_VALUE_TABLE_POINTS}"
-        ));
-    }
-    let point_count = intervals.floor() as usize + 1;
-    if point_count > MAX_VALUE_TABLE_POINTS {
-        return Err(format!(
-            "Tabla: demasiados puntos ({point_count}); máximo {MAX_VALUE_TABLE_POINTS}"
-        ));
-    }
-
-    Ok((x_min, x_max, step, point_count))
-}
-
-pub(crate) fn value_table_display_count(point_count: usize) -> usize {
-    point_count.min(MAX_VALUE_TABLE_DISPLAY_ROWS)
-}
-
-pub(crate) struct ValueTablePointSpec<'a> {
-    pub expression: &'a str,
-    pub variable: &'a str,
-    pub x_min: f64,
-    pub step: f64,
-    pub point_count: usize,
-    pub is_polar: bool,
-}
-
-pub(crate) fn commit_value_table_points(
-    document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
-    spec: ValueTablePointSpec<'_>,
-) -> Result<usize, String> {
-    if !spec.x_min.is_finite() || !spec.step.is_finite() || spec.step <= 0.0 {
-        return Err("Tabla: el rango y el paso deben ser finitos, con paso mayor que 0".into());
-    }
-    if spec.point_count > MAX_VALUE_TABLE_POINTS {
-        return Err(format!(
-            "Tabla: demasiados puntos ({}); máximo {MAX_VALUE_TABLE_POINTS}",
-            spec.point_count
-        ));
-    }
-
-    let mut objects = Vec::with_capacity(spec.point_count);
-    for index in 0..spec.point_count {
-        let x = spec.x_min + spec.step * index as f64;
-        if !x.is_finite() {
-            return Err("Tabla: un valor generado no es representable".into());
-        }
-        let variables = [(spec.variable.to_string(), x)];
-        if let Ok(y) = grafito_geometry::expr::evaluate(spec.expression, &variables) {
-            if y.is_finite() {
-                let point = if spec.is_polar {
-                    Point2::new(y * x.cos(), y * x.sin())
-                } else {
-                    Point2::new(x, y)
-                };
-                objects.push(GeoObject::Point(PointObj::new(point)));
-            }
-        }
-    }
-
-    crate::app::commit_object_insertions(document, undo_stack, redo_stack, objects)
-        .map(|ids| ids.len())
-}
-
 /// Helper de retrocompatibilidad. Devuelve la tupla histórica
 /// `(is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col)`
 /// usando el Theme activo.
@@ -970,28 +687,37 @@ fn draw_inspector_section(
 
 fn draw_inspector_empty_state(ui: &mut egui::Ui) {
     let theme = current_theme(ui.ctx());
-    ui.add_space((ui.available_height() * 0.2).clamp(SPACE_MD, 72.0));
-    egui::Frame::none()
-        .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
-        .rounding(egui::Rounding::same(RADIUS_LG))
-        .inner_margin(egui::Margin::same(SPACE_MD))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Inspector listo")
-                    .color(theme.text_primary)
-                    .size(TYPE_BASE)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new(
-                    "Seleccioná un objeto del canvas para ajustar su geometría, apariencia y controles avanzados.",
-                )
-                .color(theme.text_secondary)
-                .size(TYPE_SM),
-            );
-        });
+    let height = ui.available_height().max(140.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.add_space(48.0);
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(egui::Rounding::same(RADIUS_LG))
+                .inner_margin(egui::Margin::same(SPACE_MD))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new("Inspector listo")
+                                .color(theme.text_primary)
+                                .size(TYPE_BASE)
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Seleccioná un objeto del canvas para ajustar su geometría, apariencia y controles avanzados.",
+                            )
+                            .color(theme.text_secondary)
+                            .size(TYPE_SM),
+                        );
+                    });
+                });
+        },
+    );
 }
 
 fn draw_multidimensional_motion_card(
@@ -1406,97 +1132,6 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         });
 }
 
-pub(crate) fn draw_spreadsheet_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
-
-    egui::SidePanel::left("spreadsheet_panel")
-        .default_width(260.0)
-        .min_width(180.0)
-        .resizable(true)
-        .frame(
-            egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
-        )
-        .show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Hoja de Cálculo")
-                        .color(accent)
-                        .strong()
-                        .size(16.0),
-                );
-            });
-            ui.add_space(4.0);
-            ui.separator();
-
-            let (mut rows, mut cols) = app.document.spreadsheet_dim();
-            // Assure at least 15 rows and 6 columns for nice UI, but expand infinitely if needed
-            rows = rows.max(15);
-            cols = cols.max(6);
-
-            egui::Frame::none()
-                .stroke(egui::Stroke::new(1.0, sep_col))
-                .show(ui, |ui| {
-                    draw_virtual_spreadsheet(
-                        ui,
-                        "mini_sheet",
-                        rows,
-                        cols,
-                        accent,
-                        txt_dim,
-                        |ui, row, column| {
-                            let key = (row, column);
-                            let current_value = app.document.get_spreadsheet_cell(row, column);
-                            let mut value = app
-                                .spreadsheet_edit_buffers
-                                .remove(&key)
-                                .unwrap_or_else(|| current_value.clone());
-                            let cell_frame = egui::Frame::none()
-                                .stroke(egui::Stroke::new(0.5, sep_col))
-                                .inner_margin(egui::Margin::symmetric(2.0, 2.0));
-                            cell_frame.show(ui, |ui| {
-                                let response = ui.add_sized(
-                                    [SPREADSHEET_CELL_WIDTH - 4.0, SPREADSHEET_CELL_HEIGHT - 4.0],
-                                    egui::TextEdit::singleline(&mut value)
-                                        .font(egui::FontId::proportional(12.0))
-                                        .frame(false),
-                                );
-                                let explicit_submit = response.has_focus()
-                                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                                let commit = response.lost_focus() || explicit_submit;
-                                if let Err(error) = crate::app::commit_spreadsheet_edit(
-                                    &mut app.document,
-                                    crate::app::SpreadsheetEditState {
-                                        undo_stack: &mut app.undo_stack,
-                                        redo_stack: &mut app.redo_stack,
-                                        edit_buffers: &mut app.spreadsheet_edit_buffers,
-                                    },
-                                    row,
-                                    column,
-                                    value,
-                                    commit,
-                                ) {
-                                    log::warn!("set_spreadsheet_cell: {error}");
-                                    app.notify(
-                                        format!("No se pudo editar la hoja: {error}"),
-                                        grafito_ui::toast::ToastKind::Error,
-                                    );
-                                }
-                            });
-                        },
-                    );
-                });
-
-            ui.add_space(8.0);
-            if ui.button("Abrir hoja completa ->").clicked() {
-                app.show_spreadsheet = !app.show_spreadsheet;
-            }
-        });
-}
-
 /// Panel derecho: controles de la animación trigonométrica.
 ///
 /// El círculo y la función se dibujan como overlay del canvas 2D para compartir
@@ -1707,222 +1342,6 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
         });
 }
 
-pub(crate) fn draw_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
-
-    egui::SidePanel::left("table_panel")
-        .default_width(240.0)
-        .min_width(180.0)
-        .resizable(true)
-        .frame(
-            egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
-        )
-        .show(ctx, |ui| {
-            let functions: Vec<FuncInfo> = app
-                .document
-                .objects_iter()
-                .filter_map(|(_, obj)| match obj {
-                    GeoObject::Function(f) => Some((
-                        f.label.clone(),
-                        f.expr.clone(),
-                        "f(x)".to_string(),
-                        f.domain_min,
-                        f.domain_max,
-                    )),
-                    GeoObject::ParametricCurve2D(pc) => Some((
-                        pc.label.clone(),
-                        format!("x={}, y={}", pc.expr_x, pc.expr_y),
-                        "(x,y)".to_string(),
-                        Some(pc.t_min),
-                        Some(pc.t_max),
-                    )),
-                    GeoObject::PolarCurve(pc) => Some((
-                        pc.label.clone(),
-                        pc.expr_r.clone(),
-                        "r(θ)".to_string(),
-                        Some(pc.t_min),
-                        Some(pc.t_max),
-                    )),
-                    _ => None,
-                })
-                .collect();
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("Tabla de Valores")
-                        .color(accent)
-                        .strong()
-                        .size(16.0),
-                );
-            });
-            ui.add_space(4.0);
-            ui.separator();
-
-            if functions.is_empty() {
-                egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("Sin funciones\nEscribe f(x)=... en la entrada")
-                            .size(12.0)
-                            .color(txt_dim),
-                    );
-                });
-            } else {
-                if app.table_func_idx >= functions.len() {
-                    app.table_func_idx = 0;
-                }
-                let (_, expr, ftype, dmin, dmax) = &functions[app.table_func_idx];
-                let var = match ftype.as_str() {
-                    "(x,y)" | "r(θ)" => "t",
-                    _ => "x",
-                };
-                let name_labels: Vec<String> =
-                    functions.iter().map(|(l, _, _, _, _)| l.clone()).collect();
-
-                egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Función:").strong());
-                        let selected = name_labels
-                            .get(app.table_func_idx)
-                            .cloned()
-                            .unwrap_or_default();
-                        egui::ComboBox::from_id_salt("func_dropdown")
-                            .selected_text(&selected)
-                            .width(120.0)
-                            .show_ui(ui, |ui| {
-                                for (i, name) in name_labels.iter().enumerate() {
-                                    if ui.selectable_label(app.table_func_idx == i, name).clicked()
-                                    {
-                                        app.table_func_idx = i;
-                                    }
-                                }
-                            });
-                    });
-
-                    ui.add_space(8.0);
-                    egui::Grid::new("table_config_grid")
-                        .num_columns(2)
-                        .spacing([16.0, 8.0])
-                        .show(ui, |ui| {
-                            ui.label("Desde:");
-                            ui.add_sized(
-                                [80.0, 18.0],
-                                egui::TextEdit::singleline(&mut app.table_x_min)
-                                    .font(egui::FontId::proportional(12.0)),
-                            );
-                            ui.end_row();
-
-                            ui.label("Hasta:");
-                            ui.add_sized(
-                                [80.0, 18.0],
-                                egui::TextEdit::singleline(&mut app.table_x_max)
-                                    .font(egui::FontId::proportional(12.0)),
-                            );
-                            ui.end_row();
-
-                            ui.label("Paso:");
-                            ui.horizontal(|ui| {
-                                ui.add_sized(
-                                    [50.0, 18.0],
-                                    egui::TextEdit::singleline(&mut app.table_step)
-                                        .font(egui::FontId::proportional(12.0)),
-                                );
-                                if ui
-                                    .button("Go")
-                                    .on_hover_text("Agregar puntos al canvas")
-                                    .clicked()
-                                {
-                                    match validate_value_table_range(
-                                        &app.table_x_min,
-                                        &app.table_x_max,
-                                        &app.table_step,
-                                    ) {
-                                        Ok((x_min, _x_max, step, point_count)) => {
-                                            let is_polar = ftype == "r(θ)";
-                                            if let Err(error) = commit_value_table_points(
-                                                &mut app.document,
-                                                &mut app.undo_stack,
-                                                &mut app.redo_stack,
-                                                ValueTablePointSpec {
-                                                    expression: expr,
-                                                    variable: var,
-                                                    x_min,
-                                                    step,
-                                                    point_count,
-                                                    is_polar,
-                                                },
-                                            ) {
-                                                app.handle_command_outcome(
-                                                    grafito_command::commands::CommandOutcome::Error(
-                                                        error,
-                                                    ),
-                                                    ui.ctx().input(|input| input.time),
-                                                    "Tabla de valores",
-                                                );
-                                            }
-                                        }
-                                        Err(message) => {
-                                            app.notify(message, grafito_ui::toast::ToastKind::Error)
-                                        }
-                                    }
-                                }
-                            });
-                            ui.end_row();
-                        });
-                });
-                ui.separator();
-
-                // Table display
-                let x_min: f64 = dmin.unwrap_or(app.table_x_min.parse().unwrap_or(-5.0));
-                let x_max: f64 = dmax.unwrap_or(app.table_x_max.parse().unwrap_or(5.0));
-                let step: f64 = app.table_step.parse().unwrap_or(1.0);
-                let max_rows = 50;
-                egui::ScrollArea::vertical()
-                    .max_height(ui.available_height() - 8.0)
-                    .show(ui, |ui| {
-                        egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
-                            egui::Grid::new("tbl_grid")
-                                .striped(true)
-                                .min_col_width(80.0)
-                                .spacing([16.0, 8.0])
-                                .show(ui, |ui| {
-                                    ui.label(egui::RichText::new(var).strong().color(accent));
-                                    ui.label(
-                                        egui::RichText::new(&functions[app.table_func_idx].0)
-                                            .strong()
-                                            .color(accent),
-                                    );
-                                    ui.end_row();
-
-                                    let mut x = x_min;
-                                    let mut count = 0;
-                                    while x <= x_max + 1e-9 && count < max_rows {
-                                        let vars = vec![(var.to_string(), x)];
-                                        if let Ok(y) = grafito_geometry::expr::evaluate(expr, &vars)
-                                        {
-                                            if y.is_finite() {
-                                                ui.label(
-                                                    egui::RichText::new(format!("{:.3}", x))
-                                                        .size(12.0),
-                                                );
-                                                let out = format!("{:.4}", y);
-                                                ui.label(egui::RichText::new(out).size(12.0));
-                                                ui.end_row();
-                                            }
-                                        }
-                                        x += step;
-                                        count += 1;
-                                    }
-                                });
-                        });
-                    });
-            }
-        });
-}
-
 pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
         panel_theme_local(ctx);
@@ -1937,10 +1356,26 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::new(1.0, sep_col)),
         )
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(30.0);
-                ui.label(egui::RichText::new("En construcción...").color(Color32::from_gray(150)));
-            });
+            let height = ui.available_height().max(120.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.add_space(48.0);
+                    ui.label(
+                        egui::RichText::new("Sin panel aquí")
+                            .color(Color32::from_gray(150))
+                            .size(TYPE_SM),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Cambiá de perspectiva o abrí un panel desde «Paneles».",
+                        )
+                        .color(Color32::from_gray(120))
+                        .size(TYPE_SM),
+                    );
+                },
+            );
         });
 }
 
@@ -2973,114 +2408,6 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
     );
 }
 
-/// Panel derecho: Tabla de valores x|f(x) (AlgebraCas, Calculus).
-pub(crate) fn draw_right_table_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
-
-    egui::SidePanel::right("right_table")
-        .default_width(260.0)
-        .min_width(180.0)
-        .resizable(true)
-        .frame(
-            egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
-        )
-        .show(ctx, |ui| {
-            ui.add_space(8.0);
-            draw_right_drawer_header(ui, app, "Tabla de valores", accent);
-            ui.add_space(6.0);
-
-            let funcs: Vec<_> = app
-                .document
-                .objects_iter()
-                .filter_map(|(_, o)| {
-                    if let grafito_core::GeoObject::Function(f) = o {
-                        Some((f.label.clone(), f.expr.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if funcs.is_empty() {
-                ui.label(egui::RichText::new("Sin funciones en el documento.").color(txt_dim));
-                return;
-            }
-
-            // Selector de función
-            ui.horizontal(|ui| {
-                ui.label("Función:");
-                let max_idx = funcs.len().saturating_sub(1);
-                app.table_func_idx = app.table_func_idx.min(max_idx);
-                ui.add(
-                    egui::Slider::new(&mut app.table_func_idx, 0..=max_idx)
-                        .text("")
-                        .max_decimals(0),
-                );
-                ui.label(&funcs[app.table_func_idx].0);
-            });
-            ui.add_space(6.0);
-
-            egui::Grid::new("right_table_params").show(ui, |ui| {
-                ui.label("x min");
-                ui.text_edit_singleline(&mut app.table_x_min);
-                ui.end_row();
-                ui.label("x max");
-                ui.text_edit_singleline(&mut app.table_x_max);
-                ui.end_row();
-                ui.label("step");
-                ui.text_edit_singleline(&mut app.table_step);
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-
-            let (x_min, _x_max, step, point_count) = match validate_value_table_range(
-                &app.table_x_min,
-                &app.table_x_max,
-                &app.table_step,
-            ) {
-                Ok(range) => range,
-                Err(message) => {
-                    ui.label(egui::RichText::new(message).color(txt_dim));
-                    return;
-                }
-            };
-            let display_count = value_table_display_count(point_count);
-
-            let expr = funcs[app.table_func_idx].1.clone();
-            if display_count < point_count {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Mostrando las primeras {display_count} de {point_count} filas."
-                    ))
-                    .color(txt_dim),
-                );
-            }
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("right_table_values")
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("x").strong().color(txt_col));
-                        ui.label(egui::RichText::new("f(x)").strong().color(txt_col));
-                        ui.end_row();
-                        for index in 0..display_count {
-                            let x = x_min + index as f64 * step;
-                            let y =
-                                grafito_geometry::expr::evaluate(&expr, &[("x".to_string(), x)])
-                                    .ok();
-                            ui.label(format!("{:.3}", x));
-                            ui.label(match y {
-                                Some(v) => format!("{:.3}", v),
-                                None => "—".to_string(),
-                            });
-                            ui.end_row();
-                        }
-                    });
-            });
-        });
-}
-
 fn set_domain_coloring_mode(document: &mut Document, id: ObjectId, mode: u8) -> bool {
     let needs_update = matches!(
         document.get_object(id),
@@ -3575,76 +2902,6 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     }
                 });
         });
-}
-
-pub(crate) fn draw_right_spreadsheet(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let theme = current_theme(ctx);
-    let alg_fill = theme.panel_bg;
-    let sep_col = theme.separator;
-
-    // ─── 5. SPREADSHEET (optional right panel) ────────────────────────────
-    if app.show_spreadsheet {
-        egui::SidePanel::right("spreadsheet")
-            .resizable(true)
-            .default_width(280.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(alg_fill)
-                    .stroke(egui::Stroke::new(1.0, sep_col)),
-            )
-            .show(ctx, |ui| {
-                draw_right_drawer_header(ui, app, "Hoja de Cálculo", theme.accent);
-                ui.separator();
-                let (rows, cols) = app.document.spreadsheet_dim();
-                let text_col = theme.input_text;
-                let hdr_col = theme.text_secondary;
-
-                draw_virtual_spreadsheet(
-                    ui,
-                    "right_spreadsheet",
-                    rows,
-                    cols,
-                    hdr_col,
-                    hdr_col,
-                    |ui, row, column| {
-                        let key = (row, column);
-                        let current_value = app.document.get_spreadsheet_cell(row, column);
-                        let mut value = app
-                            .spreadsheet_edit_buffers
-                            .remove(&key)
-                            .unwrap_or_else(|| current_value.clone());
-                        let response = ui.add_sized(
-                            [SPREADSHEET_CELL_WIDTH, SPREADSHEET_CELL_HEIGHT],
-                            egui::TextEdit::singleline(&mut value)
-                                .font(egui::TextStyle::Monospace)
-                                .text_color(text_col)
-                                .horizontal_align(egui::Align::Center),
-                        );
-                        let explicit_submit = response.has_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                        let commit = response.lost_focus() || explicit_submit;
-                        if let Err(error) = crate::app::commit_spreadsheet_edit(
-                            &mut app.document,
-                            crate::app::SpreadsheetEditState {
-                                undo_stack: &mut app.undo_stack,
-                                redo_stack: &mut app.redo_stack,
-                                edit_buffers: &mut app.spreadsheet_edit_buffers,
-                            },
-                            row,
-                            column,
-                            value,
-                            commit,
-                        ) {
-                            log::warn!("set_spreadsheet_cell: {error}");
-                            app.notify(
-                                format!("No se pudo editar la hoja: {error}"),
-                                grafito_ui::toast::ToastKind::Error,
-                            );
-                        }
-                    },
-                );
-            });
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
