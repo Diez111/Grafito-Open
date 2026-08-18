@@ -439,6 +439,17 @@ impl GrafitoApp {
         self.assistant.tutor_streak = self.profile.streak;
         self.assistant.tutor_best_streak = self.profile.best_streak;
         self.assistant.tutor_domain_samples = self.domain_sparkline();
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        self.assistant.tutor_last_activity = self
+            .profile
+            .recommend_next()
+            .first()
+            .and_then(|branch| branch.last_study_epoch)
+            .map(|last| grafito_profile::time_ago(last, epoch))
+            .unwrap_or_default();
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {

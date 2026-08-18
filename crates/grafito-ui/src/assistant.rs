@@ -191,6 +191,8 @@ pub struct AssistantPanelState {
     pub tutor_best_streak: u32,
     /// Muestras 0..=1 para el sparkline de evolución de dominio.
     pub tutor_domain_samples: Vec<f32>,
+    /// Última actividad legible («hoy», «ayer», «hace N días») de la próxima rama.
+    pub tutor_last_activity: String,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
@@ -276,6 +278,7 @@ impl Default for AssistantPanelState {
             tutor_streak: 0,
             tutor_best_streak: 0,
             tutor_domain_samples: Vec::new(),
+            tutor_last_activity: String::new(),
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -1778,8 +1781,16 @@ fn draw_tutor_card(
                     {
                         action = Some(AssistantUiAction::RunMiniExam);
                     }
+                    let next = if state.tutor_last_activity.is_empty() {
+                        format!("Próximo: {}", state.tutor_next)
+                    } else {
+                        format!(
+                            "Próximo: {} · última: {}",
+                            state.tutor_next, state.tutor_last_activity
+                        )
+                    };
                     ui.label(
-                        egui::RichText::new(format!("Próximo: {}", state.tutor_next))
+                        egui::RichText::new(next)
                             .color(theme.text_secondary)
                             .size(TYPE_XS),
                     );
