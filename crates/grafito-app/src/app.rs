@@ -1196,6 +1196,8 @@ pub struct GrafitoApp {
     pub whiteboard: crate::whiteboard_ui::WhiteboardSession,
     /// Asistente visible (y ocultable) dentro de la pizarra.
     pub show_whiteboard_assistant: bool,
+    /// Memoria pedagógica del usuario (nivel, ramas, exámenes) del tutor.
+    pub profile: grafito_profile::StudentProfile,
     pub undo_stack: Vec<Document>,
     pub redo_stack: Vec<ChangeSet>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
@@ -1688,6 +1690,7 @@ impl GrafitoApp {
             whiteboard_open: false,
             whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
             show_whiteboard_assistant: true,
+            profile: crate::utils::load_profile(),
             recent_files: Vec::new(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),

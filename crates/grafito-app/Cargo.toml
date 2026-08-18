@@ -47,6 +47,7 @@ tiny-skia = "0.11.4"
 serde_json.workspace = true
 grafito-anim.workspace = true
 grafito-whiteboard.workspace = true
+grafito-profile.workspace = true
 serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true

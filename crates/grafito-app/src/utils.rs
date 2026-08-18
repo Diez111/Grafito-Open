@@ -79,6 +79,19 @@ fn config_path() -> std::path::PathBuf {
     std::path::PathBuf::from("grafito_config.json")
 }
 
+/// Ruta del perfil pedagógico del estudiante (memoria del tutor).
+pub(crate) fn profile_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("grafito_profile.json")
+}
+
+/// Carga el perfil persistido; ante cualquier error devuelve un perfil vacío.
+pub(crate) fn load_profile() -> grafito_profile::StudentProfile {
+    std::fs::read_to_string(profile_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
 /// Directorio de plugins del asistente (configurable por entorno).
 pub(crate) fn plugins_dir() -> std::path::PathBuf {
     std::env::var_os("GRAFITO_PLUGINS_DIR")

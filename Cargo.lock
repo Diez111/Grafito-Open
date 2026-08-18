@@ -1883,6 +1883,7 @@ dependencies = [
  "grafito-core",
  "grafito-geometry",
  "grafito-plugins",
+ "grafito-profile",
  "grafito-render",
  "grafito-ui",
  "grafito-whiteboard",

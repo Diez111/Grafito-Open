@@ -182,6 +182,11 @@ pub struct AssistantPanelState {
     pub media: Option<AssistantMedia>,
     /// Verdadero mientras el job de animación está en curso (progreso en vivo).
     pub anim_progress: bool,
+    /// Memoria del tutor en el panel: nivel, ramas y siguiente recomendación.
+    pub tutor_level: u32,
+    pub tutor_covered: usize,
+    pub tutor_total: usize,
+    pub tutor_next: String,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
@@ -260,6 +265,10 @@ impl Default for AssistantPanelState {
             media_textures: Vec::new(),
             media_textures_ready: false,
             anim_progress: false,
+            tutor_level: 0,
+            tutor_covered: 0,
+            tutor_total: 0,
+            tutor_next: String::new(),
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -776,6 +785,15 @@ impl AssistantPanelState {
     }
 
     /// Conserva intercambios completos recientes que caben en el presupuesto remoto.
+    /// Texto de la última respuesta del asistente (para clasificar el tema).
+    pub fn latest_assistant_text(&self) -> Option<String> {
+        self.conversation
+            .iter()
+            .rev()
+            .find(|turn| matches!(turn.role, ConversationRole::Assistant))
+            .map(|turn| turn.content.clone())
+    }
+
     pub fn conversation_within_budget(&self, max_bytes: usize) -> Vec<ConversationTurn> {
         Self::conversation_slice_within_budget(&self.conversation, max_bytes)
     }
@@ -1269,6 +1287,12 @@ pub enum AssistantUiAction {
     AgentModeChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
+    /// Preguntarle al tutor qué estudiar a continuación.
+    AskNextTopic,
+    /// Feedback del usuario: la última explicación le sirvió.
+    LearnCorrect,
+    /// Feedback del usuario: la última explicación no le sirvió.
+    LearnIncorrect,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -1648,6 +1672,85 @@ fn draw_assistant_settings_contents(
     action
 }
 
+/// Tarjeta de progreso del tutor (memoria del usuario) con la siguiente
+/// recomendación y feedback ✓/✗ de la última explicación.
+fn draw_tutor_card(
+    ui: &mut egui::Ui,
+    state: &mut AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    let theme = current_theme(ui.ctx());
+    let mut action = None;
+    let pct = if state.tutor_total > 0 {
+        state.tutor_covered as f32 / state.tutor_total as f32 * 100.0
+    } else {
+        0.0
+    };
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(RADIUS_MD)
+        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Tutor · Nivel ")
+                        .color(theme.accent)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.label(
+                    egui::RichText::new(state.tutor_level.to_string())
+                        .color(theme.accent)
+                        .size(TYPE_SM)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{:.0}% ramas", pct))
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS),
+                    );
+                });
+            });
+            if !state.tutor_next.is_empty() {
+                ui.add_space(SPACE_XS);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(egui::Button::new("¿Qué sigo estudiando?").small())
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::AskNextTopic);
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("Próximo: {}", state.tutor_next))
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS),
+                    );
+                });
+            }
+            ui.add_space(SPACE_XS);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("¿Te sirvió la explicación?")
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if action_icon_button(ui, Icon::Close, theme.text_secondary, "No sirvió")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::LearnIncorrect);
+                    }
+                    if action_icon_button(ui, Icon::Check, theme.accent, "Sí, entendí").clicked()
+                    {
+                        action = Some(AssistantUiAction::LearnCorrect);
+                    }
+                });
+            });
+        });
+    action
+}
+
 fn draw_panel_contents(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
@@ -1657,6 +1760,12 @@ fn draw_panel_contents(
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let mut action = draw_assistant_header(ui, state, theme, visuals);
+    if state.tutor_total > 0 {
+        ui.add_space(SPACE_XS);
+        if let Some(child) = draw_tutor_card(ui, state) {
+            action = Some(child);
+        }
+    }
     ui.add_space(SPACE_XS);
 
     let composer_height = assistant_composer_height(state);

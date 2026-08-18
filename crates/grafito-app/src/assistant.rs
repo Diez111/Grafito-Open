@@ -421,6 +421,21 @@ impl GrafitoApp {
     /// Sincroniza el foco actual y procesa resultados antes de pintar cualquier
     /// host del asistente, incluso cuando su pestaña no es la visible.
     pub(crate) fn sync_assistant_for_frame(&mut self, ctx: &egui::Context) {
+        // Sincroniza la memoria del tutor con la tarjeta de progreso del panel.
+        self.assistant.tutor_level = self.profile.level;
+        self.assistant.tutor_covered = self
+            .profile
+            .branches
+            .iter()
+            .filter(|branch| branch.covered)
+            .count();
+        self.assistant.tutor_total = self.profile.branches.len();
+        self.assistant.tutor_next = self
+            .profile
+            .recommend_next()
+            .first()
+            .map(|branch| branch.name.clone())
+            .unwrap_or_default();
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
@@ -732,6 +747,16 @@ impl GrafitoApp {
                 self.save_app_config();
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
+            AssistantUiAction::AskNextTopic => {
+                let memory = self.profile.memory();
+                self.assistant.problem = format!(
+                    "Soy nivel {} de Grafito. Mi progreso: {memory} ¿Qué debería estudiar a continuación y cómo?",
+                    self.profile.level
+                );
+                self.start_local_assistant_request(ctx);
+            }
+            AssistantUiAction::LearnCorrect => self.record_learning(true),
+            AssistantUiAction::LearnIncorrect => self.record_learning(false),
         }
     }
 
@@ -951,7 +976,17 @@ impl GrafitoApp {
                 .len()
                 .saturating_add(REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES)
         };
-        request.system_instructions = plugin_instructions;
+        // Memoria del tutor: el perfil del estudiante entra en el contexto de
+        // cada turno para que Mora adapte la pedagogía (ADR-0001).
+        let mut system = plugin_instructions;
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&format!(
+            "[Perfil del estudiante]\n{}",
+            self.profile.memory()
+        ));
+        request.system_instructions = system;
         let focus_bytes = request
             .focus
             .as_ref()
@@ -1141,6 +1176,56 @@ impl GrafitoApp {
     }
 
     /// Genera una animación didáctica con el motor externo y la reproduce en el chat.
+    /// Clasifica el contenido de la última explicación en una rama del plan.
+    fn learning_branch(&self) -> (&'static str, &'static str) {
+        let text = self
+            .assistant
+            .latest_assistant_text()
+            .unwrap_or_default()
+            .to_lowercase();
+        for (needle, id, name) in [
+            ("deriv", "calculus", "Cálculo"),
+            ("integral", "calculus", "Cálculo"),
+            ("límite", "calculus", "Cálculo"),
+            ("ecuación", "algebra", "Álgebra"),
+            ("polinom", "algebra", "Álgebra"),
+            ("función", "functions", "Funciones"),
+            ("gráf", "functions", "Funciones"),
+            ("trigonometr", "trigonometry", "Trigonometría"),
+            ("geom", "geometry", "Geometría"),
+            ("estadíst", "stats", "Estadística"),
+            ("complej", "complex", "Complejos"),
+            ("fractal", "complex", "Complejos"),
+        ] {
+            if text.contains(needle) {
+                return (id, name);
+            }
+        }
+        ("general", "General")
+    }
+
+    /// Registra el feedback del usuario en la memoria del tutor y persiste.
+    fn record_learning(&mut self, correct: bool) {
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let (id, name) = self.learning_branch();
+        self.profile.record_outcome(id, name, epoch, correct);
+        let _ = std::fs::write(
+            crate::utils::profile_path(),
+            serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+        );
+        self.notify(
+            if correct {
+                "¡Bien! Registrado en tu progreso."
+            } else {
+                "Anotado: reforzamos ese tema."
+            },
+            ToastKind::Success,
+        );
+    }
+
     fn run_assistant_animation(&mut self, ctx: &egui::Context) {
         if self.assistant_runtime.anim_job.is_some() || self.assistant.is_pending {
             return;
