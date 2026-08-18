@@ -121,6 +121,19 @@ mod tests {
     }
 
     #[test]
+    fn grading_never_panics_on_exotic_inputs() {
+        // Bordes anti-pánico: vacío, unicode, símbolos raros y repeticiones.
+        assert!(!mini_exam_grade("calculus", 0, ""));
+        assert!(!mini_exam_grade("calculus", 0, "   "));
+        assert!(!mini_exam_grade("algebra", 1, "(−x−3)(x+3)"));
+        assert!(!mini_exam_grade("trigonometry", 0, "🫀∞√√"));
+        assert!(!mini_exam_grade("complex", 0, "NaN"));
+        assert!(mini_exam_grade("stats", 2, "5"));
+        let huge = "x".repeat(10_000);
+        assert!(!mini_exam_grade("geometry", 0, &huge));
+    }
+
+    #[test]
     fn result_passes_only_at_two_thirds_or_more() {
         assert!(mini_exam_result("algebra", 1, 2, 3).passed);
         assert!(!mini_exam_result("algebra", 1, 1, 3).passed);

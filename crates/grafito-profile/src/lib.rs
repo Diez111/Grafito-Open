@@ -223,10 +223,44 @@ impl StudentProfile {
     }
 }
 
+/// Tiempo transcurrido desde `epoch` hasta `now`, legible y determinista.
+/// Sin dependencias externas (matemática pura): hoy, hace N días, hace N h o
+/// hace N min. Si `now <= epoch` devuelve «hoy».
+pub fn time_ago(epoch: u64, now: u64) -> String {
+    const DAY: u64 = 86_400;
+    const HOUR: u64 = 3_600;
+    const MINUTE: u64 = 60;
+    let elapsed = now.saturating_sub(epoch);
+    if elapsed < MINUTE {
+        return "hoy".to_string();
+    }
+    if elapsed < HOUR {
+        let minutes = elapsed / MINUTE;
+        return format!("hace {minutes} min");
+    }
+    if elapsed < DAY {
+        let hours = elapsed / HOUR;
+        return format!("hace {hours} h");
+    }
+    let days = elapsed / DAY;
+    if days == 1 {
+        return "ayer".to_string();
+    }
+    format!("hace {days} días")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn time_ago_is_deterministic_and_legible() {
+        assert_eq!(time_ago(100, 100), "hoy");
+        assert_eq!(time_ago(100, 130), "hoy"); // 30 s < 1 min
+        assert_eq!(time_ago(0, 86_400), "ayer");
+        assert_eq!(time_ago(0, 86_400 * 3), "hace 3 días");
+        assert_eq!(time_ago(0, 1_800), "hace 30 min");
+    }
     #[test]
     fn profile_tracks_outcomes_levels_and_branch_coverage() {
         let mut profile = StudentProfile::new("Lucas");
