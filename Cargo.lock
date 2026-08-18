@@ -1999,6 +1999,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-profile"
+version = "1.2.20-beta"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "grafito-release-tests"
 version = "1.2.20-beta"
 
