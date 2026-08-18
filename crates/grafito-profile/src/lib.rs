@@ -20,6 +20,10 @@ pub struct BranchState {
     /// Dominio 0..=1 (media móvil exponencial de aciertos).
     pub mastery: f32,
     pub last_study_epoch: Option<u64>,
+    /// Histórico (epoch, dominio) por rama, acotado a 64 muestras, para
+    /// graficar la evolución. `#[serde(default)]` permite leer perfiles viejos.
+    #[serde(default)]
+    pub domain_history: Vec<(u64, f32)>,
 }
 
 /// Tipo de evento de aprendizaje registrado.
@@ -88,6 +92,7 @@ impl StudentProfile {
             covered: false,
             mastery: 0.0,
             last_study_epoch: None,
+            domain_history: Vec::new(),
         });
         self.branches.len() - 1
     }
@@ -113,6 +118,11 @@ impl StudentProfile {
             self.streak = 0;
         }
         branch.last_study_epoch = Some(epoch);
+        // Evolución de dominio acotada (64 muestras por rama).
+        branch.domain_history.push((epoch, branch.mastery));
+        if branch.domain_history.len() > 64 {
+            branch.domain_history.remove(0);
+        }
         self.push_event(StudyEvent {
             epoch,
             branch_id: branch_id.to_string(),
@@ -277,6 +287,28 @@ mod tests {
         }
         assert!(profile.branches[0].mastery.is_finite());
         assert!(profile.branches[0].mastery >= 0.0 && profile.branches[0].mastery <= 1.0);
+    }
+
+    #[test]
+    fn domain_history_records_evolution_and_stays_capped() {
+        let mut profile = StudentProfile::new("Evo");
+        for index in 0..70 {
+            profile.record_outcome("algebra", "Álgebra", index as u64, true);
+        }
+        let branch = &profile.branches[0];
+        assert!(branch.domain_history.len() <= 64, "histórico acotado");
+        assert!(branch.domain_history.len() >= 2);
+        let last = branch
+            .domain_history
+            .last()
+            .map(|entry| entry.1)
+            .unwrap_or(0.0);
+        let first = branch
+            .domain_history
+            .first()
+            .map(|entry| entry.1)
+            .unwrap_or(1.0);
+        assert!(last >= first, "el dominio sube con los aciertos");
     }
 
     #[test]
