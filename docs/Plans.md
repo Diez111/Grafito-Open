@@ -108,6 +108,7 @@ Entregas (TDD):
 | id | Tarea | DoD (definición de hecho) | Estado |
 |---|---|---|---|
 | P6.a | Ra cha y dominio en grafito-profile: `streak` (aciertos consecutivos) e histórico de dominio por rama | `record_outcome` actualiza streak; `memory()` menciona la racha; tests | cc:完了 |
+| P6.c | Histórico de dominio por rama (`domain_history` acotado + serde default) | cada acierto anota (epoch, dominio); tests; no pierde perfiles viejos | cc:完了 |
 | P6.b | Fechas/histórico de dominio por rama y racha visibles en la tarjeta Tutores | memory() y tarjeta muestran evolución; tests | cc:完了 |
 | P4 | Perf render 3D/2D: LOD de mallas por distancia, cache de texturas por hash, `request_repaint` diferido en hot path | clippy 0, tests verdes; medición de mejora | cc:TODO |
 | Px.i18n | i18n ES/EN de la UI (strings en ES hoy; tablas de idioma + selección) | selector de idioma; strings con claves; tests | cc:TODO |
