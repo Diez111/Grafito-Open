@@ -189,6 +189,8 @@ pub struct AssistantPanelState {
     pub tutor_next: String,
     pub tutor_streak: u32,
     pub tutor_best_streak: u32,
+    /// Muestras 0..=1 para el sparkline de evolución de dominio.
+    pub tutor_domain_samples: Vec<f32>,
     /// Texturas de frames cargadas una sola vez al mostrar la animación.
     media_textures: Vec<egui::TextureHandle>,
     /// Guarda si ya se construyeron las texturas de la media actual.
@@ -273,6 +275,7 @@ impl Default for AssistantPanelState {
             tutor_next: String::new(),
             tutor_streak: 0,
             tutor_best_streak: 0,
+            tutor_domain_samples: Vec::new(),
             vision_enabled: false,
             allow_fusion_fallback: false,
             problem: String::new(),
@@ -1683,6 +1686,34 @@ fn draw_assistant_settings_contents(
     action
 }
 
+/// Mini-gráfico de evolución de dominio (0..=1) de la rama más trabajada.
+fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::theme::Theme) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
+    if samples.len() < 2 {
+        return;
+    }
+    let painter = ui.painter();
+    let min_x = rect.left() + 2.0;
+    let max_x = rect.right() - 2.0;
+    let step = (max_x - min_x) / (samples.len() - 1) as f32;
+    let baseline = rect.bottom();
+    let to_y = |value: f32| baseline - value.clamp(0.0, 0.9) * rect.height();
+    let points: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, value)| egui::pos2(min_x + step * index as f32, to_y(*value)))
+        .collect();
+    let last = points.last().copied();
+    painter.add(egui::Shape::line(
+        points,
+        egui::Stroke::new(2.0, theme.accent),
+    ));
+    if let Some(last) = last {
+        painter.circle_filled(last, 2.5, theme.accent);
+    }
+}
+
 /// Tarjeta de progreso del tutor (memoria del usuario) con la siguiente
 /// recomendación y feedback ✓/✗ de la última explicación.
 fn draw_tutor_card(
@@ -1753,6 +1784,10 @@ fn draw_tutor_card(
                             .size(TYPE_XS),
                     );
                 });
+            }
+            if state.tutor_domain_samples.len() >= 2 {
+                ui.add_space(SPACE_SM);
+                draw_domain_sparkline(ui, &state.tutor_domain_samples, theme);
             }
             ui.add_space(SPACE_XS);
             ui.horizontal(|ui| {

@@ -438,6 +438,7 @@ impl GrafitoApp {
             .unwrap_or_default();
         self.assistant.tutor_streak = self.profile.streak;
         self.assistant.tutor_best_streak = self.profile.best_streak;
+        self.assistant.tutor_domain_samples = self.domain_sparkline();
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
@@ -1204,6 +1205,11 @@ impl GrafitoApp {
         self.start_local_assistant_request(ctx);
     }
 
+    /// Muestras (0..=1) para el sparkline de evolución de dominio.
+    fn domain_sparkline(&self) -> Vec<f32> {
+        Self::domain_sparkline_from(&self.profile)
+    }
+
     /// Clasifica el contenido de la última explicación en una rama del plan.
     fn learning_branch(&self) -> (&'static str, &'static str) {
         let text = self
@@ -1230,6 +1236,28 @@ impl GrafitoApp {
             }
         }
         ("general", "General")
+    }
+
+    /// Muestras 0..=1 del sparkline: histórico de la rama más trabajada,
+    /// hacia atrás hasta 14 puntos (función pura y testeable).
+    fn domain_sparkline_from(profile: &grafito_profile::StudentProfile) -> Vec<f32> {
+        profile
+            .branches
+            .iter()
+            .max_by_key(|branch| branch.domain_history.len())
+            .map(|branch| {
+                branch
+                    .domain_history
+                    .iter()
+                    .rev()
+                    .take(14)
+                    .map(|entry| entry.1.clamp(0.0, 1.0))
+                    .collect::<Vec<f32>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Registra el feedback del usuario en la memoria del tutor y persiste.
@@ -2261,6 +2289,21 @@ fn load_gif_frames(path: &str) -> Result<Vec<egui::ColorImage>, String> {
         frames.push(image);
     }
     Ok(frames)
+}
+
+#[cfg(test)]
+mod domain_sparkline_tests {
+    #[test]
+    fn samples_are_bounded_and_normalized() {
+        let mut profile = grafito_profile::StudentProfile::new("Spark");
+        for index in 0..20 {
+            profile.record_outcome("calculus", "Cálculo", index as u64, index % 2 == 0);
+        }
+        let samples = crate::GrafitoApp::domain_sparkline_from(&profile);
+        assert!(!samples.is_empty());
+        assert!(samples.len() <= 14, "muestras acotadas");
+        assert!(samples.iter().all(|value| (0.0..=1.0).contains(value)));
+    }
 }
 
 #[cfg(test)]
