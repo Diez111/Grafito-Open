@@ -987,23 +987,47 @@ impl Renderer {
             }],
         });
 
-        let implicit_compute = Some(crate::implicit_compute::ImplicitComputePipeline::new(
-            device, queue, 1024,
-        ));
-        let function_compute = Some(crate::function_compute::FunctionComputePipeline::new(
-            device, queue, 10000,
-        ));
-        let parametric_compute = Some(crate::parametric_compute::ParametricComputePipeline::new(
-            device, queue, 4000, 128,
-        ));
-        let vector_compute = Some(crate::vector_compute::VectorComputePipeline::new(
-            device, queue, 128,
-        ));
-        let complex_compute = Some(crate::complex_compute::ComplexComputePipeline::new(
-            device, queue,
-        ));
-        let domain_coloring_compute =
-            Some(crate::domain_coloring_compute::DomainColoringComputePipeline::new(device, queue));
+        let limits = device.limits();
+        let has_compute_storage = limits.max_storage_buffers_per_shader_stage >= 3;
+        let implicit_compute = if has_compute_storage {
+            Some(crate::implicit_compute::ImplicitComputePipeline::new(
+                device, queue, 1024,
+            ))
+        } else {
+            log::warn!("GPU compute deshabilitado");
+            None
+        };
+        let function_compute = if has_compute_storage {
+            Some(crate::function_compute::FunctionComputePipeline::new(
+                device, queue, 10000,
+            ))
+        } else {
+            None
+        };
+        let parametric_compute = if has_compute_storage {
+            Some(crate::parametric_compute::ParametricComputePipeline::new(
+                device, queue, 4000, 128,
+            ))
+        } else {
+            None
+        };
+        let vector_compute = if has_compute_storage {
+            Some(crate::vector_compute::VectorComputePipeline::new(
+                device, queue, 128,
+            ))
+        } else {
+            None
+        };
+        let complex_compute = if has_compute_storage {
+            Some(crate::complex_compute::ComplexComputePipeline::new(device, queue))
+        } else {
+            None
+        };
+        let domain_coloring_compute = if has_compute_storage {
+            Some(crate::domain_coloring_compute::DomainColoringComputePipeline::new(device, queue))
+        } else {
+            None
+        };
 
         Self {
             pipeline,

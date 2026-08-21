@@ -25,7 +25,7 @@
 //! `Color32::from_rgb(` en cualquier archivo que no sea este.
 
 use crate::tokens::{
-    ANIM_MICRO, FONT_SF_MONO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SPACING_MINIMAL_X,
+    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SPACING_MINIMAL_X,
     SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
 };
 use egui::{Color32, Context};
@@ -230,23 +230,6 @@ impl Theme {
 
         ctx.set_visuals(visuals);
 
-        // SF Pro typography — registra la familia del sistema si está disponible;
-        // egui hace fallback automático a la fuente embebida cuando SF Pro no existe.
-        {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, FONT_SF_TEXT.to_owned());
-            // Display para headings se resuelve vía TextStyle más abajo.
-            fonts
-                .families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .insert(0, FONT_SF_MONO.to_owned());
-            ctx.set_fonts(fonts);
-        }
 
         ctx.style_mut(|s| {
             s.animation_time = ANIM_MICRO / 1_000.0;
