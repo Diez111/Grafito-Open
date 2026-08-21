@@ -2567,8 +2567,8 @@ fn draw_assistant_header(
     // macOS: header como toolbar translúcido con vibrancy, esquinas 16, sombra suave.
     let mut action = None;
     egui::Frame::none()
-        .fill(theme.panel_bg.gamma_multiply(0.72))
-        .rounding(egui::Rounding::same(crate::tokens::RADIUS_XL))
+        .fill(theme.panel_bg.gamma_multiply(0.5))
+        .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
         .inner_margin(egui::Margin::symmetric(
             crate::tokens::SPACE_SM,
             crate::tokens::SPACE_XS,

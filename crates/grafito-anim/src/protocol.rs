@@ -419,3 +419,212 @@ pub enum WireMessage {
     },
     Pong,
 }
+
+// ── Generador universal estilo canal de YouTube ───────────────────────────
+/// Normaliza un concepto libre (trim, colapso de espacios, truncado 500 chars).
+pub fn normalize_concept(concept: &str) -> String {
+    let mut s = concept.trim().replace(['\n', '\r', '\t'], " ");
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    s = out;
+    if s.is_empty() {
+        return "matem\u{00e1}tica".to_string();
+    }
+    if s.len() > 500 {
+        s.truncate(500);
+    }
+    s
+}
+
+/// Elige la mejor plantilla para cualquier texto (ES+EN), como un canal profesional.
+/// Garantiza siempre una plantilla valida conocida.
+pub fn template_for_concept(concept: &str) -> &'static str {
+    let c = concept.to_lowercase();
+    if c.contains("pit\u{00e1}goras")
+        || c.contains("pitagoras")
+        || c.contains("pythag")
+        || (c.contains("triang") && (c.contains("rect") || c.contains("hipoten")))
+    {
+        return "pitagoras";
+    }
+    if c.contains("integral")
+        || c.contains("\u{00e1}rea")
+        || (c.contains("area")
+            && (c.contains("bajo") || c.contains("curva") || c.contains("riemann")))
+        || c.contains("\u{00e1}rea bajo")
+    {
+        return "integral-area";
+    }
+    if c.contains("taylor")
+        || c.contains("maclaurin")
+        || (c.contains("serie") && (c.contains("potencia") || c.contains("aprox")))
+        || c.contains("aproxima")
+    {
+        return "taylor-series";
+    }
+    if c.contains("conformal")
+        || c.contains("conforme")
+        || c.contains("complej")
+        || c.contains("complex")
+        || c.contains("fractal")
+        || c.contains("mandelb")
+    {
+        return "conformal-map";
+    }
+    if c.contains("deriv")
+        || c.contains("pendiente")
+        || c.contains("tangente")
+        || c.contains("slope")
+        || (c.contains("l\u{00ed}mite") && c.contains("cociente"))
+    {
+        return "derivative-slope";
+    }
+    if c.contains("vector") || (c.contains("campo") && c.contains("vectorial")) {
+        return "conformal-map";
+    }
+    if c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad") {
+        return "integral-area";
+    }
+    if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
+        return "taylor-series";
+    }
+    "derivative-slope"
+}
+
+/// Sanitiza un template libre a uno conocido; si es desconocido, elige por concepto.
+pub fn sanitize_template(template: &str, concept: &str) -> String {
+    let t = template.trim().to_lowercase();
+    match t.as_str() {
+        "derivative-slope" | "integral-area" | "taylor-series" | "conformal-map" | "pitagoras"
+        | "pythagoras" => {
+            if t == "pythagoras" {
+                "pitagoras".to_string()
+            } else {
+                t
+            }
+        }
+        "" | "universal" | "auto" => template_for_concept(concept).to_string(),
+        _ => template_for_concept(concept).to_string(),
+    }
+}
+
+/// Construye un AnimRequest universal a partir de cualquier texto libre.
+/// Garantiza validacion y valores por defecto profesionales.
+pub fn request_for_concept(concept: &str, template_hint: &str) -> AnimRequest {
+    let concept_norm = normalize_concept(concept);
+    let template = sanitize_template(template_hint, &concept_norm);
+    AnimRequest {
+        template,
+        concept: concept_norm,
+        params: std::collections::BTreeMap::new(),
+        spec: None,
+        export: ExportFormat::Gif,
+        canvas: (640, 480),
+    }
+}
+
+#[cfg(test)]
+mod universal_tests {
+    use super::*;
+    #[test]
+    fn normalize_handles_any_text() {
+        assert_eq!(normalize_concept("  hola   mundo  "), "hola mundo");
+        assert!(!normalize_concept("").is_empty());
+        assert!(!normalize_concept("   ").is_empty());
+        let long = "a".repeat(1000);
+        assert!(normalize_concept(&long).len() <= 500);
+        assert_eq!(normalize_concept("\u{1f600} emoji"), "\u{1f600} emoji");
+    }
+    #[test]
+    fn template_for_any_text_is_valid() {
+        let cases = [
+            ("teorema de pit\u{00e1}goras", "pitagoras"),
+            ("integral area bajo curva", "integral-area"),
+            ("serie de taylor seno", "taylor-series"),
+            ("mapeo conforme complejo", "conformal-map"),
+            ("derivada pendiente tangente", "derivative-slope"),
+            ("hola mundo sin matem\u{00e1}tica", "derivative-slope"),
+            ("", "derivative-slope"),
+            ("   ", "derivative-slope"),
+            ("probabilidad binomial", "integral-area"),
+            ("fractal mandelbrot", "conformal-map"),
+        ];
+        for (concept, expected) in cases {
+            assert_eq!(
+                template_for_concept(concept),
+                expected,
+                "concept: {concept}"
+            );
+        }
+        // any arbitrary text must return a known template
+        let known = [
+            "derivative-slope",
+            "integral-area",
+            "taylor-series",
+            "conformal-map",
+            "pitagoras",
+        ];
+        for txt in [
+            "random",
+            "foo bar baz",
+            "12345",
+            "\u{1f4da} libros",
+            &"x".repeat(200),
+        ] {
+            assert!(
+                known.contains(&template_for_concept(txt)),
+                "unknown mapping for {txt}"
+            );
+        }
+    }
+    #[test]
+    fn request_for_concept_validates() {
+        let req = request_for_concept("derivada", "");
+        assert!(req.validate().is_ok());
+        let req2 = request_for_concept("", "unknown-template");
+        assert!(req2.validate().is_ok());
+        let req3 = request_for_concept(&"a".repeat(1000), "auto");
+        assert!(req3.validate().is_ok());
+        assert!(req3.concept.len() <= 500);
+    }
+    #[test]
+    fn placeholder_budget_under_2s_for_any_text() {
+        let start = std::time::Instant::now();
+        for i in 0..200 {
+            let concept = format!("concepto {i} con texto libre y alguna matem\u{00e1}tica");
+            let tmpl = template_for_concept(&concept);
+            let _req = request_for_concept(&concept, tmpl);
+        }
+        assert!(
+            start.elapsed().as_millis() < 1800,
+            "universal mapping debe ser <1.8s para 200 conceptos"
+        );
+    }
+    #[test]
+    fn sanitize_template_fallback() {
+        assert_eq!(
+            sanitize_template("derivative-slope", "hola"),
+            "derivative-slope"
+        );
+        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
+        assert_eq!(
+            sanitize_template("", "integral de riemann"),
+            "integral-area"
+        );
+        assert_eq!(
+            sanitize_template("unknown", "taylor serie"),
+            "taylor-series"
+        );
+    }
+}

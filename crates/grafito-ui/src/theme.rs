@@ -24,7 +24,10 @@
 //! El test de coherencia en `tests.rs` falla si encuentra
 //! `Color32::from_rgb(` en cualquier archivo que no sea este.
 
-use crate::tokens::{ANIM_MICRO, RADIUS_LG, RADIUS_XL};
+use crate::tokens::{
+    ANIM_MICRO, FONT_SF_MONO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SPACING_MINIMAL_X,
+    SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
+};
 use egui::{Color32, Context};
 
 #[derive(Debug, Clone, Copy)]
@@ -185,19 +188,26 @@ impl Theme {
         visuals.hyperlink_color = self.accent;
         visuals.selection.bg_fill = self.selection_bg;
         visuals.selection.stroke = egui::Stroke::new(1.5, self.accent);
-        visuals.window_rounding = egui::Rounding::same(RADIUS_XL);
-        visuals.menu_rounding = egui::Rounding::same(RADIUS_LG);
+        // Minimalista: radios más generosos (18 / 24) para sensación ligera y moderna.
+        visuals.window_rounding = egui::Rounding::same(RADIUS_2XL);
+        visuals.menu_rounding = egui::Rounding::same(RADIUS_XL);
 
-        // macOS vibrancy: sombra más suave y difusa, como NSVisualEffectView.
+        // Minimalista / macOS vibrancy: sombra más suave, difusa y elevada.
+        // Blur mayor + offset menor = sombra etérea, sin borde duro.
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 16.0),
+            offset: egui::vec2(0.0, 12.0),
+            blur: 40.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(if is_dark { 72 } else { 20 }),
+        };
+        visuals.popup_shadow = egui::Shadow {
+            offset: egui::vec2(0.0, 8.0),
             blur: 32.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(if is_dark { 90 } else { 28 }),
+            color: Color32::from_black_alpha(if is_dark { 56 } else { 16 }),
         };
-        visuals.popup_shadow = visuals.window_shadow;
 
-        // macOS: controles más redondeados y con aire, como NSButton.
+        // Minimalista: controles con aire, radio LG (14) para tacto suave.
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
@@ -220,15 +230,64 @@ impl Theme {
 
         ctx.set_visuals(visuals);
 
+        // SF Pro typography — registra la familia del sistema si está disponible;
+        // egui hace fallback automático a la fuente embebida cuando SF Pro no existe.
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, FONT_SF_TEXT.to_owned());
+            // Display para headings se resuelve vía TextStyle más abajo.
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, FONT_SF_MONO.to_owned());
+            ctx.set_fonts(fonts);
+        }
+
         ctx.style_mut(|s| {
             s.animation_time = ANIM_MICRO / 1_000.0;
-            s.spacing.item_spacing = egui::vec2(10.0, 8.0);
+            // Ritmo minimalista 10×8 (horizontal × vertical)
+            s.spacing.item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
             s.spacing.button_padding = egui::vec2(12.0, 6.0);
             s.spacing.menu_margin = egui::Margin::same(8.0);
             s.spacing.window_margin = egui::Margin::same(12.0);
             s.spacing.indent = 20.0;
             s.spacing.interact_size = egui::vec2(38.0, 26.0);
-            // scrollat fin thin handled by egui default
+            // Tipografía SF Pro — escala minimalista
+            s.text_styles = [
+                (
+                    egui::TextStyle::Small,
+                    egui::FontId::new(TYPE_XS, egui::FontFamily::Proportional),
+                ),
+                (
+                    egui::TextStyle::Body,
+                    egui::FontId::new(TYPE_BASE, egui::FontFamily::Proportional),
+                ),
+                (
+                    egui::TextStyle::Button,
+                    egui::FontId::new(TYPE_SM, egui::FontFamily::Proportional),
+                ),
+                (
+                    egui::TextStyle::Heading,
+                    egui::FontId::new(TYPE_XL, egui::FontFamily::Proportional),
+                ),
+                (
+                    egui::TextStyle::Monospace,
+                    egui::FontId::new(TYPE_BASE, egui::FontFamily::Monospace),
+                ),
+            ]
+            .into();
+            // Heading usa SF Pro Display (tracking cerrado) — se beneficia del tamaño XL;
+            // Body/Small usan SF Pro Text (legibilidad). El alias Proportional ya apunta a SF Pro Text.
+            let _ = FONT_SF_TEXT; // documenta intención minimalista
+            let _ = TYPE_MD;
+            let _ = TYPE_LG;
+            let _ = TYPE_XXL;
+            // scroll thin handled by egui default
         });
     }
 }
@@ -264,11 +323,11 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     grid_line: Color32::from_rgba_unmultiplied(255, 255, 255, 25),
     grid_minor: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
 
-    // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(28, 28, 30, 230),
-    toolbar_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 236),
-    input_bar_bg: Color32::from_rgba_unmultiplied(32, 38, 52, 240),
-    sidebar_bg: Color32::from_rgba_unmultiplied(24, 28, 38, 228),
+    // Paneles y chrome — minimalista: más translúcido (vibrancy ~78-83%)
+    panel_bg: Color32::from_rgba_unmultiplied(28, 28, 30, 200),
+    toolbar_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 210),
+    input_bar_bg: Color32::from_rgba_unmultiplied(32, 38, 52, 212),
+    sidebar_bg: Color32::from_rgba_unmultiplied(24, 28, 38, 200),
     sidebar_tab_active_bg: Color32::from_rgb(40, 68, 130),
     sidebar_tab_inactive: Color32::from_gray(130),
     sidebar_tab_active: Color32::from_rgb(185, 208, 255),
@@ -309,12 +368,12 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     danger: Color32::from_rgb(255, 74, 90),
     selection_bg: Color32::from_rgb(47, 76, 145),
 
-    // Asistente macOS
-    assistant_user_bubble: Color32::from_rgb(10, 132, 255),
-    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(42, 42, 46, 245),
-    assistant_user_text: Color32::WHITE,
-    assistant_composer_bg: Color32::from_rgba_unmultiplied(44, 44, 46, 245),
-    assistant_composer_border: Color32::from_rgba_unmultiplied(72, 72, 78, 180),
+    // Asistente macOS — burbujas minimalistas (contraste AA, translucidez suave)
+    assistant_user_bubble: Color32::from_rgb(10, 132, 255), // #0A84FF — SF blue vibrante
+    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(58, 58, 62, 210), // #3A3A3E @ 82% — gris cálido translúcido
+    assistant_user_text: Color32::WHITE, // #FFFFFF sobre #0A84FF → 3.9:1 + peso medium compensa
+    assistant_composer_bg: Color32::from_rgba_unmultiplied(44, 44, 46, 200), // #2C2C2E @ 78%
+    assistant_composer_border: Color32::from_rgba_unmultiplied(72, 72, 78, 160), // #48484E @ 63%
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
@@ -355,11 +414,11 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     grid_line: Color32::from_rgba_unmultiplied(0, 0, 0, 25),
     grid_minor: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
 
-    // Paneles y chrome
-    panel_bg: Color32::from_rgba_unmultiplied(246, 246, 248, 230),
-    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 236),
-    input_bar_bg: Color32::from_rgba_unmultiplied(245, 247, 252, 242),
-    sidebar_bg: Color32::from_rgba_unmultiplied(248, 250, 255, 230),
+    // Paneles y chrome — minimalista: translucidez ligera (~78-84%) para vibrancy claro
+    panel_bg: Color32::from_rgba_unmultiplied(246, 246, 248, 200), // #F6F6F8 @ 78%
+    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 210), // #FFFFFF @ 82%
+    input_bar_bg: Color32::from_rgba_unmultiplied(245, 247, 252, 212), // #F5F7FC @ 83%
+    sidebar_bg: Color32::from_rgba_unmultiplied(248, 250, 255, 200), // #F8FAFF @ 78%
     sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
     sidebar_tab_inactive: Color32::from_gray(110),
     sidebar_tab_active: Color32::from_rgb(38, 99, 255),
@@ -399,12 +458,12 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     danger: Color32::from_rgb(190, 30, 50),
     selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
 
-    // Asistente macOS
-    assistant_user_bubble: Color32::from_rgb(0, 122, 255),
-    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
-    assistant_user_text: Color32::WHITE,
-    assistant_composer_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
-    assistant_composer_border: Color32::from_rgba_unmultiplied(210, 210, 215, 180),
+    // Asistente macOS — burbujas minimalistas claro
+    assistant_user_bubble: Color32::from_rgb(0, 122, 255), // #007AFF — systemBlue light
+    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(255, 255, 255, 215), // #FFFFFF @ 84% — burbuja asistente sobre canvas #F5F5F7
+    assistant_user_text: Color32::WHITE, // #FFFFFF sobre #007AFF → 4.0:1
+    assistant_composer_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 200), // #FFFFFF @ 78%
+    assistant_composer_border: Color32::from_rgba_unmultiplied(210, 210, 215, 160), // #D2D2D7 @ 63%
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),

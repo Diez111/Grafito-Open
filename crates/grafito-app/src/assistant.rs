@@ -687,6 +687,7 @@ impl GrafitoApp {
                     {
                         self.set_perspective(perspective);
                     }
+                    self.ensure_algebra_panel_visible();
                 }
                 self.input_text = command.canonical_text();
                 self.command_input_focus_requested = true;
@@ -747,6 +748,9 @@ impl GrafitoApp {
                 };
                 self.assistant
                     .finish_verified_proposal_application(candidate_index, committed);
+                if committed {
+                    self.ensure_algebra_panel_visible();
+                }
                 if is_generate_animation && committed {
                     if let Some((template_opt, concept_opt)) = generate_args {
                         let template = template_opt
@@ -864,6 +868,9 @@ impl GrafitoApp {
                 if let Some(perspective) = assistant_graph_perspective(view, self.current_view) {
                     self.set_perspective(perspective);
                 }
+                if committed {
+                    self.ensure_algebra_panel_visible();
+                }
                 committed
             }
             Err(error) => {
@@ -907,6 +914,7 @@ impl GrafitoApp {
                 {
                     self.set_perspective(perspective);
                 }
+                self.ensure_algebra_panel_visible();
                 self.notify(
                     "Escena verificada aplicada y encuadrada.",
                     ToastKind::Success,
@@ -1724,9 +1732,18 @@ impl GrafitoApp {
         ) {
             Ok(result) => {
                 self.record_step_from_diff("Propuesta local aplicada", &before_labels, true);
-                if plan.operations.iter().any(|operation| operation.is_graph()) {
-                    self.set_perspective(crate::Perspective::Geometry2D);
+                // Decide perspectiva según el contenido del plan: CreateGraph es 2D,
+                // otras operaciones matemáticas también deben quedar visibles en Álgebra.
+                let has_graph = plan.operations.iter().any(|operation| operation.is_graph());
+                if has_graph {
+                    if let Some(perspective) = assistant_graph_perspective(
+                        grafito_command::assistant_context::AssistantGraphView::TwoD,
+                        self.current_view,
+                    ) {
+                        self.set_perspective(perspective);
+                    }
                 }
+                self.ensure_algebra_panel_visible();
                 self.assistant.finish_proposed_plan_application(true);
                 self.notify(
                     format!("Propuesta local aplicada: {}", result.changes.join(", ")),
@@ -3416,6 +3433,15 @@ fn assistant_graph_perspective(
             Some(crate::Perspective::Geometry3D)
         }
         _ => None,
+    }
+}
+
+impl GrafitoApp {
+    /// Asegura que el panel de Álgebra quede visible después de un Apply exitoso.
+    fn ensure_algebra_panel_visible(&mut self) {
+        self.left_drawer_open = true;
+        self.compact_drawer_open = false;
+        self.sidebar_tab = crate::LeftPanelContent::Algebra.default_sidebar_tab();
     }
 }
 

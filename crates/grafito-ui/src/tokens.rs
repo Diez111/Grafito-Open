@@ -14,7 +14,12 @@
 //! espacios siguen otra. La sensación es profesional y la jerarquía
 //! se lee a simple vista.
 //!
-//! # Escala tipográfica
+//! # Escala tipográfica — SF Pro
+//!
+//! Tipografía del sistema **SF Pro** (Apple Human Interface Guidelines).
+//! - `SF Pro Text` para cuerpo ≤ 19 pt (tracking óptico para lectura).
+//! - `SF Pro Display` para títulos ≥ 20 pt (tracking más cerrado).
+//! - `SF Mono` para código y valores numéricos.
 //!
 //! Basada en una **razón 1.25 (major third)** partiendo de 14 px:
 //! - `XS` (11): notas, metadatos, hints
@@ -25,25 +30,46 @@
 //! - `XL` (22): titles
 //! - `XXL` (28): splash, branding
 //!
-//! # Escala de spacing
+//! # Escala de spacing — 10×8 minimalista
 //!
-//! Basada en **4 px** (siguiendo la convención de Material Design y de
-//! Apple Human Interface Guidelines):
+//! Grid minimalista **10 px horizontal × 8 px vertical** como unidad base
+//! (derivado del sistema 4 px de Material/HIG, redondeado a ritmo visual limpio).
+//! - `item_spacing` = `vec2(10.0, 8.0)`
+//! - `button_padding` = `vec2(12.0, 6.0)`
+//! - Todos los `SPACE_*` siguen siendo múltiplos de 4 para compatibilidad.
+//!
+//! Valores:
 //! - `XS` (4): entre items muy cercanos (label + value)
-//! - `SM` (8): entre items de un grupo
+//! - `SM` (8): entre items de un grupo  — ritmo vertical base
 //! - `MD` (12): padding interno de chips
 //! - `LG` (16): padding interno de paneles
 //! - `XL` (24): separación entre secciones
 //! - `XXL` (32): separación entre paneles principales
 //!
-//! # Radios
+//! # Radios — minimalista suave
 //!
-//! - `SM` (4): chips, checkboxes
-//! - `MD` (8): botones, inputs, items
-//! - `LG` (12): paneles, modales
+//! Radios aumentados para estética minimalista / macOS vibrancy:
+//! - `SM` (6): chips, checkboxes
+//! - `MD` (10): botones, inputs, items
+//! - `LG` (14): paneles, modales pequeños
+//! - `XL` (18): ventanas y cards
+//! - `2XL` (24): sheets y contenedores principales
 
 // ═══════════════════════════════════════════════════════════
-// Type scale (ratio 1.25)
+// Familias tipográficas — SF Pro (sistema Apple)
+// ═══════════════════════════════════════════════════════════
+
+/// SF Pro Text — óptimo ≤ 19 pt (cuerpo, labels).
+pub const FONT_SF_TEXT: &str = "SF Pro Text";
+/// SF Pro Display — óptimo ≥ 20 pt (títulos, headers).
+pub const FONT_SF_DISPLAY: &str = "SF Pro Display";
+/// SF Mono — código, expresiones y valores.
+pub const FONT_SF_MONO: &str = "SF Mono";
+/// Fallback sans del sistema cuando SF Pro no está disponible.
+pub const FONT_FALLBACK_SANS: &str = "Inter";
+
+// ═══════════════════════════════════════════════════════════
+// Type scale (ratio 1.25) — SF Pro
 // ═══════════════════════════════════════════════════════════
 
 /// Texto extra-pequeño: notas, metadatos, hints.
@@ -62,12 +88,12 @@ pub const TYPE_XL: f32 = 22.0;
 pub const TYPE_XXL: f32 = 28.0;
 
 // ═══════════════════════════════════════════════════════════
-// Spacing scale (4px base)
+// Spacing scale (4px base) — ritmo 10×8
 // ═══════════════════════════════════════════════════════════
 
 /// Espacio extra-pequeño: entre items muy cercanos.
 pub const SPACE_XS: f32 = 4.0;
-/// Espacio pequeño: entre items de un grupo.
+/// Espacio pequeño: entre items de un grupo — base vertical 8.
 pub const SPACE_SM: f32 = 8.0;
 /// Espacio mediano: padding interno de chips.
 pub const SPACE_MD: f32 = 12.0;
@@ -78,15 +104,20 @@ pub const SPACE_XL: f32 = 24.0;
 /// Espacio doble-extra-grande: separación entre paneles principales.
 pub const SPACE_XXL: f32 = 32.0;
 
+/// Ritmo minimalista horizontal (usado en item_spacing.x).
+pub const SPACING_MINIMAL_X: f32 = 10.0;
+/// Ritmo minimalista vertical (usado en item_spacing.y).
+pub const SPACING_MINIMAL_Y: f32 = 8.0;
+
 // ═══════════════════════════════════════════════════════════
-// Radii
+// Radii — minimalista (más redondeado y suave)
 // ═══════════════════════════════════════════════════════════
 
-pub const RADIUS_SM: f32 = 4.0;
-pub const RADIUS_MD: f32 = 8.0;
-pub const RADIUS_LG: f32 = 12.0;
-pub const RADIUS_XL: f32 = 16.0;
-pub const RADIUS_2XL: f32 = 20.0;
+pub const RADIUS_SM: f32 = 6.0;
+pub const RADIUS_MD: f32 = 10.0;
+pub const RADIUS_LG: f32 = 14.0;
+pub const RADIUS_XL: f32 = 18.0;
+pub const RADIUS_2XL: f32 = 24.0;
 pub const RADIUS_PILL: f32 = 999.0;
 
 // ═══════════════════════════════════════════════════════════
