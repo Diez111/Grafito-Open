@@ -1019,7 +1019,9 @@ impl Renderer {
             None
         };
         let complex_compute = if has_compute_storage {
-            Some(crate::complex_compute::ComplexComputePipeline::new(device, queue))
+            Some(crate::complex_compute::ComplexComputePipeline::new(
+                device, queue,
+            ))
         } else {
             None
         };

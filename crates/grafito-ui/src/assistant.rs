@@ -2567,18 +2567,9 @@ fn draw_assistant_header(
     // macOS: header como toolbar translúcido con vibrancy, esquinas 16, sombra suave.
     let mut action = None;
     egui::Frame::none()
-        .fill(theme.panel_bg.gamma_multiply(0.5))
-        .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
-        .inner_margin(egui::Margin::symmetric(
-            crate::tokens::SPACE_SM,
-            crate::tokens::SPACE_XS,
-        ))
-        .shadow(egui::Shadow {
-            offset: egui::vec2(0.0, 4.0),
-            blur: 16.0,
-            spread: 0.0,
-            color: egui::Color32::from_black_alpha(16),
-        })
+        .fill(egui::Color32::TRANSPARENT)
+        .rounding(egui::Rounding::same(crate::tokens::RADIUS_SM))
+        .inner_margin(egui::Margin::same(crate::tokens::SPACE_XS))
         .show(ui, |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
@@ -2673,21 +2664,15 @@ fn draw_assistant_composer(
         ui.add_space(SPACE_XS);
     }
 
-    // macOS: composer como cápsula vibrancy con sombra interior suave.
+    // Minimalista: composer pill ultra limpio, sin sombra, solo borde sutil
     egui::Frame::none()
-        .fill(theme.assistant_composer_bg)
-        .stroke(egui::Stroke::new(1.0, theme.assistant_composer_border))
-        .rounding(crate::tokens::RADIUS_XL)
+        .fill(theme.panel_bg.gamma_multiply(0.6))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.2)))
+        .rounding(crate::tokens::RADIUS_PILL)
         .inner_margin(egui::Margin::symmetric(
             crate::tokens::SPACE_SM,
-            crate::tokens::SPACE_SM,
+            crate::tokens::SPACE_XS,
         ))
-        .shadow(egui::Shadow {
-            offset: egui::vec2(0.0, 6.0),
-            blur: 20.0,
-            spread: -4.0,
-            color: egui::Color32::from_black_alpha(18),
-        })
         .show(ui, |ui| {
             // Editor minimalista con placeholder SF Pro-like
             let editor = ui.add_sized(
@@ -2901,7 +2886,6 @@ fn draw_conversation_turn(
     let mut copy_requested = false;
     // macOS: burbuja con cola y sombra sutil, como Messages
     // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia
-    let rounding = egui::Rounding::same(crate::tokens::RADIUS_XL);
     let max_bubble_width = (ui.available_width() * 0.78).clamp(220.0, 400.0);
     // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia (no WhatsApp)
     ui.allocate_ui_with_layout(
@@ -2912,17 +2896,17 @@ fn draw_conversation_turn(
             // ui.set_min_width(ui.available_width())
             egui::Frame::none()
                 .fill(appearance.fill)
-                .stroke(egui::Stroke::new(1.0, appearance.stroke))
-                .rounding(rounding)
-                .inner_margin(egui::Margin::symmetric(
-                    crate::tokens::SPACE_MD,
-                    crate::tokens::SPACE_SM,
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    appearance.stroke.gamma_multiply(0.5),
                 ))
+                .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
                 .shadow(egui::Shadow {
                     offset: egui::vec2(0.0, 2.0),
-                    blur: 8.0,
+                    blur: 4.0,
                     spread: 0.0,
-                    color: egui::Color32::from_black_alpha(10),
+                    color: egui::Color32::from_black_alpha(6),
                 })
                 .show(ui, |ui| {
                     // El ancho ya está limitado por el layout exterior (0.84), no forzar min_width

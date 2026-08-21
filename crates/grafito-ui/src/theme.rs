@@ -230,7 +230,6 @@ impl Theme {
 
         ctx.set_visuals(visuals);
 
-
         ctx.style_mut(|s| {
             s.animation_time = ANIM_MICRO / 1_000.0;
             // Ritmo minimalista 10×8 (horizontal × vertical)
