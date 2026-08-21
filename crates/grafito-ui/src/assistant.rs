@@ -2900,104 +2900,92 @@ fn draw_conversation_turn(
     let mut action = None;
     let mut copy_requested = false;
     // macOS: burbuja con cola y sombra sutil, como Messages
-    let rounding = if is_user {
-        egui::Rounding {
-            nw: crate::tokens::RADIUS_XL,
-            ne: 4.0,
-            sw: crate::tokens::RADIUS_XL,
-            se: crate::tokens::RADIUS_XL,
-        }
-    } else {
-        egui::Rounding {
-            nw: 4.0,
-            ne: crate::tokens::RADIUS_XL,
-            sw: crate::tokens::RADIUS_XL,
-            se: crate::tokens::RADIUS_XL,
-        }
-    };
-    let max_bubble_width = ui.available_width() * 0.84;
-    // Alineación: usuario a derecha, asistente a izquierda (como iMessage)
-    let bubble_layout = if is_user {
-        egui::Layout::right_to_left(egui::Align::Min)
-    } else {
-        egui::Layout::left_to_right(egui::Align::Min)
-    };
-    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0), bubble_layout, |ui| {
-        ui.set_max_width(max_bubble_width);
-        // ui.set_min_width(ui.available_width())
-        egui::Frame::none()
-            .fill(appearance.fill)
-            .stroke(egui::Stroke::new(1.0, appearance.stroke))
-            .rounding(rounding)
-            .inner_margin(egui::Margin::symmetric(
-                crate::tokens::SPACE_MD,
-                crate::tokens::SPACE_SM,
-            ))
-            .shadow(egui::Shadow {
-                offset: egui::vec2(0.0, 2.0),
-                blur: 8.0,
-                spread: 0.0,
-                color: egui::Color32::from_black_alpha(10),
-            })
-            .show(ui, |ui| {
-                // El ancho ya está limitado por el layout exterior (0.84), no forzar min_width
-                let label = if is_user {
-                    "Vos".into()
-                } else {
-                    let origin = turn
-                        .origin
-                        .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
-                    format!("{MORA_NAME} · {}", origin.public_label())
-                };
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(label)
-                            .color(appearance.role_color)
-                            .size(TYPE_SM)
-                            .strong(),
-                    );
-                });
-                ui.add_space(SPACE_SM);
-                if is_user {
-                    draw_inline_text(ui, &turn.content);
-                } else {
-                    action = draw_assistant_response(
-                        ui,
-                        &turn.content,
-                        proposal_state,
-                        reveal_clip,
-                        cache,
-                    );
-                    ui.add_space(SPACE_XS);
-                    // Telemetría tipo harness: estimación de salida del turno.
-                    let est_tokens = (turn.content.chars().count() / 4).max(1);
+    // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia
+    let rounding = egui::Rounding::same(crate::tokens::RADIUS_XL);
+    let max_bubble_width = (ui.available_width() * 0.78).clamp(220.0, 400.0);
+    // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia (no WhatsApp)
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 0.0),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.set_max_width(max_bubble_width);
+            // ui.set_min_width(ui.available_width())
+            egui::Frame::none()
+                .fill(appearance.fill)
+                .stroke(egui::Stroke::new(1.0, appearance.stroke))
+                .rounding(rounding)
+                .inner_margin(egui::Margin::symmetric(
+                    crate::tokens::SPACE_MD,
+                    crate::tokens::SPACE_SM,
+                ))
+                .shadow(egui::Shadow {
+                    offset: egui::vec2(0.0, 2.0),
+                    blur: 8.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(10),
+                })
+                .show(ui, |ui| {
+                    // El ancho ya está limitado por el layout exterior (0.84), no forzar min_width
+                    let label = if is_user {
+                        "Vos".into()
+                    } else {
+                        let origin = turn
+                            .origin
+                            .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
+                        format!("{MORA_NAME} · {}", origin.public_label())
+                    };
                     ui.vertical_centered(|ui| {
                         ui.label(
-                            egui::RichText::new(format!("~{est_tokens} token de salida (est.)"))
-                                .color(theme.text_tertiary)
-                                .size(TYPE_XS),
+                            egui::RichText::new(label)
+                                .color(appearance.role_color)
+                                .size(TYPE_SM)
+                                .strong(),
                         );
                     });
-                }
-                ui.add_space(SPACE_SM);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        copy_requested = ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Copiar")
-                                        .color(theme.text_secondary)
-                                        .size(TYPE_XS),
+                    ui.add_space(SPACE_SM);
+                    if is_user {
+                        draw_inline_text(ui, &turn.content);
+                    } else {
+                        action = draw_assistant_response(
+                            ui,
+                            &turn.content,
+                            proposal_state,
+                            reveal_clip,
+                            cache,
+                        );
+                        ui.add_space(SPACE_XS);
+                        // Telemetría tipo harness: estimación de salida del turno.
+                        let est_tokens = (turn.content.chars().count() / 4).max(1);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "~{est_tokens} token de salida (est.)"
+                                ))
+                                .color(theme.text_tertiary)
+                                .size(TYPE_XS),
+                            );
+                        });
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            copy_requested = ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Copiar")
+                                            .color(theme.text_secondary)
+                                            .size(TYPE_XS),
+                                    )
+                                    .frame(false),
                                 )
-                                .frame(false),
-                            )
-                            .clicked();
-                    },
-                );
-            });
-    });
+                                .clicked();
+                        },
+                    );
+                });
+        },
+    );
     if copy_requested && action.is_none() {
         action = Some(AssistantUiAction::CopyMessage(turn.content.clone()));
     }
