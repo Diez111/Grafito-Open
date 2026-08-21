@@ -1415,20 +1415,8 @@ pub fn draw_assistant_panel(
             .max_height(max_height)
             .frame(
                 egui::Frame::none()
-                    .fill(theme.panel_bg.gamma_multiply(0.78))
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
-                    .rounding(egui::Rounding {
-                        nw: crate::tokens::RADIUS_XL,
-                        ne: crate::tokens::RADIUS_XL,
-                        sw: 0.0,
-                        se: 0.0,
-                    })
-                    .shadow(egui::Shadow {
-                        offset: egui::vec2(0.0, -8.0),
-                        blur: 24.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(20),
-                    })
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -1443,20 +1431,8 @@ pub fn draw_assistant_panel(
             .max_width(max_width)
             .frame(
                 egui::Frame::none()
-                    .fill(theme.panel_bg.gamma_multiply(0.82))
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
-                    .rounding(egui::Rounding {
-                        nw: crate::tokens::RADIUS_XL,
-                        ne: 0.0,
-                        sw: crate::tokens::RADIUS_XL,
-                        se: 0.0,
-                    })
-                    .shadow(egui::Shadow {
-                        offset: egui::vec2(-8.0, 0.0),
-                        blur: 24.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(18),
-                    })
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -2512,57 +2488,45 @@ fn mora_avatar_scale(active: bool, time: f64) -> f32 {
 fn draw_assistant_empty_state(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
-    visuals: AssistantVisuals,
+    _visuals: AssistantVisuals,
 ) {
     let theme = current_theme(ui.ctx());
-    egui::Frame::none()
-        .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
-        .rounding(RADIUS_MD)
-        .inner_margin(egui::Margin::same(SPACE_MD))
-        .show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                let _ = draw_mora_avatar(ui, visuals, 64.0, false);
-                ui.add_space(SPACE_SM);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("Hola, soy {MORA_NAME}"))
-                            .color(theme.text_primary)
-                            .size(TYPE_MD)
-                            .strong(),
-                    );
-                    ui.add_space(SPACE_XS);
-                    ui.label(
-                        egui::RichText::new(
-                            "Puedo resolver, graficar, analizar o construir. Las acciones se aplican sólo cuando las confirmás.",
-                        )
-                        .color(theme.text_secondary)
-                        .size(TYPE_SM),
-                    );
-                });
-            });
-            ui.add_space(SPACE_SM);
-            ui.label(
-                egui::RichText::new("Probá con")
-                    .color(theme.text_tertiary)
-                    .size(TYPE_XS),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (label, prompt) in suggestion_prompts(state.focus.is_some()) {
-                    if ui.small_button(label).clicked() {
-                        state.problem = prompt.into();
-                        state.clear_error();
-                    }
-                }
-            });
-        });
+    // Minimalista: sin avatar circular, sin tarjeta Hola soy Mora, solo sugerencias
+    ui.add_space(crate::tokens::SPACE_LG);
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new("Pregunta lo que quieras")
+                .color(theme.text_secondary)
+                .size(crate::tokens::TYPE_SM),
+        );
+        ui.add_space(crate::tokens::SPACE_XS);
+        ui.label(
+            egui::RichText::new("ej. \"derivada de x³\" o \"animá la integral\"")
+                .color(theme.text_tertiary)
+                .size(crate::tokens::TYPE_XS),
+        );
+    });
+    ui.add_space(crate::tokens::SPACE_MD);
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(crate::tokens::SPACE_SM);
+        for (label, prompt) in suggestion_prompts(state.focus.is_some()) {
+            let btn = egui::Button::new(egui::RichText::new(label).size(crate::tokens::TYPE_XS))
+                .rounding(crate::tokens::RADIUS_PILL)
+                .fill(theme.button_bg.gamma_multiply(0.0))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.4)));
+            if ui.add(btn).clicked() {
+                state.problem = prompt.into();
+                state.clear_error();
+            }
+        }
+    });
 }
 
 fn draw_assistant_header(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     theme: &crate::theme::Theme,
-    visuals: AssistantVisuals,
+    _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     // macOS: header como toolbar translúcido con vibrancy, esquinas 16, sombra suave.
     let mut action = None;
@@ -2575,9 +2539,6 @@ fn draw_assistant_header(
                 egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    // Avatar Mora con halo sutil
-                    let _ = draw_mora_avatar(ui, visuals, 30.0, false);
-                    ui.add_space(crate::tokens::SPACE_SM);
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new(MORA_NAME)
