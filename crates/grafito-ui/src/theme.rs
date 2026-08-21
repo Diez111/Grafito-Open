@@ -24,7 +24,7 @@
 //! El test de coherencia en `tests.rs` falla si encuentra
 //! `Color32::from_rgb(` en cualquier archivo que no sea este.
 
-use crate::tokens::{ANIM_MICRO, RADIUS_LG, RADIUS_MD};
+use crate::tokens::{ANIM_MICRO, RADIUS_LG, RADIUS_XL};
 use egui::{Color32, Context};
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +78,13 @@ pub struct Theme {
     pub warning: Color32,
     pub danger: Color32,
     pub selection_bg: Color32,
+
+    // ── Asistente macOS (vibrancy + burbujas) ──
+    pub assistant_user_bubble: Color32,
+    pub assistant_assistant_bubble: Color32,
+    pub assistant_user_text: Color32,
+    pub assistant_composer_bg: Color32,
+    pub assistant_composer_border: Color32,
 
     // ── Toast notifications ──
     pub toast_bg: Color32,
@@ -178,49 +185,50 @@ impl Theme {
         visuals.hyperlink_color = self.accent;
         visuals.selection.bg_fill = self.selection_bg;
         visuals.selection.stroke = egui::Stroke::new(1.5, self.accent);
-        visuals.window_rounding = egui::Rounding::same(RADIUS_LG);
-        visuals.menu_rounding = egui::Rounding::same(RADIUS_MD);
+        visuals.window_rounding = egui::Rounding::same(RADIUS_XL);
+        visuals.menu_rounding = egui::Rounding::same(RADIUS_LG);
 
-        // Elevation separates floating controls without obscuring the canvas.
+        // macOS vibrancy: sombra más suave y difusa, como NSVisualEffectView.
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 10.0),
-            blur: 24.0,
-            spread: -3.0,
-            color: Color32::from_black_alpha(if is_dark { 100 } else { 26 }),
+            offset: egui::vec2(0.0, 16.0),
+            blur: 32.0,
+            spread: 0.0,
+            color: Color32::from_black_alpha(if is_dark { 90 } else { 28 }),
         };
         visuals.popup_shadow = visuals.window_shadow;
 
-        // The chrome is compact, but each interaction state remains visible.
+        // macOS: controles más redondeados y con aire, como NSButton.
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.noninteractive.rounding = egui::Rounding::same(RADIUS_MD);
+        visuals.widgets.noninteractive.rounding = egui::Rounding::same(RADIUS_LG);
 
         visuals.widgets.inactive.bg_fill = self.button_bg;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.separator);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.inactive.rounding = egui::Rounding::same(RADIUS_MD);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(RADIUS_LG);
 
         visuals.widgets.hovered.bg_fill = self.button_hover;
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
-        visuals.widgets.hovered.rounding = egui::Rounding::same(RADIUS_MD);
+        visuals.widgets.hovered.rounding = egui::Rounding::same(RADIUS_LG);
 
         visuals.widgets.active.bg_fill = self.selection_bg;
         visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.accent);
         visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.accent);
-        visuals.widgets.active.rounding = egui::Rounding::same(RADIUS_MD);
+        visuals.widgets.active.rounding = egui::Rounding::same(RADIUS_LG);
 
         ctx.set_visuals(visuals);
 
         ctx.style_mut(|s| {
             s.animation_time = ANIM_MICRO / 1_000.0;
-            s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-            s.spacing.button_padding = egui::vec2(8.0, 5.0);
-            s.spacing.menu_margin = egui::Margin::same(6.0);
-            s.spacing.window_margin = egui::Margin::same(10.0);
+            s.spacing.item_spacing = egui::vec2(10.0, 8.0);
+            s.spacing.button_padding = egui::vec2(12.0, 6.0);
+            s.spacing.menu_margin = egui::Margin::same(8.0);
+            s.spacing.window_margin = egui::Margin::same(12.0);
             s.spacing.indent = 20.0;
-            s.spacing.interact_size = egui::vec2(36.0, 24.0);
+            s.spacing.interact_size = egui::vec2(38.0, 26.0);
+            // scrollat fin thin handled by egui default
         });
     }
 }
@@ -300,6 +308,13 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     warning: Color32::from_rgb(255, 184, 0),
     danger: Color32::from_rgb(255, 74, 90),
     selection_bg: Color32::from_rgb(47, 76, 145),
+
+    // Asistente macOS
+    assistant_user_bubble: Color32::from_rgb(10, 132, 255),
+    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(42, 42, 46, 245),
+    assistant_user_text: Color32::WHITE,
+    assistant_composer_bg: Color32::from_rgba_unmultiplied(44, 44, 46, 245),
+    assistant_composer_border: Color32::from_rgba_unmultiplied(72, 72, 78, 180),
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
@@ -383,6 +398,13 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     warning: Color32::from_rgb(140, 85, 0),
     danger: Color32::from_rgb(190, 30, 50),
     selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
+
+    // Asistente macOS
+    assistant_user_bubble: Color32::from_rgb(0, 122, 255),
+    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
+    assistant_user_text: Color32::WHITE,
+    assistant_composer_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 245),
+    assistant_composer_border: Color32::from_rgba_unmultiplied(210, 210, 215, 180),
 
     // Toast notifications
     toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),

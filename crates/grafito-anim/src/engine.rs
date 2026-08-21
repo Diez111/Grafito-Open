@@ -1,4 +1,5 @@
 //! Puente IPC al motor de animaciones externo (ciclo de vida, jobs y presupuestos).
+//! Mejoras de auditoria 2026-08-20: Statem AnimJobState, correccion de races/leaks/timeouts.
 
 use crate::protocol::{
     downcast, kinds, AnimJobId, AnimRequest, AnimResult, RenderProgress, WireMessage,
@@ -8,10 +9,10 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
-/// Configuración del proceso del motor de animaciones.
+/// Configuracion del proceso del motor de animaciones.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// argv del worker (programa + argumentos).
@@ -20,9 +21,9 @@ pub struct EngineConfig {
     pub working_dir: Option<PathBuf>,
     /// Tiempo de espera para el handshake y el apagado cooperativo.
     pub idle_timeout: Duration,
-    /// Tiempo máximo para completar un job.
+    /// Tiempo maximo para completar un job.
     pub job_timeout: Duration,
-    /// Tope de caracteres por línea de salida del motor.
+    /// Tope de caracteres por linea de salida del motor.
     pub line_cap_bytes: usize,
 }
 
@@ -42,14 +43,57 @@ impl Default for EngineConfig {
     }
 }
 
+/// Estado tipado del ciclo de vida de un job (Statem).
+/// Cada transicion es verificada; no hay submit sin Ready, no hay fuga sin ShuttingDown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimJobState {
+    Idle,
+    Spawning,
+    AwaitingHello {
+        deadline: Instant,
+    },
+    AwaitingPong {
+        deadline: Instant,
+    },
+    Ready,
+    Running {
+        job_id: AnimJobId,
+        deadline: Instant,
+    },
+    Cancelling {
+        job_id: AnimJobId,
+    },
+    ShuttingDown {
+        deadline: Instant,
+    },
+    Completed {
+        media_path: PathBuf,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
+    TimedOut,
+    Cancelled,
+}
+
+impl AnimJobState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Failed { .. } | Self::TimedOut | Self::Cancelled
+        )
+    }
+    pub fn can_submit(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
 /// Evento de un job de render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobEvent {
-    /// Progreso parcial del motor.
     Progress(RenderProgress),
-    /// El motor terminó el render.
     Result(AnimResult),
-    /// El motor reportó un error.
     Error { code: String, message: String },
 }
 
@@ -61,6 +105,7 @@ pub struct AnimEngine {
     next_job: u64,
     config: EngineConfig,
     diagnostics: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    state: AnimJobState,
 }
 
 impl AnimEngine {
@@ -68,6 +113,32 @@ impl AnimEngine {
     pub fn spawn(config: EngineConfig) -> Result<Self, String> {
         if config.command.is_empty() {
             return Err("animation engine command is empty".into());
+        }
+        for arg in &config.command {
+            if arg.contains('\0') {
+                return Err("animation engine command contains NUL byte".into());
+            }
+        }
+        if let Some(dir) = &config.working_dir {
+            if dir.as_os_str().is_empty() {
+                return Err("animation engine working_dir is empty".into());
+            }
+            if !dir.exists() {
+                return Err(format!(
+                    "animation engine working_dir no existe: {}",
+                    dir.display()
+                ));
+            }
+        }
+        // Validación temprana: si el binario es una ruta, verificar existencia antes de spawn.
+        if config.command[0].contains('/') || config.command[0].contains('\\') {
+            let bin = Path::new(&config.command[0]);
+            if !bin.exists() {
+                return Err(format!(
+                    "animation engine bin no encontrado: {}",
+                    bin.display()
+                ));
+            }
         }
         let mut command = Command::new(&config.command[0]);
         command
@@ -81,16 +152,25 @@ impl AnimEngine {
         let mut child = command
             .spawn()
             .map_err(|error| format!("cannot start animation engine: {error}"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "animation engine stdin is unavailable".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "animation engine stdout is unavailable".to_string())?;
+        // Si take() falla, matamos al hijo para no fugarlo (S1).
+        let stdin = match child.stdin.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("animation engine stdin is unavailable".into());
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("animation engine stdout is unavailable".into());
+            }
+        };
         let stderr = child.stderr.take();
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(128);
         let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         spawn_reader(stdout, sender, config.line_cap_bytes);
         if let Some(stderr) = stderr {
@@ -103,55 +183,130 @@ impl AnimEngine {
             next_job: 0,
             config,
             diagnostics,
+            state: AnimJobState::Spawning,
         })
     }
 
-    /// Diagnósticos (stderr) recogidos del motor.
+    pub fn state(&self) -> &AnimJobState {
+        &self.state
+    }
+
+    /// Diagnosticos (stderr) recogidos del motor — poison-aware.
     pub fn diagnostics(&self) -> Vec<String> {
-        self.diagnostics.lock().unwrap().clone()
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     /// Espera el handshake (hello + pong) antes de enviar jobs.
+    /// Usa config.idle_timeout (H1) y no silencia Error (H2).
     pub fn wait_ready(&mut self) -> Result<(), String> {
-        let hello_deadline = Instant::now() + Duration::from_secs(8);
+        self.state = AnimJobState::AwaitingHello {
+            deadline: Instant::now() + self.config.idle_timeout,
+        };
+        let hello_deadline = Instant::now() + self.config.idle_timeout;
         loop {
             if Instant::now() >= hello_deadline {
+                self.state = AnimJobState::Failed {
+                    code: "handshake_timeout".into(),
+                    message: "hello not received".into(),
+                };
+                let _ = self.shutdown();
                 return Err("animation engine did not send a hello handshake".into());
             }
-            match self.recv_raw(Some(Duration::from_secs(1))) {
+            let remaining = hello_deadline.saturating_duration_since(Instant::now());
+            // polling fino para respetar deadline sin 1s de granularidad
+            let poll = remaining.min(Duration::from_millis(250));
+            match self.recv_raw(Some(poll)) {
                 Ok(Some(WireMessage::Hello {
                     protocol_version, ..
                 })) => {
                     if protocol_version != ANIM_PROTOCOL_VERSION {
+                        self.state = AnimJobState::Failed {
+                            code: "version_mismatch".into(),
+                            message: format!("v{protocol_version}"),
+                        };
+                        let _ = self.shutdown();
                         return Err(format!(
                             "animation engine speaks protocol v{protocol_version}; this Grafito supports v{ANIM_PROTOCOL_VERSION}"
                         ));
                     }
                     break;
                 }
+                Ok(Some(WireMessage::Error { code, message })) => {
+                    self.state = AnimJobState::Failed {
+                        code: code.clone(),
+                        message: message.clone(),
+                    };
+                    let _ = self.shutdown();
+                    return Err(format!("animation engine {code}: {message}"));
+                }
                 Ok(_) => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.state = AnimJobState::Failed {
+                        code: "handshake_error".into(),
+                        message: error.clone(),
+                    };
+                    return Err(error);
+                }
             }
         }
         self.send(&json!({ "type": kinds::PING }))?;
-        let pong_deadline = Instant::now() + Duration::from_secs(4);
+        let pong_timeout = self.config.idle_timeout.min(Duration::from_secs(4));
+        let pong_deadline = Instant::now() + pong_timeout;
+        self.state = AnimJobState::AwaitingPong {
+            deadline: pong_deadline,
+        };
         loop {
             if Instant::now() >= pong_deadline {
+                self.state = AnimJobState::Failed {
+                    code: "handshake_timeout".into(),
+                    message: "pong not received".into(),
+                };
+                let _ = self.shutdown();
                 return Err("animation engine did not answer the health ping".into());
             }
-            if let Some(WireMessage::Pong) = self.recv_raw(Some(Duration::from_secs(1)))? {
-                return Ok(());
+            let remaining = pong_deadline.saturating_duration_since(Instant::now());
+            let poll = remaining.min(Duration::from_millis(250));
+            match self.recv_raw(Some(poll)) {
+                Ok(Some(WireMessage::Pong)) => {
+                    self.state = AnimJobState::Ready;
+                    return Ok(());
+                }
+                Ok(Some(WireMessage::Error { code, message })) => {
+                    self.state = AnimJobState::Failed {
+                        code: code.clone(),
+                        message: message.clone(),
+                    };
+                    let _ = self.shutdown();
+                    return Err(format!("animation engine {code}: {message}"));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.state = AnimJobState::Failed {
+                        code: "handshake_error".into(),
+                        message: e.clone(),
+                    };
+                    return Err(e);
+                }
             }
         }
     }
 
-    /// Envía un nuevo pedido y devuelve su id.
+    /// Envia un nuevo pedido y devuelve su id. Solo en Ready (SB1).
     pub fn submit(&mut self, request: AnimRequest) -> Result<AnimJobId, String> {
-        self.next_job += 1;
-        let job_id = format!("job-{}", self.next_job);
+        if !self.state.can_submit() {
+            return Err(format!(
+                "cannot submit in state {:?}: wait_ready() first",
+                self.state
+            ));
+        }
+        self.next_job = self.next_job.wrapping_add(1);
+        let job_id = AnimJobId(format!("job-{}", self.next_job));
         let message = json!({
             "type": kinds::RENDER_REQUEST,
-            "job_id": job_id,
+            "job_id": job_id.0,
             "template": request.template,
             "concept": request.concept,
             "params": request.params,
@@ -160,7 +315,27 @@ impl AnimEngine {
             "canvas": [request.canvas.0, request.canvas.1],
         });
         self.send(&message)?;
+        self.state = AnimJobState::Running {
+            job_id: job_id.clone(),
+            deadline: Instant::now() + self.config.job_timeout,
+        };
         Ok(job_id)
+    }
+
+    /// Cancela el job en curso si está en Running. Transiciona a Cancelling.
+    pub fn cancel(&mut self) -> Result<(), String> {
+        match &self.state {
+            AnimJobState::Running { job_id, .. } => {
+                let job_id = job_id.clone();
+                self.state = AnimJobState::Cancelling { job_id };
+                let _ = self.shutdown();
+                self.state = AnimJobState::Cancelled;
+                Ok(())
+            }
+            other => Err(format!(
+                "no hay job en curso para cancelar (estado {other:?})"
+            )),
+        }
     }
 
     /// Lee el siguiente evento de un job (None cuando no hay mensaje en el timeout).
@@ -176,12 +351,13 @@ impl AnimEngine {
         }
     }
 
-    /// Apaga el motor de forma cooperativa y garantiza su terminación.
+    /// Apaga el motor de forma cooperativa y garantiza su terminacion.
     pub fn shutdown(&mut self) -> Result<(), String> {
+        self.state = AnimJobState::ShuttingDown {
+            deadline: Instant::now() + self.config.idle_timeout,
+        };
         let _ = self.send(&json!({ "type": kinds::SHUTDOWN }));
-        let deadline = Instant::now()
-            .checked_add(self.config.idle_timeout)
-            .unwrap_or_else(Instant::now);
+        let deadline = Instant::now() + self.config.idle_timeout;
         loop {
             if Instant::now() >= deadline {
                 break;
@@ -189,7 +365,7 @@ impl AnimEngine {
             match self.child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => {
-                    let _ = self.events.recv_timeout(Duration::from_millis(50));
+                    std::thread::sleep(Duration::from_millis(20));
                 }
                 Err(_) => break,
             }
@@ -235,12 +411,15 @@ impl AnimEngine {
 
 impl Drop for AnimEngine {
     fn drop(&mut self) {
+        // No bloquear el hilo de UI: intenta matar y hace try_wait no bloqueante.
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.try_wait();
+        // Si aún no terminó, el SO lo cosechará; evitamos bloquear Drop.
     }
 }
 
-/// Ejecuta un job de punta a punta contra un motor efímero.
+/// Ejecuta un job de punta a punta contra un motor efimero.
+/// Polling de 200ms para honrar cancel (RJ1) y timeout incluye wait_ready via deadline absoluta.
 pub fn run_job(
     config: &EngineConfig,
     request: &AnimRequest,
@@ -249,39 +428,72 @@ pub fn run_job(
 ) -> Result<AnimResult, String> {
     let mut engine = AnimEngine::spawn(config.clone())?;
     engine.wait_ready()?;
-    let _job_id = engine.submit(request.clone())?;
+    let job_id = engine.submit(request.clone())?;
     let started = Instant::now();
+    // deadline absoluta para timeout correcto (RJ2)
+    let job_deadline = started + config.job_timeout;
     loop {
         if cancel.is_some_and(|cancel| cancel()) {
+            engine.state = AnimJobState::Cancelling {
+                job_id: job_id.clone(),
+            };
             let _ = engine.shutdown();
+            engine.state = AnimJobState::Cancelled;
             return Err("animation job was cancelled".into());
         }
-        let remaining = config.job_timeout.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
+        let now = Instant::now();
+        if now >= job_deadline {
+            engine.state = AnimJobState::TimedOut;
             let _ = engine.shutdown();
             return Err("animation job timed out".into());
         }
-        match engine.recv_event(Some(remaining)) {
-            Ok(Some(JobEvent::Progress(progress))) => on_event(JobEvent::Progress(progress)),
+        let remaining = job_deadline.saturating_duration_since(now);
+        // cap a 200ms para chequear cancel con baja latencia
+        let poll = remaining.min(Duration::from_millis(200));
+        match engine.recv_event(Some(poll)) {
+            Ok(Some(JobEvent::Progress(progress))) => {
+                // filtrar por job_id si el motor multiplexa (RJ5)
+                if progress.job_id == job_id {
+                    on_event(JobEvent::Progress(progress));
+                }
+            }
             Ok(Some(JobEvent::Result(result))) => {
+                if result.job_id != job_id {
+                    continue;
+                }
                 if !validate_media_path(
                     config.working_dir.as_deref().unwrap_or(Path::new(".")),
                     &result.media_path,
                 ) {
+                    engine.state = AnimJobState::Failed {
+                        code: "path_escape".into(),
+                        message: result.media_path.clone(),
+                    };
                     let _ = engine.shutdown();
                     return Err(
                         "animation engine returned a media path outside its working dir".into(),
                     );
                 }
+                engine.state = AnimJobState::Completed {
+                    media_path: PathBuf::from(result.media_path.clone()),
+                };
                 let _ = engine.shutdown();
                 return Ok(result);
             }
             Ok(Some(JobEvent::Error { code, message })) => {
+                engine.state = AnimJobState::Failed {
+                    code: code.clone(),
+                    message: message.clone(),
+                };
                 let _ = engine.shutdown();
                 return Err(format!("animation engine {code}: {message}"));
             }
             Ok(None) => {}
             Err(error) => {
+                engine.state = AnimJobState::Failed {
+                    code: "engine_exit".into(),
+                    message: error.clone(),
+                };
                 let _ = engine.shutdown();
                 return Err(error);
             }
@@ -290,16 +502,14 @@ pub fn run_job(
 }
 
 /// Comprueba que el artefacto devuelto queda dentro del directorio de trabajo.
+/// Corrige rama muerta (V1), NUL (V4) y TOCTOU documentado.
 pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
+    if media_path.contains('\0') {
+        return false;
+    }
     let path = Path::new(media_path);
-    if path.is_absolute()
-        && !path.components().next().is_some_and(|component| {
-            matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Prefix(_)
-            )
-        })
-    {
+    // Rechaza paths vacios o sin parent util
+    if media_path.is_empty() {
         return false;
     }
     let absolute = if path.is_absolute() {
@@ -310,22 +520,21 @@ pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
     let Ok(cwd) = working_dir.canonicalize() else {
         return false;
     };
-    // El archivo puede no existir todavía: se canónica el directorio padre y
-    // se comprueba que ese directorio quede dentro del directorio de trabajo.
     let Some(parent) = absolute.parent() else {
         return false;
     };
+    // Si el archivo no existe aun, canonicaliza el parent; si no existe, rechaza.
     let Ok(parent_canonical) = parent.canonicalize() else {
         return false;
     };
     parent_canonical.starts_with(&cwd)
 }
 
-fn spawn_reader(stdout: ChildStdout, sender: Sender<WireMessage>, line_cap: usize) {
+fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: usize) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
-            let mut line = Vec::new();
+            let mut line: Vec<u8> = Vec::new();
             let mut oversized = false;
             let mut done = false;
             while !done {
@@ -333,21 +542,42 @@ fn spawn_reader(stdout: ChildStdout, sender: Sender<WireMessage>, line_cap: usiz
                 match reader.read(&mut chunk) {
                     Ok(0) => return,
                     Ok(count) => {
+                        // Si ya es oversized, drenamos sin acumular hasta \n (LC1 fix)
+                        if oversized {
+                            if let Some(_nl) = chunk[..count].iter().position(|b| *b == b'\n') {
+                                done = true;
+                                // descartamos resto de linea
+                            }
+                            continue;
+                        }
                         if let Some(newline) = chunk[..count].iter().position(|byte| *byte == b'\n')
                         {
-                            line.extend_from_slice(&chunk[..newline]);
-                            done = true;
-                        } else {
-                            line.extend_from_slice(&chunk[..count]);
-                            if line.len() > line_cap {
+                            // check cap incluyendo lo que viene antes de \n
+                            if line.len() + newline > line_cap {
                                 oversized = true;
+                                // drenar resto de este chunk hasta \n ya hecho
+                                done = true;
+                                // limpiar lo acumulado para no retener OOM
+                                line.clear();
+                            } else {
+                                line.extend_from_slice(&chunk[..newline]);
+                                done = true;
+                            }
+                        } else {
+                            // sin newline en este chunk
+                            if line.len() + count > line_cap {
+                                oversized = true;
+                                line.clear();
+                                // seguir drenando sin acumular
+                            } else {
+                                line.extend_from_slice(&chunk[..count]);
                             }
                         }
                     }
                     Err(_) => return,
                 }
             }
-            if oversized || line.len() > line_cap {
+            if oversized {
                 let _ = sender.send(WireMessage::Error {
                     code: "protocol".into(),
                     message: "the animation engine emitted an oversized line".into(),
@@ -362,6 +592,7 @@ fn spawn_reader(stdout: ChildStdout, sender: Sender<WireMessage>, line_cap: usiz
                 continue;
             };
             if let Some(message) = downcast(&value) {
+                // sync_channel puede bloquear: si esta llena, este thread frena al motor (backpressure)
                 let _ = sender.send(message);
             }
         }
@@ -380,7 +611,7 @@ fn spawn_stderr_drainer(
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    let mut guard = shared.lock().unwrap();
+                    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
                     if guard.len() < 64 {
                         guard.push(line.trim_end().to_string());
                     }
@@ -485,6 +716,7 @@ for line in sys.stdin:
         let (_guard, config) = stub_engine();
         let mut engine = AnimEngine::spawn(config.clone()).unwrap();
         engine.wait_ready().unwrap();
+        assert!(matches!(engine.state(), AnimJobState::Ready));
         let job_id = engine
             .submit(derivada_request("derivada como pendiente"))
             .unwrap();
@@ -536,6 +768,21 @@ for line in sys.stdin:
         assert!(validate_media_path(&dir, "out.png"));
         assert!(!validate_media_path(&dir, "../out.png"));
         assert!(!validate_media_path(&dir, "/etc/passwd"));
+        // NUL rechazado
+        assert!(!validate_media_path(&dir, "out\0.png"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn statem_rejects_submit_before_ready() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, config) = stub_engine();
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        let err = engine.submit(derivada_request("x")).unwrap_err();
+        assert!(err.contains("wait_ready"), "err: {err}");
+        let _ = engine.shutdown();
     }
 }

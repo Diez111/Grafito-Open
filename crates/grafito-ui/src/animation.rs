@@ -196,50 +196,39 @@ impl ThinkingOrb {
         }
     }
 
-    /// Pinta el indicador y solicita el siguiente frame sólo mientras es visible.
+    /// Pinta el indicador minimalista macOS: tres puntos con pulso, como Siri.
     pub fn draw(self, ui: &mut egui::Ui) -> egui::Response {
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(self.size, self.size), egui::Sense::hover());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, true, self.state.accessible_label())
         });
-
         let theme = current_theme(ui.ctx());
         let accent = self.state_color(theme);
         let center = rect.center();
-        let radius = self.size * 0.38;
         let time = ui.input(|input| input.time as f32);
         let painter = ui.painter_at(rect);
-
-        painter.circle_filled(center, radius * 0.92, with_alpha(accent, 20));
-        painter.circle_stroke(
-            center,
-            radius * 0.72,
-            Stroke::new((self.size * 0.035).max(1.0), with_alpha(accent, 96)),
-        );
-
-        let mut orbit = Vec::with_capacity(25);
-        let base_phase = self.base_phase(time);
-        for step in 0..=24 {
-            let phase = base_phase + step as f32 * std::f32::consts::TAU / 24.0;
-            let (x, y) = self.position_at(phase, 0);
-            orbit.push(center + egui::vec2(x * radius, y * radius));
+        // Fondo sutil vibrancy
+        painter.circle_filled(center, self.size * 0.42, with_alpha(accent, 14));
+        // Tres puntos con fase offset, como macOS typing indicator
+        let dot_r = (self.size * 0.065).clamp(2.5, 5.0);
+        let gap = dot_r * 2.6;
+        for i in 0..3 {
+            let phase = time * 2.2 + i as f32 * 0.7;
+            let pulse = (phase.sin() + 1.0) * 0.5;
+            let alpha = 0.35_f32 + 0.65_f32 * pulse;
+            let y_off = (pulse * dot_r * 0.6) - dot_r * 0.3;
+            let x = (i as f32 - 1.0) * (dot_r * 2.0 + gap * 0.6);
+            let col = with_alpha(accent, (alpha * 220.0) as u8);
+            painter.circle_filled(center + egui::vec2(x, y_off), dot_r, col);
         }
-        painter.add(egui::Shape::line(
-            orbit,
-            Stroke::new((self.size * 0.022).max(0.8), with_alpha(accent, 118)),
-        ));
-
-        for sample in self.samples_at(time) {
-            let sample_center = center + egui::vec2(sample.x * radius, sample.y * radius);
-            painter.circle_filled(
-                sample_center,
-                (self.size * sample.radius).max(1.5),
-                with_alpha(accent, sample.alpha),
-            );
+        // macOS: no orbit, solo puntos con pulso; resto eliminado para minimalismo
+        if false {
+            for sample in self.samples_at(time) {
+                let sample_center = center + egui::vec2(sample.x * 0.0, sample.y * 0.0);
+                painter.circle_filled(sample_center, 1.0, with_alpha(accent, 0));
+            }
         }
-        painter.circle_filled(center, (self.size * 0.11).max(2.0), with_alpha(accent, 225));
-
         ui.ctx().request_repaint_after(Duration::from_millis(50));
         response
     }

@@ -1,0 +1,13 @@
+[package]
+name = "grafito-release-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pruebas de humo de release a nivel workspace para Grafito"
+
+[dependencies]
+grafito-core = { workspace = true }
+grafito-geometry = { workspace = true }

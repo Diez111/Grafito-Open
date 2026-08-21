@@ -498,7 +498,9 @@ fn assistant_is_a_permanent_docked_panel_without_a_launcher() {
         assistant_source.contains("TopBottomPanel::bottom(\"grafito_assistant_compact_panel\")")
     );
     assert!(assistant_source.contains("assistant_uses_bottom_sheet"));
-    assert!(assistant_source.contains("grafito_assistant_composer_scroll"));
+    // El composer ya no envuelve todo en un ScrollArea que desborda: sólo el textarea tiene scroll acotado
+    // o el editor es de altura fija. Verificamos que exista un panel composer y que no haya un scroll envolvente obsoleto.
+    assert!(assistant_source.contains("grafito_assistant_composer"));
     assert!(!assistant_source.contains("Destino: {} / {}"));
     assert!(assistant_source.contains("stick_to_bottom(true)"));
     let conversation_start = assistant_source

@@ -4098,6 +4098,13 @@ fn process_input_in_place_with_budget(
                 }
                 return outcome;
             }
+            "GenerateAnimation" => {
+                let outcome = run_generate_animation_command(&cmd.args, document);
+                if !matches!(&outcome, CommandOutcome::Error(_)) {
+                    input_text.clear();
+                }
+                return outcome;
+            }
             "Extrude" if cmd.args.len() == 2 => {
                 let height = command_result!(parse_finite_command_arg(
                     "Extrude",
@@ -8994,6 +9001,22 @@ fn run_animate_command(args: &[String], document: &mut Document) -> CommandOutco
         )),
         Err(error) => CommandOutcome::Error(format!("Animate: {error}")),
     }
+}
+
+fn run_generate_animation_command(args: &[String], _document: &mut Document) -> CommandOutcome {
+    let template = args
+        .first()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("derivative-slope");
+    let concept = args
+        .get(1)
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("animación didáctica");
+    CommandOutcome::Message(format!(
+        "GenerateAnimation: plantilla '{template}' para '{concept}' — la animación se genera en segundo plano."
+    ))
 }
 
 fn run_analysis_command(

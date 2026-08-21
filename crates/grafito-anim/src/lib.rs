@@ -9,5 +9,6 @@ pub mod protocol;
 
 pub use engine::{run_job, AnimEngine, EngineConfig, JobEvent};
 pub use protocol::{
-    downcast, kinds, AnimJobId, AnimRequest, AnimResult, ExportFormat, RenderProgress, WireMessage,
+    downcast, kinds, AnimDuration, AnimJobId, AnimParams, AnimRequest, AnimResult, ExportFormat,
+    RenderProgress, Resolution, WireMessage,
 };

@@ -22,10 +22,13 @@ const MAX_CURVE_STEPS: usize = 4000;
 /// Maximum grid resolution for surface evaluation.
 const MAX_SURFACE_RES: usize = 128;
 
-/// Hash document variables for use in cache keys.
+/// Hash document variables for use in cache keys — determinista.
+/// Ordena por clave para evitar no-determinismo de HashMap (SipHash random).
 pub fn variables_hash(variables: &HashMap<String, f64>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for (k, v) in variables.iter() {
+    let mut pairs: Vec<_> = variables.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in pairs {
         k.hash(&mut hasher);
         v.to_bits().hash(&mut hasher);
     }

@@ -707,6 +707,21 @@ impl GrafitoApp {
                     self.reject_assistant_command();
                     return;
                 };
+                // Si es GenerateAnimation, además de aplicar el comando, dispara el motor de animación
+                let is_generate_animation = matches!(
+                    &verified.proposal,
+                    AssistantProposal::Command(cmd) if cmd.canonical_name() == "GenerateAnimation"
+                );
+                let generate_args = if is_generate_animation {
+                    if let AssistantProposal::Command(cmd) = &verified.proposal {
+                        let args = cmd.arguments();
+                        Some((args.first().cloned(), args.get(1).cloned()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let committed = match verified.proposal {
                     // Revalidate simple proposals against the live document at the explicit
                     // click, so a valid card never depends on a stale response-time cache.
@@ -719,8 +734,8 @@ impl GrafitoApp {
                         &commands,
                         &verified.prerequisite_parameters,
                     ),
-                    AssistantProposal::Parameter(assignment) => {
-                        if preflight_assistant_parameter(&self.document, &assignment).is_ok() {
+                    AssistantProposal::Parameter(ref assignment) => {
+                        if preflight_assistant_parameter(&self.document, assignment).is_ok() {
                             let command = assignment.canonical_text();
                             let outcome = self.execute_command_and_record(&command, self.ui_time);
                             !matches!(outcome, grafito_command::commands::CommandOutcome::Error(_))
@@ -732,6 +747,22 @@ impl GrafitoApp {
                 };
                 self.assistant
                     .finish_verified_proposal_application(candidate_index, committed);
+                if is_generate_animation && committed {
+                    if let Some((template_opt, concept_opt)) = generate_args {
+                        let template = template_opt
+                            .as_deref()
+                            .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("derivative-slope");
+                        let concept = concept_opt
+                            .as_deref()
+                            .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
+                            .unwrap_or("");
+                        self.run_assistant_animation_with(ctx, template, concept);
+                    } else {
+                        self.run_assistant_animation(ctx);
+                    }
+                }
             }
             AssistantUiAction::ApplyProposedPlan => self.apply_proposed_assistant_plan(),
             AssistantUiAction::RetryProposalCorrection => {
@@ -1294,22 +1325,36 @@ impl GrafitoApp {
     }
 
     fn run_assistant_animation(&mut self, ctx: &egui::Context) {
-        if self.assistant_runtime.anim_job.is_some() || self.assistant.is_pending {
+        self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
+    }
+
+    fn run_assistant_animation_with(&mut self, ctx: &egui::Context, template: &str, concept: &str) {
+        if self.assistant_runtime.anim_job.is_some() {
             return;
         }
+        // Limpia animación previa para no confundir
+        self.assistant.set_media(None, ctx);
         // Motor externo si está configurado; si no (o si falla), se usa la
         // animación nativa de Rust para que «Animá» siempre produzca algo.
         let engine = self
             .plugin_registry
             .as_ref()
             .and_then(|registry| registry.engines().into_iter().next().cloned());
-        let concept = self
-            .assistant
-            .focus
-            .as_ref()
-            .map(|focus| focus.summary.clone())
-            .filter(|summary| !summary.is_empty())
-            .unwrap_or_else(|| "derivada como pendiente".to_string());
+        let concept = if concept.is_empty() {
+            self.assistant
+                .focus
+                .as_ref()
+                .map(|focus| focus.summary.clone())
+                .filter(|summary| !summary.is_empty())
+                .unwrap_or_else(|| "derivada como pendiente".to_string())
+        } else {
+            concept.to_string()
+        };
+        let template = if template.is_empty() {
+            "derivative-slope"
+        } else {
+            template
+        };
         let work_dir = std::env::temp_dir().join(format!(
             "grafito_anim_{}_{}",
             std::process::id(),
@@ -1320,8 +1365,8 @@ impl GrafitoApp {
         ));
         let _ = std::fs::create_dir_all(&work_dir);
         let request = grafito_anim::AnimRequest {
-            template: "derivative-slope".into(),
-            concept,
+            template: template.to_string(),
+            concept: concept.clone(),
             params: std::collections::BTreeMap::new(),
             spec: None,
             export: grafito_anim::ExportFormat::Gif,
@@ -1329,10 +1374,20 @@ impl GrafitoApp {
         };
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = ctx.clone();
+        let template_owned = template.to_string();
         std::thread::spawn(move || {
-            let native = || grafito_ui::assistant::AssistantMedia {
-                title: "Derivada como pendiente (nativa)".into(),
-                frames: crate::anim_native::render_native_animation_frames(480, 360),
+            let native = || {
+                let title = if template_owned == "integral-area" {
+                    "Teorema de Pitágoras (nativa)".into()
+                } else {
+                    "Derivada como pendiente (nativa)".into()
+                };
+                let frames = if template_owned == "integral-area" {
+                    crate::anim_native::render_pitagoras_frames(480, 360)
+                } else {
+                    crate::anim_native::render_native_animation_frames(480, 360)
+                };
+                grafito_ui::assistant::AssistantMedia { title, frames }
             };
             let result = match engine {
                 Some(engine_section) => {
@@ -1348,10 +1403,12 @@ impl GrafitoApp {
                     match grafito_anim::run_job(&config, &request, None, |_| {}) {
                         Ok(result) => match load_gif_frames(&result.media_path) {
                             Ok(frames) if !frames.is_empty() => {
-                                Ok(grafito_ui::assistant::AssistantMedia {
-                                    title: "Derivada como pendiente".into(),
-                                    frames,
-                                })
+                                let title = if template_owned == "integral-area" {
+                                    "Teorema de Pitágoras".into()
+                                } else {
+                                    "Derivada como pendiente".into()
+                                };
+                                Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                             }
                             _ => Ok(native()),
                         },

@@ -2598,13 +2598,15 @@ impl ImplicitCurveObj {
         variables: &HashMap<String, f64>,
         var_names: &[&str],
     ) -> Option<(grafito_geometry::ast::Expr, grafito_geometry::ast::Expr)> {
-        // Hash combinado de lhs + rhs + variables.
+        // Hash combinado de lhs + rhs + variables (orden determinista).
         let mut hasher = DefaultHasher::new();
         self.expr_lhs.hash(&mut hasher);
         self.expr_rhs.hash(&mut hasher);
-        for v in variables {
-            v.0.hash(&mut hasher);
-            v.1.to_bits().hash(&mut hasher);
+        let mut sorted_vars: Vec<_> = variables.iter().collect();
+        sorted_vars.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, value) in sorted_vars {
+            key.hash(&mut hasher);
+            value.to_bits().hash(&mut hasher);
         }
         let combined_hash = hasher.finish();
 
@@ -3471,6 +3473,39 @@ impl TransformedObj {
             complex_expr: expr.to_string(),
             compiled_expr: None,
         }
+    }
+
+    /// Crea un Transformed validado (type-safe). Valida que la expresión sea parseable
+    /// y que no sea singular trivial (p. ej. "0" que colapsa el objeto).
+    pub fn try_new(inner: GeoObject, expr: &str) -> Result<Self, String> {
+        if expr.len() > crate::validation::MAX_EXPR_LENGTH {
+            return Err(format!(
+                "complex_expr exceeds {} chars",
+                crate::validation::MAX_EXPR_LENGTH
+            ));
+        }
+        if expr.is_empty() {
+            return Err("complex_expr cannot be empty".into());
+        }
+        // Validar que la expresión sea sintácticamente válida como función de z
+        if let Err(reason) = grafito_geometry::expr::prepare_function_ast(
+            expr,
+            &std::collections::HashMap::new(),
+            &["z"],
+        ) {
+            return Err(format!("complex_expr inválida: {reason}"));
+        }
+        // Rechazar transformaciones triviales que colapsan todo a un punto (singular)
+        let trimmed = expr.trim();
+        if trimmed == "0" || trimmed == "0.0" {
+            return Err("complex_expr singular: colapsa el objeto".into());
+        }
+        // Validar anidamiento: Document::validate ya limita MAX_TRANSFORM_DEPTH, aquí solo check básico
+        Ok(Self {
+            inner: Box::new(inner),
+            complex_expr: expr.to_string(),
+            compiled_expr: None,
+        })
     }
 }
 

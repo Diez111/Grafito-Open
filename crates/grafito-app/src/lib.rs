@@ -6,7 +6,10 @@
 //! módulos internos del crate.
 
 pub(crate) mod algebra;
+#[allow(dead_code)]
 pub(crate) mod anim_native;
+#[allow(dead_code)]
+pub(crate) mod anim_ui;
 pub(crate) mod app;
 pub(crate) mod assistant;
 pub(crate) mod assistant_credentials;

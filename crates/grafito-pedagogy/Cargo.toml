@@ -1,14 +1,13 @@
 [package]
-name = "grafito-anim"
+name = "grafito-pedagogy"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Puente de Grafito hacia motores de animación externos (IPC stdio, protocolo JSON versionado)"
+description = "Motor pedagógico puro de Grafito: niveles, currículum UTN, scaffold socrático, ejercicios y feedback formativo"
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true

@@ -1,0 +1,39 @@
+name: grafito-assistant-overflow-audit
+initial: plan
+nodes:
+  plan:
+    prompt: |
+      Auditar a profundidad el desborde del chat del asistente: barra de scroll en espacio para escribir desborda y el chat desborda. Revisar crates/grafito-ui/src/assistant.rs, tokens, layout, composer height, ScrollArea vs TextEdit, TopBottomPanel anidado, wrapping, clip. Generar informe de causas raíz.
+    before_transfer:
+      - type: predicate
+        path: progress.md
+        exists: true
+        non_empty: true
+  execute:
+    prompt: |
+      Implementar corrección del overflow del asistente según plan. Sin ampliar scope fuera del composer y scroll del chat.
+    before_transfer:
+      - type: checklist
+        items: ["Implementación match plan", "cargo fmt --check pasa", "cargo clippy --workspace --all-targets -- -D warnings 0 errores", "cargo test --workspace verde o riesgos documentados"]
+  verify:
+    prompt: |
+      Verificar que el desborde ya no ocurre: revisar layout lógico, construir y testear, inspección visual del esqueleto egui si es posible. Documentar evidencia.
+    before_transfer:
+      - type: command
+        run: "cargo test -p grafito-ui 2>&1 | tail -n 40"
+  handoff:
+    prompt: |
+      Resumen de auditoría y fix, riesgos, next command.
+edges:
+  - from: plan
+    to: execute
+    condition: "Plan listo"
+  - from: execute
+    to: verify
+    condition: "Implementación lista para verify"
+  - from: verify
+    to: execute
+    condition: "Verify encontró gap reparable"
+  - from: verify
+    to: handoff
+    condition: "Verificación pasó o riesgos documentados"

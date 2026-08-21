@@ -280,6 +280,22 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
+        "animation.generate",
+        "GenerateAnimation",
+        ["GenerateAnimation"],
+        "Animaciones",
+        "Genera una animación didáctica (placeholder o Manim) para el concepto dado.",
+        CreatesObject,
+        Low,
+        true,
+        "GenerateAnimation",
+        [
+            signature!("GenerateAnimation[template, concepto]"; "template": Expression required, "concepto": Expression required),
+            signature!("GenerateAnimation[template]"; "template": Expression required),
+            signature!("GenerateAnimation[]";)
+        ]
+    ),
+    command!(
         "complex.domain-coloring",
         "DomainColoring",
         ["domain_coloring", "dcolor"],

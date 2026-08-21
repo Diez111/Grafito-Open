@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-agent"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -1855,15 +1855,16 @@ dependencies = [
 
 [[package]]
 name = "grafito-anim"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "grafito-app"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -1907,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-assistant"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "base64",
  "grafito-agent",
@@ -1924,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-assistant-types"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -1932,7 +1933,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-command"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "geo",
  "glam",
@@ -1946,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-complex"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "num-complex",
  "serde",
@@ -1954,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-core"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "criterion",
  "geo",
@@ -1973,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-geometry"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "criterion",
  "evalexpr",
@@ -1992,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-plugins"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -2001,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-profile"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -2009,11 +2010,11 @@ dependencies = [
 
 [[package]]
 name = "grafito-release-tests"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 
 [[package]]
 name = "grafito-render"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2032,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-ui"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 dependencies = [
  "egui",
  "grafito-assistant-types",
@@ -2045,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-whiteboard"
-version = "1.2.20-beta"
+version = "1.2.21-beta"
 
 [[package]]
 name = "half"

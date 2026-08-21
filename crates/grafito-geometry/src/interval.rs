@@ -38,7 +38,9 @@ impl Interval {
     }
 
     pub fn midpoint(&self) -> f64 {
-        (self.lo.to_f64() + self.hi.to_f64()) * 0.5
+        let lo = self.lo.to_f64();
+        let hi = self.hi.to_f64();
+        lo + (hi - lo) * 0.5
     }
 }
 
@@ -50,7 +52,11 @@ pub fn safe_sample<F: Fn(f64) -> f64>(
     x_max: f64,
     n: usize,
 ) -> Vec<(f64, Option<f64>)> {
-    if n < 2 {
+    const MAX_SAMPLES: usize = 100_000;
+    if !(2..=MAX_SAMPLES).contains(&n) {
+        return vec![];
+    }
+    if !x_min.is_finite() || !x_max.is_finite() || x_min >= x_max {
         return vec![];
     }
     let dx = (x_max - x_min) / (n - 1) as f64;

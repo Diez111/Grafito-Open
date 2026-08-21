@@ -85,6 +85,9 @@ pub const SPACE_XXL: f32 = 32.0;
 pub const RADIUS_SM: f32 = 4.0;
 pub const RADIUS_MD: f32 = 8.0;
 pub const RADIUS_LG: f32 = 12.0;
+pub const RADIUS_XL: f32 = 16.0;
+pub const RADIUS_2XL: f32 = 20.0;
+pub const RADIUS_PILL: f32 = 999.0;
 
 // ═══════════════════════════════════════════════════════════
 // Tamaños de íconos

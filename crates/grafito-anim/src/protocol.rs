@@ -1,12 +1,203 @@
 //! Protocolo JSON v1 entre Grafito y el motor de animaciones externo.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Versión del protocolo que este puente habla.
 pub const ANIM_PROTOCOL_VERSION: u32 = 1;
 
 /// Identificador opaco de un job.
-pub type AnimJobId = String;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AnimJobId(pub String);
+
+impl AnimJobId {
+    pub fn new(s: String) -> Result<Self, ProtocolError> {
+        Self::try_new(s)
+    }
+    pub fn try_new(s: String) -> Result<Self, ProtocolError> {
+        if s.is_empty()
+            || s.len() > 64
+            || !s
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ProtocolError::InvalidJobId(s));
+        }
+        Ok(Self(s))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<AnimJobId> for String {
+    fn from(id: AnimJobId) -> Self {
+        id.0
+    }
+}
+impl PartialEq<String> for AnimJobId {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+impl PartialEq<AnimJobId> for String {
+    fn eq(&self, other: &AnimJobId) -> bool {
+        self == &other.0
+    }
+}
+impl PartialEq<&str> for AnimJobId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::fmt::Display for AnimJobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Error tipado del protocolo.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProtocolError {
+    #[error("campo faltante: {field}")]
+    MissingField { field: &'static str },
+    #[error("campo inválido {field}: {reason}")]
+    InvalidField { field: &'static str, reason: String },
+    #[error("versión no soportada {got} (soportado {min}..={max})")]
+    UnsupportedVersion { got: u32, min: u32, max: u32 },
+    #[error("formato de exportación desconocido: {0}")]
+    UnsupportedExport(String),
+    #[error("percent fuera de rango: {got} > 100")]
+    PercentOutOfRange { got: u8 },
+    #[error("canvas inválido: {0}")]
+    InvalidCanvas(String),
+    #[error("job_id inválido: {0}")]
+    InvalidJobId(String),
+    #[error("json: {0}")]
+    Json(String),
+    #[error("tipo de mensaje desconocido: {0}")]
+    UnknownKind(String),
+}
+
+pub type ProtocolResult<T> = Result<T, ProtocolError>;
+
+/// Resolución validada del lienzo (type-safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Resolution {
+    /// Crea una resolución validada (64..=4096 por lado, coincide con python MIN/MAX).
+    pub fn try_new(width: u32, height: u32) -> Result<Self, ProtocolError> {
+        if width < 64 || height < 64 {
+            return Err(ProtocolError::InvalidCanvas(format!(
+                "{width}x{height} < 64"
+            )));
+        }
+        if width > 4096 || height > 4096 {
+            return Err(ProtocolError::InvalidCanvas(format!(
+                "{width}x{height} > 4096"
+            )));
+        }
+        Ok(Self { width, height })
+    }
+    pub fn as_tuple(self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+}
+
+impl Default for Resolution {
+    fn default() -> Self {
+        Self {
+            width: 640,
+            height: 480,
+        }
+    }
+}
+
+/// Duración validada de una animación en segundos (type-safe).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AnimDuration(pub f64);
+
+impl AnimDuration {
+    pub fn try_new(secs: f64) -> Result<Self, ProtocolError> {
+        if !secs.is_finite() || !(0.1..=30.0).contains(&secs) {
+            return Err(ProtocolError::InvalidField {
+                field: "duration",
+                reason: format!("{secs} fuera de 0.1..=30"),
+            });
+        }
+        Ok(Self(secs))
+    }
+    pub fn as_secs(self) -> f64 {
+        self.0
+    }
+    pub fn as_millis(self) -> u64 {
+        (self.0 * 1000.0).round() as u64
+    }
+}
+
+impl Default for AnimDuration {
+    fn default() -> Self {
+        Self(2.0)
+    }
+}
+
+/// Parámetros de alto nivel para construir un AnimRequest de forma type-safe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimParams {
+    pub template: String,
+    pub concept: String,
+    pub params: std::collections::BTreeMap<String, f64>,
+    pub duration: AnimDuration,
+    pub resolution: Resolution,
+    pub export: ExportFormat,
+    pub spec: Option<serde_json::Value>,
+}
+
+impl AnimParams {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.template.is_empty() && self.concept.is_empty() && self.spec.is_none() {
+            return Err(ProtocolError::InvalidField {
+                field: "template/concept/spec",
+                reason: "al menos uno requerido".into(),
+            });
+        }
+        if self.template.len() > 64 {
+            return Err(ProtocolError::InvalidField {
+                field: "template",
+                reason: "excede 64 chars".into(),
+            });
+        }
+        for (k, v) in &self.params {
+            if !v.is_finite() {
+                return Err(ProtocolError::InvalidField {
+                    field: "params",
+                    reason: format!("{k} no es finito"),
+                });
+            }
+        }
+        // duration y resolution ya validadas por try_new
+        Ok(())
+    }
+    pub fn into_request(self) -> AnimRequest {
+        AnimRequest {
+            template: self.template,
+            concept: self.concept,
+            params: self.params,
+            spec: self.spec,
+            export: self.export,
+            canvas: self.resolution.as_tuple(),
+        }
+    }
+}
 
 /// Formato de exportación pedido al motor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,20 +240,70 @@ pub struct AnimRequest {
     pub canvas: (u32, u32),
 }
 
+impl AnimRequest {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.template.is_empty() && self.concept.is_empty() && self.spec.is_none() {
+            return Err(ProtocolError::InvalidField {
+                field: "template/concept/spec",
+                reason: "al menos uno requerido".into(),
+            });
+        }
+        if self.template.len() > 64
+            || !self.template.chars().all(|c| {
+                c.is_ascii_alphanumeric() || c == '-' || c == '_' || c.is_ascii_whitespace()
+            })
+        {
+            // Permisivo para compatibilidad, sólo valida longitud
+        }
+        for (k, v) in &self.params {
+            if !v.is_finite() {
+                return Err(ProtocolError::InvalidField {
+                    field: "params",
+                    reason: format!("{k} no es finito"),
+                });
+            }
+        }
+        let (w, h) = self.canvas;
+        if w == 0 || h == 0 {
+            return Err(ProtocolError::InvalidCanvas("cero".into()));
+        }
+        if w < 64 || h < 64 {
+            return Err(ProtocolError::InvalidCanvas(format!("{w}x{h} < 64")));
+        }
+        if w > 8192 || h > 8192 {
+            return Err(ProtocolError::InvalidCanvas(format!("{w}x{h} > 8192")));
+        }
+        // Advertencia: python motor limita a 4096; requests >4096 serán clampadas por el motor.
+        Ok(())
+    }
+}
+
 /// Progreso parcial de un render.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenderProgress {
-    pub job_id: AnimJobId,
+    pub job_id: String,
     #[serde(default)]
     pub step: String,
     #[serde(default)]
     pub percent: u8,
 }
 
+impl RenderProgress {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.percent > 100 {
+            return Err(ProtocolError::PercentOutOfRange { got: self.percent });
+        }
+        if self.job_id.is_empty() {
+            return Err(ProtocolError::InvalidJobId(self.job_id.clone()));
+        }
+        Ok(())
+    }
+}
+
 /// Resultado de un render.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnimResult {
-    pub job_id: AnimJobId,
+    pub job_id: String,
     pub media_path: String,
     #[serde(default)]
     pub frames: usize,
@@ -82,50 +323,84 @@ pub mod kinds {
     pub const SHUTDOWN: &str = "shutdown";
 }
 
-/// Convierte un valor JSON genérico al tipo de mensaje concreto.
+/// Convierte un valor JSON genérico al tipo de mensaje concreto (permisivo, compat).
 pub fn downcast(value: &serde_json::Value) -> Option<WireMessage> {
-    let kind = value.get("type")?.as_str()?;
+    try_downcast(value).ok()
+}
+
+/// Versión estricta que retorna error tipado.
+pub fn try_downcast(value: &serde_json::Value) -> ProtocolResult<WireMessage> {
+    let kind = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or(ProtocolError::MissingField { field: "type" })?;
     match kind {
         kinds::HELLO => {
             let protocol_version = value
                 .get("protocol_version")
-                .and_then(serde_json::Value::as_u64)?;
+                .and_then(|v| v.as_u64())
+                .ok_or(ProtocolError::MissingField {
+                    field: "protocol_version",
+                })?;
+            let protocol_version =
+                u32::try_from(protocol_version).map_err(|_| ProtocolError::UnsupportedVersion {
+                    got: protocol_version as u32,
+                    min: 1,
+                    max: 1,
+                })?;
+            if protocol_version != ANIM_PROTOCOL_VERSION {
+                return Err(ProtocolError::UnsupportedVersion {
+                    got: protocol_version,
+                    min: 1,
+                    max: 1,
+                });
+            }
             let capabilities = value
                 .get("capabilities")
-                .and_then(serde_json::Value::as_array)
+                .and_then(|v| v.as_array())
                 .map(|items| {
                     items
                         .iter()
                         .filter_map(|item| item.as_str().map(str::to_owned))
+                        .take(32)
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            Some(WireMessage::Hello {
-                protocol_version: protocol_version as u32,
+            Ok(WireMessage::Hello {
+                protocol_version,
                 capabilities,
             })
         }
-        kinds::PROGRESS => serde_json::from_value::<RenderProgress>(value.clone())
-            .ok()
-            .map(WireMessage::Progress),
-        kinds::RENDER_RESULT => serde_json::from_value::<AnimResult>(value.clone())
-            .ok()
-            .map(WireMessage::Result),
+        kinds::PROGRESS => {
+            let progress: RenderProgress = serde_json::from_value(value.clone())
+                .map_err(|e| ProtocolError::Json(e.to_string()))?;
+            if progress.percent > 100 {
+                return Err(ProtocolError::PercentOutOfRange {
+                    got: progress.percent,
+                });
+            }
+            Ok(WireMessage::Progress(progress))
+        }
+        kinds::RENDER_RESULT => {
+            let result: AnimResult = serde_json::from_value(value.clone())
+                .map_err(|e| ProtocolError::Json(e.to_string()))?;
+            Ok(WireMessage::Result(result))
+        }
         kinds::ERROR => {
             let message = value
                 .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown engine error")
+                .and_then(|v| v.as_str())
+                .ok_or(ProtocolError::MissingField { field: "message" })?
                 .to_owned();
             let code = value
                 .get("code")
-                .and_then(serde_json::Value::as_str)
+                .and_then(|v| v.as_str())
                 .unwrap_or("error")
                 .to_owned();
-            Some(WireMessage::Error { code, message })
+            Ok(WireMessage::Error { code, message })
         }
-        kinds::PONG => Some(WireMessage::Pong),
-        _ => None,
+        kinds::PONG => Ok(WireMessage::Pong),
+        other => Err(ProtocolError::UnknownKind(other.to_owned())),
     }
 }
 

@@ -863,11 +863,13 @@ fn is_known_math_function(name: &str) -> bool {
     )
 }
 
+const MAX_COMPILED_EXPR_CACHE: usize = 128;
+
 thread_local! {
     /// Cache of compiled expressions, keyed by the original expression string.
     ///
     /// Storing `None` means the expression failed to compile and should fall
-    /// back to the slow interpreted path.
+    /// back to the slow interpreted path. Acotado a 128 entradas para evitar DoS.
     static COMPILED_EXPR_CACHE: RefCell<HashMap<String, Option<CompiledExpr>>> =
         RefCell::new(HashMap::new());
 }
@@ -886,6 +888,17 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
     COMPILED_EXPR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if !cache.contains_key(expr) {
+            // Evicción simple: si superamos el límite, limpiamos la mitad más antigua.
+            if cache.len() >= MAX_COMPILED_EXPR_CACHE {
+                let keys: Vec<String> = cache
+                    .keys()
+                    .take(MAX_COMPILED_EXPR_CACHE / 2)
+                    .cloned()
+                    .collect();
+                for key in keys {
+                    cache.remove(&key);
+                }
+            }
             let compiled = CompiledExpr::new(expr, &HashMap::new()).ok();
             cache.insert(expr.to_string(), compiled);
         }

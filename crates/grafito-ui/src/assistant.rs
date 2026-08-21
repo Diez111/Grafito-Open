@@ -17,6 +17,69 @@ use grafito_assistant_types::{
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Statem del asistente — hace imposibles los estados inválidos (rust-design)
+// ─────────────────────────────────────────────────────────────────────────────
+/// Ciclo de vida tipado del asistente. Cada transición es verificada; no hay
+/// submit sin Idle/Failed, no hay cancel sin Thinking/Verifying/Animating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantLifecycle {
+    /// Listo para recibir una nueva pregunta.
+    Idle,
+    /// Usuario escribiendo (composer con foco).
+    Composing,
+    /// Pensando: local o remoto en curso.
+    Thinking,
+    /// Esperando autorización para ir a la red.
+    AwaitingAuthorization,
+    /// Verificando propuestas (preflight) antes de mostrar.
+    Verifying,
+    /// Animando (job de animación en curso).
+    Animating,
+    /// Fallo tipado que requiere acción del usuario.
+    Failed,
+    /// Cancelando trabajo cooperativo.
+    Cancelling,
+}
+
+impl AssistantLifecycle {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+    pub fn can_submit(self) -> bool {
+        matches!(self, Self::Idle | Self::Composing | Self::Failed)
+    }
+    pub fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::Thinking | Self::Verifying | Self::Animating | Self::Cancelling
+        )
+    }
+}
+
+/// Error tipado del asistente (rust-design: Result<T, AssistantError>).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistantError {
+    Validation(String),
+    Network(String),
+    BudgetExceeded { what: String, limit: usize },
+    Cancelled,
+    Unauthorized,
+}
+
+impl std::fmt::Display for AssistantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(msg) => write!(f, "validación: {msg}"),
+            Self::Network(msg) => write!(f, "red: {msg}"),
+            Self::BudgetExceeded { what, limit } => write!(f, "límite excedido {what} > {limit}"),
+            Self::Cancelled => write!(f, "cancelado"),
+            Self::Unauthorized => write!(f, "no autorizado"),
+        }
+    }
+}
+impl std::error::Error for AssistantError {}
+
 const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 400.0;
 const ASSISTANT_PANEL_MIN_WIDTH: f32 = 340.0;
 const ASSISTANT_PANEL_MAX_WIDTH: f32 = 460.0;
@@ -314,6 +377,29 @@ impl Default for AssistantPanelState {
 
 impl AssistantPanelState {
     /// Indica si una consulta se puede iniciar con la conexión elegida.
+    /// Deriva el ciclo de vida tipado desde los flags internos (statem).
+    pub fn lifecycle(&self) -> AssistantLifecycle {
+        if self.is_cancelling {
+            return AssistantLifecycle::Cancelling;
+        }
+        if self.anim_progress {
+            return AssistantLifecycle::Animating;
+        }
+        if self.is_pending {
+            return AssistantLifecycle::Thinking;
+        }
+        if self.has_pending_remote_authorization() {
+            return AssistantLifecycle::AwaitingAuthorization;
+        }
+        if self.error.is_some() {
+            return AssistantLifecycle::Failed;
+        }
+        if !self.problem.trim().is_empty() {
+            return AssistantLifecycle::Composing;
+        }
+        AssistantLifecycle::Idle
+    }
+
     pub fn can_submit(&self) -> bool {
         !self.is_pending
             && !self.is_importing_image
@@ -704,9 +790,10 @@ impl AssistantPanelState {
             self.media_textures = media
                 .frames
                 .iter()
-                .map(|frame| {
+                .enumerate()
+                .map(|(index, frame)| {
                     ctx.load_texture(
-                        "assistant_media_frame",
+                        format!("assistant_media_frame_{:03}", index),
                         frame.clone(),
                         egui::TextureOptions::LINEAR,
                     )
@@ -1328,8 +1415,21 @@ pub fn draw_assistant_panel(
             .max_height(max_height)
             .frame(
                 egui::Frame::none()
-                    .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator)),
+                    .fill(theme.panel_bg.gamma_multiply(0.78))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
+                    .rounding(egui::Rounding {
+                        nw: crate::tokens::RADIUS_XL,
+                        ne: crate::tokens::RADIUS_XL,
+                        sw: 0.0,
+                        se: 0.0,
+                    })
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, -8.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(20),
+                    })
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
                 action = draw_panel_contents(ui, state, true, visuals, cache);
@@ -1343,8 +1443,21 @@ pub fn draw_assistant_panel(
             .max_width(max_width)
             .frame(
                 egui::Frame::none()
-                    .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator)),
+                    .fill(theme.panel_bg.gamma_multiply(0.82))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
+                    .rounding(egui::Rounding {
+                        nw: crate::tokens::RADIUS_XL,
+                        ne: 0.0,
+                        sw: crate::tokens::RADIUS_XL,
+                        se: 0.0,
+                    })
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(-8.0, 0.0),
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(18),
+                    })
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
                 action = draw_assistant_contents(ui, state, visuals, cache);
@@ -1846,26 +1959,49 @@ fn draw_panel_contents(
     ui.add_space(SPACE_XS);
 
     let composer_height = assistant_composer_height(state);
+    // Composer crece con el contenido pero nunca desborda: máx 38% del alto,
+    // suelo 88px para que input+botones quepan sin scrollbar prematura.
+    // La barra sólo aparece si las attachments exceden el máximo.
+    let available = ui.available_height().max(120.0);
+    let max_composer = (available * 0.38).clamp(88.0, 260.0);
     let visible_composer_height = if compact {
-        // Leave room for the header and a sliver of transcript in the sheet.
-        (ui.available_height() - 64.0).max(0.0).min(composer_height)
+        (available - 64.0)
+            .max(88.0)
+            .min(composer_height)
+            .min(max_composer)
     } else {
-        composer_height
+        composer_height.min(max_composer).max(88.0)
     };
     egui::TopBottomPanel::bottom("grafito_assistant_composer")
         .exact_height(visible_composer_height)
         .frame(
             egui::Frame::none()
-                .fill(theme.input_bar_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
-                .inner_margin(egui::Margin::same(SPACE_SM)),
+                .fill(theme.assistant_composer_bg.gamma_multiply(0.96))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    theme.assistant_composer_border.gamma_multiply(0.6),
+                ))
+                .rounding(egui::Rounding {
+                    nw: crate::tokens::RADIUS_XL,
+                    ne: crate::tokens::RADIUS_XL,
+                    sw: 0.0,
+                    se: 0.0,
+                })
+                .inner_margin(egui::Margin::symmetric(
+                    crate::tokens::SPACE_MD,
+                    crate::tokens::SPACE_SM,
+                ))
+                .shadow(egui::Shadow {
+                    offset: egui::vec2(0.0, -4.0),
+                    blur: 12.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(10),
+                }),
         )
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("grafito_assistant_composer_scroll")
-                .show(ui, |ui| {
-                    retain_first_assistant_action(&mut action, draw_assistant_composer(ui, state));
-                });
+            // Sin ScrollArea envolvente: el composer ya tiene editor de altura fija (44px)
+            // y los botones quedan siempre visibles; la barra del panel no desborda el card.
+            retain_first_assistant_action(&mut action, draw_assistant_composer(ui, state));
         });
 
     egui::ScrollArea::vertical()
@@ -1875,9 +2011,16 @@ fn draw_panel_contents(
         .show(ui, |ui| {
             if let Some(error) = state.error.clone() {
                 egui::Frame::none()
-                    .fill(theme.danger.gamma_multiply(0.12))
-                    .rounding(RADIUS_MD)
-                    .inner_margin(egui::Margin::same(SPACE_SM))
+                    .fill(theme.danger.gamma_multiply(0.08))
+                    .stroke(egui::Stroke::new(1.0, theme.danger.gamma_multiply(0.2)))
+                    .rounding(crate::tokens::RADIUS_XL)
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(8),
+                    })
                     .show(ui, |ui| {
                         ui.colored_label(theme.danger, error);
                         if state.proposal_correction_available
@@ -2391,60 +2534,77 @@ fn draw_assistant_header(
     theme: &crate::theme::Theme,
     visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
+    // macOS: header como toolbar translúcido con vibrancy, esquinas 16, sombra suave.
     let mut action = None;
-    ui.add_space(SPACE_XS);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            let _ = draw_mora_avatar(ui, visuals, 28.0, false);
-            ui.add_space(SPACE_XS);
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(MORA_NAME)
-                        .color(theme.text_primary)
-                        .strong()
-                        .size(TYPE_MD),
-                );
-                ui.label(
-                    egui::RichText::new("Asistente matemático")
-                        .color(theme.text_tertiary)
-                        .size(TYPE_XS),
-                );
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if action_icon_button(
-                    ui,
-                    Icon::ChevronRight,
-                    theme.text_secondary,
-                    "Ocultar asistente",
-                )
-                .clicked()
-                {
-                    action = Some(AssistantUiAction::HidePanel);
-                }
-                if action_icon_button(
-                    ui,
-                    Icon::Settings,
-                    theme.text_secondary,
-                    "Configuración del asistente",
-                )
-                .clicked()
-                {
-                    state.settings_open = true;
-                }
-                if ui
-                    .add_enabled(
-                        !state.is_pending && !state.conversation.is_empty(),
-                        egui::Button::new("Limpiar").small(),
-                    )
-                    .clicked()
-                {
-                    action = Some(AssistantUiAction::ClearConversation);
-                }
-            });
-        },
-    );
+    egui::Frame::none()
+        .fill(theme.panel_bg.gamma_multiply(0.72))
+        .rounding(egui::Rounding::same(crate::tokens::RADIUS_XL))
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::SPACE_SM,
+            crate::tokens::SPACE_XS,
+        ))
+        .shadow(egui::Shadow {
+            offset: egui::vec2(0.0, 4.0),
+            blur: 16.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(16),
+        })
+        .show(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    // Avatar Mora con halo sutil
+                    let _ = draw_mora_avatar(ui, visuals, 30.0, false);
+                    ui.add_space(crate::tokens::SPACE_SM);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(MORA_NAME)
+                                .color(theme.text_primary)
+                                .strong()
+                                .size(crate::tokens::TYPE_LG),
+                        );
+                        ui.label(
+                            egui::RichText::new("Asistente matemático  •  macOS")
+                                .color(theme.text_tertiary)
+                                .size(crate::tokens::TYPE_XS),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Botón cerrar con estilo SF Symbol (xmark.circle)
+                        if action_icon_button(
+                            ui,
+                            Icon::Close,
+                            theme.text_secondary,
+                            "Ocultar asistente",
+                        )
+                        .clicked()
+                        {
+                            action = Some(AssistantUiAction::HidePanel);
+                        }
+                        if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Ajustes")
+                            .clicked()
+                        {
+                            state.settings_open = true;
+                        }
+                        // Limpiar con estilo ghost, solo si hay conversación
+                        let can_clear = !state.is_pending && !state.conversation.is_empty();
+                        ui.add_enabled_ui(can_clear, |ui| {
+                            let btn = egui::Button::new(
+                                egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
+                            )
+                            .rounding(crate::tokens::RADIUS_PILL)
+                            .fill(theme.button_bg.gamma_multiply(0.0))
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                            if ui.add(btn).clicked() {
+                                action = Some(AssistantUiAction::ClearConversation);
+                            }
+                        });
+                    });
+                },
+            );
+        });
+    ui.add_space(crate::tokens::SPACE_SM);
     action
 }
 
@@ -2483,20 +2643,32 @@ fn draw_assistant_composer(
         ui.add_space(SPACE_XS);
     }
 
+    // macOS: composer como cápsula vibrancy con sombra interior suave.
     egui::Frame::none()
-        .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
-        .rounding(RADIUS_MD)
-        .inner_margin(egui::Margin::same(SPACE_SM))
+        .fill(theme.assistant_composer_bg)
+        .stroke(egui::Stroke::new(1.0, theme.assistant_composer_border))
+        .rounding(crate::tokens::RADIUS_XL)
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::SPACE_SM,
+            crate::tokens::SPACE_SM,
+        ))
+        .shadow(egui::Shadow {
+            offset: egui::vec2(0.0, 6.0),
+            blur: 20.0,
+            spread: -4.0,
+            color: egui::Color32::from_black_alpha(18),
+        })
         .show(ui, |ui| {
+            // Editor minimalista con placeholder SF Pro-like
             let editor = ui.add_sized(
                 egui::vec2(ui.available_width(), ASSISTANT_COMPOSER_EDITOR_HEIGHT),
                 egui::TextEdit::multiline(&mut state.problem)
                     .id_source("grafito_assistant_problem")
-                    .hint_text("Preguntale a Mora sobre matemática")
+                    .hint_text("Preguntá a Mora — ej. “derivada de x³” o “animá la integral”")
                     .text_color(theme.input_text)
                     .frame(false)
-                    .desired_rows(1),
+                    .desired_rows(1)
+                    .margin(egui::vec2(4.0, 4.0)),
             );
             let submit_on_enter = should_submit_on_enter(
                 editor.has_focus(),
@@ -2504,25 +2676,21 @@ fn draw_assistant_composer(
                 ui.input(|input| input.modifiers.shift),
                 state.can_submit(),
             );
-            let request_budget = RequestBudget::default();
-            let input_bytes = state.input_bytes();
-
-            ui.horizontal_centered(|ui| {
+            ui.add_space(crate::tokens::SPACE_XS);
+            ui.horizontal(|ui| {
+                // Adjuntar con estilo ghost macOS
                 let can_attach = !state.is_pending
                     && !state.is_importing_image
                     && state.attachments.len() < attachment_limits.max_attachments;
                 let attach_response = ui
                     .add_enabled_ui(can_attach, |ui| {
-                        action_icon_button(
-                            ui,
-                            Icon::Image,
-                            theme.text_secondary,
-                            if state.is_importing_image {
-                                "Importando imagen"
-                            } else {
-                                "Adjuntar imagen PNG o JPEG"
-                            },
+                        let btn = egui::Button::new(
+                            egui::RichText::new("＋ Imagen").size(crate::tokens::TYPE_XS),
                         )
+                        .rounding(crate::tokens::RADIUS_PILL)
+                        .fill(theme.button_bg.gamma_multiply(0.0))
+                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                        ui.add(btn)
                     })
                     .inner;
                 if attach_response.clicked() {
@@ -2536,40 +2704,54 @@ fn draw_assistant_composer(
                             attachment_limits.max_attachments
                         ))
                         .color(theme.text_tertiary)
-                        .size(TYPE_XS),
+                        .size(crate::tokens::TYPE_XS),
                     );
                 }
-                if state.is_pending {
-                    if state.is_cancelling {
-                        ui.add_enabled(false, egui::Button::new("Cancelando..."));
-                    } else if ui.button("Cancelar").clicked() {
-                        action = Some(AssistantUiAction::Cancel);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if state.is_pending {
+                        if state.is_cancelling {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new("Cancelando…")
+                                    .rounding(crate::tokens::RADIUS_PILL),
+                            );
+                        } else if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Cancelar").size(crate::tokens::TYPE_SM),
+                                )
+                                .rounding(crate::tokens::RADIUS_PILL)
+                                .fill(theme.button_bg),
+                            )
+                            .clicked()
+                        {
+                            action = Some(AssistantUiAction::Cancel);
+                        }
+                    } else {
+                        // Botón Enviar macOS: cápsula azul #007AFF con SF Symbol ↑
+                        let can_submit = state.can_submit();
+                        let btn = egui::Button::new(
+                            egui::RichText::new("↑ Enviar")
+                                .size(crate::tokens::TYPE_SM)
+                                .color(if can_submit {
+                                    egui::Color32::WHITE
+                                } else {
+                                    theme.text_tertiary
+                                }),
+                        )
+                        .rounding(crate::tokens::RADIUS_PILL)
+                        .fill(if can_submit {
+                            theme.accent
+                        } else {
+                            theme.button_bg.gamma_multiply(0.6)
+                        })
+                        .stroke(egui::Stroke::NONE);
+                        if ui.add_enabled(can_submit, btn).clicked() || submit_on_enter {
+                            action = Some(AssistantUiAction::Submit);
+                        }
                     }
-                } else if ui
-                    .add_enabled(state.can_submit(), egui::Button::new("Enviar"))
-                    .clicked()
-                    || submit_on_enter
-                {
-                    action = Some(AssistantUiAction::Submit);
-                }
-            });
-            if input_bytes > request_budget.max_input_chars * 3 / 4 {
-                let input_color = if input_bytes > request_budget.max_input_chars {
-                    theme.warning
-                } else {
-                    theme.text_tertiary
-                };
-                ui.horizontal_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} / {} B",
-                            input_bytes, request_budget.max_input_chars
-                        ))
-                        .color(input_color)
-                        .size(TYPE_XS),
-                    );
                 });
-            }
+            });
         });
 
     if !state.attachments.is_empty() {
@@ -2658,16 +2840,17 @@ fn conversation_turn_appearance(
     is_user: bool,
 ) -> ConversationTurnAppearance {
     if is_user {
-        // Sin burbuja tipo WhatsApp: tarjeta neutra con el rol en acento.
+        // macOS: burbuja azul del usuario, como Messages.app
         ConversationTurnAppearance {
-            fill: theme.panel_bg,
-            stroke: theme.separator,
-            role_color: theme.accent_strong,
+            fill: theme.assistant_user_bubble,
+            stroke: theme.assistant_user_bubble,
+            role_color: theme.assistant_user_text,
         }
     } else {
+        // macOS: burbuja del asistente, gris claro con vibrancy
         ConversationTurnAppearance {
-            fill: theme.input_bar_bg,
-            stroke: theme.separator,
+            fill: theme.assistant_assistant_bubble,
+            stroke: theme.assistant_composer_border,
             role_color: theme.text_primary,
         }
     }
@@ -2685,64 +2868,104 @@ fn draw_conversation_turn(
     let appearance = conversation_turn_appearance(theme, is_user);
     let mut action = None;
     let mut copy_requested = false;
-    egui::Frame::none()
-        .fill(appearance.fill)
-        .stroke(egui::Stroke::new(1.0, appearance.stroke))
-        .rounding(RADIUS_SM)
-        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            let label = if is_user {
-                "Vos".into()
-            } else {
-                let origin = turn
-                    .origin
-                    .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
-                format!("{MORA_NAME} · {}", origin.public_label())
-            };
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(label)
-                        .color(appearance.role_color)
-                        .size(TYPE_SM)
-                        .strong(),
-                );
-            });
-            ui.add_space(SPACE_SM);
-            if is_user {
-                draw_inline_text(ui, &turn.content);
-            } else {
-                action =
-                    draw_assistant_response(ui, &turn.content, proposal_state, reveal_clip, cache);
-                ui.add_space(SPACE_XS);
-                // Telemetría tipo harness: estimación de salida del turno.
-                let est_tokens = (turn.content.chars().count() / 4).max(1);
+    // macOS: burbuja con cola y sombra sutil, como Messages
+    let rounding = if is_user {
+        egui::Rounding {
+            nw: crate::tokens::RADIUS_XL,
+            ne: 4.0,
+            sw: crate::tokens::RADIUS_XL,
+            se: crate::tokens::RADIUS_XL,
+        }
+    } else {
+        egui::Rounding {
+            nw: 4.0,
+            ne: crate::tokens::RADIUS_XL,
+            sw: crate::tokens::RADIUS_XL,
+            se: crate::tokens::RADIUS_XL,
+        }
+    };
+    let max_bubble_width = ui.available_width() * 0.84;
+    // Alineación: usuario a derecha, asistente a izquierda (como iMessage)
+    let layout = if is_user {
+        egui::Layout::right_to_left(egui::Align::Min)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Min)
+    };
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0), layout, |ui| {
+        ui.set_max_width(max_bubble_width);
+        egui::Frame::none()
+            .fill(appearance.fill)
+            .stroke(egui::Stroke::new(1.0, appearance.stroke))
+            .rounding(rounding)
+            .inner_margin(egui::Margin::symmetric(
+                crate::tokens::SPACE_MD,
+                crate::tokens::SPACE_SM,
+            ))
+            .shadow(egui::Shadow {
+                offset: egui::vec2(0.0, 2.0),
+                blur: 8.0,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(10),
+            })
+            .show(ui, |ui| {
+                // El ancho ya está limitado por el layout exterior (0.84), no forzar min_width
+                let label = if is_user {
+                    "Vos".into()
+                } else {
+                    let origin = turn
+                        .origin
+                        .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
+                    format!("{MORA_NAME} · {}", origin.public_label())
+                };
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        egui::RichText::new(format!("~{est_tokens} token de salida (est.)"))
-                            .color(theme.text_tertiary)
-                            .size(TYPE_XS),
+                        egui::RichText::new(label)
+                            .color(appearance.role_color)
+                            .size(TYPE_SM)
+                            .strong(),
                     );
                 });
-            }
-            ui.add_space(SPACE_SM);
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    copy_requested = ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("Copiar")
-                                    .color(theme.text_secondary)
-                                    .size(TYPE_XS),
+                ui.add_space(SPACE_SM);
+                if is_user {
+                    draw_inline_text(ui, &turn.content);
+                } else {
+                    action = draw_assistant_response(
+                        ui,
+                        &turn.content,
+                        proposal_state,
+                        reveal_clip,
+                        cache,
+                    );
+                    ui.add_space(SPACE_XS);
+                    // Telemetría tipo harness: estimación de salida del turno.
+                    let est_tokens = (turn.content.chars().count() / 4).max(1);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("~{est_tokens} token de salida (est.)"))
+                                .color(theme.text_tertiary)
+                                .size(TYPE_XS),
+                        );
+                    });
+                }
+                ui.add_space(SPACE_SM);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        copy_requested = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Copiar")
+                                        .color(theme.text_secondary)
+                                        .size(TYPE_XS),
+                                )
+                                .frame(false),
                             )
-                            .frame(false),
-                        )
-                        .clicked();
-                },
-            );
-        });
+                            .clicked();
+                    },
+                );
+            });
+    });
     if copy_requested && action.is_none() {
         action = Some(AssistantUiAction::CopyMessage(turn.content.clone()));
     }
@@ -2756,11 +2979,21 @@ fn draw_pending_indicator(
 ) {
     let theme = current_theme(ui.ctx());
     let appearance = conversation_turn_appearance(theme, false);
+    // macOS: burbuja de pensamiento con vibrancy y pulso suave
     egui::Frame::none()
         .fill(appearance.fill)
         .stroke(egui::Stroke::new(1.0, appearance.stroke))
-        .rounding(RADIUS_SM)
-        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+        .rounding(crate::tokens::RADIUS_XL)
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::SPACE_MD,
+            crate::tokens::SPACE_SM,
+        ))
+        .shadow(egui::Shadow {
+            offset: egui::vec2(0.0, 2.0),
+            blur: 8.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(8),
+        })
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(MORA_NAME)

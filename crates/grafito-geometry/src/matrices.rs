@@ -58,6 +58,10 @@ impl Matrix {
     }
 
     pub fn zeros(rows: usize, cols: usize) -> Self {
+        debug_assert!(
+            Self::try_zeros(rows, cols).is_some(),
+            "zeros({rows},{cols}) excede MAX_MATRIX_DIMENSION o MAX_MATRIX_ELEMENTS, devuelve 0×0"
+        );
         Self::try_zeros(rows, cols).unwrap_or_else(|| Self {
             rows: 0,
             cols: 0,
@@ -75,6 +79,10 @@ impl Matrix {
     }
 
     pub fn identity(n: usize) -> Self {
+        debug_assert!(
+            Self::try_identity(n).is_some(),
+            "identity({n}) excede límites, devuelve 0×0"
+        );
         Self::try_identity(n).unwrap_or_else(|| Self {
             rows: 0,
             cols: 0,
