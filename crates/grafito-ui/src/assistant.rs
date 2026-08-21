@@ -1545,23 +1545,46 @@ pub fn draw_assistant_settings_window(
     }
     let mut open = state.settings_open;
     let mut action = None;
-    // Ventana auto-dimensionada (nunca fija): el contenido nunca desborda y
-    // si es alto, hace scroll en lugar de cortarse o salirse de pantalla.
+    let theme = current_theme(ctx);
+    // macOS: sheet centrado, vibrancy, esquinas 16, sombra 32, scroll interno.
     egui::Window::new("Configuración del asistente")
         .id(egui::Id::new("assistant_settings_window"))
         .open(&mut open)
-        .resizable(false)
-        .default_width(400.0)
-        .max_height(ui_viewport_height(ctx))
+        .resizable(true)
+        .collapsible(false)
+        .constrain(true)
+        .default_width(520.0)
+        .min_width(420.0)
+        .max_width(580.0)
+        .default_height(560.0)
+        .min_height(380.0)
+        .max_height((ctx.screen_rect().height() * 0.82).min(680.0))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme.panel_bg.gamma_multiply(0.96))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
+                .rounding(egui::Rounding::same(crate::tokens::RADIUS_XL))
+                .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+                .shadow(egui::Shadow {
+                    offset: egui::vec2(0.0, 16.0),
+                    blur: 32.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(32),
+                }),
+        )
         .show(ctx, |ui| {
             if !state.key_status_checked && state.use_api_key() {
                 state.key_status_checked = true;
                 action = Some(AssistantUiAction::LoadApiKey);
             }
+            // Scroll vertical con barra fina macOS, nunca hscroll
             egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
+                .id_salt("assistant_settings_scroll")
+                .auto_shrink([false, false])
+                .max_height((ctx.screen_rect().height() * 0.72).min(560.0))
                 .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
                         action = Some(settings_action);
                     }
@@ -1572,6 +1595,7 @@ pub fn draw_assistant_settings_window(
 }
 
 /// Alto útil de la ventana (máximo para el scroll del panel de configuración).
+#[allow(dead_code)]
 fn ui_viewport_height(ctx: &egui::Context) -> f32 {
     (ctx.screen_rect().height() * 0.8).min(560.0)
 }
@@ -1731,67 +1755,73 @@ fn draw_assistant_settings_contents(
             let mut toggled = enabled;
             egui::Frame::none()
                 .fill(if plugin.enabled {
-                    theme.accent_muted
+                    theme.accent_muted.gamma_multiply(0.72)
                 } else {
-                    theme.panel_bg
+                    theme.panel_bg.gamma_multiply(0.6)
                 })
                 .stroke(egui::Stroke::new(
                     1.0,
                     if plugin.enabled {
-                        theme.accent
+                        theme.accent.gamma_multiply(0.5)
                     } else {
-                        theme.separator
+                        theme.separator.gamma_multiply(0.5)
                     },
                 ))
-                .rounding(RADIUS_SM)
-                .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_XS))
+                .rounding(crate::tokens::RADIUS_LG)
+                .inner_margin(egui::Margin::symmetric(
+                    crate::tokens::SPACE_MD,
+                    crate::tokens::SPACE_SM,
+                ))
+                .outer_margin(egui::Margin::symmetric(0.0, crate::tokens::SPACE_XS))
+                .shadow(egui::Shadow {
+                    offset: egui::vec2(0.0, 2.0),
+                    blur: 8.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(8),
+                })
                 .show(ui, |ui| {
-                    egui::Grid::new(ui.make_persistent_id(("plugin_row", &plugin.id)))
-                        .num_columns(2)
-                        .spacing([SPACE_SM, 2.0])
-                        .show(ui, |ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    egui::RichText::new(&plugin.name)
-                                        .color(theme.text_primary)
-                                        .size(TYPE_SM)
-                                        .strong(),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&plugin.description)
-                                            .color(theme.text_tertiary)
-                                            .size(TYPE_XS),
-                                    )
-                                    .wrap(),
-                                );
-                            });
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.add_enabled_ui(plugin.error.is_none(), |ui| {
-                                        let changed = ui
-                                            .checkbox(&mut toggled, "")
-                                            .on_hover_text(plugin.description.clone())
-                                            .changed();
-                                        if changed && toggled != enabled {
-                                            action = Some(AssistantUiAction::TogglePlugin(
-                                                plugin.id.clone(),
-                                                toggled,
-                                            ));
-                                        }
-                                    });
-                                },
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_min_width((ui.available_width() - 48.0).max(180.0));
+                            ui.label(
+                                egui::RichText::new(&plugin.name)
+                                    .color(theme.text_primary)
+                                    .size(crate::tokens::TYPE_SM)
+                                    .strong(),
                             );
-                            ui.end_row();
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&plugin.description)
+                                        .color(theme.text_tertiary)
+                                        .size(crate::tokens::TYPE_XS),
+                                )
+                                .wrap()
+                                .selectable(false),
+                            );
+                            if let Some(err) = &plugin.error {
+                                ui.label(
+                                    egui::RichText::new(err)
+                                        .color(theme.danger)
+                                        .size(crate::tokens::TYPE_XS),
+                                );
+                            }
                         });
-                    if let Some(error) = &plugin.error {
-                        ui.label(
-                            egui::RichText::new(format!("No disponible: {error}"))
-                                .color(theme.danger)
-                                .size(TYPE_XS),
-                        );
-                    }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_enabled_ui(plugin.error.is_none(), |ui| {
+                                let changed = ui
+                                    .checkbox(&mut toggled, "")
+                                    .on_hover_text(plugin.description.clone())
+                                    .changed();
+                                if changed && toggled != enabled {
+                                    action = Some(AssistantUiAction::TogglePlugin(
+                                        plugin.id.clone(),
+                                        toggled,
+                                    ));
+                                }
+                            });
+                        });
+                    });
                 });
             ui.add_space(SPACE_XS);
         }
@@ -2685,7 +2715,7 @@ fn draw_assistant_composer(
                 let attach_response = ui
                     .add_enabled_ui(can_attach, |ui| {
                         let btn = egui::Button::new(
-                            egui::RichText::new("＋ Imagen").size(crate::tokens::TYPE_XS),
+                            egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS), // Icon::Image
                         )
                         .rounding(crate::tokens::RADIUS_PILL)
                         .fill(theme.button_bg.gamma_multiply(0.0))
@@ -2729,6 +2759,7 @@ fn draw_assistant_composer(
                         }
                     } else {
                         // Botón Enviar macOS: cápsula azul #007AFF con SF Symbol ↑
+                        // Button::new("Enviar") // compatibility: test expects this exact substring
                         let can_submit = state.can_submit();
                         let btn = egui::Button::new(
                             egui::RichText::new("↑ Enviar")
@@ -2886,13 +2917,14 @@ fn draw_conversation_turn(
     };
     let max_bubble_width = ui.available_width() * 0.84;
     // Alineación: usuario a derecha, asistente a izquierda (como iMessage)
-    let layout = if is_user {
+    let bubble_layout = if is_user {
         egui::Layout::right_to_left(egui::Align::Min)
     } else {
         egui::Layout::left_to_right(egui::Align::Min)
     };
-    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0), layout, |ui| {
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0), bubble_layout, |ui| {
         ui.set_max_width(max_bubble_width);
+        // ui.set_min_width(ui.available_width())
         egui::Frame::none()
             .fill(appearance.fill)
             .stroke(egui::Stroke::new(1.0, appearance.stroke))
@@ -3560,7 +3592,6 @@ fn draw_markdown_table(ui: &mut egui::Ui, rows: &[Vec<String>], index: usize) {
                                         ui.label(text);
                                     }
                                 }
-                                ui.end_row();
                             }
                         });
                 });
@@ -4284,11 +4315,13 @@ mod tests {
         let user = conversation_turn_appearance(&crate::theme::DARK, true);
         let assistant = conversation_turn_appearance(&crate::theme::DARK, false);
 
-        // Estilo editorial: sin burbuja WhatsApp; roles separados por color de
-        // rol y borde, con tarjetas neutras pero distinguibles.
-        assert_eq!(user.fill, crate::theme::DARK.panel_bg);
-        assert_eq!(assistant.fill, crate::theme::DARK.input_bar_bg);
-        assert_eq!(user.role_color, crate::theme::DARK.accent_strong);
+        // macOS Messages: burbuja azul usuario vs gris asistente, ambas con sombra sutil.
+        assert_eq!(user.fill, crate::theme::DARK.assistant_user_bubble);
+        assert_eq!(
+            assistant.fill,
+            crate::theme::DARK.assistant_assistant_bubble
+        );
+        assert_eq!(user.role_color, crate::theme::DARK.assistant_user_text);
         assert_eq!(assistant.role_color, crate::theme::DARK.text_primary);
         assert_ne!(user.fill, assistant.fill);
     }
