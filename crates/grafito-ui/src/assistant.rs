@@ -1152,12 +1152,10 @@ fn push_unique_model(models: &mut Vec<String>, model: &str) {
     }
 }
 
-fn model_is_selectable(provider: ProviderProfile, model: &str) -> bool {
-    if provider != ProviderProfile::OpenCodeGo {
-        return true;
-    }
-    let normalized = model.trim().to_ascii_lowercase();
-    !normalized.contains("kimi") && !normalized.contains("mimo")
+fn model_is_selectable(_provider: ProviderProfile, _model: &str) -> bool {
+    // OpenCode Go ahora es compatible con todos los modelos visibles (deepseek, mimo, muse-spark, glm, etc.)
+    // No filtrar por nombre; la validación real la hace el servidor y se reporta via remote_error_message.
+    true
 }
 
 fn model_allows_image_attachment(model: &str) -> bool {

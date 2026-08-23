@@ -2111,6 +2111,23 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
+                            if error.contains("500")
+                                && self.assistant.model.contains("muse-spark")
+                                && self.assistant.provider == ProviderProfile::OpenCodeGo
+                            {
+                                eprintln!(
+                                    "grafito: auto-fallback muse-spark 500 -> deepseek-v4-flash"
+                                );
+                                self.assistant.model = "deepseek-v4-flash".to_string();
+                                self.save_app_config();
+                                if correction_attempt == 0 {
+                                    self.assistant.problem = question.clone();
+                                    self.notify(
+                                        "Muse Spark falló (500), reintentando con DeepSeek Flash...",
+                                        ToastKind::Info,
+                                    );
+                                }
+                            }
                             if correction_attempt > 0 {
                                 self.fail_assistant_repair_request(error);
                             } else {
@@ -2392,10 +2409,17 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("timeout") || error.contains("timed out") {
         format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
     } else if error.contains("500") {
-        format!(
-            "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos.",
-            current_model
-        )
+        if current_model.contains("muse-spark") {
+            format!(
+                "Error interno del proveedor (500) con modelo '{}'. Probá con 'deepseek-v4-flash' o 'mimo-2.5-vl' en Configuración → Modelo.",
+                current_model
+            )
+        } else {
+            format!(
+                "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos.",
+                current_model
+            )
+        }
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
     } else {
