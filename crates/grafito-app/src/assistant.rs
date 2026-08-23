@@ -897,7 +897,8 @@ impl GrafitoApp {
 
     fn fail_assistant_request(&mut self, error: impl Into<String>) {
         let error = error.into();
-        let visible_error = remote_error_message(&error);
+        let current_model = self.assistant.model.clone();
+        let visible_error = remote_error_message(&error, &current_model);
         self.assistant.fail_request(visible_error.clone());
         self.report_assistant_error(visible_error);
     }
@@ -2372,9 +2373,11 @@ impl GrafitoApp {
     }
 }
 
-fn remote_error_message(error: &str) -> String {
-    // Loguear el error real para auditoría (visible en `RUST_LOG=debug` o journalctl)
-    eprintln!("grafito: remote_error raw={}", error);
+fn remote_error_message(error: &str, current_model: &str) -> String {
+    eprintln!(
+        "grafito: remote_error raw={} model={}",
+        error, current_model
+    );
     if error.contains("llavero") || error.contains("API key") {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
     } else if error.contains("cancel") {
@@ -2382,12 +2385,17 @@ fn remote_error_message(error: &str) -> String {
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
         format!("La clave de API no es válida o expiró: {error}. Revisá la configuración avanzada.")
     } else if error.contains("404") || error.contains("model") {
-        format!("El modelo no está disponible: {error}. Probá con deepseek-v4-flash.")
+        format!(
+            "El modelo '{}' no está disponible: {error}. Revisá Configuración → Modelo.",
+            current_model
+        )
     } else if error.contains("timeout") || error.contains("timed out") {
         format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
     } else if error.contains("500") {
-        "Error interno del agente (500). Probá de nuevo o cambiá el modelo a deepseek-v4-flash."
-            .into()
+        format!(
+            "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos.",
+            current_model
+        )
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
     } else {
@@ -2396,7 +2404,7 @@ fn remote_error_message(error: &str) -> String {
         } else {
             error.to_string()
         };
-        format!("Error: {truncated} — Revisá Configuración → Modelo")
+        format!("Error: {truncated} — Revisá Configuración → Modelo (actual: {current_model})")
     }
 }
 

@@ -117,6 +117,8 @@ const OPENCODE_MODELS: &[&str] = &[
     "mimo-2.5-vl",
     "fusion",
     "glm-5.2",
+    "muse-spark-1.2-contributor",
+    "muse-spark-1.2",
 ];
 const OLLAMA_MODELS: &[&str] = &["llama3.2", "llama3.1", "qwen2.5", "qwen2.5-vl", "llava"];
 
@@ -1629,20 +1631,18 @@ pub fn draw_assistant_settings_window(
                         }
                     });
             } else {
-                let avail_h = ui.available_height();
                 ui.horizontal_top(|ui| {
                     let preview_w = (ui.available_width() * 0.42).clamp(200.0, 300.0);
                     let spacing = crate::tokens::SPACE_LG;
                     let total_w = ui.available_width();
                     let left_w = (total_w - preview_w - spacing).max(380.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(left_w, avail_h),
+                        egui::vec2(left_w, 0.0),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt("assistant_settings_scroll")
-                                .auto_shrink([false, true])
-                                .max_height(avail_h)
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     let inner_action = if state.config_tab == 1 {
@@ -1658,7 +1658,7 @@ pub fn draw_assistant_settings_window(
                     );
                     ui.add_space(spacing);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(preview_w, avail_h),
+                        egui::vec2(preview_w, 0.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
                             egui::Frame::none()
@@ -1788,7 +1788,7 @@ fn draw_perfil_settings_contents(
     let mut action = None;
     ui.label(
         egui::RichText::new("Perfil y Avatar")
-            .size(crate::tokens::TYPE_LG)
+            .size(crate::tokens::TYPE_BASE)
             .color(theme.text_primary),
     );
     ui.label(
@@ -1799,7 +1799,7 @@ fn draw_perfil_settings_contents(
         .color(theme.text_secondary.gamma_multiply(0.60))
         .weak(),
     );
-    ui.add_space(crate::tokens::SPACE_XL);
+    ui.add_space(crate::tokens::SPACE_MD);
     // Nombre — full width, con más aire
     ui.label(
         egui::RichText::new("Tu nombre")
@@ -1827,14 +1827,14 @@ fn draw_perfil_settings_contents(
                 .color(theme.text_tertiary),
         );
     });
-    ui.add_space(crate::tokens::SPACE_LG);
+    ui.add_space(crate::tokens::SPACE_MD);
     ui.separator();
-    ui.add_space(crate::tokens::SPACE_LG);
-    // Grid 2-col: Forma | Ojos estilo
+    ui.add_space(crate::tokens::SPACE_MD);
+    // Grid 2-col: Forma | Ojos estilo — más compacto
     egui::Grid::new("perfil_grid_top")
         .num_columns(2)
-        .spacing([crate::tokens::SPACE_LG, crate::tokens::SPACE_MD])
-        .min_col_width((ui.available_width() - crate::tokens::SPACE_LG) * 0.5 - 4.0)
+        .spacing([crate::tokens::SPACE_MD, crate::tokens::SPACE_MD])
+        .min_col_width((ui.available_width() - crate::tokens::SPACE_MD) * 0.5 - 4.0)
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(
@@ -3361,7 +3361,6 @@ fn draw_conversation_turn(
     let is_user = matches!(turn.role, ConversationRole::User);
     let appearance = conversation_turn_appearance(theme, is_user);
     let mut action = None;
-    let mut copy_requested = false;
     let max_bubble_width = (ui.available_width() * 0.86).clamp(240.0, 460.0);
     // Alineación: usuario a la derecha, asistente a la izquierda, texto siempre left-aligned
     let align = if is_user {
@@ -3441,25 +3440,9 @@ fn draw_conversation_turn(
                             action = Some(AssistantUiAction::ExplainStepwise(topic));
                         }
                     }
-                    ui.add_space(SPACE_XS);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        copy_requested = ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Copiar")
-                                        .color(theme.text_tertiary)
-                                        .size(TYPE_XS),
-                                )
-                                .frame(false),
-                            )
-                            .clicked();
-                    });
                 });
         },
     );
-    if copy_requested && action.is_none() {
-        action = Some(AssistantUiAction::CopyMessage(turn.content.clone()));
-    }
     action
 }
 
@@ -4665,7 +4648,7 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
         job.append(&inline, 0.0, format.clone());
         remaining = &after_start[end_position + end.len()..];
     }
-    ui.add(egui::Label::new(job).wrap());
+    ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
 fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
@@ -4731,7 +4714,7 @@ fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color
         job.append(&inline, 0.0, format.clone());
         remaining = &after_start[end_position + end.len()..];
     }
-    ui.add(egui::Label::new(job).wrap());
+    ui.add(egui::Label::new(job).wrap().selectable(true));
 }
 
 fn inline_math_text(source: &str) -> String {
