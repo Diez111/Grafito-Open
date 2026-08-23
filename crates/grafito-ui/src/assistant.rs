@@ -331,7 +331,7 @@ impl Default for AssistantPanelState {
             settings_open: false,
             key_status_checked: false,
             full_permission: true,
-            agent_mode: false,
+            agent_mode: true,
             agent_activity: Vec::new(),
             agent_ledger: None,
             media: None,
@@ -1421,10 +1421,11 @@ pub fn draw_assistant_panel(
             .default_height(default_height)
             .min_height(min_height)
             .max_height(max_height)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -1437,10 +1438,11 @@ pub fn draw_assistant_panel(
             .default_width(default_width)
             .min_width(min_width)
             .max_width(max_width)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -1600,6 +1602,32 @@ pub fn draw_assistant_settings_window(
                     .color(theme.text_tertiary)
                     .weak(),
                 );
+                ui.add_space(crate::tokens::SPACE_SM);
+                ui.label(
+                    egui::RichText::new("Tu nombre")
+                        .size(crate::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.add_space(4.0);
+                let mut draft = state.user_name.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .hint_text("Tu nombre")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(8.0, 6.0)),
+                );
+                if resp.changed() {
+                    state.user_name = draft.chars().take(32).collect();
+                }
+                ui.horizontal(|ui| {
+                    let count = state.user_name.chars().count();
+                    ui.label(
+                        egui::RichText::new(format!("{count}/32"))
+                            .size(crate::tokens::TYPE_XS)
+                            .color(theme.text_tertiary),
+                    );
+                });
                 ui.add_space(crate::tokens::SPACE_SM);
                 if ui
                     .add(
@@ -2044,32 +2072,18 @@ fn draw_panel_contents(
     } else {
         composer_height.min(max_composer).max(88.0)
     };
+    // Scandinavian composer — flat, hairline top, sin tarjeta oscura ni sombra
     egui::TopBottomPanel::bottom("grafito_assistant_composer")
         .exact_height(visible_composer_height)
+        .show_separator_line(false)
         .frame(
             egui::Frame::none()
-                .fill(theme.assistant_composer_bg.gamma_multiply(0.96))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    theme.assistant_composer_border.gamma_multiply(0.6),
-                ))
-                .rounding(egui::Rounding {
-                    nw: crate::tokens::RADIUS_LG,
-                    ne: crate::tokens::RADIUS_LG,
-                    sw: 0.0,
-                    se: 0.0,
-                })
-                .outer_margin(egui::Margin::same(crate::tokens::SPACE_XS))
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                 .inner_margin(egui::Margin::symmetric(
-                    crate::tokens::SPACE_MD,
                     crate::tokens::SPACE_SM,
-                ))
-                .shadow(egui::Shadow {
-                    offset: egui::vec2(0.0, -4.0),
-                    blur: 12.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_black_alpha(10),
-                }),
+                    crate::tokens::SPACE_SM,
+                )),
         )
         .show_inside(ui, |ui| {
             // Sin ScrollArea envolvente: el composer ya tiene editor de altura fija (44px)
@@ -2604,12 +2618,13 @@ fn draw_assistant_header(
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let mut action = None;
+    // Header Scandinavian — left-aligned, sin card pesada, hairline 10%
     egui::Frame::none()
         .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
         .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
         .inner_margin(egui::Margin::symmetric(
-            crate::tokens::SPACE_MD,
+            crate::tokens::SPACE_SM,
             crate::tokens::SPACE_SM,
         ))
         .show(ui, |ui| {
@@ -2636,7 +2651,6 @@ fn draw_assistant_header(
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Botón cerrar con estilo SF Symbol (xmark.circle)
                         if action_icon_button(
                             ui,
                             Icon::Close,
@@ -2658,7 +2672,6 @@ fn draw_assistant_header(
                             state.settings_open = true;
                             state.config_tab = 0;
                         }
-                        // Limpiar con estilo ghost, solo si hay conversación
                         let can_clear = !state.is_pending && !state.conversation.is_empty();
                         ui.add_enabled_ui(can_clear, |ui| {
                             let btn = egui::Button::new(
@@ -2666,7 +2679,7 @@ fn draw_assistant_header(
                             )
                             .rounding(crate::tokens::RADIUS_PILL)
                             .fill(theme.button_bg.gamma_multiply(0.0))
-                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
                             if ui.add(btn).clicked() {
                                 action = Some(AssistantUiAction::ClearConversation);
                             }
@@ -2714,12 +2727,11 @@ fn draw_assistant_composer(
         ui.add_space(SPACE_XS);
     }
 
-    // Composer Scandinavian: rectángulo con radio 12, borde 1.0 separator, fill input_bg
+    // Composer Scandinavian: input limpio hairline 10%, radio 12, sin outer_margin oscuro
     egui::Frame::none()
         .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
-        .rounding(crate::tokens::RADIUS_LG)
-        .outer_margin(egui::Margin::same(crate::tokens::SPACE_XS))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .rounding(crate::tokens::RADIUS_MD)
         .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
             ui.vertical(|ui| {
@@ -2748,11 +2760,11 @@ fn draw_assistant_composer(
                     let attach_response = ui
                         .add_enabled_ui(can_attach, |ui| {
                             let btn = egui::Button::new(
-                                egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS), // Icon::Image
+                                egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS),
                             )
                             .rounding(crate::tokens::RADIUS_PILL)
                             .fill(theme.button_bg.gamma_multiply(0.0))
-                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
                             ui.add(btn)
                         })
                         .inner;
@@ -2948,10 +2960,14 @@ fn draw_conversation_turn(
         |ui| {
             ui.set_max_width(max_bubble_width);
             // ui.set_min_width(ui.available_width())
+            // Burbuja Scandinavian — radio 12, hairline 10%
             egui::Frame::none()
                 .fill(appearance.fill)
-                .stroke(egui::Stroke::new(1.0, appearance.stroke))
-                .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    appearance.stroke.gamma_multiply(0.10),
+                ))
+                .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
                 .show(ui, |ui| {
                     ui.set_max_width(max_bubble_width - crate::tokens::SPACE_SM * 2.0);
@@ -3064,15 +3080,25 @@ fn draw_pending_indicator(
                     .size(TYPE_SM),
                 );
             });
+            // J-Space siempre desplegado — sin colapso, muestra todos los agentes
             if let Some(ledger) = &state.agent_ledger {
                 ui.add_space(SPACE_XS);
-                egui::CollapsingHeader::new("Estado de la tarea (ledger)")
-                    .id_salt("assistant_agent_ledger")
-                    .default_open(false)
+                egui::Frame::none()
+                    .fill(theme.input_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .rounding(RADIUS_MD)
+                    .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new(ledger)
+                            egui::RichText::new("Estado de la tarea")
                                 .color(theme.text_secondary)
+                                .size(TYPE_XS)
+                                .strong(),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(ledger)
+                                .color(theme.text_primary)
                                 .monospace()
                                 .size(TYPE_XS),
                         );
@@ -3081,16 +3107,31 @@ fn draw_pending_indicator(
             }
             if !state.agent_activity.is_empty() {
                 ui.add_space(SPACE_XS);
-                for row in state.agent_activity.iter().rev().take(6) {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("•").color(theme.accent));
+                egui::Frame::none()
+                    .fill(theme.panel_bg)
+                    .inner_margin(egui::Margin::same(SPACE_XS))
+                    .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new(&row.text)
-                                .color(theme.text_secondary)
-                                .size(TYPE_XS),
+                            egui::RichText::new(format!(
+                                "Actividad ({} agentes)",
+                                state.agent_activity.len()
+                            ))
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS)
+                            .strong(),
                         );
+                        ui.add_space(2.0);
+                        for row in state.agent_activity.iter() {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("•").color(theme.accent));
+                                ui.label(
+                                    egui::RichText::new(&row.text)
+                                        .color(theme.text_secondary)
+                                        .size(TYPE_XS),
+                                );
+                            });
+                        }
                     });
-                }
                 ui.ctx().request_repaint();
             }
         });

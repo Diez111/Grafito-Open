@@ -398,7 +398,7 @@ fn toolbar_exposes_subtools_with_a_normal_click_menu() {
 fn compact_toolbar_has_an_explicit_overflow_route_instead_of_only_scroll() {
     let toolbar_source = include_str!("../src/toolbar.rs");
 
-    assert!(toolbar_source.contains("COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_120.0"));
+    assert!(toolbar_source.contains("COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_360.0"));
     assert!(toolbar_source.contains("compact_toolbar_overflow"));
     assert!(toolbar_source.contains("Más herramientas"));
     assert!(toolbar_source.contains("ToolGroupId::label"));
@@ -536,7 +536,7 @@ fn assistant_is_a_permanent_docked_panel_without_a_launcher() {
     assert!(pending_source.contains("conversation_turn_appearance"));
     assert!(pending_source.contains("egui::Frame::none()"));
     assert!(assistant_source.contains("RetryProposalCorrection"));
-    assert!(assistant_source.contains("Icon::Image"));
+    assert!(assistant_source.contains("Adjuntar imagen"));
     let proposal_start = assistant_source
         .find("fn draw_verified_assistant_proposal")
         .expect("verified proposal renderer");

@@ -18,7 +18,7 @@ const TOOL_MENU_PREFERRED_WIDTH: f32 = 220.0;
 const TOOL_MENU_ITEM_HEIGHT: f32 = 30.0;
 const TOOL_MENU_SCREEN_MARGIN: f32 = 16.0;
 const TOOL_MENU_VERTICAL_RESERVE: f32 = 72.0;
-pub const COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_120.0;
+pub const COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_360.0;
 /// Lado reservado para cada selector de grupo de herramientas.
 pub const TOOLBAR_BUTTON_SIZE: f32 = 36.0;
 /// Espacio vertical que rodea la única fila de herramientas.
@@ -1084,10 +1084,10 @@ mod tests {
 
     #[test]
     fn compact_toolbar_uses_overflow_through_its_narrow_width_boundary() {
-        for width in [960.0, 1_026.0, 1_120.0] {
+        for width in [960.0, 1_026.0, 1_360.0] {
             assert!(toolbar_uses_overflow(width));
         }
-        assert!(!toolbar_uses_overflow(1_121.0));
+        assert!(!toolbar_uses_overflow(1_361.0));
     }
 
     #[test]

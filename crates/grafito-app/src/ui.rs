@@ -23,7 +23,7 @@ pub(crate) struct CommandInputResponse {
 
 /// The native minimum is 960 logical points; this also covers HiDPI windows
 /// whose physical captures look much narrower than their egui width.
-pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = 1_120.0;
+pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = 1_360.0;
 
 pub(crate) fn top_chrome_uses_overflow(viewport_width: f32) -> bool {
     viewport_width <= COMPACT_TOP_CHROME_MAX_WIDTH
@@ -297,7 +297,7 @@ pub(crate) fn draw_top_bar(
     let side_fill = theme.sidebar_bg;
     let sep_col = theme.separator;
 
-    // ── Scandinavian two rows — menu 40 + toolbar 36, sin moleteado, aire
+    // ── Scandinavian single bar 40px — sin barra negra, altura compacta equilibrada
     egui::TopBottomPanel::top("top_bar")
         .exact_height(40.0)
         .frame(
@@ -305,6 +305,7 @@ pub(crate) fn draw_top_bar(
                 .fill(bar_fill)
                 .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
+        .show_separator_line(false)
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
             ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
@@ -573,10 +574,11 @@ pub(crate) fn draw_top_bar(
         egui::SidePanel::left("icon_bar")
             .exact_width(60.0)
             .resizable(false)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::none()
                     .fill(side_fill)
-                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6))),
+                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10))),
             )
             .show(ctx, |ui| {
                 #[cfg(feature = "profile")]
@@ -749,10 +751,11 @@ pub(crate) fn draw_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egui::Conte
         .min_width(292.0)
         .max_width(440.0)
         .resizable(true)
+        .show_separator_line(false)
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
         )
         .show(ctx, |ui| {
             if draw_geometry_utility_contents(app, ctx, ui) {
@@ -770,10 +773,11 @@ pub(crate) fn draw_compact_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egu
         .default_height(360.0)
         .min_height(180.0)
         .max_height(maximum_height)
+        .show_separator_line(false)
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
         )
         .show(ctx, |ui| {
             if draw_geometry_utility_contents(app, ctx, ui) {
@@ -797,10 +801,11 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
         let mut should_exec = false;
         egui::TopBottomPanel::bottom("input_bar")
             .exact_height(40.0)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::none()
                     .fill(theme.input_bar_bg)
-                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
+                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10)))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
             )
             .show(ctx, |ui| {
@@ -832,10 +837,11 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
     // ── STATUS BAR — hairline
     egui::TopBottomPanel::bottom("status_bar")
         .exact_height(24.0)
+        .show_separator_line(false)
         .frame(
             egui::Frame::none()
                 .fill(theme.status_bar_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
+                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10)))
                 .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
         )
         .show(ctx, |ui| {

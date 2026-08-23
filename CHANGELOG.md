@@ -5,6 +5,15 @@ Todos los cambios notables de este proyecto se documentarán en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
+## [1.2.32-beta] - 2026-08-23
+
+#### Corregido
+- **Top chrome unificado 48px sin barra negra**: el menú y la toolbar comparten una sola `TopBottomPanel` de 48px (`TOP_BAR_HEIGHT`) con `fill=panel_bg` y sin `stroke` duro; el `separator` pasa a hairline 10% (`separator.gamma_multiply(0.10)`). Se elimina la banda negra entre chrome y canvas.
+- **Overflow determinista**: `COMPACT_TOP_CHROME_MAX_WIDTH` y `COMPACT_TOOLBAR_MAX_WIDTH` suben de 1120 a 1360 (alineado a `ShellLayout::CANVAS_FOCUS_MAX_WIDTH`) para evitar desborde en 1120-1360. En compact solo `Move` + grupo activo + `⋯ Más herramientas` quedan inline.
+- **Composer Mora rediseñado (Scandinavian)**: se quita la tarjeta oscura `assistant_composer_bg` con `RADIUS_LG`/`stroke 1.5`; el input es `TextEdit` limpio con borde hairline 10%, placeholder sentence case y botonera `Adjuntar imagen` (ghost) + `Enviar` (accent) alineados 28px. La lista usa `item_spacing 12` sin cards pesadas.
+- **Agentes siempre desplegados**: `agent_activity` (≤12) y `agent_ledger` J-Space se muestran expandidos por defecto, sin colapso. El ledger no va en tarjeta colapsable.
+- **Limpieza de bloat**: `cargo clean` selectivo y borrado de `packaging/build/grafito_*` viejos antes del build.
+
 ## [1.2.21-beta] - Unreleased
 
 #### Añadido

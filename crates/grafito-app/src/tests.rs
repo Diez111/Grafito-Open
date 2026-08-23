@@ -3419,10 +3419,10 @@ fn shell_and_keyboard_gates_use_window_dimensions_before_panels_reserve_space() 
 
 #[test]
 fn top_chrome_uses_a_dedicated_narrow_width_policy() {
-    for width in [960.0, 1_026.0, 1_120.0] {
+    for width in [960.0, 1_026.0, 1_360.0] {
         assert!(crate::ui::top_chrome_uses_overflow(width));
     }
-    assert!(!crate::ui::top_chrome_uses_overflow(1_121.0));
+    assert!(!crate::ui::top_chrome_uses_overflow(1_361.0));
 }
 
 #[test]

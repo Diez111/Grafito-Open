@@ -4041,9 +4041,12 @@ impl eframe::App for GrafitoApp {
                 crate::ui::draw_compact_geometry_utility_dock(self, ctx);
             } else {
                 self.draw_assistant(ctx, keyboard_height);
-                // Configuración unificada: si Mora abre ajustes, cerrar mascota
+                // Configuración unificada: exclusión mutua (solo una ventana a la vez)
                 if self.assistant.settings_open {
                     self.show_mascot_config = false;
+                }
+                if self.show_mascot_config {
+                    self.assistant.settings_open = false;
                 }
             }
 
@@ -6431,6 +6434,29 @@ impl GrafitoApp {
                     );
                 }
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
+                // Link a Perspectiva Mascota — Perfil unificado
+                if ui
+                    .add(
+                        egui::Button::new("Abrir Perspectiva Mascota")
+                            .fill(theme.accent)
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(grafito_ui::tokens::RADIUS_MD),
+                    )
+                    .clicked()
+                {
+                    self.set_perspective(crate::Perspective::Mascota);
+                    self.show_mascot_config = false;
+                }
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new(
+                        "La personalización completa de Pou vive en la Perspectiva Mascota.",
+                    )
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_tertiary)
+                    .weak(),
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.horizontal(|ui| {
@@ -6547,9 +6573,9 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                     .shadow(egui::Shadow {
                         offset: egui::vec2(0.0, 2.0),
                         blur: 8.0,
