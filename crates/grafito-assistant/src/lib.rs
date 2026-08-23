@@ -1722,10 +1722,14 @@ fn request_anthropic_completion(
         return Err("remote assistant request was cancelled".into());
     }
     if !response.status().is_success() {
-        return Err(format!(
-            "remote assistant returned HTTP {}",
-            response.status().as_u16()
-        ));
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "<no body>".to_string())
+            .chars()
+            .take(500)
+            .collect::<String>();
+        return Err(format!("remote assistant returned HTTP {status}: {body}"));
     }
     let response_bytes =
         read_bounded_response_body(response, response_body_limit(max_output_chars))?;
@@ -1750,10 +1754,14 @@ fn send_openai_request(
         return Err("remote assistant request was cancelled".into());
     }
     if !response.status().is_success() {
-        return Err(format!(
-            "remote assistant returned HTTP {}",
-            response.status().as_u16()
-        ));
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "<no body>".to_string())
+            .chars()
+            .take(500)
+            .collect::<String>();
+        return Err(format!("remote assistant returned HTTP {status}: {body}"));
     }
     let response_bytes =
         read_bounded_response_body(response, response_body_limit(max_output_chars))?;

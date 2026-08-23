@@ -1556,8 +1556,7 @@ pub fn draw_assistant_settings_window(
         .default_width((screen.width() * 0.85).clamp(600.0, 780.0))
         .min_width(520.0)
         .max_width((screen.width() * 0.96).min(860.0))
-        .default_height((screen.height() * 0.70).clamp(480.0, 600.0))
-        .min_height(400.0)
+        .min_height(380.0)
         .max_height((screen.height() * 0.90).min(760.0))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .frame(
@@ -1631,20 +1630,18 @@ pub fn draw_assistant_settings_window(
                         }
                     });
             } else {
-                let avail_h = ui.available_height();
                 ui.horizontal_top(|ui| {
                     let preview_w = (ui.available_width() * 0.38).clamp(200.0, 280.0);
                     let spacing = crate::tokens::SPACE_LG;
                     let total_w = ui.available_width();
                     let left_w = (total_w - preview_w - spacing).max(360.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(left_w, avail_h),
+                        egui::vec2(left_w, 0.0),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt("assistant_settings_scroll")
                                 .auto_shrink([false, false])
-                                .max_height(avail_h)
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     let inner_action = if state.config_tab == 1 {
@@ -1660,30 +1657,20 @@ pub fn draw_assistant_settings_window(
                     );
                     ui.add_space(spacing);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(preview_w, avail_h),
+                        egui::vec2(preview_w, 0.0),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
-                            egui::ScrollArea::vertical()
-                                .id_salt("assistant_preview_scroll")
-                                .auto_shrink([false, false])
-                                .max_height(avail_h)
+                            egui::Frame::none()
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    theme.separator.gamma_multiply(0.08),
+                                ))
+                                .rounding(crate::tokens::RADIUS_LG)
+                                .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
                                 .show(ui, |ui| {
-                                    egui::Frame::none()
-                                        .stroke(egui::Stroke::new(
-                                            1.0,
-                                            theme.separator.gamma_multiply(0.08),
-                                        ))
-                                        .rounding(crate::tokens::RADIUS_LG)
-                                        .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
-                                        .show(ui, |ui| {
-                                            ui.set_min_width(
-                                                preview_w - crate::tokens::SPACE_LG * 2.0,
-                                            );
-                                            ui.set_max_width(
-                                                preview_w - crate::tokens::SPACE_LG * 2.0,
-                                            );
-                                            draw_avatar_preview_pane(ui, state);
-                                        });
+                                    ui.set_min_width(preview_w - crate::tokens::SPACE_LG * 2.0);
+                                    ui.set_max_width(preview_w - crate::tokens::SPACE_LG * 2.0);
+                                    draw_avatar_preview_pane(ui, state);
                                 });
                         },
                     );
