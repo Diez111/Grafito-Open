@@ -1551,6 +1551,7 @@ pub fn draw_assistant_settings_window(
         .resizable(true)
         .collapsible(false)
         .constrain(true)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .default_width((screen.width() * 0.85).clamp(580.0, 760.0))
         .min_width(500.0)
         .max_width((screen.width() * 0.96).min(840.0))
