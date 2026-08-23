@@ -105,6 +105,7 @@ fn keyboard_grid_padding(available_width: f32, button_width: f32) -> f32 {
 fn draw_compact_math_keyboard(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     egui::TopBottomPanel::bottom("math_keyboard")
+        .show_separator_line(false)
         .exact_height(MATH_KEYBOARD_COMPACT_HEIGHT)
         .frame(
             egui::Frame::none()
@@ -171,6 +172,7 @@ pub(crate) fn draw_math_keyboard(
 
     // ─── 4. MATH KEYBOARD — docked bottom panel (central area only) ──────────────
     egui::TopBottomPanel::bottom("math_keyboard")
+        .show_separator_line(false)
         .exact_height(MATH_KEYBOARD_HEIGHT)
         .frame(
             egui::Frame::none()

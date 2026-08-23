@@ -557,13 +557,17 @@ pub(crate) fn draw_top_bar(
                 });
             });
         });
-    // Cubre separador residual negro (fallback si show_separator_line no bastó)
+    // Cubre separador residual negro (fallback si show_separator_line no bastó) — en Foreground para tapar en ventana y fullscreen
     {
         let top_rect = top_bar_response.response.rect;
-        ctx.layer_painter(egui::LayerId::background()).rect_filled(
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("top_bar_cover"),
+        ))
+        .rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(top_rect.min.x, top_rect.max.y - 1.0),
-                egui::pos2(top_rect.max.x, top_rect.max.y + 2.0),
+                egui::pos2(top_rect.max.x, top_rect.max.y + 3.0),
             ),
             0.0,
             bar_fill,

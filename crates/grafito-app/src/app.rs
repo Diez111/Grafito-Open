@@ -4093,6 +4093,7 @@ impl eframe::App for GrafitoApp {
                     .show(ctx, |ui| {
                         if self.exam_mode {
                             egui::TopBottomPanel::top("exam_banner")
+                                .show_separator_line(false)
                                 .frame(egui::Frame::none().fill(theme.danger).inner_margin(8.0))
                                 .show_inside(ui, |ui| {
                                     ui.vertical_centered(|ui| {

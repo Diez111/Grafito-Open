@@ -927,7 +927,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let _hdr_col = theme.text_secondary;
 
     // ── CAS PANEL (tab 1) ──
-    egui::SidePanel::left("cas_panel")
+    egui::SidePanel::left("cas_panel").show_separator_line(false)
         .default_width(260.0).min_width(180.0).resizable(true)
         .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
         .show(ctx, |ui| {
@@ -1029,6 +1029,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── VIEW/SETTINGS PANEL (tab 4) ──
     egui::SidePanel::left("view_panel")
+        .show_separator_line(false)
         .default_width(220.0)
         .min_width(160.0)
         .resizable(true)
@@ -1143,7 +1144,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
-    egui::SidePanel::right("right_trig_animation")
+    egui::SidePanel::right("right_trig_animation").show_separator_line(false)
         .default_width(280.0)
         .min_width(220.0)
         .max_width((ctx.available_rect().width() * 0.45).max(240.0))
@@ -1351,6 +1352,7 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
         panel_theme_local(ctx);
 
     egui::SidePanel::left("empty_panel")
+        .show_separator_line(false)
         .default_width(220.0)
         .min_width(160.0)
         .resizable(true)
@@ -1393,6 +1395,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("stats_panel")
+        .show_separator_line(false)
         .default_width(240.0)
         .min_width(180.0)
         .resizable(true)
@@ -1631,7 +1634,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
-    egui::SidePanel::left("complex_panel")
+    egui::SidePanel::left("complex_panel").show_separator_line(false)
         .default_width(260.0)
         .min_width(180.0)
         .resizable(true)
@@ -1810,7 +1813,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::GeoObject;
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
-    egui::SidePanel::left("attractor_panel")
+    egui::SidePanel::left("attractor_panel").show_separator_line(false)
         .default_width(260.0)
         .min_width(180.0)
         .resizable(true)
@@ -1900,6 +1903,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     egui::SidePanel::right("right_properties")
+        .show_separator_line(false)
         .default_width(340.0)
         .min_width(292.0)
         .resizable(true)
@@ -2461,7 +2465,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
     use grafito_core::GeoObject;
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
-    egui::SidePanel::right("right_domain_coloring")
+    egui::SidePanel::right("right_domain_coloring").show_separator_line(false)
         .default_width(280.0)
         .min_width(200.0)
         .resizable(true)
@@ -2598,6 +2602,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
     let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_parameters")
+        .show_separator_line(false)
         .default_width(260.0)
         .min_width(180.0)
         .resizable(true)
@@ -2738,7 +2743,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
 pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
 
-    egui::SidePanel::right("regression")
+    egui::SidePanel::right("regression").show_separator_line(false)
         .resizable(true)
         .default_width(280.0)
         .min_width(200.0)
@@ -2967,7 +2972,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
     }
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
-    egui::SidePanel::right("construction_protocol")
+    egui::SidePanel::right("construction_protocol").show_separator_line(false)
         .resizable(true)
         .default_width(300.0)
         .min_width(200.0)
@@ -3112,7 +3117,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
 pub(crate) fn draw_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
-    egui::SidePanel::left("mascota_panel")
+    egui::SidePanel::left("mascota_panel").show_separator_line(false)
         .default_width(280.0)
         .min_width(220.0)
         .resizable(true)
@@ -3252,7 +3257,7 @@ pub(crate) fn draw_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 #[allow(dead_code)]
 pub(crate) fn draw_right_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
-    egui::SidePanel::right("right_mascota")
+    egui::SidePanel::right("right_mascota").show_separator_line(false)
         .default_width(280.0)
         .min_width(220.0)
         .resizable(true)

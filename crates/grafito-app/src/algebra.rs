@@ -389,7 +389,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let txt_col = theme.text_primary;
     let _txt_dim = theme.text_tertiary;
 
-    egui::SidePanel::left("algebra_panel")
+    egui::SidePanel::left("algebra_panel").show_separator_line(false)
     .default_width(220.0)
     .min_width(160.0)
     .resizable(true)

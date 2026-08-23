@@ -9,6 +9,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let panel_fill = theme.panel_bg;
 
     egui::SidePanel::left("tools_panel")
+        .show_separator_line(false)
         .default_width(320.0)
         .frame(egui::Frame::none().fill(panel_fill).inner_margin(12.0))
         .show(ctx, |ui| {
