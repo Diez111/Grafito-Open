@@ -1628,19 +1628,20 @@ pub fn draw_assistant_settings_window(
                         }
                     });
             } else {
+                let avail_h = ui.available_height();
                 ui.horizontal_top(|ui| {
                     let preview_w = (ui.available_width() * 0.38).clamp(200.0, 280.0);
                     let spacing = crate::tokens::SPACE_LG;
                     let total_w = ui.available_width();
                     let left_w = (total_w - preview_w - spacing).max(360.0);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(left_w, 0.0),
+                        egui::vec2(left_w, avail_h),
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             egui::ScrollArea::vertical()
                                 .id_salt("assistant_settings_scroll")
                                 .auto_shrink([false, false])
-                                .max_height(ui.available_height())
+                                .max_height(avail_h)
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     let inner_action = if state.config_tab == 1 {
@@ -1656,7 +1657,7 @@ pub fn draw_assistant_settings_window(
                     );
                     ui.add_space(spacing);
                     ui.allocate_ui_with_layout(
-                        egui::vec2(preview_w, 0.0),
+                        egui::vec2(preview_w, avail_h),
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
                             egui::Frame::none()
