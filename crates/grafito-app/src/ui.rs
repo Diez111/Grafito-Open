@@ -12,7 +12,7 @@ use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     RADIUS_MD, SPACE_MD, SPACE_SM, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
-    SPACING_MINIMAL_Y, TOP_BAR_HEIGHT, TYPE_BASE,
+    SPACING_MINIMAL_Y,
 };
 use grafito_ui::toolbar::ToolGroupId;
 use grafito_ui::Tool;
@@ -298,22 +298,20 @@ pub(crate) fn draw_top_bar(
     let side_fill = theme.sidebar_bg;
     let sep_col = theme.separator;
 
-    // ── Scandinavian single bar — 48 px, hairline 10% solo abajo
+    // ── Scandinavian two rows — menu 40 + toolbar 36, sin moleteado, aire
     egui::TopBottomPanel::top("top_bar")
-        .exact_height(TOP_BAR_HEIGHT)
+        .exact_height(40.0)
         .frame(
             egui::Frame::none()
                 .fill(bar_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
                 .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
             ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
-            let bar_rect = ui.max_rect();
             egui::menu::bar(ui, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
-                ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 4.0);
                 let compact_top_chrome = top_chrome_uses_overflow(ctx.screen_rect().width());
                 if compact_top_chrome {
                     draw_file_menu(ui, app);
@@ -340,27 +338,6 @@ pub(crate) fn draw_top_bar(
                         draw_panels_menu(ui, app);
                     }
                     draw_help_menu(ui, app);
-                }
-
-                // ── Toolbar — aire, scroll horizontal si no entra
-                ui.add_space(SPACE_MD);
-                {
-                    let mut groups: Vec<ToolGroupId> =
-                        app.perspective.layout().visible_tool_groups.to_vec();
-                    let is_3d = app.current_view == ViewMode::D3;
-                    if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
-                        groups.push(ToolGroupId::ThreeD);
-                    }
-                    // Reserva para controles derecha (~260px) y evita empujar fuera de pantalla
-                    let avail_for_toolbar = (ui.available_width() - 280.0).clamp(140.0, 520.0);
-                    egui::ScrollArea::horizontal()
-                        .id_salt("top_toolbar_scroll")
-                        .auto_shrink([true, false])
-                        .show(ui, |ui| {
-                            // Fuerza ancho mínimo para que ScrollArea sepa cuando scrollear
-                            ui.set_min_width(avail_for_toolbar);
-                            grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
-                        });
                 }
 
                 // ── Right controls — Pou habitáculo al lado del toggle tema ──
@@ -578,11 +555,32 @@ pub(crate) fn draw_top_bar(
                         }
                     }
                 });
-
-                // Marca Grafito ya está en la barra del sistema; no duplicar en el centro
-                let _ = bar_rect;
-                let _ = TYPE_BASE;
             });
+        });
+    // Toolbar dedicada — segunda fila, no desborda, scroll si hace falta
+    egui::TopBottomPanel::top("toolbar_bar")
+        .exact_height(36.0)
+        .frame(
+            egui::Frame::none()
+                .fill(theme.toolbar_bg)
+                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.08)))
+                .inner_margin(egui::Margin::symmetric(SPACE_SM, 4.0)),
+        )
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+            let mut groups: Vec<ToolGroupId> =
+                app.perspective.layout().visible_tool_groups.to_vec();
+            let is_3d = app.current_view == ViewMode::D3;
+            if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
+                groups.push(ToolGroupId::ThreeD);
+            }
+            egui::ScrollArea::horizontal()
+                .id_salt("top_toolbar_scroll")
+                .auto_shrink([true, false])
+                .show(ui, |ui| {
+                    grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
+                });
         });
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
