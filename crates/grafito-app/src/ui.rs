@@ -14,7 +14,6 @@ use grafito_ui::tokens::{
     RADIUS_MD, SPACE_MD, SPACE_SM, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
     SPACING_MINIMAL_Y,
 };
-use grafito_ui::toolbar::ToolGroupId;
 use grafito_ui::Tool;
 
 pub(crate) struct CommandInputResponse {
@@ -557,32 +556,6 @@ pub(crate) fn draw_top_bar(
                 });
             });
         });
-    // Toolbar dedicada — segunda fila, no desborda, scroll si hace falta
-    egui::TopBottomPanel::top("toolbar_bar")
-        .exact_height(36.0)
-        .frame(
-            egui::Frame::none()
-                .fill(theme.toolbar_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.08)))
-                .inner_margin(egui::Margin::symmetric(SPACE_SM, 4.0)),
-        )
-        .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
-            ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
-            let mut groups: Vec<ToolGroupId> =
-                app.perspective.layout().visible_tool_groups.to_vec();
-            let is_3d = app.current_view == ViewMode::D3;
-            if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
-                groups.push(ToolGroupId::ThreeD);
-            }
-            egui::ScrollArea::horizontal()
-                .id_salt("top_toolbar_scroll")
-                .auto_shrink([true, false])
-                .show(ui, |ui| {
-                    grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
-                });
-        });
-
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
     // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
