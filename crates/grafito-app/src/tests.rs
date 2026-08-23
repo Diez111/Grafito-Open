@@ -789,7 +789,7 @@ fn test_perspective_layout_exam_restricted() {
     use crate::Perspective;
     let layout = Perspective::Exam.layout();
     assert!(layout.right_panel.is_none());
-    assert!(layout.show_math_keyboard);
+    assert!(!layout.show_math_keyboard);
     // Modo examen: sólo herramientas básicas (Move, Point, Line, Circle, Polygon).
     assert_eq!(layout.visible_tool_groups.len(), 5);
 }
@@ -798,12 +798,10 @@ fn test_perspective_layout_exam_restricted() {
 fn every_perspective_keeps_the_math_keyboard_available() {
     use crate::Perspective;
 
-    // Mascota es la excepción intencional: minimal, sin teclado matemático.
+    // Teclado eliminado por diseño Scandinavian: ninguna perspectiva lo muestra.
     assert!(Perspective::ALL
         .into_iter()
-        .filter(|p| *p != Perspective::Mascota)
-        .all(|perspective| perspective.layout().show_math_keyboard));
-    assert!(!Perspective::Mascota.layout().show_math_keyboard);
+        .all(|perspective| !perspective.layout().show_math_keyboard));
 }
 
 #[test]

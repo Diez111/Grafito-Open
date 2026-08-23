@@ -382,17 +382,19 @@ pub(crate) fn draw_top_bar(
                     {
                         app.right_drawer_open = !app.right_drawer_open;
                     }
-                    if action_icon_button(
-                        ui,
-                        Icon::Whiteboard,
-                        if app.whiteboard_open {
-                            accent
-                        } else {
-                            grafito_ui::theme::current_theme(ui.ctx()).text_secondary
-                        },
-                        "Pizarra libre (dibujo tipo Excalidraw)",
-                    )
-                    .clicked()
+                    // Whiteboard solo en wide, para no desbordar en 1120
+                    if !compact_top_chrome
+                        && action_icon_button(
+                            ui,
+                            Icon::Whiteboard,
+                            if app.whiteboard_open {
+                                accent
+                            } else {
+                                grafito_ui::theme::current_theme(ui.ctx()).text_secondary
+                            },
+                            "Pizarra libre (dibujo tipo Excalidraw)",
+                        )
+                        .clicked()
                     {
                         app.whiteboard_open = !app.whiteboard_open;
                     }
@@ -436,8 +438,8 @@ pub(crate) fn draw_top_bar(
                             }
                         }
                     }
-                    // Nivel + coins — texto, sin emoji (Scandinavian ink ladder)
-                    {
+                    // Nivel — solo en wide para no desbordar
+                    if !compact_top_chrome {
                         let level = app.profile.level;
                         let coins = app.profile.mascot_mut_or_default().coins;
                         egui::Frame::none()
@@ -518,9 +520,9 @@ pub(crate) fn draw_top_bar(
                             }
                         }
                     }
-                    // Configuración — solo nombre (Configuración minimalista)
+                    // Configuración unificada — abre "Configuración" (cierra asistente si estaba abierto)
                     {
-                        let is_open = app.show_mascot_config;
+                        let is_open = app.show_mascot_config || app.assistant.settings_open;
                         let bg = if is_open {
                             theme.accent.gamma_multiply(0.14)
                         } else {
@@ -528,7 +530,7 @@ pub(crate) fn draw_top_bar(
                         };
                         let (rect, resp) =
                             ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
-                        let resp = resp.on_hover_text("Personalizar Pou — Configuración");
+                        let resp = resp.on_hover_text("Configuración");
                         let hovered = resp.hovered();
                         let cur_bg = if hovered { theme.button_hover } else { bg };
                         if ui.is_rect_visible(rect) {
@@ -559,7 +561,10 @@ pub(crate) fn draw_top_bar(
                             );
                         }
                         if resp.clicked() {
-                            app.show_mascot_config = !app.show_mascot_config;
+                            let will_open = !is_open;
+                            app.show_mascot_config = will_open;
+                            app.assistant.settings_open = false;
+                            app.assistant.config_tab = 0;
                         }
                     }
                     if let Some(response) =

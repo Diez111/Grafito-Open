@@ -4039,6 +4039,10 @@ impl eframe::App for GrafitoApp {
                 crate::ui::draw_compact_geometry_utility_dock(self, ctx);
             } else {
                 self.draw_assistant(ctx, keyboard_height);
+                // Configuración unificada: si Mora abre ajustes, cerrar mascota
+                if self.assistant.settings_open {
+                    self.show_mascot_config = false;
+                }
             }
 
             use crate::RightPanelContent;
@@ -6333,9 +6337,9 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                     .shadow(egui::Shadow {
                         offset: egui::vec2(0.0, 2.0),
                         blur: 8.0,
@@ -6344,20 +6348,42 @@ impl GrafitoApp {
                     }),
             )
             .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new("Configuración")
-                        .size(grafito_ui::tokens::TYPE_LG)
-                        .strong()
-                        .color(theme.text_primary),
-                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Configuración")
+                            .size(grafito_ui::tokens::TYPE_BASE)
+                            .strong()
+                            .color(theme.text_primary),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("Perfil")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_tertiary),
+                        );
+                    });
+                });
                 ui.label(
                     egui::RichText::new(
-                        "Ajustes mínimos de tu perfil. La personalización de Pou vive en la Perspectiva Mascota.",
+                        "Ajustes mínimos. La personalización completa de Pou está en Perspectiva Mascota.",
                     )
                     .size(grafito_ui::tokens::TYPE_XS)
                     .color(theme.text_tertiary),
                 );
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.horizontal(|ui| {
+                    let _ = ui.selectable_label(true, "Perfil / Pou");
+                    if ui
+                        .selectable_label(false, "Asistente")
+                        .on_hover_text("Ir a Configuración de Mora")
+                        .clicked()
+                    {
+                        self.assistant.settings_open = true;
+                        self.assistant.config_tab = 0;
+                        self.show_mascot_config = false;
+                    }
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
                 ui.separator();
                 ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(

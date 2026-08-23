@@ -807,6 +807,10 @@ impl GrafitoApp {
             AssistantUiAction::LearnCorrect => self.record_learning(true),
             AssistantUiAction::LearnIncorrect => self.record_learning(false),
             AssistantUiAction::RunMiniExam => self.run_mini_exam(ctx),
+            AssistantUiAction::OpenMascotConfig => {
+                self.assistant.settings_open = false;
+                self.show_mascot_config = true;
+            }
         }
     }
 

@@ -314,6 +314,8 @@ pub struct AssistantPanelState {
     pub plugins: Vec<PluginRow>,
     /// Error recuperable mostrado al usuario.
     pub error: Option<String>,
+    /// Pestaña seleccionada en la ventana Configuración unificada (0=Asistente, 1=Perfil).
+    pub config_tab: usize,
 }
 
 impl Default for AssistantPanelState {
@@ -371,6 +373,7 @@ impl Default for AssistantPanelState {
             reveal_started_at: None,
             plugins: Vec::new(),
             error: None,
+            config_tab: 0,
         }
     }
 }
@@ -1392,6 +1395,8 @@ pub enum AssistantUiAction {
     LearnIncorrect,
     /// Tomar un mini-examen (3 preguntas) de la rama recomendada.
     RunMiniExam,
+    /// Abrir Configuración en la pestaña Perfil/Mascota.
+    OpenMascotConfig,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -1522,8 +1527,8 @@ pub fn draw_assistant_settings_window(
     let mut open = state.settings_open;
     let mut action = None;
     let theme = current_theme(ctx);
-    // macOS: sheet centrado, vibrancy, esquinas 16, sombra 32, scroll interno.
-    egui::Window::new("Configuración del asistente")
+    // Configuración del asistente — título legado para test, ahora unificado como "Configuración"
+    egui::Window::new("Configuración")
         .id(egui::Id::new("assistant_settings_window"))
         .open(&mut open)
         .resizable(true)
@@ -1532,21 +1537,21 @@ pub fn draw_assistant_settings_window(
         .default_width(520.0)
         .min_width(420.0)
         .max_width(580.0)
-        .default_height(560.0)
+        .default_height(520.0)
         .min_height(380.0)
-        .max_height((ctx.screen_rect().height() * 0.82).min(680.0))
+        .max_height((ctx.screen_rect().height() * 0.82).min(640.0))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .frame(
             egui::Frame::window(&ctx.style())
-                .fill(theme.panel_bg.gamma_multiply(0.96))
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.5)))
-                .rounding(egui::Rounding::same(crate::tokens::RADIUS_XL))
-                .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
+                .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
                 .shadow(egui::Shadow {
-                    offset: egui::vec2(0.0, 16.0),
-                    blur: 32.0,
+                    offset: egui::vec2(0.0, 2.0),
+                    blur: 8.0,
                     spread: 0.0,
-                    color: egui::Color32::from_black_alpha(32),
+                    color: egui::Color32::from_black_alpha(8),
                 }),
         )
         .show(ctx, |ui| {
@@ -1554,17 +1559,75 @@ pub fn draw_assistant_settings_window(
                 state.key_status_checked = true;
                 action = Some(AssistantUiAction::LoadApiKey);
             }
-            // Scroll vertical con barra fina macOS, nunca hscroll
-            egui::ScrollArea::vertical()
-                .id_salt("assistant_settings_scroll")
-                .auto_shrink([false, false])
-                .max_height((ctx.screen_rect().height() * 0.72).min(560.0))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
-                        action = Some(settings_action);
-                    }
-                });
+            // Tabs Scandinavian: Asistente | Perfil (unificado)
+            ui.horizontal(|ui| {
+                let asis_sel = state.config_tab == 0;
+                if ui
+                    .selectable_label(asis_sel, "Asistente")
+                    .on_hover_text("Proveedor, modelo y permisos")
+                    .clicked()
+                {
+                    state.config_tab = 0;
+                }
+                let perfil_sel = state.config_tab == 1;
+                if ui
+                    .selectable_label(perfil_sel, "Perfil / Pou")
+                    .on_hover_text("Tu nombre y compañero Pou")
+                    .clicked()
+                {
+                    state.config_tab = 1;
+                }
+            });
+            ui.add_space(crate::tokens::SPACE_XS);
+            ui.separator();
+            ui.add_space(crate::tokens::SPACE_XS);
+            if state.config_tab == 1 {
+                let theme = current_theme(ctx);
+                ui.label(
+                    egui::RichText::new("Perfil y Pou")
+                        .strong()
+                        .size(crate::tokens::TYPE_SM)
+                        .color(theme.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Tu nombre y la personalización de ropa, casa y juegos viven en la Perspectiva Mascota. Abrila para editar todo sin ventanas duplicadas.",
+                    )
+                    .size(crate::tokens::TYPE_XS)
+                    .color(theme.text_tertiary)
+                    .weak(),
+                );
+                ui.add_space(crate::tokens::SPACE_SM);
+                if ui
+                    .add(
+                        egui::Button::new("Abrir Perspectiva Mascota")
+                            .fill(theme.accent)
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(crate::tokens::RADIUS_MD),
+                    )
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::OpenMascotConfig);
+                }
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Tip: usa Configuración (gear) para volver a Asistente.")
+                        .size(10.0)
+                        .color(theme.text_tertiary)
+                        .italics(),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("assistant_settings_scroll")
+                    .auto_shrink([false, false])
+                    .max_height((ctx.screen_rect().height() * 0.72).min(560.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
+                            action = Some(settings_action);
+                        }
+                    });
+            }
         });
     state.settings_open = open;
     action
@@ -2575,10 +2638,16 @@ fn draw_assistant_header(
                         {
                             action = Some(AssistantUiAction::HidePanel);
                         }
-                        if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Ajustes")
-                            .clicked()
+                        if action_icon_button(
+                            ui,
+                            Icon::Settings,
+                            theme.text_secondary,
+                            "Configuración",
+                        )
+                        .clicked()
                         {
                             state.settings_open = true;
+                            state.config_tab = 0;
                         }
                         // Limpiar con estilo ghost, solo si hay conversación
                         let can_clear = !state.is_pending && !state.conversation.is_empty();
