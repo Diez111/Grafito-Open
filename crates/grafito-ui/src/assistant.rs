@@ -1551,10 +1551,10 @@ pub fn draw_assistant_settings_window(
         .resizable(true)
         .collapsible(false)
         .constrain(true)
-        .default_width((screen.width() * 0.85).clamp(600.0, 780.0))
-        .min_width(520.0)
-        .max_width((screen.width() * 0.96).min(860.0))
-        .default_height((screen.height() * 0.70).clamp(480.0, 600.0))
+        .default_width((screen.width() * 0.85).clamp(580.0, 760.0))
+        .min_width(500.0)
+        .max_width((screen.width() * 0.96).min(840.0))
+        .default_height((screen.height() * 0.75).clamp(520.0, 640.0))
         .min_height(400.0)
         .max_height((screen.height() * 0.90).min(760.0))
         .frame(
@@ -1615,6 +1615,7 @@ pub fn draw_assistant_settings_window(
                 egui::ScrollArea::vertical()
                     .id_salt("assistant_settings_scroll")
                     .auto_shrink([false, false])
+                    .max_height(ui.available_height())
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         let inner_action = if state.config_tab == 1 {
@@ -1639,6 +1640,7 @@ pub fn draw_assistant_settings_window(
                             egui::ScrollArea::vertical()
                                 .id_salt("assistant_settings_scroll")
                                 .auto_shrink([false, false])
+                                .max_height(ui.available_height())
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
                                     let inner_action = if state.config_tab == 1 {

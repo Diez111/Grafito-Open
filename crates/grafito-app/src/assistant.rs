@@ -2126,22 +2126,22 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
+                            // Compatibilidad total: si muse-spark falla con 500 en OpenCodeGo, reintentar automáticamente con deepseek sin molestar al usuario con error
                             if error.contains("500")
                                 && self.assistant.model.contains("muse-spark")
                                 && self.assistant.provider == ProviderProfile::OpenCodeGo
+                                && correction_attempt == 0
                             {
-                                eprintln!(
-                                    "grafito: auto-fallback muse-spark 500 -> deepseek-v4-flash"
-                                );
+                                eprintln!("grafito: auto-fallback muse-spark 500 -> deepseek-v4-flash + retry");
                                 self.assistant.model = "deepseek-v4-flash".to_string();
                                 self.save_app_config();
-                                if correction_attempt == 0 {
-                                    self.assistant.problem = question.clone();
-                                    self.notify(
-                                        "Muse Spark falló (500), reintentando con DeepSeek Flash...",
-                                        ToastKind::Info,
-                                    );
-                                }
+                                self.notify(
+                                    "Muse Spark no respondió (500), reintentando con DeepSeek Flash...",
+                                    ToastKind::Info,
+                                );
+                                // Reintentar la misma pregunta con el nuevo modelo, sin mostrar error
+                                self.start_remote_assistant_for(ctx, question.clone());
+                                return;
                             }
                             if correction_attempt > 0 {
                                 self.fail_assistant_repair_request(error);
@@ -2426,7 +2426,7 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("500") {
         if current_model.contains("muse-spark") {
             format!(
-                "Error interno del proveedor (500) con modelo '{}'. Probá con 'deepseek-v4-flash' o 'mimo-2.5-vl' en Configuración → Modelo.",
+                "Error temporal del proveedor (500) con modelo '{}'. Reintentando con 'deepseek-v4-flash'...",
                 current_model
             )
         } else {
