@@ -143,6 +143,8 @@ pub enum HouseTheme {
     Espacial = 1,
     Bosque = 2,
     Minimal = 3,
+    Retro = 4,
+    NocheEstudio = 5,
 }
 
 impl HouseTheme {
@@ -152,6 +154,8 @@ impl HouseTheme {
             Self::Espacial => "Espacial",
             Self::Bosque => "Bosque",
             Self::Minimal => "Minimal",
+            Self::Retro => "Retro",
+            Self::NocheEstudio => "Noche",
         }
     }
     pub fn description(self) -> &'static str {
@@ -160,10 +164,59 @@ impl HouseTheme {
             Self::Espacial => "Estrellas y neón tranquilo.",
             Self::Bosque => "Verde, hojas y musgo.",
             Self::Minimal => "Líneas puras, calma escandinava.",
+            Self::Retro => "Terrazo, mostaza y nostalgia cálida.",
+            Self::NocheEstudio => "Lámpara cálida, enfoque nocturno.",
         }
     }
     pub fn all() -> &'static [Self] {
-        &[Self::Acogedora, Self::Espacial, Self::Bosque, Self::Minimal]
+        &[
+            Self::Acogedora,
+            Self::Espacial,
+            Self::Bosque,
+            Self::Minimal,
+            Self::Retro,
+            Self::NocheEstudio,
+        ]
+    }
+}
+
+/// Mueble decorativo desbloqueable para la casa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FurnitureKind {
+    Desk,
+    Chair,
+    Plant,
+    Lamp,
+    Poster,
+    Shelf,
+    Rug,
+    Bedside,
+}
+
+impl FurnitureKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Desk => "Escritorio",
+            Self::Chair => "Silla",
+            Self::Plant => "Planta",
+            Self::Lamp => "Lámpara",
+            Self::Poster => "Póster",
+            Self::Shelf => "Estante",
+            Self::Rug => "Alfombra",
+            Self::Bedside => "Mesita",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Desk,
+            Self::Chair,
+            Self::Plant,
+            Self::Lamp,
+            Self::Poster,
+            Self::Shelf,
+            Self::Rug,
+            Self::Bedside,
+        ]
     }
 }
 
@@ -268,25 +321,45 @@ impl Outfit {
     }
 }
 
-/// Catálogo estático de ropa por niveles.
+/// Catálogo estático de ropa por niveles — 32 prendas (8 por tier) estilo Pou.
 pub fn outfit_catalog() -> Vec<Outfit> {
     vec![
-        // Primary 1-5
+        // Primary 1-5 (8)
         Outfit::new("cap_prim", "Gorra Primaria", OutfitLayer::Hat, 1),
         Outfit::new("scarf_prim", "Bufanda Escolar", OutfitLayer::Accessory, 2),
         Outfit::new("tee_prim", "Camiseta Básica", OutfitLayer::Body, 3),
-        // Secondary 6-12
+        Outfit::new("sneakers_prim", "Zapatillas", OutfitLayer::Accessory, 3),
+        Outfit::new("backpack_prim", "Mochila", OutfitLayer::Accessory, 4),
+        Outfit::new("headband_prim", "Vincha", OutfitLayer::Hat, 4),
+        Outfit::new("socks_prim", "Medias Divertidas", OutfitLayer::Accessory, 5),
+        Outfit::new("badge_prim", "Insignia", OutfitLayer::Accessory, 5),
+        // Secondary 6-12 (8)
         Outfit::new("hat_sec", "Gorro Secundaria", OutfitLayer::Hat, 6),
         Outfit::new("hoodie_sec", "Sudadera", OutfitLayer::Body, 8),
         Outfit::new("glasses_sec", "Gafas Estudio", OutfitLayer::Accessory, 10),
-        // University 13-20
+        Outfit::new("jacket_sec", "Campera Jeans", OutfitLayer::Body, 7),
+        Outfit::new("jeans_sec", "Jeans", OutfitLayer::Body, 9),
+        Outfit::new("sneakers_sec", "Zapas Urbanas", OutfitLayer::Accessory, 9),
+        Outfit::new("beanie_sec", "Gorro Lana", OutfitLayer::Hat, 11),
+        Outfit::new("earphones_sec", "Auriculares", OutfitLayer::Accessory, 12),
+        // University 13-20 (8)
         Outfit::new("beanie_uni", "Gorro Uni", OutfitLayer::Hat, 13),
         Outfit::new("labcoat_uni", "Bata Lab", OutfitLayer::Body, 15),
         Outfit::new("cape_uni", "Capa Uni", OutfitLayer::Accessory, 18),
-        // Master 21+
+        Outfit::new("glasses_uni", "Gafas Uni", OutfitLayer::Accessory, 14),
+        Outfit::new("blazer_uni", "Blazer", OutfitLayer::Body, 16),
+        Outfit::new("tote_uni", "Bolso Tote", OutfitLayer::Accessory, 17),
+        Outfit::new("scarf_uni", "Bufanda Uni", OutfitLayer::Accessory, 18),
+        Outfit::new("boots_uni", "Botas", OutfitLayer::Accessory, 19),
+        // Master 21+ (8)
         Outfit::new("crown_master", "Corona Máster", OutfitLayer::Hat, 21),
         Outfit::new("robe_master", "Toga Máster", OutfitLayer::Body, 22),
         Outfit::new("medal_master", "Medalla", OutfitLayer::Accessory, 24),
+        Outfit::new("cape_master", "Capa Máster", OutfitLayer::Accessory, 23),
+        Outfit::new("staff_master", "Báculo Sabio", OutfitLayer::Accessory, 25),
+        Outfit::new("glasses_master", "Monóculo", OutfitLayer::Accessory, 26),
+        Outfit::new("ring_master", "Anillo", OutfitLayer::Accessory, 27),
+        Outfit::new("sash_master", "Banda Honor", OutfitLayer::Body, 28),
     ]
 }
 
@@ -363,6 +436,47 @@ impl Wardrobe {
 // MascotConfig
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Misión diaria gamificada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyMission {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub reward_coins: u32,
+    pub reward_xp: u64,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+impl DailyMission {
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        coins: u32,
+        xp: u64,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            description: description.into(),
+            reward_coins: coins,
+            reward_xp: xp,
+            completed: false,
+        }
+    }
+}
+
+/// Ítem de tienda (cosmético o decoración).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShopItem {
+    pub id: String,
+    pub name: String,
+    pub price: u32,
+    pub required_level: u32,
+    pub category: String,
+}
+
 /// Configuración completa de la mascota Pou.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MascotConfig {
@@ -391,12 +505,28 @@ pub struct MascotConfig {
     /// Felicidad 0..=100.
     #[serde(default)]
     pub happiness: u8,
+    /// Energía 0..=100 (para juegos).
+    #[serde(default = "default_energy")]
+    pub energy: u8,
     /// Tema de la casa.
     #[serde(default)]
     pub house_theme: HouseTheme,
-    /// Monedas para cosméticos (futura economía).
+    /// Decoraciones desbloqueadas (ids de FurnitureKind).
+    #[serde(default)]
+    pub decor: Vec<String>,
+    /// Monedas para cosméticos.
     #[serde(default)]
     pub coins: u32,
+    /// Racha de cuidado diario.
+    #[serde(default)]
+    pub care_streak: u32,
+    /// Último epoch de tick de necesidades.
+    #[serde(default)]
+    pub last_tick_epoch: u64,
+}
+
+fn default_energy() -> u8 {
+    100
 }
 
 impl Default for MascotConfig {
@@ -412,8 +542,12 @@ impl Default for MascotConfig {
             care_xp: 0,
             hunger: 20,
             happiness: 80,
+            energy: 100,
             house_theme: HouseTheme::default(),
+            decor: Vec::new(),
             coins: 0,
+            care_streak: 0,
+            last_tick_epoch: 0,
         }
     }
 }
@@ -497,8 +631,70 @@ impl MascotConfig {
     pub fn feed(&mut self, now_epoch: u64) {
         self.hunger = self.hunger.saturating_sub(30).min(100);
         self.happiness = (self.happiness.saturating_add(10)).min(100);
+        self.energy = (self.energy.saturating_add(8)).min(100);
         self.last_fed_epoch = now_epoch;
         self.care_xp = self.care_xp.saturating_add(5);
+    }
+
+    /// Tick de necesidades por tiempo real (llamar cada frame o al cargar).
+    pub fn tick_needs(&mut self, now_epoch: u64) {
+        let elapsed = now_epoch.saturating_sub(self.last_tick_epoch);
+        if elapsed < 3600 {
+            return;
+        }
+        let hours = (elapsed / 3600) as u8;
+        self.hunger = self.hunger.saturating_add(hours.saturating_mul(2)).min(100);
+        if self.hunger > 50 {
+            self.happiness = self.happiness.saturating_sub(hours);
+        }
+        self.energy = self.energy.saturating_sub(hours / 2);
+        self.last_tick_epoch = now_epoch;
+    }
+
+    pub fn add_coins(&mut self, amount: u32) {
+        self.coins = self.coins.saturating_add(amount);
+    }
+
+    pub fn spend_coins(&mut self, amount: u32) -> bool {
+        if self.coins < amount {
+            return false;
+        }
+        self.coins -= amount;
+        true
+    }
+
+    pub fn play(&mut self, happiness_gain: u8, hunger_cost: u8) {
+        self.happiness = self.happiness.saturating_add(happiness_gain).min(100);
+        self.hunger = self.hunger.saturating_add(hunger_cost).min(100);
+        self.energy = self.energy.saturating_sub(5);
+        self.care_xp = self.care_xp.saturating_add(3);
+    }
+
+    pub fn rest(&mut self) {
+        self.energy = (self.energy.saturating_add(25)).min(100);
+        self.happiness = (self.happiness.saturating_add(4)).min(100);
+    }
+
+    pub fn has_decor(&self, id: &str) -> bool {
+        self.decor.iter().any(|d| d == id)
+    }
+
+    pub fn unlock_decor(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if !self.has_decor(&id) {
+            self.decor.push(id);
+        }
+    }
+
+    /// Multiplicador XP si Pou está feliz y saciado.
+    pub fn xp_multiplier(&self) -> f32 {
+        if self.happiness >= 80 && self.hunger <= 30 && self.energy >= 50 {
+            1.25
+        } else if self.happiness >= 60 {
+            1.10
+        } else {
+            1.0
+        }
     }
 }
 
@@ -705,5 +901,50 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: MascotConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn house_themes_expanded() {
+        assert_eq!(HouseTheme::Retro.label(), "Retro");
+        assert_eq!(HouseTheme::NocheEstudio.label(), "Noche");
+        assert_eq!(HouseTheme::all().len(), 6);
+    }
+
+    #[test]
+    fn outfit_catalog_has_32_items() {
+        let catalog = outfit_catalog();
+        assert_eq!(catalog.len(), 32);
+        assert!(catalog.iter().any(|o| o.id == "sneakers_prim"));
+        assert!(catalog.iter().any(|o| o.id == "sash_master"));
+    }
+
+    #[test]
+    fn tick_needs_and_economy() {
+        let mut m = MascotConfig {
+            hunger: 20,
+            happiness: 80,
+            energy: 90,
+            last_tick_epoch: 0,
+            ..Default::default()
+        };
+        m.tick_needs(7200); // 2h
+        assert!(m.hunger > 20);
+        m.add_coins(10);
+        assert_eq!(m.coins, 10);
+        assert!(m.spend_coins(5));
+        assert_eq!(m.coins, 5);
+        assert!(!m.spend_coins(10));
+        m.play(10, 2);
+        assert!(m.happiness > 80 || m.happiness == 90);
+        assert_eq!(m.xp_multiplier(), 1.25);
+    }
+
+    #[test]
+    fn furniture_and_decor() {
+        let mut m = MascotConfig::default();
+        m.unlock_decor("plant");
+        assert!(m.has_decor("plant"));
+        m.unlock_decor("plant");
+        assert_eq!(m.decor.len(), 1);
     }
 }

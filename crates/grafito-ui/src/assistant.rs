@@ -2491,35 +2491,43 @@ fn draw_assistant_empty_state(
     _visuals: AssistantVisuals,
 ) {
     let theme = current_theme(ui.ctx());
-    // Minimalista: sin avatar circular, sin tarjeta Hola soy Mora, solo sugerencias
     ui.add_space(crate::tokens::SPACE_LG);
-    ui.vertical_centered(|ui| {
+    // Capítulo 1: heading + sub — left-aligned, restraint
+    ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Pregunta lo que quieras")
-                .color(theme.text_secondary)
-                .size(crate::tokens::TYPE_SM),
-        );
-        ui.add_space(crate::tokens::SPACE_XS);
-        ui.label(
-            egui::RichText::new("ej. \"derivada de x³\" o \"animá la integral\"")
-                .color(theme.text_tertiary)
-                .size(crate::tokens::TYPE_XS),
+                .color(theme.text_primary)
+                .strong()
+                .size(crate::tokens::TYPE_BASE),
         );
     });
+    ui.add_space(crate::tokens::SPACE_XS);
+    ui.label(
+        egui::RichText::new("ej. “derivada de x³” o “animá la integral”")
+            .color(theme.text_secondary)
+            .size(crate::tokens::TYPE_XS),
+    );
     ui.add_space(crate::tokens::SPACE_MD);
+    // Chips: una sola fila scrolleable horizontal o wrap denso 8px, peers idénticos
     ui.horizontal_wrapped(|ui| {
-        ui.add_space(crate::tokens::SPACE_SM);
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         for (label, prompt) in suggestion_prompts(state.focus.is_some()) {
             let btn = egui::Button::new(egui::RichText::new(label).size(crate::tokens::TYPE_XS))
-                .rounding(crate::tokens::RADIUS_PILL)
-                .fill(theme.button_bg.gamma_multiply(0.0))
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.4)));
+                .rounding(crate::tokens::RADIUS_MD)
+                .fill(theme.button_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator));
             if ui.add(btn).clicked() {
                 state.problem = prompt.into();
                 state.clear_error();
             }
         }
     });
+    ui.add_space(crate::tokens::SPACE_XS);
+    ui.label(
+        egui::RichText::new("Enter para enviar · Shift+Enter nueva línea")
+            .color(theme.text_tertiary)
+            .size(10.0),
+    );
 }
 
 fn draw_assistant_header(
@@ -2528,12 +2536,15 @@ fn draw_assistant_header(
     theme: &crate::theme::Theme,
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
-    // macOS: header como toolbar translúcido con vibrancy, esquinas 16, sombra suave.
     let mut action = None;
     egui::Frame::none()
-        .fill(egui::Color32::TRANSPARENT)
-        .rounding(egui::Rounding::same(crate::tokens::RADIUS_SM))
-        .inner_margin(egui::Margin::same(crate::tokens::SPACE_XS))
+        .fill(theme.panel_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::SPACE_MD,
+            crate::tokens::SPACE_SM,
+        ))
         .show(ui, |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
@@ -2544,11 +2555,11 @@ fn draw_assistant_header(
                             egui::RichText::new(MORA_NAME)
                                 .color(theme.text_primary)
                                 .strong()
-                                .size(crate::tokens::TYPE_LG),
+                                .size(crate::tokens::TYPE_BASE),
                         );
                         ui.label(
-                            egui::RichText::new("Asistente matemático  •  macOS")
-                                .color(theme.text_tertiary)
+                            egui::RichText::new("Asistente matemático")
+                                .color(theme.text_secondary)
                                 .size(crate::tokens::TYPE_XS),
                         );
                     });
@@ -2625,108 +2636,108 @@ fn draw_assistant_composer(
         ui.add_space(SPACE_XS);
     }
 
-    // Minimalista: composer pill ultra limpio, sin sombra, solo borde sutil
+    // Composer Scandinavian: rectángulo con radio 12, borde 1.0 separator, fill input_bg
     egui::Frame::none()
-        .fill(theme.panel_bg.gamma_multiply(0.6))
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.2)))
-        .rounding(crate::tokens::RADIUS_PILL)
-        .inner_margin(egui::Margin::symmetric(
-            crate::tokens::SPACE_SM,
-            crate::tokens::SPACE_XS,
-        ))
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(crate::tokens::RADIUS_LG)
+        .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
-            // Editor minimalista con placeholder SF Pro-like
-            let editor = ui.add_sized(
-                egui::vec2(ui.available_width(), ASSISTANT_COMPOSER_EDITOR_HEIGHT),
-                egui::TextEdit::multiline(&mut state.problem)
-                    .id_source("grafito_assistant_problem")
-                    .hint_text("Preguntá a Mora — ej. “derivada de x³” o “animá la integral”")
-                    .text_color(theme.input_text)
-                    .frame(false)
-                    .desired_rows(1)
-                    .margin(egui::vec2(4.0, 4.0)),
-            );
-            let submit_on_enter = should_submit_on_enter(
-                editor.has_focus(),
-                ui.input(|input| input.key_pressed(egui::Key::Enter)),
-                ui.input(|input| input.modifiers.shift),
-                state.can_submit(),
-            );
-            ui.add_space(crate::tokens::SPACE_XS);
-            ui.horizontal(|ui| {
-                // Adjuntar con estilo ghost macOS
-                let can_attach = !state.is_pending
-                    && !state.is_importing_image
-                    && state.attachments.len() < attachment_limits.max_attachments;
-                let attach_response = ui
-                    .add_enabled_ui(can_attach, |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS), // Icon::Image
-                        )
-                        .rounding(crate::tokens::RADIUS_PILL)
-                        .fill(theme.button_bg.gamma_multiply(0.0))
-                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
-                        ui.add(btn)
-                    })
-                    .inner;
-                if attach_response.clicked() {
-                    action = Some(AssistantUiAction::AttachImage);
-                }
-                if !state.attachments.is_empty() {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}/{} imágenes",
-                            state.attachments.len(),
-                            attachment_limits.max_attachments
-                        ))
-                        .color(theme.text_tertiary)
-                        .size(crate::tokens::TYPE_XS),
-                    );
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if state.is_pending {
-                        if state.is_cancelling {
-                            ui.add_enabled(
-                                false,
-                                egui::Button::new("Cancelando…")
-                                    .rounding(crate::tokens::RADIUS_PILL),
-                            );
-                        } else if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Cancelar").size(crate::tokens::TYPE_SM),
-                                )
-                                .rounding(crate::tokens::RADIUS_PILL)
-                                .fill(theme.button_bg),
+            ui.vertical(|ui| {
+                let editor = ui.add_sized(
+                    egui::vec2(ui.available_width(), ASSISTANT_COMPOSER_EDITOR_HEIGHT),
+                    egui::TextEdit::multiline(&mut state.problem)
+                        .id_source("grafito_assistant_problem")
+                        .hint_text("Preguntá a Mora — ej. “derivada de x³” o “animá la integral”")
+                        .text_color(theme.input_text)
+                        .frame(false)
+                        .desired_rows(2)
+                        .margin(egui::vec2(4.0, 6.0)),
+                );
+                let submit_on_enter = should_submit_on_enter(
+                    editor.has_focus(),
+                    ui.input(|input| input.key_pressed(egui::Key::Enter)),
+                    ui.input(|input| input.modifiers.shift),
+                    state.can_submit(),
+                );
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.horizontal(|ui| {
+                    // Adjuntar con estilo ghost macOS
+                    let can_attach = !state.is_pending
+                        && !state.is_importing_image
+                        && state.attachments.len() < attachment_limits.max_attachments;
+                    let attach_response = ui
+                        .add_enabled_ui(can_attach, |ui| {
+                            let btn = egui::Button::new(
+                                egui::RichText::new("Adjuntar imagen").size(crate::tokens::TYPE_XS), // Icon::Image
                             )
-                            .clicked()
-                        {
-                            action = Some(AssistantUiAction::Cancel);
-                        }
-                    } else {
-                        // Botón Enviar macOS: cápsula azul #007AFF con SF Symbol ↑
-                        // Button::new("Enviar") // compatibility: test expects this exact substring
-                        let can_submit = state.can_submit();
-                        let btn = egui::Button::new(
-                            egui::RichText::new("↑ Enviar")
-                                .size(crate::tokens::TYPE_SM)
-                                .color(if can_submit {
-                                    egui::Color32::WHITE
-                                } else {
-                                    theme.text_tertiary
-                                }),
-                        )
-                        .rounding(crate::tokens::RADIUS_PILL)
-                        .fill(if can_submit {
-                            theme.accent
-                        } else {
-                            theme.button_bg.gamma_multiply(0.6)
+                            .rounding(crate::tokens::RADIUS_PILL)
+                            .fill(theme.button_bg.gamma_multiply(0.0))
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                            ui.add(btn)
                         })
-                        .stroke(egui::Stroke::NONE);
-                        if ui.add_enabled(can_submit, btn).clicked() || submit_on_enter {
-                            action = Some(AssistantUiAction::Submit);
-                        }
+                        .inner;
+                    if attach_response.clicked() {
+                        action = Some(AssistantUiAction::AttachImage);
                     }
+                    if !state.attachments.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}/{} imágenes",
+                                state.attachments.len(),
+                                attachment_limits.max_attachments
+                            ))
+                            .color(theme.text_tertiary)
+                            .size(crate::tokens::TYPE_XS),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if state.is_pending {
+                            if state.is_cancelling {
+                                ui.add_enabled(
+                                    false,
+                                    egui::Button::new("Cancelando…")
+                                        .rounding(crate::tokens::RADIUS_PILL),
+                                );
+                            } else if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("Cancelar")
+                                            .size(crate::tokens::TYPE_SM),
+                                    )
+                                    .rounding(crate::tokens::RADIUS_PILL)
+                                    .fill(theme.button_bg),
+                                )
+                                .clicked()
+                            {
+                                action = Some(AssistantUiAction::Cancel);
+                            }
+                        } else {
+                            // Botón Enviar: acento sage, 500, radio 12
+                            // Button::new("Enviar") // compatibility: test expects this exact substring
+                            let can_submit = state.can_submit();
+                            let btn = egui::Button::new(
+                                egui::RichText::new("Enviar")
+                                    .size(crate::tokens::TYPE_SM)
+                                    .strong()
+                                    .color(if can_submit {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        theme.text_tertiary
+                                    }),
+                            )
+                            .rounding(crate::tokens::RADIUS_MD)
+                            .fill(if can_submit {
+                                theme.accent
+                            } else {
+                                theme.button_bg.gamma_multiply(0.6)
+                            })
+                            .stroke(egui::Stroke::NONE);
+                            if ui.add_enabled(can_submit, btn).clicked() || submit_on_enter {
+                                action = Some(AssistantUiAction::Submit);
+                            }
+                        }
+                    });
                 });
             });
         });
@@ -2845,51 +2856,48 @@ fn draw_conversation_turn(
     let appearance = conversation_turn_appearance(theme, is_user);
     let mut action = None;
     let mut copy_requested = false;
-    // macOS: burbuja con cola y sombra sutil, como Messages
-    // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia
-    let max_bubble_width = (ui.available_width() * 0.78).clamp(220.0, 400.0);
-    // macOS minimalista: ambas burbujas mismo estilo, solo color diferencia (no WhatsApp)
+    let max_bubble_width = (ui.available_width() * 0.86).clamp(240.0, 460.0);
+    // Alineación: usuario a la derecha, asistente a la izquierda, texto siempre left-aligned
+    let align = if is_user {
+        egui::Align::Max
+    } else {
+        egui::Align::Min
+    };
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), 0.0),
-        egui::Layout::left_to_right(egui::Align::Min),
+        egui::Layout::top_down(align).with_cross_align(align),
         |ui| {
             ui.set_max_width(max_bubble_width);
             // ui.set_min_width(ui.available_width())
             egui::Frame::none()
                 .fill(appearance.fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    appearance.stroke.gamma_multiply(0.5),
-                ))
+                .stroke(egui::Stroke::new(1.0, appearance.stroke))
                 .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
-                .shadow(egui::Shadow {
-                    offset: egui::vec2(0.0, 2.0),
-                    blur: 4.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_black_alpha(6),
-                })
                 .show(ui, |ui| {
-                    // El ancho ya está limitado por el layout exterior (0.84), no forzar min_width
+                    ui.set_max_width(max_bubble_width - crate::tokens::SPACE_SM * 2.0);
+                    // Label left-aligned
                     let label = if is_user {
-                        "Vos".into()
+                        "Vos".to_owned()
                     } else {
                         let origin = turn
                             .origin
                             .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
                         format!("{MORA_NAME} · {}", origin.public_label())
                     };
-                    ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(label)
                                 .color(appearance.role_color)
-                                .size(TYPE_SM)
+                                .size(TYPE_XS)
                                 .strong(),
                         );
                     });
-                    ui.add_space(SPACE_SM);
+                    ui.add_space(SPACE_XS);
                     if is_user {
-                        draw_inline_text(ui, &turn.content);
+                        // Texto usuario: left-aligned, color blanco sobre burbuja sage
+                        let text_color = appearance.role_color;
+                        draw_inline_text_with_color(ui, &turn.content, text_color);
                     } else {
                         action = draw_assistant_response(
                             ui,
@@ -2898,36 +2906,20 @@ fn draw_conversation_turn(
                             reveal_clip,
                             cache,
                         );
-                        ui.add_space(SPACE_XS);
-                        // Telemetría tipo harness: estimación de salida del turno.
-                        let est_tokens = (turn.content.chars().count() / 4).max(1);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "~{est_tokens} token de salida (est.)"
-                                ))
-                                .color(theme.text_tertiary)
-                                .size(TYPE_XS),
-                            );
-                        });
                     }
-                    ui.add_space(SPACE_SM);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            copy_requested = ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Copiar")
-                                            .color(theme.text_secondary)
-                                            .size(TYPE_XS),
-                                    )
-                                    .frame(false),
+                    ui.add_space(SPACE_XS);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        copy_requested = ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("Copiar")
+                                        .color(theme.text_tertiary)
+                                        .size(TYPE_XS),
                                 )
-                                .clicked();
-                        },
-                    );
+                                .frame(false),
+                            )
+                            .clicked();
+                    });
                 });
         },
     );
@@ -4060,6 +4052,72 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
         font_id: egui::FontId::proportional(TYPE_BASE),
         color: theme.text_primary,
         italics: false,
+        ..Default::default()
+    };
+    let code = egui::TextFormat {
+        font_id: egui::FontId::monospace(TYPE_SM),
+        color: theme.accent,
+        background: theme.accent_muted,
+        ..Default::default()
+    };
+    let math = egui::TextFormat {
+        font_id: egui::FontId::proportional(TYPE_BASE),
+        color: theme.accent_strong,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let markers = [
+            ("**", "**", &bold),
+            ("`", "`", &code),
+            ("$$", "$$", &math),
+            (r"\[", r"\]", &math),
+            ("$", "$", &math),
+            (r"\(", r"\)", &math),
+        ];
+        let next = markers
+            .iter()
+            .filter_map(|(start, end, format)| {
+                remaining
+                    .find(start)
+                    .map(|position| (position, *start, *end, *format))
+            })
+            .min_by_key(|(position, _, _, _)| *position);
+        let Some((position, start, end, format)) = next else {
+            job.append(remaining, 0.0, normal.clone());
+            break;
+        };
+        if position > 0 {
+            job.append(&remaining[..position], 0.0, normal.clone());
+        }
+        let after_start = &remaining[position + start.len()..];
+        let Some(end_position) = after_start.find(end) else {
+            job.append(&remaining[position..], 0.0, normal.clone());
+            break;
+        };
+        let source_end = position + start.len() + end_position + end.len();
+        let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
+            inline_math_text(&remaining[position..source_end])
+        } else {
+            after_start[..end_position].to_owned()
+        };
+        job.append(&inline, 0.0, format.clone());
+        remaining = &after_start[end_position + end.len()..];
+    }
+    ui.add(egui::Label::new(job).wrap());
+}
+
+fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+    let theme = current_theme(ui.ctx());
+    let normal = egui::TextFormat {
+        font_id: egui::FontId::proportional(TYPE_BASE),
+        color,
+        ..Default::default()
+    };
+    let bold = egui::TextFormat {
+        font_id: egui::FontId::proportional(TYPE_BASE),
+        color,
         ..Default::default()
     };
     let code = egui::TextFormat {

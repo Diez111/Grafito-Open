@@ -1344,13 +1344,25 @@ pub struct GrafitoApp {
     pub pou_jump_open: bool,
     pub pou_jump_answers: [String; 3],
     pub pou_jump_checked: Option<[bool; 3]>,
-    /// Mini-juego activo en la pestaña Jugar (0 ninguno, 1 memoria, 2 adivina, 3 reacción).
+    /// Mini-juego activo en la pestaña Jugar (0 ninguno, 1 memoria, 2 adivina, 3 reacción, 4 ecuación, 5 fracción).
     pub pou_game_state: u8,
     pub pou_guess_target: u8,
     pub pou_guess_input: String,
+    pub pou_memory_seq: Vec<u8>,
+    pub pou_memory_input: Vec<u8>,
+    pub pou_memory_show_until: Option<Instant>,
+    pub pou_reflex_state: u8,
+    pub pou_reflex_start: Option<Instant>,
+    pub pou_equation_a: i32,
+    pub pou_equation_b: i32,
+    pub pou_equation_op: char,
+    pub pou_equation_input: String,
+    pub pou_fraction_target_num: u8,
+    pub pou_fraction_target_den: u8,
+    pub pou_fraction_input: String,
 }
 
-pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = true;
+pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = false;
 pub(crate) const DEFAULT_CONSTRUCTION_PROTOCOL_VISIBLE: bool = false;
 
 /// Construye un documento inicial vacío: los ejemplos se cargan sólo a petición.
@@ -1647,9 +1659,7 @@ impl GrafitoApp {
             let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "Inter".to_owned(),
-                egui::FontData::from_static(include_bytes!(
-                    "../../../assets/InterVariable.ttf"
-                )),
+                egui::FontData::from_static(include_bytes!("../../../assets/InterVariable.ttf")),
             );
             fonts
                 .families
@@ -1852,6 +1862,18 @@ impl GrafitoApp {
             pou_game_state: 0,
             pou_guess_target: 7,
             pou_guess_input: String::new(),
+            pou_memory_seq: vec![1, 3, 2, 0],
+            pou_memory_input: Vec::new(),
+            pou_memory_show_until: None,
+            pou_reflex_state: 0,
+            pou_reflex_start: None,
+            pou_equation_a: 5,
+            pou_equation_b: 3,
+            pou_equation_op: '+',
+            pou_equation_input: String::new(),
+            pou_fraction_target_num: 3,
+            pou_fraction_target_den: 4,
+            pou_fraction_input: String::new(),
         }
     }
 
@@ -4659,10 +4681,10 @@ impl GrafitoApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(580.0)
-            .min_width(520.0)
-            .max_width(640.0)
-            .default_height(520.0)
+            .default_width(640.0)
+            .min_width(560.0)
+            .max_width(700.0)
+            .default_height(580.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .frame(
                 egui::Frame::window(&ctx.style())
@@ -4733,7 +4755,7 @@ impl GrafitoApp {
                 // Contenido por pestaña
                 egui::ScrollArea::vertical()
                     .id_salt("pou_tab_scroll")
-                    .max_height(420.0)
+                    .max_height(480.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
@@ -4797,10 +4819,21 @@ impl GrafitoApp {
             );
         }
         ui.add_space(grafito_ui::tokens::SPACE_SM);
-        // Vida — barras muy visibles 10px
+        // Tick necesidades por tiempo real
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mascot = self.profile.mascot_mut_or_default();
+            mascot.tick_needs(now);
+        }
+        let mascot_cfg = self.profile.mascot_mut_or_default().clone();
+        // Vida — barras 12px modernas con energía
         for (label, value, icon) in [
             ("Hambre", mascot_cfg.hunger as f32, "🍽"),
             ("Felicidad", mascot_cfg.happiness as f32, "♥"),
+            ("Energía", mascot_cfg.energy as f32, "⚡"),
         ] {
             ui.horizontal(|ui| {
                 ui.label(
@@ -4922,6 +4955,109 @@ impl GrafitoApp {
                 .color(theme.text_tertiary),
         );
         ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Decor shop — 6 items con precio en coins
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .rounding(grafito_ui::tokens::RADIUS_LG)
+            .stroke(egui::Stroke::new(1.0, theme.separator))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Decorar habitáculo")
+                        .size(grafito_ui::tokens::TYPE_XS)
+                        .strong()
+                        .color(theme.text_secondary),
+                );
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (id, label, price) in [
+                        ("plant", "🪴 Planta", 5),
+                        ("lamp", "💡 Lámpara", 8),
+                        ("poster", "🖼️ Póster", 6),
+                        ("rug", "🧶 Alfombra", 7),
+                        ("shelf", "📚 Estante", 10),
+                        ("desk", "🖥️ Escritorio", 12),
+                    ] {
+                        let owned = mascot_cfg.decor.contains(&id.to_string());
+                        let can_buy = mascot_cfg.coins >= price as u32;
+                        let txt = if owned {
+                            format!("{label} ✓")
+                        } else {
+                            format!("{label} {price}🪙")
+                        };
+                        let mut btn = egui::Button::new(egui::RichText::new(txt).size(10.0))
+                            .rounding(grafito_ui::tokens::RADIUS_PILL);
+                        if owned {
+                            btn = btn
+                                .fill(theme.accent.gamma_multiply(0.14))
+                                .stroke(egui::Stroke::new(1.5, theme.accent));
+                        } else if !can_buy {
+                            btn = btn.fill(theme.input_bg.gamma_multiply(0.6)).stroke(
+                                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)),
+                            );
+                        } else {
+                            btn = btn.stroke(egui::Stroke::new(1.0, theme.separator));
+                        }
+                        if ui.add_enabled(!owned && can_buy, btn).clicked() {
+                            let mascot = self.profile.mascot_mut_or_default();
+                            if mascot.spend_coins(price as u32) {
+                                mascot.unlock_decor(id);
+                                mascot.happiness = (mascot.happiness.saturating_add(5)).min(100);
+                                let _ = std::fs::write(
+                                    crate::utils::profile_path(),
+                                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                                );
+                                self.notify(
+                                    format!("¡{label} comprada!"),
+                                    grafito_ui::toast::ToastKind::Success,
+                                );
+                            }
+                        }
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "🪙 {} monedas • Decoraciones dan +5 felicidad",
+                        mascot_cfg.coins
+                    ))
+                    .size(9.0)
+                    .color(theme.text_tertiary)
+                    .italics(),
+                );
+            });
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Evolución badge
+        egui::Frame::none()
+            .fill(theme.accent.gamma_multiply(0.08))
+            .rounding(grafito_ui::tokens::RADIUS_LG)
+            .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.3)))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Etapa {} • {}% XP",
+                            mascot_cfg.evolution_stage,
+                            ((mascot_cfg.care_xp % 100) as u8)
+                        ))
+                        .size(grafito_ui::tokens::TYPE_XS)
+                        .strong()
+                        .color(theme.accent),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Multiplicador x{:.2}",
+                                mascot_cfg.xp_multiplier()
+                            ))
+                            .size(9.0)
+                            .color(theme.text_tertiary),
+                        );
+                    });
+                });
+            });
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_LG;
             if ui
@@ -4972,12 +5108,15 @@ impl GrafitoApp {
                 .clicked()
             {
                 let mascot = self.profile.mascot_mut_or_default();
-                mascot.happiness = (mascot.happiness.saturating_add(4)).min(100);
+                mascot.rest();
                 let _ = std::fs::write(
                     crate::utils::profile_path(),
                     serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
                 );
-                self.notify("Pou descansa… Zzz", grafito_ui::toast::ToastKind::Info);
+                self.notify(
+                    "Pou descansa… Zzz +25 energía",
+                    grafito_ui::toast::ToastKind::Info,
+                );
             }
             if ui
                 .add(
@@ -5024,10 +5163,11 @@ impl GrafitoApp {
         });
         ui.add_space(grafito_ui::tokens::SPACE_SM);
         let mascot_cfg = self.profile.mascot_mut_or_default().clone();
-        let preview_rect_size = egui::Vec2::new(88.0, 88.0);
+        let preview_rect_size = egui::Vec2::new(112.0, 112.0);
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(preview_rect_size, egui::Sense::hover());
             if ui.is_rect_visible(rect) {
+                // Fondo con borde suave y sombra sutil
                 ui.painter()
                     .rect_filled(rect, grafito_ui::tokens::RADIUS_LG, theme.input_bg);
                 ui.painter().rect_stroke(
@@ -5035,29 +5175,51 @@ impl GrafitoApp {
                     grafito_ui::tokens::RADIUS_LG,
                     egui::Stroke::new(1.5, theme.separator),
                 );
+                // sutil sombra interior
+                ui.painter().rect_filled(
+                    rect.shrink(2.0),
+                    grafito_ui::tokens::RADIUS_LG,
+                    egui::Color32::from_black_alpha(4),
+                );
                 let accent = {
                     let (_, rgb, _) =
                         grafito_profile::AvatarConfig::accent_palette(mascot_cfg.species as u8 % 6);
                     egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
                 };
-                // Mapear outfit equipado a código visual 0..3
-                let outfit_code = if mascot_cfg.wardrobe.is_equipped("crown_master")
-                    || mascot_cfg.wardrobe.is_equipped("beanie_uni")
-                    || mascot_cfg.wardrobe.is_equipped("hat_sec")
-                    || mascot_cfg.wardrobe.is_equipped("cap_prim")
-                {
-                    2
-                } else if mascot_cfg.wardrobe.is_equipped("scarf_prim")
-                    || mascot_cfg.wardrobe.is_equipped("glasses_sec")
-                {
-                    1
-                } else if mascot_cfg.wardrobe.is_equipped("cape_uni")
-                    || mascot_cfg.wardrobe.is_equipped("robe_master")
-                    || mascot_cfg.wardrobe.is_equipped("medal_master")
-                {
-                    3
-                } else {
-                    0
+                // Mapear wardrobe a outfit visual 0..3 por capas (Hat→2, Accessory→1, Body cape→3)
+                let outfit_code = {
+                    let equipped = &mascot_cfg.wardrobe.equipped;
+                    let catalog = grafito_profile::mascot::outfit_catalog();
+                    let has_hat = equipped.iter().any(|id| {
+                        catalog
+                            .iter()
+                            .find(|o| &o.id == id)
+                            .is_some_and(|o| o.layer == grafito_profile::mascot::OutfitLayer::Hat)
+                    });
+                    let has_accessory_scarf = equipped.iter().any(|id| {
+                        [
+                            "scarf_prim",
+                            "scarf_uni",
+                            "glasses_sec",
+                            "glasses_uni",
+                            "glasses_master",
+                            "earphones_sec",
+                        ]
+                        .contains(&id.as_str())
+                    });
+                    let has_cape = equipped.iter().any(|id| {
+                        ["cape_uni", "cape_master", "robe_master", "sash_master"]
+                            .contains(&id.as_str())
+                    });
+                    if has_hat {
+                        2
+                    } else if has_accessory_scarf {
+                        1
+                    } else if has_cape {
+                        3
+                    } else {
+                        0
+                    }
                 };
                 let time = ui.input(|i| i.time);
                 grafito_ui::pou::draw_mascot(
@@ -5242,37 +5404,29 @@ impl GrafitoApp {
                 .strong()
                 .color(theme.text_primary),
         );
-        ui.label(egui::RichText::new("Mini-juegos cortos para subir felicidad, ganar monedas y sumar XP. Diseño playful, shell Scandinavian.").size(grafito_ui::tokens::TYPE_XS).color(theme.text_tertiary));
+        ui.label(egui::RichText::new("6 mini-juegos arañan felicidad, energía y monedas. ¡Cada victoria da XP multiplicado si Pou está feliz!").size(grafito_ui::tokens::TYPE_XS).color(theme.text_tertiary));
         ui.add_space(grafito_ui::tokens::SPACE_SM);
-        // Grid 2x2 de juegos
-        let games = [
+        // Tiempo actual para animaciones
+        let now = Instant::now();
+        // Grid 2x2 primera fila, 2x1 segunda fila
+        let games_top = [
             (
                 "Memoria cromática",
-                "Recordá la secuencia de 4 colores.",
+                "Repetí la secuencia de 4 colores.",
                 "🎨",
-                "+8 felicidad, +10 XP",
+                "+10 XP, +2 🪙",
             ),
-            (
-                "Adivina 1–10",
-                "Pou pensó un número. ¿Cuál es?",
-                "🔢",
-                "+12 felicidad, +5 🪙",
-            ),
+            ("Adivina 1–10", "Pou pensó un número.", "🔢", "+8 XP, +5 🪙"),
             (
                 "Reflejos",
-                "¡Tocá lo más rápido que puedas!",
+                "¡Tocá en verde lo más rápido!",
                 "⚡",
-                "+6 felicidad, +8 XP",
+                "+8 XP, +3 🪙",
             ),
-            (
-                "Quiz relámpago",
-                "Pregunta matemática del nivel actual.",
-                "❓",
-                "+15 XP, +3 🪙",
-            ),
+            ("Ecuación rápida", "Resolvé en 10 s.", "➗", "+12 XP, +2 🪙"),
         ];
-        egui::Grid::new("pou_games_grid").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
-            for (idx, (title, desc, icon, reward)) in games.iter().enumerate() {
+        egui::Grid::new("pou_games_grid_top").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
+            for (idx, (title, desc, icon, reward)) in games_top.iter().enumerate() {
                 egui::Frame::none()
                     .fill(theme.input_bg)
                     .stroke(egui::Stroke::new(1.0, theme.separator))
@@ -5290,17 +5444,64 @@ impl GrafitoApp {
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new(*reward).size(grafito_ui::tokens::TYPE_XS).color(theme.accent));
                         ui.add_space(6.0);
-                        // Botón / interacción según juego
                         match idx {
                             0 => {
-                                if ui.add(egui::Button::new(egui::RichText::new("Jugar memoria").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).stroke(egui::Stroke::new(1.0, theme.separator))).clicked() {
-                                    let mascot = self.profile.mascot_mut_or_default();
-                                    mascot.happiness = (mascot.happiness.saturating_add(8)).min(100);
-                                    mascot.coins = mascot.coins.saturating_add(2);
-                                    mascot.care_xp = mascot.care_xp.saturating_add(10);
-                                    self.profile.xp = self.profile.xp.saturating_add(10);
-                                    let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
-                                    self.notify("¡Memoria completada! +10 XP", grafito_ui::toast::ToastKind::Success);
+                                // Memoria — 4 colores
+                                let showing = self.pou_memory_show_until.is_some_and(|t| now < t);
+                                if showing {
+                                    ui.horizontal(|ui| {
+                                        for &c in &self.pou_memory_seq.clone() {
+                                            let col = match c % 4 {
+                                                0 => egui::Color32::from_rgb(220, 60, 60),
+                                                1 => egui::Color32::from_rgb(60, 120, 220),
+                                                2 => egui::Color32::from_rgb(240, 200, 40),
+                                                _ => egui::Color32::from_rgb(80, 180, 90),
+                                            };
+                                            egui::Frame::none().fill(col).rounding(6.0).inner_margin(egui::Margin::same(2.0)).show(ui, |ui| {
+                                                ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                                            });
+                                        }
+                                    });
+                                    ui.label(egui::RichText::new("Memorizá…").size(9.0).color(theme.text_tertiary).italics());
+                                } else {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for c in 0..4u8 {
+                                            let col = match c {
+                                                0 => egui::Color32::from_rgb(220, 60, 60),
+                                                1 => egui::Color32::from_rgb(60, 120, 220),
+                                                2 => egui::Color32::from_rgb(240, 200, 40),
+                                                _ => egui::Color32::from_rgb(80, 180, 90),
+                                            };
+                                            let btn = egui::Button::new("").fill(col).rounding(6.0).min_size(egui::vec2(22.0, 22.0));
+                                            if ui.add(btn).clicked() {
+                                                self.pou_memory_input.push(c);
+                                                if self.pou_memory_input.len() == self.pou_memory_seq.len() {
+                                                    let ok = self.pou_memory_input == self.pou_memory_seq;
+                                                    if ok {
+                                                        let mascot = self.profile.mascot_mut_or_default();
+                                                        mascot.play(8, 1);
+                                                        mascot.add_coins(2);
+                                                        let mult = mascot.xp_multiplier();
+                                                        let xp = (10.0 * mult) as u64;
+                                                        self.profile.xp = self.profile.xp.saturating_add(xp);
+                                                        let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                                        self.notify(format!("¡Memoria perfecta! +{xp} XP"), grafito_ui::toast::ToastKind::Success);
+                                                    } else {
+                                                        self.notify("Casi… mirá de nuevo", grafito_ui::toast::ToastKind::Info);
+                                                    }
+                                                    // nueva secuencia
+                                                    let base = (self.profile.xp % 4) as u8;
+                                                    self.pou_memory_seq = vec![base, (base+1)%4, (base+2)%4, (base+3)%4];
+                                                    self.pou_memory_input.clear();
+                                                    self.pou_memory_show_until = Some(now + Duration::from_millis(900));
+                                                }
+                                            }
+                                        }
+                                    });
+                                    if ui.small_button("Mostrar secuencia").clicked() {
+                                        self.pou_memory_show_until = Some(now + Duration::from_millis(900));
+                                        self.pou_memory_input.clear();
+                                    }
                                 }
                             }
                             1 => {
@@ -5310,36 +5511,96 @@ impl GrafitoApp {
                                         let guess: u8 = self.pou_guess_input.trim().parse().unwrap_or(0);
                                         if guess == self.pou_guess_target {
                                             let mascot = self.profile.mascot_mut_or_default();
-                                            mascot.happiness = (mascot.happiness.saturating_add(12)).min(100);
-                                            mascot.coins = mascot.coins.saturating_add(5);
-                                            mascot.care_xp = mascot.care_xp.saturating_add(8);
-                                            self.profile.xp = self.profile.xp.saturating_add(8);
+                                            mascot.play(12, 1);
+                                            mascot.add_coins(5);
+                                            let mult = mascot.xp_multiplier();
+                                            let xp = (8.0 * mult) as u64;
+                                            self.profile.xp = self.profile.xp.saturating_add(xp);
                                             self.pou_guess_target = (self.pou_guess_target % 10) + 1;
                                             let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
-                                            self.notify("¡Acertaste! Pou celebra 🎉", grafito_ui::toast::ToastKind::Success);
+                                            self.notify(format!("¡Acertaste! +{xp} XP 🎉"), grafito_ui::toast::ToastKind::Success);
                                         } else {
-                                            self.notify(format!("No era {guess}. ¡Probá de nuevo! (pista: era {})", self.pou_guess_target), grafito_ui::toast::ToastKind::Info);
+                                            let hint = if guess < self.pou_guess_target { "Más alto ↑" } else { "Más bajo ↓" };
+                                            self.notify(format!("No era {guess}. {hint}"), grafito_ui::toast::ToastKind::Info);
                                         }
                                         self.pou_guess_input.clear();
                                     }
                                 });
-                                ui.label(egui::RichText::new("Pista: Pou piensa entre 1 y 10…").size(9.0).color(theme.text_tertiary));
+                                ui.label(egui::RichText::new(format!("Pou piensa 1–10 (era {} la última)", self.pou_guess_target)).size(9.0).color(theme.text_tertiary));
                             }
                             2 => {
-                                if ui.add(egui::Button::new(egui::RichText::new("¡Tocar!").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).fill(theme.accent).stroke(egui::Stroke::new(1.0, theme.accent))).clicked() {
-                                    let mascot = self.profile.mascot_mut_or_default();
-                                    mascot.happiness = (mascot.happiness.saturating_add(6)).min(100);
-                                    mascot.care_xp = mascot.care_xp.saturating_add(5);
-                                    self.profile.xp = self.profile.xp.saturating_add(8);
-                                    let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
-                                    self.notify("¡Reflejos de felino! +8 XP", grafito_ui::toast::ToastKind::Success);
+                                match self.pou_reflex_state {
+                                    0 => {
+                                        if ui.add(egui::Button::new(egui::RichText::new("¡Listo!").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).fill(theme.accent).stroke(egui::Stroke::new(1.0, theme.accent))).clicked() {
+                                            self.pou_reflex_state = 1;
+                                            self.pou_reflex_start = Some(now + Duration::from_millis(800 + (self.profile.xp % 1200)));
+                                        }
+                                        ui.label(egui::RichText::new("Tocá Listo y esperá el verde…").size(9.0).color(theme.text_tertiary));
+                                    }
+                                    1 => {
+                                        let ready = self.pou_reflex_start.is_some_and(|t| now >= t);
+                                        if ready {
+                                            self.pou_reflex_state = 2;
+                                            self.pou_reflex_start = Some(now);
+                                        }
+                                        let (txt, col) = if ready { ("¡AHORA!", egui::Color32::from_rgb(80, 180, 90)) } else { ("Esperá…", egui::Color32::from_rgb(220, 180, 40)) };
+                                        egui::Frame::none().fill(col.gamma_multiply(0.18)).rounding(6.0).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
+                                            ui.label(egui::RichText::new(txt).strong().color(col));
+                                        });
+                                        if ui.small_button("Tocar").clicked() {
+                                            if ready {
+                                                let elapsed = now.duration_since(self.pou_reflex_start.unwrap_or(now)).as_millis() as u64;
+                                                let bonus = if elapsed < 300 { 12 } else if elapsed < 600 { 8 } else { 4 };
+                                                let mascot = self.profile.mascot_mut_or_default();
+                                                mascot.play(6, 0);
+                                                mascot.add_coins(2);
+                                                self.profile.xp = self.profile.xp.saturating_add(bonus);
+                                                let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                                self.notify(format!("¡{elapsed} ms! +{bonus} XP"), grafito_ui::toast::ToastKind::Success);
+                                            } else {
+                                                self.notify("¡Muy pronto! Esperá el verde", grafito_ui::toast::ToastKind::Error);
+                                            }
+                                            self.pou_reflex_state = 0;
+                                        }
+                                    }
+                                    _ => {
+                                        if ui.small_button("Reiniciar").clicked() { self.pou_reflex_state = 0; }
+                                    }
                                 }
                             }
                             3 => {
-                                if ui.add(egui::Button::new(egui::RichText::new("Responder quiz").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).stroke(egui::Stroke::new(1.0, theme.separator))).clicked() {
-                                    self.pou_tab = PouTab::Progreso;
-                                    self.pou_jump_open = true;
-                                }
+                                let q = format!("{} {} {} = ?", self.pou_equation_a, self.pou_equation_op, self.pou_equation_b);
+                                ui.label(egui::RichText::new(q).size(grafito_ui::tokens::TYPE_SM).strong().color(theme.text_primary));
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.pou_equation_input).hint_text("resultado").desired_width(70.0));
+                                    if ui.small_button("Responder").clicked() {
+                                        let ans: i32 = self.pou_equation_input.trim().parse().unwrap_or(9999);
+                                        let expected = match self.pou_equation_op {
+                                            '+' => self.pou_equation_a + self.pou_equation_b,
+                                            '-' => self.pou_equation_a - self.pou_equation_b,
+                                            '×' => self.pou_equation_a * self.pou_equation_b,
+                                            _ => 0,
+                                        };
+                                        if ans == expected {
+                                            let mascot = self.profile.mascot_mut_or_default();
+                                            mascot.play(7, 1);
+                                            mascot.add_coins(2);
+                                            let mult = mascot.xp_multiplier();
+                                            let xp = (12.0 * mult) as u64;
+                                            self.profile.xp = self.profile.xp.saturating_add(xp);
+                                            let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                            self.notify(format!("¡Correcto! +{xp} XP"), grafito_ui::toast::ToastKind::Success);
+                                        } else {
+                                            self.notify(format!("Era {expected}, ¡seguí!"), grafito_ui::toast::ToastKind::Info);
+                                        }
+                                        // nueva ecuación
+                                        let a = 2 + (self.profile.xp % 9) as i32;
+                                        let b = 2 + ((self.profile.xp / 3) % 7) as i32;
+                                        let op = match self.profile.xp % 3 { 0 => '+', 1 => '-', _ => '×' };
+                                        self.pou_equation_a = a; self.pou_equation_b = b; self.pou_equation_op = op;
+                                        self.pou_equation_input.clear();
+                                    }
+                                });
                             }
                             _ => {}
                         }
@@ -5349,6 +5610,166 @@ impl GrafitoApp {
                 }
             }
         });
+        ui.add_space(8.0);
+        egui::Grid::new("pou_games_grid_bottom")
+            .num_columns(2)
+            .spacing([12.0, 12.0])
+            .show(ui, |ui| {
+                // Quiz y Fracción
+                for (title, desc, icon, reward) in [
+                    (
+                        "Quiz relámpago",
+                        "Pregunta de tu nivel.",
+                        "❓",
+                        "+15 XP, +3 🪙",
+                    ),
+                    (
+                        "Fracción visual",
+                        "Escribí la fracción.",
+                        "🍕",
+                        "+10 XP, +2 🪙",
+                    ),
+                ] {
+                    egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.separator))
+                        .rounding(grafito_ui::tokens::RADIUS_LG)
+                        .inner_margin(egui::Margin::same(10.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(220.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(icon).size(18.0));
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(title)
+                                            .size(grafito_ui::tokens::TYPE_SM)
+                                            .strong()
+                                            .color(theme.text_primary),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(desc)
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .color(theme.text_tertiary),
+                                    );
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(reward)
+                                    .size(grafito_ui::tokens::TYPE_XS)
+                                    .color(theme.accent),
+                            );
+                            ui.add_space(6.0);
+                            if title == "Quiz relámpago" {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("Responder quiz")
+                                                .size(grafito_ui::tokens::TYPE_XS),
+                                        )
+                                        .rounding(grafito_ui::tokens::RADIUS_PILL)
+                                        .stroke(egui::Stroke::new(1.0, theme.separator)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.pou_tab = PouTab::Progreso;
+                                    self.pou_jump_open = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new("Usa tu nivel actual y gana XP real.")
+                                        .size(9.0)
+                                        .color(theme.text_tertiary),
+                                );
+                            } else {
+                                // Fracción visual con círculo dividido
+                                let den = self.pou_fraction_target_den.clamp(2, 8) as f32;
+                                let _num = self
+                                    .pou_fraction_target_num
+                                    .min(self.pou_fraction_target_den)
+                                    as f32;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(60.0, 60.0),
+                                    egui::Sense::hover(),
+                                );
+                                if ui.is_rect_visible(rect) {
+                                    let painter = ui.painter_at(rect);
+                                    painter.circle_stroke(
+                                        rect.center(),
+                                        26.0,
+                                        egui::Stroke::new(1.5, theme.separator),
+                                    );
+                                    for i in 0..self.pou_fraction_target_den {
+                                        let a0 = i as f32 / den * std::f32::consts::TAU
+                                            - std::f32::consts::FRAC_PI_2;
+                                        let a1 = (i + 1) as f32 / den * std::f32::consts::TAU
+                                            - std::f32::consts::FRAC_PI_2;
+                                        if i < self.pou_fraction_target_num {
+                                            let pts = vec![
+                                                rect.center(),
+                                                rect.center()
+                                                    + egui::vec2(a0.cos() * 26.0, a0.sin() * 26.0),
+                                                rect.center()
+                                                    + egui::vec2(a1.cos() * 26.0, a1.sin() * 26.0),
+                                            ];
+                                            painter.add(egui::Shape::convex_polygon(
+                                                pts,
+                                                theme.accent.gamma_multiply(0.35),
+                                                egui::Stroke::new(1.0, theme.accent),
+                                            ));
+                                        }
+                                        painter.line_segment(
+                                            [
+                                                rect.center(),
+                                                rect.center()
+                                                    + egui::vec2(a0.cos() * 26.0, a0.sin() * 26.0),
+                                            ],
+                                            egui::Stroke::new(1.0, theme.separator),
+                                        );
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.pou_fraction_input)
+                                            .hint_text("ej: 3/4")
+                                            .desired_width(70.0),
+                                    );
+                                    if ui.small_button("Verificar").clicked() {
+                                        let expected = format!(
+                                            "{}/{}",
+                                            self.pou_fraction_target_num,
+                                            self.pou_fraction_target_den
+                                        );
+                                        let input = self.pou_fraction_input.trim().replace(' ', "");
+                                        if input == expected {
+                                            let mascot = self.profile.mascot_mut_or_default();
+                                            mascot.play(7, 0);
+                                            mascot.add_coins(2);
+                                            self.profile.xp = self.profile.xp.saturating_add(10);
+                                            let _ = std::fs::write(
+                                                crate::utils::profile_path(),
+                                                serde_json::to_string_pretty(&self.profile)
+                                                    .unwrap_or_default(),
+                                            );
+                                            self.notify(
+                                                "¡Fracción correcta! +10 XP",
+                                                grafito_ui::toast::ToastKind::Success,
+                                            );
+                                            self.pou_fraction_target_num =
+                                                1 + (self.profile.xp % 3) as u8;
+                                            self.pou_fraction_target_den = 4;
+                                        } else {
+                                            self.notify(
+                                                format!("Era {expected}"),
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                        self.pou_fraction_input.clear();
+                                    }
+                                });
+                            }
+                        });
+                }
+            });
         ui.add_space(grafito_ui::tokens::SPACE_SM);
         ui.separator();
         ui.add_space(grafito_ui::tokens::SPACE_SM);
@@ -5537,6 +5958,174 @@ impl GrafitoApp {
         }
         ui.separator();
         ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Misiones diarias — gamificación
+        {
+            let mascot = self.profile.mascot_mut_or_default().clone();
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Misiones diarias")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .strong()
+                                .color(theme.text_primary),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("x{:.2} XP", mascot.xp_multiplier()))
+                                    .size(9.0)
+                                    .strong()
+                                    .color(theme.accent),
+                            );
+                            ui.label(
+                                egui::RichText::new("Multiplicador")
+                                    .size(9.0)
+                                    .color(theme.text_tertiary),
+                            );
+                        });
+                    });
+                    ui.add_space(4.0);
+                    let missions = [
+                        (
+                            "Alimenta a Pou",
+                            "Usá 🍎 Alimentar en Casa",
+                            mascot.happiness > 85,
+                            5,
+                            15,
+                        ),
+                        (
+                            "Juega 1 partida",
+                            "Completa cualquier juego en Jugar",
+                            mascot.care_xp > 10,
+                            5,
+                            15,
+                        ),
+                        (
+                            "Racha de estudio",
+                            "2 aciertos seguidos",
+                            self.profile.streak >= 2,
+                            10,
+                            25,
+                        ),
+                    ];
+                    for (title, desc, done, coins, xp) in missions {
+                        ui.horizontal(|ui| {
+                            let icon = if done { "✓" } else { "○" };
+                            ui.label(egui::RichText::new(icon).size(10.0).color(if done {
+                                theme.success
+                            } else {
+                                theme.text_tertiary
+                            }));
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(title)
+                                        .size(10.0)
+                                        .strong()
+                                        .color(theme.text_primary),
+                                );
+                                ui.label(
+                                    egui::RichText::new(desc)
+                                        .size(9.0)
+                                        .color(theme.text_tertiary),
+                                );
+                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if done {
+                                        if ui.small_button(format!("+{xp} XP +{coins}🪙")).clicked()
+                                        {
+                                            self.profile.xp =
+                                                self.profile.xp.saturating_add(xp as u64);
+                                            let m = self.profile.mascot_mut_or_default();
+                                            m.add_coins(coins);
+                                            let _ = std::fs::write(
+                                                crate::utils::profile_path(),
+                                                serde_json::to_string_pretty(&self.profile)
+                                                    .unwrap_or_default(),
+                                            );
+                                            self.notify(
+                                                format!("¡Misión {title} completada!"),
+                                                grafito_ui::toast::ToastKind::Success,
+                                            );
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new(format!("{xp}XP {coins}🪙"))
+                                                .size(9.0)
+                                                .color(theme.text_tertiary),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(2.0);
+                    }
+                });
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+            // Tienda rápida
+            egui::Frame::none()
+                .fill(theme.accent.gamma_multiply(0.06))
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.2)))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Tienda Pou")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .strong()
+                                .color(theme.accent),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("🪙 {} monedas", mascot.coins))
+                                .size(9.0)
+                                .color(theme.text_secondary),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, price, emoji) in [
+                            ("Gorro Retro", 8, "🎩"),
+                            ("Capa Noche", 12, "🦸"),
+                            ("Poster Fórmula", 6, "📐"),
+                            ("Rug Cómodo", 7, "🧶"),
+                        ] {
+                            let can = mascot.coins >= price;
+                            let btn = egui::Button::new(
+                                egui::RichText::new(format!("{emoji} {name} {price}🪙")).size(9.0),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                if can { theme.accent } else { theme.separator },
+                            ));
+                            if ui.add_enabled(can, btn).clicked() {
+                                let m = self.profile.mascot_mut_or_default();
+                                if m.spend_coins(price) {
+                                    m.unlock_decor(name);
+                                    let _ = std::fs::write(
+                                        crate::utils::profile_path(),
+                                        serde_json::to_string_pretty(&self.profile)
+                                            .unwrap_or_default(),
+                                    );
+                                    self.notify(
+                                        format!("¡Compraste {name}!"),
+                                        grafito_ui::toast::ToastKind::Success,
+                                    );
+                                }
+                            }
+                        }
+                    });
+                });
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+            ui.separator();
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+        }
         // Examen de salto — profesional, por tier educativo
         ui.horizontal(|ui| {
             ui.label(

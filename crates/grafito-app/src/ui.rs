@@ -342,7 +342,7 @@ pub(crate) fn draw_top_bar(
                     draw_help_menu(ui, app);
                 }
 
-                // ── Toolbar inline — sin Frame duplicado, comparte el Frame del top bar ──
+                // ── Toolbar inline — agrupado y con overflow controlado ──
                 ui.separator();
                 {
                     let mut groups: Vec<ToolGroupId> =
@@ -350,6 +350,12 @@ pub(crate) fn draw_top_bar(
                     let is_3d = app.current_view == ViewMode::D3;
                     if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
                         groups.push(ToolGroupId::ThreeD);
+                    }
+                    // Limita grupos en top bar para evitar desborde; el resto va al menú Herramientas
+                    if ui.available_width() < 380.0 {
+                        groups.truncate(2);
+                    } else if ui.available_width() < 520.0 {
+                        groups.truncate(3);
                     }
                     grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
                 }
@@ -429,6 +435,31 @@ pub(crate) fn draw_top_bar(
                                 LIGHT.apply(ui.ctx());
                             }
                         }
+                    }
+                    // Nivel + coins — texto, sin emoji (Scandinavian ink ladder)
+                    {
+                        let level = app.profile.level;
+                        let coins = app.profile.mascot_mut_or_default().coins;
+                        egui::Frame::none()
+                            .fill(theme.accent.gamma_multiply(0.09))
+                            .rounding(RADIUS_MD)
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("Nivel {level}"))
+                                            .size(11.0)
+                                            .strong()
+                                            .color(theme.accent),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("· {coins}"))
+                                            .size(11.0)
+                                            .color(theme.text_tertiary),
+                                    );
+                                });
+                            });
+                        ui.add_space(4.0);
                     }
                     // Pou — ventana profesional Casa/Vestir/Jugar/Progreso (Scandinavian shell, playful)
                     {
@@ -540,17 +571,9 @@ pub(crate) fn draw_top_bar(
                     }
                 });
 
-                // ── Marca Grafito wordmark centered — Scandinavian calm ──
-                if ctx.screen_rect().width() > 700.0 {
-                    let center = bar_rect.center();
-                    ui.painter().text(
-                        center,
-                        Align2::CENTER_CENTER,
-                        "Grafito",
-                        egui::FontId::new(TYPE_BASE, egui::FontFamily::Proportional),
-                        theme.text_primary,
-                    );
-                }
+                // Marca Grafito ya está en la barra del sistema; no duplicar en el centro
+                let _ = bar_rect;
+                let _ = TYPE_BASE;
             });
         });
 
@@ -864,7 +887,10 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                     }
                 };
                 if !hint.is_empty() {
-                    ui.label(egui::RichText::new(hint).size(11.0).color(txt_dim));
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(hint).size(11.0).color(txt_dim))
+                            .truncate(),
+                    );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(

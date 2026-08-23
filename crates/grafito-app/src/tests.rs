@@ -1,6 +1,6 @@
 use glam::Vec3;
 
-const _: [(); 1] = [(); crate::app::DEFAULT_KEYBOARD_VISIBLE as usize];
+const _: [(); 0] = [(); crate::app::DEFAULT_KEYBOARD_VISIBLE as usize];
 const _: [(); 0] = [(); crate::app::DEFAULT_CONSTRUCTION_PROTOCOL_VISIBLE as usize];
 
 #[test]

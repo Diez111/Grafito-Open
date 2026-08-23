@@ -7,8 +7,8 @@ pub mod mascot;
 
 // Re-exportar tipos de mascota en la raíz para `grafito_profile::MascotConfig`
 pub use mascot::{
-    AvatarConfig, HouseTheme, MascotConfig, MascotMood, MascotSpecies, Outfit, OutfitLayer,
-    OutfitTier, Personality, Wardrobe, MAX_NAME,
+    AvatarConfig, DailyMission, FurnitureKind, HouseTheme, MascotConfig, MascotMood, MascotSpecies,
+    Outfit, OutfitLayer, OutfitTier, Personality, ShopItem, Wardrobe, MAX_NAME,
 };
 
 use serde::{Deserialize, Serialize};

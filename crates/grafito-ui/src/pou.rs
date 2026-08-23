@@ -704,6 +704,8 @@ fn room_wall_fill(theme: HouseTheme) -> Color32 {
         HouseTheme::Espacial => Color32::from_rgb(22, 24, 38),     // deep space #161826
         HouseTheme::Bosque => Color32::from_rgb(232, 245, 233),    // mint #E8F5E9
         HouseTheme::Minimal => Color32::from_rgb(250, 250, 249),   // Scandinavian #FAFAF9
+        HouseTheme::Retro => Color32::from_rgb(255, 248, 220),     // warm retro cream
+        HouseTheme::NocheEstudio => Color32::from_rgb(30, 28, 40), // dark study
     }
 }
 
@@ -713,6 +715,8 @@ fn room_floor_fill(theme: HouseTheme) -> Color32 {
         HouseTheme::Espacial => Color32::from_rgb(42, 46, 69),     // slate space
         HouseTheme::Bosque => Color32::from_rgb(168, 185, 160),    // sage wood
         HouseTheme::Minimal => Color32::from_rgb(232, 232, 230),   // stone #E8E8E6
+        HouseTheme::Retro => Color32::from_rgb(210, 175, 120),     // retro wood
+        HouseTheme::NocheEstudio => Color32::from_rgb(55, 50, 65), // dark wood
     }
 }
 
@@ -722,6 +726,8 @@ fn room_accent(theme: HouseTheme) -> Color32 {
         HouseTheme::Espacial => Color32::from_rgb(120, 140, 255),  // neon soft
         HouseTheme::Bosque => Color32::from_rgb(101, 119, 90),     // moss
         HouseTheme::Minimal => Color32::from_rgb(107, 122, 111),   // sage
+        HouseTheme::Retro => Color32::from_rgb(200, 120, 60),      // mustard
+        HouseTheme::NocheEstudio => Color32::from_rgb(255, 190, 90), // warm lamp
     }
 }
 
@@ -831,6 +837,41 @@ pub fn paint_mascot_room(
                 egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.35)),
             );
         }
+        HouseTheme::Retro => {
+            // patrón terrazo sutil
+            for (sx, sy, r) in [
+                (0.2, 0.2, 3.0),
+                (0.6, 0.18, 2.0),
+                (0.75, 0.3, 2.5),
+                (0.35, 0.35, 1.8),
+            ] {
+                painter.circle_filled(
+                    egui::pos2(
+                        rect.min.x + rect.width() * sx,
+                        rect.min.y + rect.height() * sy,
+                    ),
+                    r,
+                    egui::Color32::from_rgba_premultiplied(180, 120, 60, 14),
+                );
+            }
+        }
+        HouseTheme::NocheEstudio => {
+            // halo lámpara cálido
+            painter.circle_filled(
+                egui::pos2(rect.min.x + rect.width() * 0.5, rect.min.y + 28.0),
+                42.0,
+                egui::Color32::from_rgba_premultiplied(255, 200, 90, 10),
+            );
+            // estantería sutil
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.min.x + rect.width() * 0.65, rect.min.y + 42.0),
+                    egui::pos2(rect.max.x - 12.0, rect.min.y + 46.0),
+                ),
+                2.0,
+                egui::Color32::from_rgba_premultiplied(90, 70, 55, 55),
+            );
+        }
     }
 
     // Ventana — marco + vidrio + cruz + cortinas + alféizar
@@ -839,7 +880,7 @@ pub fn paint_mascot_room(
         egui::Vec2::new(68.0, 68.0),
     );
     let glass = match state.house_theme {
-        HouseTheme::Espacial => egui::Color32::from_rgb(18, 24, 48),
+        HouseTheme::Espacial | HouseTheme::NocheEstudio => egui::Color32::from_rgb(18, 24, 48),
         _ => egui::Color32::from_rgb(232, 244, 248),
     };
     // Sombra marco
@@ -871,6 +912,8 @@ pub fn paint_mascot_room(
         HouseTheme::Espacial => egui::Color32::from_rgb(60, 66, 110),
         HouseTheme::Bosque => egui::Color32::from_rgb(200, 220, 190),
         HouseTheme::Minimal => egui::Color32::from_rgb(240, 240, 238),
+        HouseTheme::Retro => egui::Color32::from_rgb(220, 180, 120),
+        HouseTheme::NocheEstudio => egui::Color32::from_rgb(70, 60, 85),
     };
     let left_curtain = vec![
         egui::pos2(win.min.x - 3.0, win.min.y - 2.0),
@@ -902,7 +945,7 @@ pub fn paint_mascot_room(
     painter.rect_filled(sill, 2.0, egui::Color32::from_rgb(210, 210, 208));
     painter.rect_stroke(sill, 2.0, egui::Stroke::new(1.0, theme.separator));
     // Detalle exterior: sol/luna
-    if state.house_theme == HouseTheme::Espacial {
+    if state.house_theme == HouseTheme::Espacial || state.house_theme == HouseTheme::NocheEstudio {
         painter.circle_filled(
             win.center() + egui::Vec2::new(10.0, -10.0),
             6.0,
@@ -992,7 +1035,7 @@ pub fn paint_mascot_room(
     }
 
     // Lámpara o planta pequeña (según tema)
-    if state.house_theme != HouseTheme::Espacial {
+    if state.house_theme != HouseTheme::Espacial && state.house_theme != HouseTheme::NocheEstudio {
         let pot_rect = egui::Rect::from_min_size(
             egui::pos2(rect.min.x + SPACE_LG + 82.0, rect.max.y - 30.0 - 18.0),
             egui::Vec2::new(18.0, 12.0),
