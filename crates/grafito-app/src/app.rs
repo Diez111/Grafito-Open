@@ -4029,6 +4029,8 @@ impl eframe::App for GrafitoApp {
                 ctx.screen_rect().height(),
             );
             let keyboard_height = keyboard_layout.height();
+            // Sincroniza nombre de usuario para header Mora personalizado
+            self.assistant.user_name = self.profile.display_name().to_owned();
             if geometry_utility_dock_available {
                 self.sync_assistant_for_frame(ctx);
                 if geometry_utility_dock {

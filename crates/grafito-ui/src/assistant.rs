@@ -316,6 +316,8 @@ pub struct AssistantPanelState {
     pub error: Option<String>,
     /// Pestaña seleccionada en la ventana Configuración unificada (0=Asistente, 1=Perfil).
     pub config_tab: usize,
+    /// Nombre del usuario para saludo personalizado en el header.
+    pub user_name: String,
 }
 
 impl Default for AssistantPanelState {
@@ -374,6 +376,7 @@ impl Default for AssistantPanelState {
             plugins: Vec::new(),
             error: None,
             config_tab: 0,
+            user_name: String::new(),
         }
     }
 }
@@ -1421,7 +1424,7 @@ pub fn draw_assistant_panel(
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -1437,7 +1440,7 @@ pub fn draw_assistant_panel(
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)))
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -2051,11 +2054,12 @@ fn draw_panel_contents(
                     theme.assistant_composer_border.gamma_multiply(0.6),
                 ))
                 .rounding(egui::Rounding {
-                    nw: crate::tokens::RADIUS_XL,
-                    ne: crate::tokens::RADIUS_XL,
+                    nw: crate::tokens::RADIUS_LG,
+                    ne: crate::tokens::RADIUS_LG,
                     sw: 0.0,
                     se: 0.0,
                 })
+                .outer_margin(egui::Margin::same(crate::tokens::SPACE_XS))
                 .inner_margin(egui::Margin::symmetric(
                     crate::tokens::SPACE_MD,
                     crate::tokens::SPACE_SM,
@@ -2614,14 +2618,19 @@ fn draw_assistant_header(
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.vertical(|ui| {
+                        let greeting = if state.user_name.trim().is_empty() {
+                            MORA_NAME.to_owned()
+                        } else {
+                            format!("Hola, {}", state.user_name.trim())
+                        };
                         ui.label(
-                            egui::RichText::new(MORA_NAME)
+                            egui::RichText::new(greeting)
                                 .color(theme.text_primary)
                                 .strong()
                                 .size(crate::tokens::TYPE_BASE),
                         );
                         ui.label(
-                            egui::RichText::new("Asistente matemático")
+                            egui::RichText::new(format!("{MORA_NAME} · Asistente matemático"))
                                 .color(theme.text_secondary)
                                 .size(crate::tokens::TYPE_XS),
                         );
@@ -2710,6 +2719,7 @@ fn draw_assistant_composer(
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator))
         .rounding(crate::tokens::RADIUS_LG)
+        .outer_margin(egui::Margin::same(crate::tokens::SPACE_XS))
         .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
             ui.vertical(|ui| {

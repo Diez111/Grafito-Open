@@ -393,7 +393,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     .default_width(220.0)
     .min_width(160.0)
     .resizable(true)
-    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6))))
     .show(ctx, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {

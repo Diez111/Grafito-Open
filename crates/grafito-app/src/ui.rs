@@ -298,13 +298,13 @@ pub(crate) fn draw_top_bar(
     let side_fill = theme.sidebar_bg;
     let sep_col = theme.separator;
 
-    // ── Scandinavian single bar — 48 px, item_spacing 16, button_padding 16×8, inner 12×8, RADIUS 8/12 ──
+    // ── Scandinavian single bar — 48 px, hairline 10% solo abajo
     egui::TopBottomPanel::top("top_bar")
         .exact_height(TOP_BAR_HEIGHT)
         .frame(
             egui::Frame::none()
                 .fill(bar_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col))
+                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
                 .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
@@ -342,8 +342,8 @@ pub(crate) fn draw_top_bar(
                     draw_help_menu(ui, app);
                 }
 
-                // ── Toolbar inline — agrupado y con overflow controlado ──
-                ui.separator();
+                // ── Toolbar — aire, scroll horizontal si no entra
+                ui.add_space(SPACE_MD);
                 {
                     let mut groups: Vec<ToolGroupId> =
                         app.perspective.layout().visible_tool_groups.to_vec();
@@ -351,13 +351,16 @@ pub(crate) fn draw_top_bar(
                     if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
                         groups.push(ToolGroupId::ThreeD);
                     }
-                    // Limita grupos en top bar para evitar desborde; el resto va al menú Herramientas
-                    if ui.available_width() < 380.0 {
-                        groups.truncate(2);
-                    } else if ui.available_width() < 520.0 {
-                        groups.truncate(3);
-                    }
-                    grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
+                    // Reserva para controles derecha (~260px) y evita empujar fuera de pantalla
+                    let avail_for_toolbar = (ui.available_width() - 280.0).clamp(140.0, 520.0);
+                    egui::ScrollArea::horizontal()
+                        .id_salt("top_toolbar_scroll")
+                        .auto_shrink([true, false])
+                        .show(ui, |ui| {
+                            // Fuerza ancho mínimo para que ScrollArea sepa cuando scrollear
+                            ui.set_min_width(avail_for_toolbar);
+                            grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
+                        });
                 }
 
                 // ── Right controls — Pou habitáculo al lado del toggle tema ──
@@ -602,7 +605,7 @@ pub(crate) fn draw_top_bar(
             .frame(
                 egui::Frame::none()
                     .fill(side_fill)
-                    .stroke(egui::Stroke::new(1.0, sep_col)),
+                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6))),
             )
             .show(ctx, |ui| {
                 #[cfg(feature = "profile")]
@@ -818,7 +821,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
     let txt_dim = theme.text_tertiary;
     let _txt_col = theme.text_primary;
 
-    // ── INPUT BAR ──
+    // ── INPUT BAR — hairline 10% (no negro)
     if show_input {
         let mut should_exec = false;
         egui::TopBottomPanel::bottom("input_bar")
@@ -826,7 +829,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
             .frame(
                 egui::Frame::none()
                     .fill(theme.input_bar_bg)
-                    .stroke(egui::Stroke::new(1.0, sep_col))
+                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
             )
             .show(ctx, |ui| {
@@ -855,13 +858,13 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
         }
     }
 
-    // ── STATUS BAR ──
+    // ── STATUS BAR — hairline
     egui::TopBottomPanel::bottom("status_bar")
         .exact_height(24.0)
         .frame(
             egui::Frame::none()
                 .fill(theme.status_bar_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col))
+                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6)))
                 .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
         )
         .show(ctx, |ui| {

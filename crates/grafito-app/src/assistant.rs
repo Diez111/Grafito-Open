@@ -450,6 +450,7 @@ impl GrafitoApp {
             .and_then(|branch| branch.last_study_epoch)
             .map(|last| grafito_profile::time_ago(last, epoch))
             .unwrap_or_default();
+        self.assistant.user_name = self.profile.display_name().to_owned();
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
