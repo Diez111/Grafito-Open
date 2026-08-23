@@ -298,7 +298,7 @@ pub(crate) fn draw_top_bar(
     let sep_col = theme.separator;
 
     // ── Scandinavian single bar 40px — sin barra negra, altura compacta equilibrada
-    egui::TopBottomPanel::top("top_bar")
+    let top_bar_response = egui::TopBottomPanel::top("top_bar")
         .exact_height(40.0)
         .frame(
             egui::Frame::none()
@@ -557,6 +557,18 @@ pub(crate) fn draw_top_bar(
                 });
             });
         });
+    // Cubre separador residual negro (fallback si show_separator_line no bastó)
+    {
+        let top_rect = top_bar_response.response.rect;
+        ctx.layer_painter(egui::LayerId::background()).rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(top_rect.min.x, top_rect.max.y - 1.0),
+                egui::pos2(top_rect.max.x, top_rect.max.y + 2.0),
+            ),
+            0.0,
+            bar_fill,
+        );
+    }
     // ── LEFT SIDEBAR (56px, labeled tabs) ──
     // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
