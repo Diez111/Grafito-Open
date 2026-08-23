@@ -9,7 +9,7 @@ use grafito_core::{
 use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
-use grafito_ui::tokens::{RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, TYPE_BASE, TYPE_SM};
+use grafito_ui::tokens::{RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, TYPE_BASE, TYPE_LG, TYPE_SM};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -3096,6 +3096,215 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                     }
                 });
 
+        });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Perspectiva Mascota Pou (Fase Mascota)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Panel izquierdo de la perspectiva Mascota — habitáculo de Pou.
+/// Único lugar donde vive `mascot_picker_ui` (fuera de Configuración).
+#[allow(dead_code)]
+pub(crate) fn draw_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    egui::SidePanel::left("mascota_panel")
+        .default_width(280.0)
+        .min_width(220.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("Mascota Pou")
+                        .color(accent)
+                        .size(15.0)
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if action_icon_button(
+                        ui,
+                        Icon::Close,
+                        theme.text_secondary,
+                        "Cerrar panel mascota",
+                    )
+                    .clicked()
+                    {
+                        app.left_drawer_open = false;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .id_salt("mascota_panel_content")
+                .show(ui, |ui| {
+                    egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .rounding(egui::Rounding::same(RADIUS_LG))
+                        .inner_margin(egui::Margin::same(SPACE_SM))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new("Pou")
+                                        .color(theme.text_primary)
+                                        .size(TYPE_LG)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new("Tu compañero de estudio")
+                                        .color(theme.text_secondary)
+                                        .size(TYPE_SM),
+                                );
+                                ui.add_space(4.0);
+                            });
+                        });
+                    ui.add_space(SPACE_MD);
+                    // ——— Personalización Pou (único lugar para mascot_picker_ui) ———
+                    egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .rounding(egui::Rounding::same(RADIUS_LG))
+                        .stroke(egui::Stroke::new(1.0, theme.separator))
+                        .inner_margin(egui::Margin::same(SPACE_SM))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new("Personalizar a Pou")
+                                    .size(TYPE_SM)
+                                    .strong()
+                                    .color(theme.text_primary),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Nombre, especie, personalidad, casa y ropa. Configuración solo guarda tu nombre.",
+                                )
+                                .size(TYPE_SM)
+                                .color(theme.text_tertiary),
+                            );
+                            ui.add_space(SPACE_SM);
+                            ui.separator();
+                            ui.add_space(SPACE_SM);
+                            let level = app.profile.level;
+                            let time = ctx.input(|i| i.time);
+                            let mascot = app.profile.mascot_mut_or_default();
+                            let changed =
+                                grafito_ui::pou::mascot_picker_ui(ui, mascot, level, time, theme);
+                            if changed {
+                                let mascot_clone = mascot.clone();
+                                app.profile.mascot = Some(mascot_clone);
+                                if let Err(err) = std::fs::write(
+                                    crate::utils::profile_path(),
+                                    serde_json::to_string_pretty(&app.profile)
+                                        .unwrap_or_default(),
+                                ) {
+                                    log::warn!("No se pudo guardar perfil: {}", err);
+                                }
+                            }
+                        });
+                    ui.add_space(SPACE_MD);
+                    ui.label(
+                        egui::RichText::new(
+                            "Pou te acompaña mientras explorás. Perspectiva minimal: sólo Mover y lienzo pequeño para no distraer.",
+                        )
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                    );
+                    ui.add_space(SPACE_SM);
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::Button::new(
+                                egui::RichText::new("Saludar a Pou 👋")
+                                    .color(theme.accent)
+                                    .strong(),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        app.notify(
+                            "¡Pou te saluda! Seguí construyendo ✨",
+                            grafito_ui::toast::ToastKind::Info,
+                        );
+                    }
+                    ui.add_space(SPACE_MD);
+                    draw_object_cards_where(
+                        ui,
+                        app,
+                        "Recuerdos con Pou",
+                        "Aún sin objetos. Creá un punto \"Pou\" para empezar.",
+                        |object| object.label().contains("Pou"),
+                    );
+                });
+        });
+}
+
+/// Panel derecho de la perspectiva Mascota — estado y cuidados.
+#[allow(dead_code)]
+pub(crate) fn draw_right_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
+    let theme = current_theme(ctx);
+    egui::SidePanel::right("right_mascota")
+        .default_width(280.0)
+        .min_width(220.0)
+        .resizable(true)
+        .frame(
+            egui::Frame::none()
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
+        )
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            draw_right_drawer_header(ui, app, "Pou — estado", theme.accent);
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical()
+                .id_salt("right_mascota_content")
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Pou está tranquilo.")
+                            .color(theme.text_primary)
+                            .size(TYPE_BASE),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Cuidados: este panel mostrará hambre, energía y ánimo. \
+                             Por ahora es un placeholder; futuras iteraciones conectarán con la simulación completa.",
+                        )
+                        .color(theme.text_secondary)
+                        .size(TYPE_SM),
+                    );
+                    ui.add_space(SPACE_SM);
+                    if ui
+                        .button("Alimentar (próximamente)")
+                        .on_hover_text("Función futura: alimentar a Pou")
+                        .clicked()
+                    {
+                        app.notify(
+                            "Pou agradece el gesto — la alimentación llegará pronto",
+                            grafito_ui::toast::ToastKind::Info,
+                        );
+                    }
+                    ui.add_space(SPACE_SM);
+                    ui.separator();
+                    ui.add_space(SPACE_SM);
+                    ui.label(
+                        egui::RichText::new("Atajo: Ctrl+Shift+M")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_SM)
+                            .monospace(),
+                    );
+                    ui.label(
+                        egui::RichText::new("Numérico Ctrl+Shift+0 comparte con Examen (ver tradeoff en Perspective::shortcut_number).")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_SM),
+                    );
+                });
         });
 }
 

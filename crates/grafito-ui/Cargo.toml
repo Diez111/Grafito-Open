@@ -12,6 +12,7 @@ grafito-core.workspace = true
 grafito-geometry.workspace = true
 grafito-command.workspace = true
 grafito-assistant-types.workspace = true
+grafito-profile.workspace = true
 
 egui.workspace = true
 log.workspace = true

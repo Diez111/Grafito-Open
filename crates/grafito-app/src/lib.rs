@@ -49,7 +49,7 @@ pub enum ViewMode {
 // Sistema de Perspectivas (estilo GeoGebra Perspectives)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Las diez perspectivas de Grafito, análogas a las *Perspectives* de GeoGebra.
+/// Las once perspectivas de Grafito, análogas a las *Perspectives* de GeoGebra.
 ///
 /// Cada perspectiva define un `layout` que controla el modo del canvas, los
 /// paneles visibles, los grupos de herramientas de la toolbar, el teclado
@@ -77,11 +77,13 @@ pub enum Perspective {
     DataAnalysis,
     /// Modo examen restringido.
     Exam,
+    /// Mascota Pou interactiva — acompañante lúdico de baja fricción.
+    Mascota,
 }
 
 impl Perspective {
     /// Devuelve todas las perspectivas en orden, útil para construir selectores.
-    pub const ALL: [Perspective; 10] = [
+    pub const ALL: [Perspective; 11] = [
         Perspective::Geometry2D,
         Perspective::Geometry3D,
         Perspective::AlgebraCas,
@@ -92,6 +94,7 @@ impl Perspective {
         Perspective::Dynamics,
         Perspective::DataAnalysis,
         Perspective::Exam,
+        Perspective::Mascota,
     ];
 
     /// Nombre largo, legible para el usuario.
@@ -107,6 +110,7 @@ impl Perspective {
             Perspective::Dynamics => "Dinámica",
             Perspective::DataAnalysis => "Análisis de datos",
             Perspective::Exam => "Examen",
+            Perspective::Mascota => "Mascota",
         }
     }
 
@@ -123,10 +127,22 @@ impl Perspective {
             Perspective::Dynamics => "Dn",
             Perspective::DataAnalysis => "D",
             Perspective::Exam => "E",
+            Perspective::Mascota => "Pou",
         }
     }
 
     /// Atajo de teclado asociado (`Ctrl+Shift+N`) donde N es 1..9,0.
+    ///
+    /// # Tradeoff 11 perspectivas / 10 dígitos
+    /// Con 11 perspectivas y sólo 10 teclas numéricas (1..9,0) la colisión
+    /// es inevitable. Se elige **duplicar `0`** para `Exam` y `Mascota`:
+    /// ambos son modos especiales que no se usan simultáneamente (examen
+    /// restringido vs. acompañante lúdico). `Ctrl+Shift+0` abre `Exam` por
+    /// la tabla `NUM_KEYS` en `app.rs`; `Mascota` es accesible por menú
+    /// Perspectivas y por el atajo alternativo `Ctrl+Shift+M` (letra `M`)
+    /// manejado aparte en `app.rs`. Alternativas descartadas:
+    /// - Reasignar `DataAnalysis` de `9` a otro dígito: rompe memoria muscular 1..9.
+    /// - Cambiar `shortcut_number` a `char`/`Key`: mayor churn para beneficio mínimo.
     pub const fn shortcut_number(&self) -> u8 {
         match self {
             Perspective::Geometry2D => 1,
@@ -139,6 +155,7 @@ impl Perspective {
             Perspective::Dynamics => 8,
             Perspective::DataAnalysis => 9,
             Perspective::Exam => 0,
+            Perspective::Mascota => 0, // duplicado intencional — ver doc superior
         }
     }
 
@@ -155,6 +172,7 @@ impl Perspective {
             Perspective::Dynamics => CanvasMode::D3,
             Perspective::DataAnalysis => CanvasMode::D2,
             Perspective::Exam => CanvasMode::D2,
+            Perspective::Mascota => CanvasMode::SmallD2,
         }
     }
 
@@ -294,6 +312,17 @@ impl Perspective {
                 show_input_bar: true,
                 default_tool: Tool::Select,
             },
+            Perspective::Mascota => PerspectiveLayout {
+                title: Self::title(self),
+                icon: Self::short_label(self),
+                canvas_mode: CanvasMode::SmallD2,
+                left_panel: LeftPanelContent::Mascota,
+                right_panel: Some(RightPanelContent::Mascota),
+                visible_tool_groups: &[G::Move],
+                show_math_keyboard: false,
+                show_input_bar: true,
+                default_tool: Tool::Select,
+            },
         }
     }
 }
@@ -417,6 +446,8 @@ pub enum LeftPanelContent {
     Attractor,
     /// Herramientas de construcción.
     Tools,
+    /// Mascota Pou — panel de compañero lúdico.
+    Mascota,
 }
 
 impl LeftPanelContent {
@@ -424,14 +455,14 @@ impl LeftPanelContent {
     /// armonizados: 0=Álgebra, 1=Herram., 2=CAS, 3=Tabla, 4=Hoja, 5=Vista).
     /// El tab activo elige el drawer genérico; la perspectiva activa decide
     /// si el drawer muestra contenido específico (Stats en Tabla, Complejos
-    /// en Álgebra, Atractores en Herram.).
+    /// en Álgebra, Atractores en Herram., Mascota en Herram.).
     pub const fn default_sidebar_tab(self) -> usize {
         match self {
             LeftPanelContent::Algebra
             | LeftPanelContent::AlgebraAndCas
             | LeftPanelContent::Complex
             | LeftPanelContent::Stats => 0,
-            LeftPanelContent::Tools | LeftPanelContent::Attractor => 1,
+            LeftPanelContent::Tools | LeftPanelContent::Attractor | LeftPanelContent::Mascota => 1,
             LeftPanelContent::Cas => 2,
         }
     }
@@ -452,6 +483,8 @@ pub enum RightPanelContent {
     Parameters,
     /// Animación trigonométrica (círculo unitario).
     TrigAnimation,
+    /// Panel derecho de la Mascota Pou — estado y cuidados.
+    Mascota,
 }
 
 /// Geometry 3D supports one dock instead of two competing right-side columns.

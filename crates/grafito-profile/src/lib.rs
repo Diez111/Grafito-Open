@@ -3,6 +3,13 @@
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
 pub mod exam;
+pub mod mascot;
+
+// Re-exportar tipos de mascota en la raíz para `grafito_profile::MascotConfig`
+pub use mascot::{
+    AvatarConfig, HouseTheme, MascotConfig, MascotMood, MascotSpecies, Outfit, OutfitLayer,
+    OutfitTier, Personality, Wardrobe, MAX_NAME,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +63,7 @@ pub struct ExamResult {
 }
 
 /// Perfil completo del estudiante (memoria del usuario).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudentProfile {
     pub name: String,
     pub level: u32,
@@ -68,6 +75,30 @@ pub struct StudentProfile {
     pub streak: u32,
     /// Mejor racha histórica de aciertos consecutivos.
     pub best_streak: u32,
+    /// Avatar y personalización visual (migración: default si no existe).
+    #[serde(default)]
+    pub avatar: AvatarConfig,
+    /// Mascota directa (compatibilidad con spec: duplicado de avatar.mascot).
+    /// Se mantiene sincronizada con `avatar.mascot` en helpers.
+    #[serde(default)]
+    pub mascot: Option<MascotConfig>,
+}
+
+impl Default for StudentProfile {
+    fn default() -> Self {
+        Self {
+            name: "Estudiante".to_string(),
+            level: 1,
+            xp: 0,
+            branches: Vec::new(),
+            history: Vec::new(),
+            exams: Vec::new(),
+            streak: 0,
+            best_streak: 0,
+            avatar: AvatarConfig::default(),
+            mascot: None,
+        }
+    }
 }
 
 impl StudentProfile {
@@ -76,6 +107,28 @@ impl StudentProfile {
             name: name.into(),
             ..Self::default()
         }
+    }
+
+    /// Devuelve mascota mutable, creando una por defecto si no existe.
+    /// Sincroniza `self.mascot` y `self.avatar.mascot` para compatibilidad.
+    pub fn mascot_mut_or_default(&mut self) -> &mut MascotConfig {
+        // Prioriza avatar.mascot si existe, si no mascot directo, si no crea.
+        if self.avatar.mascot.is_none() && self.mascot.is_some() {
+            self.avatar.mascot = self.mascot.clone();
+        }
+        if self.mascot.is_none() && self.avatar.mascot.is_some() {
+            self.mascot = self.avatar.mascot.clone();
+        }
+        if self.avatar.mascot.is_none() {
+            let cfg = MascotConfig::default();
+            self.avatar.mascot = Some(cfg.clone());
+            self.mascot = Some(cfg);
+        }
+        // Mantener ambos sincronizados (avatar es fuente de verdad para UI)
+        if self.mascot.is_none() {
+            self.mascot = self.avatar.mascot.clone();
+        }
+        self.avatar.mascot.as_mut().unwrap()
     }
 
     /// Asegura que la rama exista; devuelve su índice (MAX si hay límite).
@@ -134,6 +187,15 @@ impl StudentProfile {
             detail: format!("{} {branch_id}", if correct { "acierto" } else { "fallo" }),
         });
         self.level = (self.xp / 250).saturating_add(1) as u32;
+        // Sincronizar evolución de mascota si existe
+        if let Some(m) = self.avatar.mascot.as_mut() {
+            let covered = self.branches.iter().filter(|b| b.covered).count() as u32;
+            m.sync_evolution(self.level, covered);
+        }
+        if let Some(m) = self.mascot.as_mut() {
+            let covered = self.branches.iter().filter(|b| b.covered).count() as u32;
+            m.sync_evolution(self.level, covered);
+        }
     }
 
     pub fn record_exam(&mut self, result: ExamResult) {
@@ -180,6 +242,30 @@ impl StudentProfile {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         pending
+    }
+
+    pub fn display_name(&self) -> &str {
+        let d = self.avatar.display_name.trim();
+        if !d.is_empty() {
+            &self.avatar.display_name
+        } else {
+            &self.name
+        }
+    }
+    pub fn set_display_name(&mut self, name: &str) -> Result<(), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("El nombre no puede estar vacío".to_string());
+        }
+        if trimmed.chars().count() > 32 {
+            return Err("El nombre no puede superar 32 caracteres".to_string());
+        }
+        self.name = trimmed.to_string();
+        self.avatar.display_name = trimmed.to_string();
+        if self.avatar.seed.trim().is_empty() {
+            self.avatar.seed = trimmed.to_string();
+        }
+        Ok(())
     }
 
     /// Resumen comprimido para el prompt del tutor (memoria del usuario).
@@ -365,5 +451,53 @@ mod tests {
             profile.record_outcome("algebra", "Álgebra", year, true);
         }
         assert!(profile.history.len() <= MAX_HISTORY_EVENTS);
+    }
+
+    #[test]
+    fn mascot_mut_or_default_creates_and_syncs() {
+        let mut profile = StudentProfile::new("Masc");
+        profile.mascot = None;
+        profile.avatar.mascot = None;
+        let m = profile.mascot_mut_or_default();
+        m.name = "TestPou".to_string();
+        assert_eq!(profile.avatar.mascot.as_ref().unwrap().name, "TestPou");
+        assert!(profile.mascot.is_some());
+        // Segunda llamada no duplica
+        let _ = profile.mascot_mut_or_default();
+        assert!(profile.avatar.mascot.is_some());
+    }
+
+    #[test]
+    fn profile_migration_defaults_mascot_fields() {
+        let json = r#"{"name":"Old","level":1,"xp":0,"branches":[],"history":[],"exams":[],"streak":0,"best_streak":0}"#;
+        let restored: StudentProfile = serde_json::from_str(json).expect("migration");
+        assert!(restored.avatar.mascot.is_some() || restored.mascot.is_none());
+        // Debe poder serializar de nuevo sin perder datos
+        let json2 = serde_json::to_string(&restored).unwrap();
+        assert!(json2.contains("Old"));
+    }
+
+    #[test]
+    fn mascot_config_validation_and_sanitized() {
+        let mut m = MascotConfig::default();
+        assert!(m.validate().is_ok());
+        m.name = "a".repeat(MAX_NAME + 1);
+        assert!(m.validate().is_err());
+        m.name = "  Hola  ".to_string();
+        assert_eq!(m.sanitized_name(), "Hola");
+        m.name = "".to_string();
+        assert_eq!(m.sanitized_name(), "Pou");
+    }
+
+    #[test]
+    fn outfit_tier_and_wardrobe_unlock() {
+        assert_eq!(OutfitTier::from_level(3), OutfitTier::Primary);
+        assert_eq!(OutfitTier::from_level(10), OutfitTier::Secondary);
+        assert_eq!(OutfitTier::from_level(15), OutfitTier::University);
+        assert_eq!(OutfitTier::from_level(30), OutfitTier::Master);
+        let mut w = Wardrobe::default();
+        w.unlock_for_level(6);
+        assert!(w.is_owned("cap_prim"));
+        assert!(w.is_owned("hat_sec"));
     }
 }

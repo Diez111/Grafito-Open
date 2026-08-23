@@ -10,8 +10,11 @@ use egui::{Align2, Color32};
 use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
-use grafito_ui::tokens::RADIUS_MD;
-use grafito_ui::toolbar::{ToolGroupId, TOOLBAR_PANEL_HEIGHT};
+use grafito_ui::tokens::{
+    RADIUS_MD, SPACE_MD, SPACE_SM, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
+    SPACING_MINIMAL_Y, TOP_BAR_HEIGHT, TYPE_BASE,
+};
+use grafito_ui::toolbar::ToolGroupId;
 use grafito_ui::Tool;
 
 pub(crate) struct CommandInputResponse {
@@ -291,23 +294,27 @@ pub(crate) fn draw_top_bar(
 
     let theme = current_theme(ctx);
     let accent = theme.accent;
-    let bar_fill = theme.toolbar_bg;
+    let bar_fill = theme.panel_bg;
     let side_fill = theme.sidebar_bg;
     let sep_col = theme.separator;
-    let _txt_col = theme.text_primary;
 
-    // ── MENU BAR + QUICK CONTROLS ──
-    egui::TopBottomPanel::top("menu_bar")
-        .exact_height(38.0)
+    // ── Scandinavian single bar — 48 px, item_spacing 16, button_padding 16×8, inner 12×8, RADIUS 8/12 ──
+    egui::TopBottomPanel::top("top_bar")
+        .exact_height(TOP_BAR_HEIGHT)
         .frame(
             egui::Frame::none()
                 .fill(bar_fill)
                 .stroke(egui::Stroke::new(1.0, sep_col))
-                .inner_margin(egui::Margin::symmetric(10.0, 5.0)),
+                .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
-            let compact_top_chrome = top_chrome_uses_overflow(ctx.screen_rect().width());
+            ui.spacing_mut().item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
+            ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
+            let bar_rect = ui.max_rect();
             egui::menu::bar(ui, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
+                ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
+                let compact_top_chrome = top_chrome_uses_overflow(ctx.screen_rect().width());
                 if compact_top_chrome {
                     draw_file_menu(ui, app);
                     draw_edit_menu(ui, app);
@@ -334,58 +341,26 @@ pub(crate) fn draw_top_bar(
                     }
                     draw_help_menu(ui, app);
                 }
+
+                // ── Toolbar inline — sin Frame duplicado, comparte el Frame del top bar ──
+                ui.separator();
+                {
+                    let mut groups: Vec<ToolGroupId> =
+                        app.perspective.layout().visible_tool_groups.to_vec();
+                    let is_3d = app.current_view == ViewMode::D3;
+                    if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
+                        groups.push(ToolGroupId::ThreeD);
+                    }
+                    grafito_ui::toolbar::toolbar_inline(ui, &mut app.current_tool, &groups);
+                }
+
+                // ── Right controls — Pou habitáculo al lado del toggle tema ──
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(response) =
-                        draw_assistant_reopen_control(ui, &mut app.assistant_visible, accent)
-                    {
-                        if response.clicked() {
-                            app.open_assistant_workspace();
-                        }
-                    }
-                    // El cambio de perspectiva vive en el menú superior; el
-                    // sidebar queda dedicado a paneles de trabajo.
-                    if ui.available_width() > 700.0 {
-                        ui.label(
-                            egui::RichText::new("Grafito")
-                                .color(accent)
-                                .strong()
-                                .size(14.0),
-                        );
-                        ui.add_space(4.0);
-                    }
-                    if action_icon_button(
-                        ui,
-                        if app.dark_mode { Icon::Sun } else { Icon::Moon },
-                        accent,
-                        if app.dark_mode {
-                            "Activar tema claro"
-                        } else {
-                            "Activar tema oscuro"
-                        },
-                    )
-                    .clicked()
-                    {
-                        app.dark_mode = !app.dark_mode;
-                        if app.dark_mode {
-                            DARK.apply(ui.ctx());
-                        } else {
-                            LIGHT.apply(ui.ctx());
-                        }
-                    }
-                    if action_icon_button(
-                        ui,
-                        Icon::Whiteboard,
-                        if app.whiteboard_open {
-                            accent
-                        } else {
-                            grafito_ui::theme::current_theme(ui.ctx()).text_secondary
-                        },
-                        "Pizarra libre (dibujo tipo Excalidraw)",
-                    )
-                    .clicked()
-                    {
-                        app.whiteboard_open = !app.whiteboard_open;
-                    }
+                    ui.spacing_mut().item_spacing =
+                        egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
+                    ui.spacing_mut().button_padding =
+                        egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
+
                     if show_right_drawer_toggle
                         && action_icon_button(
                             ui,
@@ -401,29 +376,182 @@ pub(crate) fn draw_top_bar(
                     {
                         app.right_drawer_open = !app.right_drawer_open;
                     }
+                    if action_icon_button(
+                        ui,
+                        Icon::Whiteboard,
+                        if app.whiteboard_open {
+                            accent
+                        } else {
+                            grafito_ui::theme::current_theme(ui.ctx()).text_secondary
+                        },
+                        "Pizarra libre (dibujo tipo Excalidraw)",
+                    )
+                    .clicked()
+                    {
+                        app.whiteboard_open = !app.whiteboard_open;
+                    }
+                    // Toggle tema Sun/Moon — Scandinavian calm, visible con fondo (panel/button_bg + borde separator)
+                    {
+                        let theme_toggle_bg = theme.button_bg;
+                        let theme_toggle_hover = theme.button_hover;
+                        let is_dark = app.dark_mode;
+                        let toggle_icon = if is_dark { Icon::Sun } else { Icon::Moon };
+                        let toggle_tip = if is_dark {
+                            "Activar tema claro"
+                        } else {
+                            "Activar tema oscuro"
+                        };
+                        let (rect, response) =
+                            ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+                        let response = response.on_hover_text(toggle_tip);
+                        let bg = if response.hovered() {
+                            theme_toggle_hover
+                        } else {
+                            theme_toggle_bg
+                        };
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(rect, RADIUS_MD, bg);
+                            ui.painter().rect_stroke(
+                                rect,
+                                RADIUS_MD,
+                                egui::Stroke::new(1.0, theme.separator),
+                            );
+                            draw_icon(ui.painter(), rect.shrink(3.0), toggle_icon, accent);
+                        }
+                        response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, toggle_tip)
+                        });
+                        if response.clicked() {
+                            app.dark_mode = !app.dark_mode;
+                            if app.dark_mode {
+                                DARK.apply(ui.ctx());
+                            } else {
+                                LIGHT.apply(ui.ctx());
+                            }
+                        }
+                    }
+                    // Pou — ventana profesional Casa/Vestir/Jugar/Progreso (Scandinavian shell, playful)
+                    {
+                        let is_open = app.show_pou_window;
+                        let bg = if is_open {
+                            theme.accent.gamma_multiply(0.14)
+                        } else {
+                            theme.button_bg
+                        };
+                        let hover_bg = if is_open {
+                            theme.accent.gamma_multiply(0.22)
+                        } else {
+                            theme.button_hover
+                        };
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+                        let resp = resp.on_hover_text("Pou — Casa / Vestir / Jugar / Progreso");
+                        let hovered = resp.hovered();
+                        let cur_bg = if hovered { hover_bg } else { bg };
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(rect, RADIUS_MD, cur_bg);
+                            ui.painter().rect_stroke(
+                                rect,
+                                RADIUS_MD,
+                                egui::Stroke::new(
+                                    1.0,
+                                    if is_open {
+                                        theme.accent
+                                    } else {
+                                        theme.separator
+                                    },
+                                ),
+                            );
+                            draw_icon(
+                                ui.painter(),
+                                rect.shrink(3.0),
+                                Icon::Pou,
+                                if is_open {
+                                    theme.accent
+                                } else {
+                                    theme.text_secondary
+                                },
+                            );
+                        }
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                "Pou — habitáculo",
+                            )
+                        });
+                        if resp.clicked() {
+                            app.show_pou_window = !app.show_pou_window;
+                            if app.show_pou_window {
+                                app.pou_tab = crate::app::PouTab::Casa;
+                            }
+                        }
+                    }
+                    // Configuración — solo nombre (Configuración minimalista)
+                    {
+                        let is_open = app.show_mascot_config;
+                        let bg = if is_open {
+                            theme.accent.gamma_multiply(0.14)
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
+                        let resp = resp.on_hover_text("Personalizar Pou — Configuración");
+                        let hovered = resp.hovered();
+                        let cur_bg = if hovered { theme.button_hover } else { bg };
+                        if ui.is_rect_visible(rect) {
+                            if hovered || is_open {
+                                ui.painter().rect_filled(rect, RADIUS_MD, cur_bg);
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    RADIUS_MD,
+                                    egui::Stroke::new(
+                                        1.0,
+                                        if is_open {
+                                            theme.accent
+                                        } else {
+                                            theme.separator
+                                        },
+                                    ),
+                                );
+                            }
+                            draw_icon(
+                                ui.painter(),
+                                rect.shrink(3.0),
+                                Icon::Settings,
+                                if is_open {
+                                    theme.accent
+                                } else {
+                                    theme.text_secondary
+                                },
+                            );
+                        }
+                        if resp.clicked() {
+                            app.show_mascot_config = !app.show_mascot_config;
+                        }
+                    }
+                    if let Some(response) =
+                        draw_assistant_reopen_control(ui, &mut app.assistant_visible, accent)
+                    {
+                        if response.clicked() {
+                            app.open_assistant_workspace();
+                        }
+                    }
                 });
-            });
-        });
 
-    // ── TOOLBAR (horizontal, with dropdown groups) ──
-    egui::TopBottomPanel::top("toolbar_panel")
-        .exact_height(TOOLBAR_PANEL_HEIGHT)
-        .frame(
-            egui::Frame::none()
-                .fill(theme.toolbar_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
-        )
-        .show(ctx, |ui| {
-            #[cfg(feature = "profile")]
-            puffin::profile_scope!("ui_toolbar");
-            // Filtra los grupos de herramientas según la perspectiva activa.
-            let mut groups: Vec<ToolGroupId> =
-                app.perspective.layout().visible_tool_groups.to_vec();
-            let is_3d = app.current_view == ViewMode::D3;
-            if is_3d && !groups.contains(&ToolGroupId::ThreeD) {
-                groups.push(ToolGroupId::ThreeD);
-            }
-            grafito_ui::toolbar::toolbar_filtered(ui, &mut app.current_tool, &groups);
+                // ── Marca Grafito wordmark centered — Scandinavian calm ──
+                if ctx.screen_rect().width() > 700.0 {
+                    let center = bar_rect.center();
+                    ui.painter().text(
+                        center,
+                        Align2::CENTER_CENTER,
+                        "Grafito",
+                        egui::FontId::new(TYPE_BASE, egui::FontFamily::Proportional),
+                        theme.text_primary,
+                    );
+                }
+            });
         });
 
     // ── LEFT SIDEBAR (56px, labeled tabs) ──

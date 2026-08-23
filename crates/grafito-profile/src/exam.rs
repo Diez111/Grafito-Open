@@ -101,6 +101,34 @@ pub fn mini_exam_result(branch_id: &str, epoch: u64, correct: u32, total: u32) -
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Examen de salto (jump exam) — permite saltar de nivel si se domina el tier.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rama asociada al examen de salto según nivel.
+/// Mapea tier educativo a rama representativa.
+pub fn jump_exam_branch_id(level: u32) -> String {
+    match level {
+        1..=5 => "functions".to_string(),  // Primary → funciones básicas
+        6..=12 => "algebra".to_string(),   // Secondary → álgebra
+        13..=20 => "calculus".to_string(), // University → cálculo
+        _ => "complex".to_string(),        // Master → complejos
+    }
+}
+
+/// Preguntas del examen de salto para un nivel dado.
+/// Reutiliza el banco de mini-exámenes de la rama correspondiente.
+pub fn jump_exam_questions(level: u32) -> Vec<String> {
+    let branch = jump_exam_branch_id(level);
+    mini_exam_questions(&branch)
+}
+
+/// Corrige una respuesta del examen de salto.
+pub fn jump_exam_grade(level: u32, index: usize, answer: &str) -> bool {
+    let branch = jump_exam_branch_id(level);
+    mini_exam_grade(&branch, index, answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +165,22 @@ mod tests {
     fn result_passes_only_at_two_thirds_or_more() {
         assert!(mini_exam_result("algebra", 1, 2, 3).passed);
         assert!(!mini_exam_result("algebra", 1, 1, 3).passed);
+    }
+
+    #[test]
+    fn jump_exam_branch_maps_level_to_branch() {
+        assert_eq!(jump_exam_branch_id(3), "functions");
+        assert_eq!(jump_exam_branch_id(8), "algebra");
+        assert_eq!(jump_exam_branch_id(15), "calculus");
+        assert_eq!(jump_exam_branch_id(25), "complex");
+    }
+
+    #[test]
+    fn jump_exam_questions_and_grade_delegate_correctly() {
+        let qs = jump_exam_questions(15);
+        assert_eq!(qs.len(), 3);
+        assert!(jump_exam_grade(15, 0, "2x")); // calculus tier
+        assert!(jump_exam_grade(3, 1, "2")); // functions tier → "2"
+        assert!(!jump_exam_grade(3, 0, "99"));
     }
 }

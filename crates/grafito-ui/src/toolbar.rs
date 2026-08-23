@@ -766,6 +766,22 @@ pub fn toolbar_filtered(
         .response
 }
 
+/// Toolbar inline para top bar Scandinavian single-bar — sin `Frame` duplicado.
+/// Comparte el `Frame` del `TopBottomPanel` padre; solo coloca los grupos.
+pub fn toolbar_inline(ui: &mut Ui, current_tool: &mut Tool, groups: &[ToolGroupId]) {
+    ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+    if toolbar_uses_overflow(ui.ctx().screen_rect().width()) {
+        compact_toolbar(ui, current_tool, groups);
+    } else {
+        ui.horizontal(|ui| {
+            for &gid in groups {
+                let (_, tools) = gid.def();
+                tool_group(ui, current_tool, tools);
+            }
+        });
+    }
+}
+
 fn compact_toolbar(ui: &mut Ui, current: &mut Tool, groups: &[ToolGroupId]) {
     let inline_groups = compact_toolbar_inline_groups(*current, groups);
     ui.horizontal(|ui| {

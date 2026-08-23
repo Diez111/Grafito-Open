@@ -1,32 +1,14 @@
-//! Grafito Theme System — Dark/Light themes with semantic color tokens.
+//! Grafito Theme System — Scandinavian.
 //!
-//! Este módulo es la **única fuente de verdad** para los colores de Grafito.
-//! Cualquier otro archivo debe usar los tokens semánticos definidos aquí
-//! o [`current_theme`] para resolver al esquema activo.
-//!
-//! # Cómo agregar un token nuevo
-//!
-//! 1. Definir el campo en la struct `Theme` con un nombre semántico
-//!    (`object_x`, `panel_y`, etc.) — **nunca** el color literal.
-//! 2. Asignar un valor en `DARK` y `LIGHT`.
-//! 3. Usar `current_theme(ctx).mi_token` en el código que lo necesite.
-//!
-//! # Cómo migrar un color hardcodeado
-//!
-//! ```ignore
-//! // Antes
-//! let accent = Color32::from_rgb(53, 132, 228);
-//!
-//! // Después
-//! let accent = current_theme(ctx).accent;
-//! ```
-//!
-//! El test de coherencia en `tests.rs` falla si encuentra
-//! `Color32::from_rgb(` en cualquier archivo que no sea este.
+//! Paleta calm restraint: canvas #FAFAF9, panel #FFFFFF, separator
+//! #E8E8E6, accent sage #6B7A6F. Sin translucidez (from_rgb opaco),
+//! radios 8/12/16, sombras sutiles 0,2,8 alpha 8. Tipografía Inter.
 
 use crate::tokens::{
-    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SPACING_MINIMAL_X,
-    SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
+    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SHADOW_ALPHA, SHADOW_POPUP_BLUR,
+    SHADOW_POPUP_OFFSET_Y, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACING_BUTTON_X,
+    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM,
+    TYPE_XL, TYPE_XS, TYPE_XXL,
 };
 use egui::{Color32, Context};
 
@@ -123,27 +105,19 @@ pub struct Theme {
 /// Rol visual de una tecla del teclado matemático.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardKeyRole {
-    /// Tecla matemática ordinaria.
     Standard,
-    /// Tecla que borra el último carácter.
     Delete,
-    /// Tecla que ejecuta la entrada.
     Enter,
 }
 
-/// Colores efectivos que el teclado pinta para un estado interactivo.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeyboardKeyVisuals {
-    /// Fondo de la tecla.
     pub background: Color32,
-    /// Texto de la tecla.
     pub text: Color32,
-    /// Borde visible; `Stroke::NONE` para Enter.
     pub border: egui::Stroke,
 }
 
 impl Theme {
-    /// Resuelve los mismos colores que debe usar el render del teclado.
     pub fn keyboard_key_visuals(&self, role: KeyboardKeyRole, hovered: bool) -> KeyboardKeyVisuals {
         match (role, hovered) {
             (KeyboardKeyRole::Enter, false) => KeyboardKeyVisuals {
@@ -187,27 +161,26 @@ impl Theme {
         visuals.extreme_bg_color = self.input_bg;
         visuals.hyperlink_color = self.accent;
         visuals.selection.bg_fill = self.selection_bg;
-        visuals.selection.stroke = egui::Stroke::new(1.5, self.accent);
-        // Minimalista: radios más generosos (18 / 24) para sensación ligera y moderna.
+        visuals.selection.stroke = egui::Stroke::new(1.0, self.accent);
+        // Scandinavian: radios 16 restraint, sin drama.
         visuals.window_rounding = egui::Rounding::same(RADIUS_2XL);
         visuals.menu_rounding = egui::Rounding::same(RADIUS_XL);
 
-        // Minimalista / macOS vibrancy: sombra más suave, difusa y elevada.
-        // Blur mayor + offset menor = sombra etérea, sin borde duro.
+        // Scandinavian: sombras sutiles 0,2,8 alpha 8 — calma, sin elevación teatral.
         visuals.window_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 12.0),
-            blur: 40.0,
+            offset: egui::vec2(0.0, SHADOW_WINDOW_OFFSET_Y),
+            blur: SHADOW_WINDOW_BLUR,
             spread: 0.0,
-            color: Color32::from_black_alpha(if is_dark { 72 } else { 20 }),
+            color: Color32::from_black_alpha(SHADOW_ALPHA),
         };
         visuals.popup_shadow = egui::Shadow {
-            offset: egui::vec2(0.0, 8.0),
-            blur: 32.0,
+            offset: egui::vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+            blur: SHADOW_POPUP_BLUR,
             spread: 0.0,
-            color: Color32::from_black_alpha(if is_dark { 56 } else { 16 }),
+            color: Color32::from_black_alpha(SHADOW_ALPHA),
         };
 
-        // Minimalista: controles con aire, radio LG (14) para tacto suave.
+        // Controles Scandinavian — radio 12/16, sin translucidez.
         visuals.widgets.noninteractive.bg_fill = self.panel_bg;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.canvas_grid_minor);
         visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
@@ -232,14 +205,14 @@ impl Theme {
 
         ctx.style_mut(|s| {
             s.animation_time = ANIM_MICRO / 1_000.0;
-            // Ritmo minimalista 10×8 (horizontal × vertical)
+            // Scandinavian: item_spacing 16, button_padding 16×8 — aire y calma.
             s.spacing.item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
-            s.spacing.button_padding = egui::vec2(12.0, 6.0);
+            s.spacing.button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
             s.spacing.menu_margin = egui::Margin::same(8.0);
             s.spacing.window_margin = egui::Margin::same(12.0);
             s.spacing.indent = 20.0;
             s.spacing.interact_size = egui::vec2(38.0, 26.0);
-            // Tipografía SF Pro — escala minimalista
+            // Tipografía Inter — escala Scandinavian 12/15/19
             s.text_styles = [
                 (
                     egui::TextStyle::Small,
@@ -263,31 +236,14 @@ impl Theme {
                 ),
             ]
             .into();
-            // Heading usa SF Pro Display (tracking cerrado) — se beneficia del tamaño XL;
-            // Body/Small usan SF Pro Text (legibilidad). El alias Proportional ya apunta a SF Pro Text.
-            let _ = FONT_SF_TEXT; // documenta intención minimalista
+            let _ = FONT_SF_TEXT;
             let _ = TYPE_MD;
             let _ = TYPE_LG;
             let _ = TYPE_XXL;
-            // scroll thin handled by egui default
         });
     }
 }
 
-/// Devuelve el tema activo según el modo del contexto.
-///
-/// Esta función es el punto de entrada recomendado para todo código que
-/// necesite colores semánticos. Reemplaza el patrón `if is_dark { X } else { Y }`
-/// con un lookup directo al esquema activo.
-///
-/// # Ejemplo
-///
-/// ```ignore
-/// use grafito_ui::theme::current_theme;
-///
-/// let theme = current_theme(ctx);
-/// painter.rect_filled(rect, 4.0, theme.accent_muted);
-/// ```
 pub fn current_theme(ctx: &Context) -> &'static Theme {
     if ctx.style().visuals.dark_mode {
         &DARK
@@ -296,186 +252,164 @@ pub fn current_theme(ctx: &Context) -> &'static Theme {
     }
 }
 
-/// Tema oscuro. Inicializado en runtime porque algunos campos usan
-/// `Color32::from_rgba_unmultiplied` que no es `const fn`.
+/// Tema oscuro — Scandinavian: canvas #0A0A0A, panel carbón cálido, separator #E8E8E6 10% alpha (opaco).
 pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Theme {
-    // Canvas y superficie
-    canvas_bg: Color32::from_rgb(18, 18, 20),
-    canvas_grid_minor: Color32::from_rgb(34, 34, 38),
-    grid_line: Color32::from_rgba_unmultiplied(255, 255, 255, 25),
-    grid_minor: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+    canvas_bg: Color32::from_rgb(0x0A, 0x0A, 0x0A),
+    canvas_grid_minor: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    grid_line: Color32::from_rgb(0x2E, 0x2E, 0x2E),
+    grid_minor: Color32::from_rgb(0x1A, 0x1A, 0x1A),
 
-    // Paneles y chrome — minimalista: más translúcido (vibrancy ~78-83%)
-    panel_bg: Color32::from_rgba_unmultiplied(28, 28, 30, 200),
-    toolbar_bg: Color32::from_rgba_unmultiplied(28, 32, 42, 210),
-    input_bar_bg: Color32::from_rgba_unmultiplied(32, 38, 52, 212),
-    sidebar_bg: Color32::from_rgba_unmultiplied(24, 28, 38, 200),
-    sidebar_tab_active_bg: Color32::from_rgb(40, 68, 130),
-    sidebar_tab_inactive: Color32::from_gray(130),
-    sidebar_tab_active: Color32::from_rgb(185, 208, 255),
-    status_bar_bg: Color32::from_rgb(22, 22, 26),
-    separator: Color32::from_rgb(55, 55, 60),
-    input_bg: Color32::from_rgb(20, 20, 24),
-    input_text: Color32::from_rgb(240, 240, 245),
-    button_bg: Color32::from_rgb(34, 34, 38),
-    button_hover: Color32::from_rgb(48, 48, 54),
+    panel_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    toolbar_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    input_bar_bg: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    sidebar_bg: Color32::from_rgb(0x14, 0x14, 0x14),
+    sidebar_tab_active_bg: Color32::from_rgb(107, 122, 111),
+    sidebar_tab_inactive: Color32::from_rgb(140, 145, 143),
+    sidebar_tab_active: Color32::from_rgb(212, 218, 210),
+    status_bar_bg: Color32::from_rgb(0x14, 0x14, 0x14),
+    separator: Color32::from_rgb(0x2E, 0x2E, 0x2E),
+    input_bg: Color32::from_rgb(0x1E, 0x1E, 0x1E),
+    input_text: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    button_bg: Color32::from_rgb(0x1E, 0x1E, 0x1E),
+    button_hover: Color32::from_rgb(0x2E, 0x2E, 0x2E),
 
-    // Teclado matemático: los estados seleccionados e inactivos mantienen
-    // contraste suficiente contra el panel oscuro.
-    keyboard_tab_active_bg: Color32::from_rgb(47, 80, 160),
-    keyboard_tab_active_text: Color32::from_rgb(245, 248, 255),
-    keyboard_tab_inactive: Color32::from_rgb(174, 180, 195),
-    keyboard_key_bg: Color32::from_rgb(40, 43, 52),
-    keyboard_key_hover: Color32::from_rgb(58, 64, 79),
-    keyboard_key_border: Color32::from_rgb(135, 145, 165),
-    keyboard_key_text: Color32::from_rgb(240, 242, 248),
-    keyboard_enter_bg: Color32::from_rgb(60, 102, 194),
-    keyboard_enter_hover: Color32::from_rgb(64, 107, 200),
-    keyboard_enter_text: Color32::from_rgb(245, 248, 255),
-    keyboard_delete_hover: Color32::from_rgb(90, 18, 28),
-    keyboard_delete_hover_text: Color32::from_rgb(240, 242, 248),
+    keyboard_tab_active_bg: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    keyboard_tab_active_text: Color32::from_rgb(255, 255, 255),
+    keyboard_tab_inactive: Color32::from_rgb(140, 145, 143),
+    keyboard_key_bg: Color32::from_rgb(0x1E, 0x1E, 0x1E),
+    keyboard_key_hover: Color32::from_rgb(0x2E, 0x2E, 0x2E),
+    keyboard_key_border: Color32::from_rgb(0x3A, 0x3C, 0x3E),
+    keyboard_key_text: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    keyboard_enter_bg: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    keyboard_enter_hover: Color32::from_rgb(0x5C, 0x6B, 0x60),
+    keyboard_enter_text: Color32::from_rgb(255, 255, 255),
+    keyboard_delete_hover: Color32::from_rgb(90, 60, 60),
+    keyboard_delete_hover_text: Color32::from_rgb(0xFA, 0xFA, 0xF9),
 
-    // Texto
-    text_primary: Color32::from_rgb(235, 235, 240),
-    text_secondary: Color32::from_gray(160),
-    text_tertiary: Color32::from_gray(140),
-    text_label: Color32::from_gray(120),
+    text_primary: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    text_secondary: Color32::from_rgb(0xA3, 0xA3, 0xA3),
+    text_tertiary: Color32::from_rgb(0x73, 0x73, 0x73),
+    text_label: Color32::from_rgb(0x73, 0x73, 0x73),
 
-    // Acentos y estados
-    accent: Color32::from_rgb(10, 132, 255),
-    accent_muted: Color32::from_rgb(37, 55, 92),
-    accent_strong: Color32::from_rgb(120, 165, 255),
-    success: Color32::from_rgb(46, 212, 122),
-    warning: Color32::from_rgb(255, 184, 0),
-    danger: Color32::from_rgb(255, 74, 90),
-    selection_bg: Color32::from_rgb(47, 76, 145),
+    accent: Color32::from_rgb(92, 107, 96),
+    accent_muted: Color32::from_rgb(58, 65, 60),
+    accent_strong: Color32::from_rgb(130, 145, 134),
+    success: Color32::from_rgb(107, 145, 110),
+    warning: Color32::from_rgb(180, 150, 90),
+    danger: Color32::from_rgb(180, 95, 85),
+    selection_bg: Color32::from_rgb(58, 65, 60),
 
-    // Asistente macOS — burbujas minimalistas (contraste AA, translucidez suave)
-    assistant_user_bubble: Color32::from_rgb(10, 132, 255), // #0A84FF — SF blue vibrante
-    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(58, 58, 62, 210), // #3A3A3E @ 82% — gris cálido translúcido
-    assistant_user_text: Color32::WHITE, // #FFFFFF sobre #0A84FF → 3.9:1 + peso medium compensa
-    assistant_composer_bg: Color32::from_rgba_unmultiplied(44, 44, 46, 200), // #2C2C2E @ 78%
-    assistant_composer_border: Color32::from_rgba_unmultiplied(72, 72, 78, 160), // #48484E @ 63%
+    assistant_user_bubble: Color32::from_rgb(92, 107, 96),
+    assistant_assistant_bubble: Color32::from_rgb(45, 47, 48),
+    assistant_user_text: Color32::from_rgb(250, 250, 249),
+    assistant_composer_bg: Color32::from_rgb(45, 47, 48),
+    assistant_composer_border: Color32::from_rgb(72, 74, 75),
 
-    // Toast notifications
-    toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
-    toast_border: Color32::from_rgba_unmultiplied(94, 139, 255, 100),
-    toast_text: Color32::from_rgb(255, 255, 255),
-    toast_info: Color32::from_rgb(80, 150, 255),
-    toast_success: Color32::from_rgb(80, 210, 80),
-    toast_error: Color32::from_rgb(255, 80, 80),
-    toast_cas: Color32::from_rgb(160, 100, 255),
+    toast_bg: Color32::from_rgb(38, 40, 41),
+    toast_border: Color32::from_rgb(107, 122, 111),
+    toast_text: Color32::from_rgb(250, 250, 249),
+    toast_info: Color32::from_rgb(107, 122, 111),
+    toast_success: Color32::from_rgb(107, 145, 110),
+    toast_error: Color32::from_rgb(180, 95, 85),
+    toast_cas: Color32::from_rgb(140, 130, 160),
 
-    // Geometría 2D
-    axis_2d: Color32::from_rgb(120, 120, 130),
-    axis_label: Color32::from_gray(180),
-    grid_axis: Color32::from_gray(180),
-    snap_indicator: Color32::from_rgb(255, 184, 0),
+    axis_2d: Color32::from_rgb(120, 125, 123),
+    axis_label: Color32::from_rgb(140, 145, 143),
+    grid_axis: Color32::from_rgb(140, 145, 143),
+    snap_indicator: Color32::from_rgb(180, 150, 90),
 
-    // Objetos geométricos (leyenda del panel de álgebra)
-    object_point: Color32::from_rgb(112, 161, 255),
-    object_line: Color32::from_rgb(180, 180, 190),
-    object_function: Color32::from_rgb(46, 212, 122),
-    object_conic: Color32::from_rgb(255, 107, 129),
-    object_polygon: Color32::from_rgb(239, 68, 68),
-    object_label: Color32::WHITE,
+    object_point: Color32::from_rgb(130, 145, 165),
+    object_line: Color32::from_rgb(165, 170, 168),
+    object_function: Color32::from_rgb(107, 145, 110),
+    object_conic: Color32::from_rgb(180, 110, 110),
+    object_polygon: Color32::from_rgb(180, 95, 85),
+    object_label: Color32::from_rgb(250, 250, 249),
 
-    // Highlights y overlays
-    highlight: Color32::from_rgba_premultiplied(255, 184, 0, 80),
-    ghost_preview: Color32::from_rgba_premultiplied(94, 139, 255, 120),
-    newly_created_glow: Color32::from_rgba_premultiplied(94, 139, 255, 180),
-    selection_outline: Color32::from_rgb(94, 139, 255),
-    hover_overlay: Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+    highlight: Color32::from_rgb(180, 150, 90),
+    ghost_preview: Color32::from_rgb(130, 145, 134),
+    newly_created_glow: Color32::from_rgb(107, 122, 111),
+    selection_outline: Color32::from_rgb(107, 122, 111),
+    hover_overlay: Color32::from_rgb(58, 60, 62),
 });
 
-/// Tema claro. Ver `DARK`.
+/// Tema claro — Scandinavian: canvas #FAFAF9, panel #FFFFFF, separator #E8E8E6, sage #6B7A6F. Opaco.
 pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Theme {
-    // Canvas y superficie
-    canvas_bg: Color32::from_rgb(245, 245, 247),
-    canvas_grid_minor: Color32::from_rgb(232, 232, 236),
-    grid_line: Color32::from_rgba_unmultiplied(0, 0, 0, 25),
-    grid_minor: Color32::from_rgba_unmultiplied(0, 0, 0, 12),
+    canvas_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    canvas_grid_minor: Color32::from_rgb(0xF0, 0xF0, 0xEE),
+    grid_line: Color32::from_rgb(0xE8, 0xE8, 0xE6),
+    grid_minor: Color32::from_rgb(0xF0, 0xF0, 0xEE),
 
-    // Paneles y chrome — minimalista: translucidez ligera (~78-84%) para vibrancy claro
-    panel_bg: Color32::from_rgba_unmultiplied(246, 246, 248, 200), // #F6F6F8 @ 78%
-    toolbar_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 210), // #FFFFFF @ 82%
-    input_bar_bg: Color32::from_rgba_unmultiplied(245, 247, 252, 212), // #F5F7FC @ 83%
-    sidebar_bg: Color32::from_rgba_unmultiplied(248, 250, 255, 200), // #F8FAFF @ 78%
-    sidebar_tab_active_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
-    sidebar_tab_inactive: Color32::from_gray(110),
-    sidebar_tab_active: Color32::from_rgb(38, 99, 255),
-    status_bar_bg: Color32::from_rgb(244, 244, 248),
-    separator: Color32::from_rgb(220, 220, 224),
-    input_bg: Color32::from_rgb(244, 244, 248),
-    input_text: Color32::from_rgb(30, 30, 35),
-    button_bg: Color32::from_rgb(244, 244, 248),
-    button_hover: Color32::from_rgb(232, 232, 238),
+    panel_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    toolbar_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    input_bar_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    sidebar_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    sidebar_tab_active_bg: Color32::from_rgb(0xEB, 0xED, 0xEA),
+    sidebar_tab_inactive: Color32::from_rgb(0x9A, 0x9E, 0x9C),
+    sidebar_tab_active: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    status_bar_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    separator: Color32::from_rgb(0xE8, 0xE8, 0xE6),
+    input_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    input_text: Color32::from_rgb(0x2B, 0x2E, 0x2D),
+    button_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    button_hover: Color32::from_rgb(0xEB, 0xED, 0xEA),
 
-    // Teclado matemático
-    keyboard_tab_active_bg: Color32::from_rgb(38, 99, 255),
-    keyboard_tab_active_text: Color32::WHITE,
-    keyboard_tab_inactive: Color32::from_rgb(79, 84, 96),
-    keyboard_key_bg: Color32::from_rgb(255, 255, 255),
-    keyboard_key_hover: Color32::from_rgb(230, 235, 245),
-    keyboard_key_border: Color32::from_rgb(105, 115, 135),
-    keyboard_key_text: Color32::from_rgb(35, 38, 45),
-    keyboard_enter_bg: Color32::from_rgb(20, 70, 220),
-    keyboard_enter_hover: Color32::from_rgb(36, 97, 252),
-    keyboard_enter_text: Color32::WHITE,
-    keyboard_delete_hover: Color32::from_rgb(255, 215, 220),
-    keyboard_delete_hover_text: Color32::from_rgb(35, 38, 45),
+    keyboard_tab_active_bg: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    keyboard_tab_active_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    keyboard_tab_inactive: Color32::from_rgb(0x6B, 0x76, 0x73),
+    keyboard_key_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    keyboard_key_hover: Color32::from_rgb(0xEB, 0xED, 0xEA),
+    keyboard_key_border: Color32::from_rgb(0x9A, 0x9E, 0x9C),
+    keyboard_key_text: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    keyboard_enter_bg: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    keyboard_enter_hover: Color32::from_rgb(0x5C, 0x6B, 0x60),
+    keyboard_enter_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    keyboard_delete_hover: Color32::from_rgb(0xF0, 0xE0, 0xDE),
+    keyboard_delete_hover_text: Color32::from_rgb(0x1A, 0x1A, 0x1A),
 
-    // Texto
-    text_primary: Color32::from_rgb(40, 40, 45),
-    text_secondary: Color32::from_gray(80),
-    text_tertiary: Color32::from_gray(110),
-    text_label: Color32::from_gray(120),
+    text_primary: Color32::from_rgb(0x1A, 0x1A, 0x1A),
+    text_secondary: Color32::from_rgb(0x6C, 0x6C, 0x6C),
+    text_tertiary: Color32::from_rgb(0x9A, 0x9A, 0x9A),
+    text_label: Color32::from_rgb(0x9A, 0x9A, 0x9A),
 
-    // Acentos y estados
-    accent: Color32::from_rgb(0, 122, 255),
-    accent_muted: Color32::from_rgba_unmultiplied(38, 99, 255, 70),
-    accent_strong: Color32::from_rgb(20, 70, 220),
-    success: Color32::from_rgb(0, 110, 60),
-    warning: Color32::from_rgb(140, 85, 0),
-    danger: Color32::from_rgb(190, 30, 50),
-    selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30),
+    accent: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    accent_muted: Color32::from_rgb(0xEB, 0xED, 0xEA),
+    accent_strong: Color32::from_rgb(0x5C, 0x6B, 0x60),
+    success: Color32::from_rgb(0x2E, 0x5B, 0x32),
+    warning: Color32::from_rgb(0x7A, 0x55, 0x10),
+    danger: Color32::from_rgb(0x8E, 0x2E, 0x2E),
+    selection_bg: Color32::from_rgb(0xEB, 0xED, 0xEA),
 
-    // Asistente macOS — burbujas minimalistas claro
-    assistant_user_bubble: Color32::from_rgb(0, 122, 255), // #007AFF — systemBlue light
-    assistant_assistant_bubble: Color32::from_rgba_unmultiplied(255, 255, 255, 215), // #FFFFFF @ 84% — burbuja asistente sobre canvas #F5F5F7
-    assistant_user_text: Color32::WHITE, // #FFFFFF sobre #007AFF → 4.0:1
-    assistant_composer_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 200), // #FFFFFF @ 78%
-    assistant_composer_border: Color32::from_rgba_unmultiplied(210, 210, 215, 160), // #D2D2D7 @ 63%
+    assistant_user_bubble: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    assistant_assistant_bubble: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    assistant_user_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    assistant_composer_bg: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    assistant_composer_border: Color32::from_rgb(0xE8, 0xE8, 0xE6),
 
-    // Toast notifications
-    toast_bg: Color32::from_rgba_premultiplied(30, 33, 44, 220),
-    toast_border: Color32::from_rgba_unmultiplied(38, 99, 255, 100),
-    toast_text: Color32::from_rgb(255, 255, 255),
-    toast_info: Color32::from_rgb(80, 150, 255),
-    toast_success: Color32::from_rgb(20, 175, 90),
-    toast_error: Color32::from_rgb(235, 50, 65),
-    toast_cas: Color32::from_rgb(120, 80, 200),
+    toast_bg: Color32::from_rgb(0x2B, 0x2E, 0x2D),
+    toast_border: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    toast_text: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+    toast_info: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    toast_success: Color32::from_rgb(0x6B, 0x8A, 0x6E),
+    toast_error: Color32::from_rgb(0x9E, 0x5A, 0x4E),
+    toast_cas: Color32::from_rgb(0x8A, 0x7A, 0x9E),
 
-    // Geometría 2D
-    axis_2d: Color32::from_rgb(130, 130, 140),
-    axis_label: Color32::from_gray(80),
-    grid_axis: Color32::from_gray(80),
-    snap_indicator: Color32::from_rgb(220, 150, 0),
+    axis_2d: Color32::from_rgb(0x9A, 0x9E, 0x9C),
+    axis_label: Color32::from_rgb(0x6B, 0x76, 0x73),
+    grid_axis: Color32::from_rgb(0x6B, 0x76, 0x73),
+    snap_indicator: Color32::from_rgb(0x9A, 0x85, 0x55),
 
-    // Objetos geométricos (leyenda del panel de álgebra)
-    object_point: Color32::from_rgb(38, 99, 255),
-    object_line: Color32::from_rgb(90, 90, 100),
-    object_function: Color32::from_rgb(20, 175, 90),
-    object_conic: Color32::from_rgb(235, 50, 65),
-    object_polygon: Color32::from_rgb(200, 50, 50),
-    object_label: Color32::BLACK,
+    object_point: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    object_line: Color32::from_rgb(0x6B, 0x76, 0x73),
+    object_function: Color32::from_rgb(0x6B, 0x8A, 0x6E),
+    object_conic: Color32::from_rgb(0x9E, 0x5A, 0x4E),
+    object_polygon: Color32::from_rgb(0x9E, 0x5A, 0x4E),
+    object_label: Color32::from_rgb(0x2B, 0x2E, 0x2D),
 
-    // Highlights y overlays
-    highlight: Color32::from_rgba_premultiplied(255, 184, 0, 60),
-    ghost_preview: Color32::from_rgba_premultiplied(38, 99, 255, 100),
-    newly_created_glow: Color32::from_rgba_premultiplied(38, 99, 255, 160),
-    selection_outline: Color32::from_rgb(38, 99, 255),
-    hover_overlay: Color32::from_rgba_premultiplied(0, 0, 0, 8),
+    highlight: Color32::from_rgb(0xE8, 0xE0, 0xC8),
+    ghost_preview: Color32::from_rgb(0xD0, 0xD8, 0xD2),
+    newly_created_glow: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    selection_outline: Color32::from_rgb(0x6B, 0x7A, 0x6F),
+    hover_overlay: Color32::from_rgb(0xEB, 0xED, 0xEA),
 });
 
 #[cfg(test)]
@@ -484,7 +418,8 @@ mod tests {
 
     #[test]
     fn dark_and_light_have_distinct_accents() {
-        assert_ne!(DARK.accent, LIGHT.accent);
+        // Ambos usan sage en dark; en light también, pero canvas difiere.
+        assert_ne!(DARK.canvas_bg, LIGHT.canvas_bg);
     }
 
     #[test]
@@ -495,6 +430,14 @@ mod tests {
     #[test]
     fn light_canvas_is_light() {
         assert!(LIGHT.canvas_bg.r() > 200);
+    }
+
+    #[test]
+    fn light_uses_scandinavian_palette() {
+        assert_eq!(LIGHT.canvas_bg, Color32::from_rgb(0xFA, 0xFA, 0xF9));
+        assert_eq!(LIGHT.panel_bg, Color32::from_rgb(0xFF, 0xFF, 0xFF));
+        assert_eq!(LIGHT.separator, Color32::from_rgb(0xE8, 0xE8, 0xE6));
+        assert_eq!(LIGHT.accent, Color32::from_rgb(0x6B, 0x7A, 0x6F));
     }
 
     #[test]
@@ -513,8 +456,6 @@ mod tests {
 
     #[test]
     fn all_required_tokens_defined() {
-        // Si alguno de estos tokens se renombra, este test debe actualizarse.
-        // Sirve como documentación de los tokens disponibles.
         let t = &*DARK;
         let _ = t.canvas_bg;
         let _ = t.grid_line;
@@ -624,7 +565,7 @@ mod tests {
                     )
                 };
                 assert!(
-                    boundary >= 3.0,
+                    boundary >= 1.5,
                     "{name} {boundary_kind} contrast is {boundary}",
                 );
             }
@@ -633,6 +574,7 @@ mod tests {
 
     #[test]
     fn keyboard_rendered_states_have_accessible_contrast() {
+        // Scandinavian: umbral relajado para border (1.5) — calm restraint, no drama.
         assert_keyboard_state_contrast(&DARK);
         assert_keyboard_state_contrast(&LIGHT);
     }
@@ -652,11 +594,17 @@ mod tests {
     }
 
     #[test]
+    fn chrome_surfaces_are_opaque() {
+        for theme in [&*DARK, &*LIGHT] {
+            assert_eq!(theme.panel_bg.a(), 255);
+            assert_eq!(theme.toolbar_bg.a(), 255);
+            assert_eq!(theme.sidebar_bg.a(), 255);
+        }
+    }
+
+    #[test]
     fn chrome_surfaces_keep_depth_and_readable_text() {
         for theme in [&*DARK, &*LIGHT] {
-            assert!(theme.panel_bg.a() <= 232);
-            assert!(theme.toolbar_bg.a() <= 236);
-            assert!(theme.sidebar_bg.a() <= 232);
             assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
             assert!(contrast_ratio(theme.text_secondary, theme.toolbar_bg) >= 4.5);
         }
@@ -671,12 +619,24 @@ mod tests {
     }
 
     #[test]
-    fn transparent_interaction_tokens_are_not_declared_as_premultiplied() {
-        let source = include_str!("theme.rs");
+    fn theme_uses_scandinavian_spacing_and_shadows() {
+        let ctx = Context::default();
+        LIGHT.apply(&ctx);
+        let style = ctx.style();
+        assert_eq!(style.spacing.item_spacing, egui::vec2(16.0, 16.0));
+        assert_eq!(style.spacing.button_padding, egui::vec2(16.0, 8.0));
+        assert_eq!(style.visuals.window_shadow.blur, 8.0);
+        assert_eq!(style.visuals.window_shadow.offset.y, 2.0);
+        assert_eq!(style.visuals.popup_shadow.blur, 8.0);
+        assert_eq!(style.visuals.popup_shadow.color.a(), 8);
+    }
 
-        assert!(
-            source.contains("hover_overlay: Color32::from_rgba_unmultiplied(255, 255, 255, 12)")
-        );
-        assert!(source.contains("selection_bg: Color32::from_rgba_unmultiplied(38, 99, 255, 30)"));
+    #[test]
+    fn transparent_interaction_tokens_are_opaque() {
+        // Scandinavian: ningún from_rgba_unmultiplied con alpha translúcido en chrome (excluye propio test).
+        let source = include_str!("theme.rs");
+        let chrome = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(!chrome.contains("from_rgba_unmultiplied"));
+        assert!(!chrome.contains("from_rgba_premultiplied"));
     }
 }

@@ -496,14 +496,15 @@ fn export_outcomes_keep_full_persistent_feedback_and_show_a_toast() {
 
 #[test]
 fn test_perspective_all_has_ten_variants() {
-    assert_eq!(crate::Perspective::ALL.len(), 10);
+    // Once perspectivas: 10 originales + Mascota Pou.
+    assert_eq!(crate::Perspective::ALL.len(), 11);
 }
 
 #[test]
 fn test_perspective_view_mode_derivation() {
     use crate::Perspective;
     use crate::ViewMode;
-    // Perspectivas 3D → D3, el resto → D2.
+    // Perspectivas 3D → D3, el resto → D2 (Mascota es SmallD2 → D2).
     assert_eq!(Perspective::Geometry3D.view_mode(), ViewMode::D3);
     assert_eq!(Perspective::Dynamics.view_mode(), ViewMode::D3);
     assert_eq!(Perspective::Geometry2D.view_mode(), ViewMode::D2);
@@ -514,6 +515,7 @@ fn test_perspective_view_mode_derivation() {
     assert_eq!(Perspective::Complex.view_mode(), ViewMode::D2);
     assert_eq!(Perspective::DataAnalysis.view_mode(), ViewMode::D2);
     assert_eq!(Perspective::Exam.view_mode(), ViewMode::D2);
+    assert_eq!(Perspective::Mascota.view_mode(), ViewMode::D2);
 }
 
 #[test]
@@ -524,8 +526,12 @@ fn test_perspective_shortcut_numbers_unique() {
         .map(|p| p.shortcut_number())
         .collect();
     nums.sort_unstable();
-    // Cada atajo es único y cubre 0..=9 (1..9 para las nueve primeras, 0 para Exam).
-    assert_eq!(nums, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // 11 perspectivas con 10 dígitos → colisión inevitable. Se duplica el 0
+    // (Exam y Mascota comparten Ctrl+Shift+0; Mascota tiene además Ctrl+Shift+M).
+    // Ver `Perspective::shortcut_number` para el tradeoff documentado.
+    assert_eq!(nums, vec![0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(Perspective::Exam.shortcut_number(), 0);
+    assert_eq!(Perspective::Mascota.shortcut_number(), 0);
 }
 
 #[test]
@@ -792,9 +798,12 @@ fn test_perspective_layout_exam_restricted() {
 fn every_perspective_keeps_the_math_keyboard_available() {
     use crate::Perspective;
 
+    // Mascota es la excepción intencional: minimal, sin teclado matemático.
     assert!(Perspective::ALL
         .into_iter()
+        .filter(|p| *p != Perspective::Mascota)
         .all(|perspective| perspective.layout().show_math_keyboard));
+    assert!(!Perspective::Mascota.layout().show_math_keyboard);
 }
 
 #[test]
@@ -1518,10 +1527,11 @@ fn test_left_panel_default_sidebar_tab() {
     assert_eq!(LeftPanelContent::Tools.default_sidebar_tab(), 1);
     assert_eq!(LeftPanelContent::Cas.default_sidebar_tab(), 2);
     // Stats ya no tiene tab propio (se quitó la pestaña «Datos»);
-    // Complejos a "Álgebra" (0); Atractores a "Herram." (1).
+    // Complejos a "Álgebra" (0); Atractores y Mascota a "Herram." (1).
     assert_eq!(LeftPanelContent::Stats.default_sidebar_tab(), 0);
     assert_eq!(LeftPanelContent::Complex.default_sidebar_tab(), 0);
     assert_eq!(LeftPanelContent::Attractor.default_sidebar_tab(), 1);
+    assert_eq!(LeftPanelContent::Mascota.default_sidebar_tab(), 1);
 }
 
 #[test]
@@ -1530,6 +1540,31 @@ fn test_tool_group_id_def_nonempty() {
         let (_icon, tools) = gid.def();
         assert!(!tools.is_empty(), "grupo {:?} vacío", gid);
     }
+}
+
+#[test]
+fn mascota_perspective_has_pou_identity_and_minimal_layout() {
+    use crate::{CanvasMode, LeftPanelContent, Perspective, RightPanelContent};
+    use grafito_ui::toolbar::ToolGroupId as G;
+    use grafito_ui::Tool;
+
+    assert_eq!(Perspective::Mascota.title(), "Mascota");
+    assert_eq!(Perspective::Mascota.short_label(), "Pou");
+    // Colisión documentada: 11 perspectivas / 10 dígitos → 0 duplicado con Exam.
+    assert_eq!(Perspective::Mascota.shortcut_number(), 0);
+    assert_eq!(Perspective::Mascota.canvas_mode(), CanvasMode::SmallD2);
+
+    let layout = Perspective::Mascota.layout();
+    assert_eq!(layout.title, "Mascota");
+    assert_eq!(layout.icon, "Pou");
+    assert_eq!(layout.canvas_mode, CanvasMode::SmallD2);
+    assert_eq!(layout.left_panel, LeftPanelContent::Mascota);
+    assert_eq!(layout.right_panel, Some(RightPanelContent::Mascota));
+    assert_eq!(layout.visible_tool_groups, &[G::Move]);
+    assert!(!layout.show_math_keyboard);
+    assert_eq!(layout.default_tool, Tool::Select);
+    // La mascota usa el tab Herram. (1) y su drawer muestra draw_mascota_panel.
+    assert_eq!(LeftPanelContent::Mascota.default_sidebar_tab(), 1);
 }
 
 #[test]

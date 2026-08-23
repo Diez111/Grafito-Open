@@ -982,6 +982,42 @@ pub(crate) struct TrigGraphCache {
     pub asymptotes: Vec<f64>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pou — ventana profesional con tabs Casa/Vestir/Jugar/Progreso (Scandinavian shell, contenido playful)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Pestaña visible de la ventana Pou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PouTab {
+    #[default]
+    Casa,
+    Vestir,
+    Jugar,
+    Progreso,
+}
+
+impl PouTab {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Casa => "Casa",
+            Self::Vestir => "Vestir",
+            Self::Jugar => "Jugar",
+            Self::Progreso => "Progreso",
+        }
+    }
+    pub const fn icon(self) -> &'static str {
+        match self {
+            Self::Casa => "⌂",
+            Self::Vestir => "👕",
+            Self::Jugar => "🎮",
+            Self::Progreso => "📈",
+        }
+    }
+    pub fn all() -> [Self; 4] {
+        [Self::Casa, Self::Vestir, Self::Jugar, Self::Progreso]
+    }
+}
+
 /// Evaluador GPU para la ruta híbrida de integrales definidas.
 struct AppGpuFunctionEvaluator {
     renderer: Arc<RwLock<Option<grafito_render::Renderer>>>,
@@ -1282,6 +1318,23 @@ pub struct GrafitoApp {
     pub(crate) trig_view_mode: TrigViewMode,
     /// Cache de la curva trigonométrica visible; el marcador se anima aparte.
     pub(crate) trig_graph_cache: std::sync::RwLock<Option<TrigGraphCache>>,
+    /// Ventana Pou profesional (Scandinavian shell, tabs Casa/Vestir/Jugar/Progreso).
+    pub show_pou_window: bool,
+    pub pou_tab: PouTab,
+    /// Configuración — solo nombre (Configuración minimalista Scandinavian).
+    pub show_mascot_config: bool,
+    /// Borrador del nombre en Configuración — se valida con `profile.set_display_name`.
+    pub avatar_draft: grafito_profile::AvatarConfig,
+    /// Error de validación del nombre en Configuración.
+    pub config_name_error: Option<String>,
+    /// Estado del examen de salto dentro de la pestaña Progreso (3 preguntas).
+    pub pou_jump_open: bool,
+    pub pou_jump_answers: [String; 3],
+    pub pou_jump_checked: Option<[bool; 3]>,
+    /// Mini-juego activo en la pestaña Jugar (0 ninguno, 1 memoria, 2 adivina, 3 reacción).
+    pub pou_game_state: u8,
+    pub pou_guess_target: u8,
+    pub pou_guess_input: String,
 }
 
 pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = true;
@@ -1643,6 +1696,8 @@ impl GrafitoApp {
         let snapshot_version = document.version;
         let snapshot_render_quality = document.render_quality;
         let document_snapshot = std::sync::Arc::new(document.clone());
+        let profile = crate::utils::load_profile();
+        let avatar_draft = profile.avatar.clone();
 
         Self {
             document,
@@ -1690,7 +1745,7 @@ impl GrafitoApp {
             whiteboard_open: false,
             whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
             show_whiteboard_assistant: true,
-            profile: crate::utils::load_profile(),
+            profile,
             recent_files: Vec::new(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
@@ -1752,6 +1807,17 @@ impl GrafitoApp {
             trig_function: 0,
             trig_view_mode: TrigViewMode::Didactic,
             trig_graph_cache: std::sync::RwLock::new(None),
+            show_pou_window: false,
+            pou_tab: PouTab::default(),
+            show_mascot_config: false,
+            avatar_draft,
+            config_name_error: None,
+            pou_jump_open: false,
+            pou_jump_answers: [String::new(), String::new(), String::new()],
+            pou_jump_checked: None,
+            pou_game_state: 0,
+            pou_guess_target: 7,
+            pou_guess_input: String::new(),
         }
     }
 
@@ -2732,6 +2798,12 @@ impl GrafitoApp {
             }
             Perspective::Exam => {
                 // Modo examen: documento vacío intencionalmente.
+            }
+            Perspective::Mascota => {
+                // Mascota Pou: ejemplo mínimo lúdico — un punto llamado Pou.
+                let _ = staged.try_add_object(GeoObject::Point(
+                    PointObj::new(Point2::new(1.0, 1.0)).with_label("Pou"),
+                ));
             }
         }
 
@@ -3786,6 +3858,8 @@ impl eframe::App for GrafitoApp {
                 self.handle_file_command(command);
             }
             // Ctrl+Shift+1..9,0: cambiar de perspectiva (1=Geometry2D … 9=DataAnalysis, 0=Exam).
+            // Mascota (11ª) comparte el dígito 0 con Exam — ver `Perspective::shortcut_number` tradeoff;
+            // se añade atajo letra `Ctrl+Shift+M` como vía sin colisión.
             {
                 const NUM_KEYS: [(Key, Perspective); 10] = [
                     (Key::Num1, Perspective::Geometry2D),
@@ -3804,6 +3878,9 @@ impl eframe::App for GrafitoApp {
                         self.set_perspective(p);
                         break;
                     }
+                }
+                if ctx.input(|i| i.key_pressed(Key::M) && i.modifiers.ctrl && i.modifiers.shift) {
+                    self.set_perspective(Perspective::Mascota);
                 }
             }
             // Ctrl+K: abrir la paleta de comandos.
@@ -3868,10 +3945,12 @@ impl eframe::App for GrafitoApp {
                 match self.sidebar_tab {
                     0 => match self.perspective {
                         Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
+                        Perspective::Mascota => crate::panels::draw_mascota_panel(self, ctx),
                         _ => crate::algebra::draw_algebra_panel(self, ctx),
                     },
                     1 => match self.perspective {
                         Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
+                        Perspective::Mascota => crate::panels::draw_mascota_panel(self, ctx),
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
                     2 => crate::panels::draw_cas_panel(self, ctx),
@@ -3926,6 +4005,9 @@ impl eframe::App for GrafitoApp {
                     }
                     Some(RightPanelContent::TrigAnimation) => {
                         crate::panels::draw_trig_animation_panel(self, ctx);
+                    }
+                    Some(RightPanelContent::Mascota) => {
+                        crate::panels::draw_right_mascota_panel(self, ctx);
                     }
                 }
             }
@@ -4385,6 +4467,14 @@ impl eframe::App for GrafitoApp {
         if self.show_about {
             self.draw_about_window(ctx);
         }
+        // Ventana Pou profesional (Casa/Vestir/Jugar/Progreso) — Scandinavian shell, playful content
+        if self.show_pou_window {
+            self.draw_pou_window(ctx);
+        }
+        // Configuración — solo nombre (Configuración minimalista)
+        if self.show_mascot_config {
+            self.draw_mascot_config_window(ctx);
+        }
 
         // File actions and decisions run only after every editor has consumed
         // this frame's text/IME events.
@@ -4520,6 +4610,1451 @@ impl GrafitoApp {
                 });
             });
     }
+
+    /// Ventana Pou profesional con tabs Casa/Vestir/Jugar/Progreso.
+    /// Shell Scandinavian (frame opaco, 16p radius, 1.5 stroke), contenido playful (colores cálidos, iconos, badges).
+    pub(crate) fn draw_pou_window(&mut self, ctx: &egui::Context) {
+        if !self.show_pou_window {
+            return;
+        }
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let mut open = self.show_pou_window;
+        egui::Window::new("Pou — tu compañero")
+            .id(egui::Id::new("pou_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(580.0)
+            .min_width(520.0)
+            .max_width(640.0)
+            .default_height(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(8),
+                    }),
+            )
+            .show(ctx, |ui| {
+                // Header tabs — Scandinavian pill con playful icons
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for tab in PouTab::all() {
+                        let sel = self.pou_tab == tab;
+                        let btn = egui::Button::new(
+                            egui::RichText::new(format!("{} {}", tab.icon(), tab.label()))
+                                .size(grafito_ui::tokens::TYPE_SM)
+                                .strong()
+                                .color(if sel {
+                                    egui::Color32::WHITE
+                                } else {
+                                    theme.text_secondary
+                                }),
+                        )
+                        .selected(sel)
+                        .rounding(grafito_ui::tokens::RADIUS_PILL)
+                        .fill(if sel { theme.accent } else { theme.input_bg })
+                        .stroke(egui::Stroke::new(
+                            1.5,
+                            if sel { theme.accent } else { theme.separator },
+                        ));
+                        if ui.add(btn).clicked() {
+                            self.pou_tab = tab;
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let level = self.profile.level;
+                        let coins = self.profile.mascot_mut_or_default().coins;
+                        ui.label(
+                            egui::RichText::new(format!("Nivel {level}"))
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_tertiary),
+                        );
+                        ui.add_space(6.0);
+                        egui::Frame::none()
+                            .fill(theme.accent.gamma_multiply(0.12))
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("🪙 {coins}"))
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .strong()
+                                        .color(theme.accent),
+                                );
+                            });
+                    });
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                // Contenido por pestaña
+                egui::ScrollArea::vertical()
+                    .id_salt("pou_tab_scroll")
+                    .max_height(420.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        match self.pou_tab {
+                            PouTab::Casa => self.draw_pou_casa_tab(ui, ctx),
+                            PouTab::Vestir => self.draw_pou_vestir_tab(ui, ctx),
+                            PouTab::Jugar => self.draw_pou_jugar_tab(ui, ctx),
+                            PouTab::Progreso => self.draw_pou_progreso_tab(ui, ctx),
+                        }
+                    });
+            });
+        self.show_pou_window = open;
+    }
+
+    fn draw_pou_casa_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        // Vida — estado actual + habitáculo detallado
+        ui.label(
+            egui::RichText::new("Vida de Pou")
+                .size(grafito_ui::tokens::TYPE_SM)
+                .strong()
+                .color(theme.text_primary),
+        );
+        ui.label(
+            egui::RichText::new(
+                "Cuida su hambre, felicidad y descanso. Toca el habitáculo para animarlo.",
+            )
+            .size(grafito_ui::tokens::TYPE_XS)
+            .color(theme.text_tertiary),
+        );
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Obtener mascota clon para pintar
+        let mascot_cfg = self.profile.mascot_mut_or_default().clone();
+        let room_state = grafito_ui::pou::MascotRoomState::from(&mascot_cfg);
+        // Pintar habitáculo detallado (pared, piso, ventana, cama)
+        let room_h = 190.0;
+        let room_w = ui.available_width();
+        let (room_rect, room_resp) =
+            ui.allocate_exact_size(egui::Vec2::new(room_w, room_h), egui::Sense::click());
+        let mut poke = false;
+        if ui.is_rect_visible(room_rect) {
+            let painter = ui.painter_at(room_rect);
+            let time = ui.input(|i| i.time);
+            grafito_ui::pou::paint_mascot_room(&painter, room_rect, &room_state, theme, time);
+        }
+        if room_resp.clicked() {
+            poke = true;
+        }
+        room_resp.on_hover_text("Toca a Pou");
+        if poke {
+            let mascot = self.profile.mascot_mut_or_default();
+            mascot.happiness = (mascot.happiness.saturating_add(6)).min(100);
+            mascot.hunger = mascot.hunger.saturating_add(2).min(100);
+            let _ = std::fs::write(
+                crate::utils::profile_path(),
+                serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+            );
+            self.notify(
+                "¡Pou reacciona con alegría! ♥",
+                grafito_ui::toast::ToastKind::Success,
+            );
+        }
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Vida — barras muy visibles 10px
+        for (label, value, icon) in [
+            ("Hambre", mascot_cfg.hunger as f32, "🍽"),
+            ("Felicidad", mascot_cfg.happiness as f32, "♥"),
+        ] {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{icon} {label}"))
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let pct = value.clamp(0.0, 100.0);
+                    let bg = if label == "Hambre" {
+                        if pct > 70.0 {
+                            theme.warning.gamma_multiply(0.16)
+                        } else {
+                            theme.accent.gamma_multiply(0.12)
+                        }
+                    } else if pct < 30.0 {
+                        theme.text_tertiary.gamma_multiply(0.12)
+                    } else {
+                        theme.success.gamma_multiply(0.12)
+                    };
+                    let col = if label == "Hambre" {
+                        if pct > 70.0 {
+                            theme.warning
+                        } else {
+                            theme.accent
+                        }
+                    } else if pct < 30.0 {
+                        theme.text_tertiary
+                    } else {
+                        theme.success
+                    };
+                    egui::Frame::none()
+                        .fill(bg)
+                        .rounding(grafito_ui::tokens::RADIUS_PILL)
+                        .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{pct:.0}%"))
+                                    .size(grafito_ui::tokens::TYPE_XS)
+                                    .strong()
+                                    .color(col),
+                            );
+                        });
+                });
+            });
+            let bar_w = ui.available_width();
+            let (bar_rect, _) =
+                ui.allocate_exact_size(egui::Vec2::new(bar_w, 10.0), egui::Sense::hover());
+            if ui.is_rect_visible(bar_rect) {
+                ui.painter()
+                    .rect_filled(bar_rect, 5.0, theme.separator.gamma_multiply(0.55));
+                let pct = value.clamp(0.0, 100.0) / 100.0;
+                let filled =
+                    egui::Rect::from_min_size(bar_rect.min, egui::Vec2::new(bar_w * pct, 10.0));
+                let col = if label == "Hambre" {
+                    if value > 70.0 {
+                        theme.warning
+                    } else {
+                        theme.accent
+                    }
+                } else if value < 30.0 {
+                    theme.text_tertiary
+                } else {
+                    theme.success
+                };
+                ui.painter().rect_filled(filled, 5.0, col);
+                ui.painter()
+                    .rect_stroke(bar_rect, 5.0, egui::Stroke::new(1.0, theme.separator));
+            }
+            ui.add_space(2.0);
+        }
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        ui.separator();
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Casa — selector de tema + acciones
+        ui.label(
+            egui::RichText::new("Casa")
+                .size(grafito_ui::tokens::TYPE_SM)
+                .strong()
+                .color(theme.text_primary),
+        );
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for house in grafito_profile::mascot::HouseTheme::all() {
+                let sel = mascot_cfg.house_theme == *house;
+                let btn = egui::Button::new(
+                    egui::RichText::new(house.label()).size(grafito_ui::tokens::TYPE_XS),
+                )
+                .selected(sel)
+                .rounding(grafito_ui::tokens::RADIUS_PILL)
+                .fill(if sel {
+                    theme.accent.gamma_multiply(0.14)
+                } else {
+                    theme.input_bg
+                })
+                .stroke(egui::Stroke::new(
+                    1.5,
+                    if sel { theme.accent } else { theme.separator },
+                ));
+                if ui.add(btn).clicked() {
+                    let mascot = self.profile.mascot_mut_or_default();
+                    mascot.house_theme = *house;
+                    let _ = std::fs::write(
+                        crate::utils::profile_path(),
+                        serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                    );
+                    self.notify(
+                        format!("Casa cambiada a {}", house.label()),
+                        grafito_ui::toast::ToastKind::Info,
+                    );
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(mascot_cfg.house_theme.description())
+                .size(grafito_ui::tokens::TYPE_XS)
+                .color(theme.text_tertiary),
+        );
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_LG;
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("🍎 Alimentar").size(grafito_ui::tokens::TYPE_XS),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                )
+                .clicked()
+            {
+                let mascot = self.profile.mascot_mut_or_default();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                mascot.feed(now);
+                let _ = std::fs::write(
+                    crate::utils::profile_path(),
+                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                );
+                self.notify(
+                    "¡Pou comió y está más feliz!",
+                    grafito_ui::toast::ToastKind::Success,
+                );
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("🎮 Jugar").size(grafito_ui::tokens::TYPE_XS),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                )
+                .clicked()
+            {
+                self.pou_tab = PouTab::Jugar;
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("💤 Dormir").size(grafito_ui::tokens::TYPE_XS),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                )
+                .clicked()
+            {
+                let mascot = self.profile.mascot_mut_or_default();
+                mascot.happiness = (mascot.happiness.saturating_add(4)).min(100);
+                let _ = std::fs::write(
+                    crate::utils::profile_path(),
+                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                );
+                self.notify("Pou descansa… Zzz", grafito_ui::toast::ToastKind::Info);
+            }
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("✨ Personalizar").size(grafito_ui::tokens::TYPE_XS),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                )
+                .clicked()
+            {
+                self.show_mascot_config = true;
+            }
+        });
+    }
+
+    fn draw_pou_vestir_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let level = self.profile.level;
+        // Preview grande
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("Vestir")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Nivel {} • {} prendas desbloqueadas",
+                        level,
+                        grafito_profile::mascot::outfits_for_level(level).len()
+                    ))
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_tertiary),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Personalizar completo").clicked() {
+                    self.show_mascot_config = true;
+                }
+            });
+        });
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        let mascot_cfg = self.profile.mascot_mut_or_default().clone();
+        let preview_rect_size = egui::Vec2::new(88.0, 88.0);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(preview_rect_size, egui::Sense::hover());
+            if ui.is_rect_visible(rect) {
+                ui.painter()
+                    .rect_filled(rect, grafito_ui::tokens::RADIUS_LG, theme.input_bg);
+                ui.painter().rect_stroke(
+                    rect,
+                    grafito_ui::tokens::RADIUS_LG,
+                    egui::Stroke::new(1.5, theme.separator),
+                );
+                let accent = {
+                    let (_, rgb, _) =
+                        grafito_profile::AvatarConfig::accent_palette(mascot_cfg.species as u8 % 6);
+                    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+                };
+                // Mapear outfit equipado a código visual 0..3
+                let outfit_code = if mascot_cfg.wardrobe.is_equipped("crown_master")
+                    || mascot_cfg.wardrobe.is_equipped("beanie_uni")
+                    || mascot_cfg.wardrobe.is_equipped("hat_sec")
+                    || mascot_cfg.wardrobe.is_equipped("cap_prim")
+                {
+                    2
+                } else if mascot_cfg.wardrobe.is_equipped("scarf_prim")
+                    || mascot_cfg.wardrobe.is_equipped("glasses_sec")
+                {
+                    1
+                } else if mascot_cfg.wardrobe.is_equipped("cape_uni")
+                    || mascot_cfg.wardrobe.is_equipped("robe_master")
+                    || mascot_cfg.wardrobe.is_equipped("medal_master")
+                {
+                    3
+                } else {
+                    0
+                };
+                let time = ui.input(|i| i.time);
+                grafito_ui::pou::draw_mascot(
+                    ui.painter(),
+                    rect.shrink(6.0),
+                    mascot_cfg.dna,
+                    mascot_cfg.species as u8,
+                    grafito_ui::pou::MascotMood::Idle as u8,
+                    time,
+                    accent,
+                    theme.panel_bg,
+                    outfit_code,
+                );
+            }
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(mascot_cfg.sanitized_name())
+                        .size(grafito_ui::tokens::TYPE_BASE)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} • {}",
+                        mascot_cfg.species.label(),
+                        mascot_cfg.personality.label()
+                    ))
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_secondary),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Casa: {}", mascot_cfg.house_theme.label()))
+                        .size(grafito_ui::tokens::TYPE_XS)
+                        .color(theme.text_tertiary),
+                );
+                ui.add_space(4.0);
+                egui::Frame::none()
+                    .fill(theme.accent.gamma_multiply(0.10))
+                    .rounding(grafito_ui::tokens::RADIUS_PILL)
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("🪙 {} monedas", mascot_cfg.coins))
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.accent)
+                                .strong(),
+                        );
+                    });
+            });
+        });
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        ui.separator();
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Catálogo por tier — más ropa, profesional
+        let catalog = grafito_profile::mascot::outfit_catalog();
+        let tiers = [
+            (
+                grafito_profile::mascot::OutfitTier::Primary,
+                "Primaria (1–5)",
+            ),
+            (
+                grafito_profile::mascot::OutfitTier::Secondary,
+                "Secundaria (6–12)",
+            ),
+            (
+                grafito_profile::mascot::OutfitTier::University,
+                "Universidad (13–20)",
+            ),
+            (grafito_profile::mascot::OutfitTier::Master, "Máster (21+)"),
+        ];
+        // Asegurar desbloqueo según nivel actual
+        {
+            let mascot = self.profile.mascot_mut_or_default();
+            mascot.wardrobe.unlock_for_level(level);
+        }
+        let mut pending_equip: Option<String> = None;
+        let mut pending_unequip: Option<String> = None;
+        for (tier, title) in tiers {
+            ui.label(
+                egui::RichText::new(title)
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .strong()
+                    .color(theme.text_secondary),
+            );
+            ui.add_space(4.0);
+            let tier_outfits: Vec<_> = catalog.iter().filter(|o| o.tier == tier).collect();
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for outfit in tier_outfits {
+                    let owned = self
+                        .profile
+                        .mascot_mut_or_default()
+                        .wardrobe
+                        .is_owned(&outfit.id);
+                    let equipped = self
+                        .profile
+                        .mascot_mut_or_default()
+                        .wardrobe
+                        .is_equipped(&outfit.id);
+                    let locked = level < outfit.unlocked_by_level;
+                    let label = if equipped {
+                        format!("{} ✓", outfit.name)
+                    } else if locked {
+                        format!("🔒 {} (Nv {})", outfit.name, outfit.unlocked_by_level)
+                    } else {
+                        outfit.name.clone()
+                    };
+                    let mut btn = egui::Button::new(egui::RichText::new(label).size(10.0))
+                        .rounding(grafito_ui::tokens::RADIUS_PILL);
+                    if equipped {
+                        btn = btn
+                            .fill(theme.accent.gamma_multiply(0.16))
+                            .stroke(egui::Stroke::new(1.5, theme.accent));
+                    } else if locked {
+                        btn = btn
+                            .fill(theme.input_bg.gamma_multiply(0.5))
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
+                    } else if owned {
+                        btn = btn.stroke(egui::Stroke::new(1.0, theme.separator));
+                    } else {
+                        btn = btn.fill(theme.separator.gamma_multiply(0.25));
+                    }
+                    let enabled = owned && !locked;
+                    if ui
+                        .add_enabled(enabled, btn)
+                        .on_hover_text(if locked {
+                            format!("Se desbloquea en nivel {}", outfit.unlocked_by_level)
+                        } else if equipped {
+                            "Equipada — toca para desequipar".to_string()
+                        } else {
+                            format!(
+                                "Capa: {} • Tier {}",
+                                outfit.layer.label(),
+                                outfit.tier.label()
+                            )
+                        })
+                        .clicked()
+                    {
+                        if equipped {
+                            pending_unequip = Some(outfit.id.clone());
+                        } else {
+                            pending_equip = Some(outfit.id.clone());
+                        }
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if let Some(id) = pending_unequip {
+            let mascot = self.profile.mascot_mut_or_default();
+            mascot.wardrobe.unequip(&id);
+            let _ = std::fs::write(
+                crate::utils::profile_path(),
+                serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+            );
+        }
+        if let Some(id) = pending_equip {
+            let catalog = grafito_profile::mascot::outfit_catalog();
+            if let Some(outfit) = catalog.iter().find(|o| o.id == id) {
+                let mascot = self.profile.mascot_mut_or_default();
+                mascot.wardrobe.equip(outfit);
+                let _ = std::fs::write(
+                    crate::utils::profile_path(),
+                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                );
+                self.notify(
+                    format!("¡{} equipada!", outfit.name),
+                    grafito_ui::toast::ToastKind::Success,
+                );
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Una prenda por capa (sombrero, cuerpo, accesorio). Desbloqueá más subiendo de nivel.").size(grafito_ui::tokens::TYPE_XS).color(theme.text_tertiary).italics());
+    }
+
+    #[allow(clippy::collapsible_match)]
+    fn draw_pou_jugar_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        ui.label(
+            egui::RichText::new("Jugar con Pou")
+                .size(grafito_ui::tokens::TYPE_SM)
+                .strong()
+                .color(theme.text_primary),
+        );
+        ui.label(egui::RichText::new("Mini-juegos cortos para subir felicidad, ganar monedas y sumar XP. Diseño playful, shell Scandinavian.").size(grafito_ui::tokens::TYPE_XS).color(theme.text_tertiary));
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Grid 2x2 de juegos
+        let games = [
+            (
+                "Memoria cromática",
+                "Recordá la secuencia de 4 colores.",
+                "🎨",
+                "+8 felicidad, +10 XP",
+            ),
+            (
+                "Adivina 1–10",
+                "Pou pensó un número. ¿Cuál es?",
+                "🔢",
+                "+12 felicidad, +5 🪙",
+            ),
+            (
+                "Reflejos",
+                "¡Tocá lo más rápido que puedas!",
+                "⚡",
+                "+6 felicidad, +8 XP",
+            ),
+            (
+                "Quiz relámpago",
+                "Pregunta matemática del nivel actual.",
+                "❓",
+                "+15 XP, +3 🪙",
+            ),
+        ];
+        egui::Grid::new("pou_games_grid").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
+            for (idx, (title, desc, icon, reward)) in games.iter().enumerate() {
+                egui::Frame::none()
+                    .fill(theme.input_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(10.0))
+                    .show(ui, |ui| {
+                        ui.set_min_width(220.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(*icon).size(18.0));
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(*title).size(grafito_ui::tokens::TYPE_SM).strong().color(theme.text_primary));
+                                ui.label(egui::RichText::new(*desc).size(grafito_ui::tokens::TYPE_XS).color(theme.text_tertiary));
+                            });
+                        });
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(*reward).size(grafito_ui::tokens::TYPE_XS).color(theme.accent));
+                        ui.add_space(6.0);
+                        // Botón / interacción según juego
+                        match idx {
+                            0 => {
+                                if ui.add(egui::Button::new(egui::RichText::new("Jugar memoria").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).stroke(egui::Stroke::new(1.0, theme.separator))).clicked() {
+                                    let mascot = self.profile.mascot_mut_or_default();
+                                    mascot.happiness = (mascot.happiness.saturating_add(8)).min(100);
+                                    mascot.coins = mascot.coins.saturating_add(2);
+                                    mascot.care_xp = mascot.care_xp.saturating_add(10);
+                                    self.profile.xp = self.profile.xp.saturating_add(10);
+                                    let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                    self.notify("¡Memoria completada! +10 XP", grafito_ui::toast::ToastKind::Success);
+                                }
+                            }
+                            1 => {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.pou_guess_input).hint_text("1–10").desired_width(56.0));
+                                    if ui.small_button("Adivinar").clicked() {
+                                        let guess: u8 = self.pou_guess_input.trim().parse().unwrap_or(0);
+                                        if guess == self.pou_guess_target {
+                                            let mascot = self.profile.mascot_mut_or_default();
+                                            mascot.happiness = (mascot.happiness.saturating_add(12)).min(100);
+                                            mascot.coins = mascot.coins.saturating_add(5);
+                                            mascot.care_xp = mascot.care_xp.saturating_add(8);
+                                            self.profile.xp = self.profile.xp.saturating_add(8);
+                                            self.pou_guess_target = (self.pou_guess_target % 10) + 1;
+                                            let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                            self.notify("¡Acertaste! Pou celebra 🎉", grafito_ui::toast::ToastKind::Success);
+                                        } else {
+                                            self.notify(format!("No era {guess}. ¡Probá de nuevo! (pista: era {})", self.pou_guess_target), grafito_ui::toast::ToastKind::Info);
+                                        }
+                                        self.pou_guess_input.clear();
+                                    }
+                                });
+                                ui.label(egui::RichText::new("Pista: Pou piensa entre 1 y 10…").size(9.0).color(theme.text_tertiary));
+                            }
+                            2 => {
+                                if ui.add(egui::Button::new(egui::RichText::new("¡Tocar!").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).fill(theme.accent).stroke(egui::Stroke::new(1.0, theme.accent))).clicked() {
+                                    let mascot = self.profile.mascot_mut_or_default();
+                                    mascot.happiness = (mascot.happiness.saturating_add(6)).min(100);
+                                    mascot.care_xp = mascot.care_xp.saturating_add(5);
+                                    self.profile.xp = self.profile.xp.saturating_add(8);
+                                    let _ = std::fs::write(crate::utils::profile_path(), serde_json::to_string_pretty(&self.profile).unwrap_or_default());
+                                    self.notify("¡Reflejos de felino! +8 XP", grafito_ui::toast::ToastKind::Success);
+                                }
+                            }
+                            3 => {
+                                if ui.add(egui::Button::new(egui::RichText::new("Responder quiz").size(grafito_ui::tokens::TYPE_XS)).rounding(grafito_ui::tokens::RADIUS_PILL).stroke(egui::Stroke::new(1.0, theme.separator))).clicked() {
+                                    self.pou_tab = PouTab::Progreso;
+                                    self.pou_jump_open = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    });
+                if idx % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        ui.separator();
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        ui.horizontal(|ui| {
+            let mascot = self.profile.mascot_mut_or_default().clone();
+            ui.label(
+                egui::RichText::new(format!(
+                    "Felicidad {}% • Hambre {}% • Coins {}",
+                    mascot.happiness, mascot.hunger, mascot.coins
+                ))
+                .size(grafito_ui::tokens::TYPE_XS)
+                .color(theme.text_tertiary),
+            );
+        });
+    }
+
+    fn draw_pou_progreso_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let level = self.profile.level;
+        let xp = self.profile.xp;
+        let covered = self.profile.branches.iter().filter(|b| b.covered).count();
+        let total = self.profile.branches.len().max(1);
+        let pct = covered as f32 / total as f32 * 100.0;
+        ui.label(
+            egui::RichText::new("Progreso")
+                .size(grafito_ui::tokens::TYPE_SM)
+                .strong()
+                .color(theme.text_primary),
+        );
+        ui.horizontal(|ui| {
+            egui::Frame::none()
+                .fill(theme.accent.gamma_multiply(0.10))
+                .rounding(grafito_ui::tokens::RADIUS_PILL)
+                .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Nivel {level}"))
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .strong()
+                            .color(theme.accent),
+                    );
+                });
+            ui.label(
+                egui::RichText::new(format!(
+                    "XP {xp} • Racha {} (mejor {})",
+                    self.profile.streak, self.profile.best_streak
+                ))
+                .size(grafito_ui::tokens::TYPE_XS)
+                .color(theme.text_secondary),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{covered}/{total} ramas • {pct:.0}%"))
+                        .size(grafito_ui::tokens::TYPE_XS)
+                        .color(theme.text_tertiary),
+                );
+            });
+        });
+        ui.add_space(6.0);
+        let bar_w = ui.available_width();
+        let (bar_rect, _) =
+            ui.allocate_exact_size(egui::Vec2::new(bar_w, 8.0), egui::Sense::hover());
+        if ui.is_rect_visible(bar_rect) {
+            ui.painter().rect_filled(bar_rect, 4.0, theme.separator);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(
+                    bar_rect.min,
+                    egui::Vec2::new(bar_w * (covered as f32 / total as f32), 8.0),
+                ),
+                4.0,
+                theme.accent,
+            );
+            ui.painter()
+                .rect_stroke(bar_rect, 4.0, egui::Stroke::new(1.0, theme.separator));
+        }
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Ramas con dominio
+        if !self.profile.branches.is_empty() {
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    for branch in self.profile.branches.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} {}",
+                                    if branch.covered { "✓" } else { "○" },
+                                    branch.name
+                                ))
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(if branch.covered {
+                                    theme.success
+                                } else {
+                                    theme.text_primary
+                                }),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{:.0}%",
+                                            branch.mastery * 100.0
+                                        ))
+                                        .size(9.0)
+                                        .color(theme.text_tertiary),
+                                    );
+                                },
+                            );
+                        });
+                        let w = ui.available_width();
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::Vec2::new(w, 4.0), egui::Sense::hover());
+                        if ui.is_rect_visible(r) {
+                            ui.painter()
+                                .rect_filled(r, 2.0, theme.separator.gamma_multiply(0.6));
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(
+                                    r.min,
+                                    egui::Vec2::new(w * branch.mastery.clamp(0.0, 1.0), 4.0),
+                                ),
+                                2.0,
+                                if branch.covered {
+                                    theme.success
+                                } else {
+                                    theme.accent
+                                },
+                            );
+                        }
+                        ui.add_space(3.0);
+                    }
+                });
+            // Sparkline del histórico de la rama con más muestras
+            if let Some(branch) = self
+                .profile
+                .branches
+                .iter()
+                .max_by_key(|b| b.domain_history.len())
+            {
+                if branch.domain_history.len() >= 2 {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("Evolución: {}", branch.name))
+                            .size(9.0)
+                            .color(theme.text_tertiary),
+                    );
+                    let samples: Vec<f32> = branch.domain_history.iter().map(|(_, v)| *v).collect();
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::Vec2::new(ui.available_width(), 28.0),
+                        egui::Sense::hover(),
+                    );
+                    if ui.is_rect_visible(rect) && samples.len() >= 2 {
+                        let min_x = rect.left() + 2.0;
+                        let max_x = rect.right() - 2.0;
+                        let step = (max_x - min_x) / (samples.len() - 1) as f32;
+                        let to_y = |v: f32| rect.bottom() - v.clamp(0.0, 1.0) * rect.height();
+                        let points: Vec<egui::Pos2> = samples
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| egui::pos2(min_x + step * i as f32, to_y(*v)))
+                            .collect();
+                        ui.painter().add(egui::Shape::line(
+                            points.clone(),
+                            egui::Stroke::new(2.0, theme.accent),
+                        ));
+                        if let Some(last) = points.last() {
+                            ui.painter().circle_filled(*last, 3.0, theme.accent);
+                        }
+                    }
+                }
+            }
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+        } else {
+            ui.label(
+                egui::RichText::new(
+                    "Aún sin ramas registradas. ¡Empezá a explorar y tu progreso aparecerá aquí!",
+                )
+                .size(grafito_ui::tokens::TYPE_XS)
+                .color(theme.text_tertiary)
+                .italics(),
+            );
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+        }
+        ui.separator();
+        ui.add_space(grafito_ui::tokens::SPACE_SM);
+        // Examen de salto — profesional, por tier educativo
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Examen de salto")
+                    .size(grafito_ui::tokens::TYPE_SM)
+                    .strong()
+                    .color(theme.text_primary),
+            );
+            let branch = grafito_profile::exam::jump_exam_branch_id(level);
+            egui::Frame::none()
+                .fill(theme.input_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(grafito_ui::tokens::RADIUS_PILL)
+                .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Tier: {branch}"))
+                            .size(9.0)
+                            .color(theme.text_tertiary),
+                    );
+                });
+        });
+        ui.label(
+            egui::RichText::new(
+                "Si dominás el tier actual, podés saltar de nivel. 3 preguntas, aprobás con 2/3.",
+            )
+            .size(grafito_ui::tokens::TYPE_XS)
+            .color(theme.text_tertiary),
+        );
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let label = if self.pou_jump_open {
+                "Ocultar examen"
+            } else {
+                "Iniciar examen de salto"
+            };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(label).size(grafito_ui::tokens::TYPE_XS))
+                        .rounding(grafito_ui::tokens::RADIUS_PILL)
+                        .fill(theme.accent)
+                        .stroke(egui::Stroke::new(1.0, theme.accent)),
+                )
+                .clicked()
+            {
+                self.pou_jump_open = !self.pou_jump_open;
+                if self.pou_jump_open {
+                    self.pou_jump_answers = [String::new(), String::new(), String::new()];
+                    self.pou_jump_checked = None;
+                }
+            }
+            if !self.pou_jump_open {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Nivel {} → {}",
+                        level,
+                        grafito_profile::exam::jump_exam_branch_id(level)
+                    ))
+                    .size(9.0)
+                    .color(theme.text_tertiary),
+                );
+            }
+        });
+        if self.pou_jump_open {
+            ui.add_space(8.0);
+            let questions = grafito_profile::exam::jump_exam_questions(level);
+            for (idx, q) in questions.iter().enumerate().take(3) {
+                egui::Frame::none()
+                    .fill(theme.input_bg)
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{}. {q}", idx + 1))
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_primary),
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new("Respuesta:")
+                                    .size(10.0)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.pou_jump_answers[idx])
+                                    .hint_text("…")
+                                    .desired_width(160.0),
+                            );
+                            if let Some(checked) = self.pou_jump_checked {
+                                let ok = checked[idx];
+                                ui.label(
+                                    egui::RichText::new(if ok { "✓" } else { "✗" })
+                                        .size(14.0)
+                                        .strong()
+                                        .color(if ok { theme.success } else { theme.danger }),
+                                );
+                            }
+                        });
+                    });
+                ui.add_space(6.0);
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Corregir").size(grafito_ui::tokens::TYPE_XS),
+                        )
+                        .rounding(grafito_ui::tokens::RADIUS_PILL)
+                        .stroke(egui::Stroke::new(1.5, theme.accent)),
+                    )
+                    .clicked()
+                {
+                    let mut results = [false; 3];
+                    for (i, r) in results.iter_mut().enumerate() {
+                        *r = grafito_profile::exam::jump_exam_grade(
+                            level,
+                            i,
+                            &self.pou_jump_answers[i],
+                        );
+                    }
+                    let correct = results.iter().filter(|&&b| b).count();
+                    self.pou_jump_checked = Some(results);
+                    let passed = correct * 3 >= 6; // 2/3
+                    if passed {
+                        self.profile.xp = self.profile.xp.saturating_add(100);
+                        if let Some(m) = self.profile.avatar.mascot.as_mut() {
+                            m.coins = m.coins.saturating_add(10);
+                            m.care_xp = m.care_xp.saturating_add(20);
+                        }
+                        if let Some(m) = self.profile.mascot.as_mut() {
+                            m.coins = m.coins.saturating_add(10);
+                        }
+                        let covered =
+                            self.profile.branches.iter().filter(|b| b.covered).count() as u32;
+                        if let Some(m) = self.profile.avatar.mascot.as_mut() {
+                            m.sync_evolution(self.profile.level, covered);
+                        }
+                        let _ = std::fs::write(
+                            crate::utils::profile_path(),
+                            serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                        );
+                        self.notify(
+                            format!("¡Examen de salto aprobado! {correct}/3 — +100 XP, +10 🪙"),
+                            grafito_ui::toast::ToastKind::Success,
+                        );
+                    } else {
+                        self.notify(
+                            format!("Examen: {correct}/3 — seguí practicando"),
+                            grafito_ui::toast::ToastKind::Info,
+                        );
+                    }
+                }
+                if ui.small_button("Limpiar").clicked() {
+                    self.pou_jump_answers = [String::new(), String::new(), String::new()];
+                    self.pou_jump_checked = None;
+                }
+            });
+            if let Some(results) = self.pou_jump_checked {
+                ui.add_space(4.0);
+                let correct = results.iter().filter(|&&b| b).count();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Resultado: {correct}/3 — {}",
+                        if correct * 3 >= 6 {
+                            "¡Aprobado! Podés saltar de nivel"
+                        } else {
+                            "Aún no alcanza, ¡a seguir!"
+                        }
+                    ))
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .strong()
+                    .color(if correct * 3 >= 6 {
+                        theme.success
+                    } else {
+                        theme.text_secondary
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Configuración — solo nombre (minimalista Scandinavian).
+    /// El picker de mascota vive en la Perspectiva Mascota, no aquí.
+    pub(crate) fn draw_mascot_config_window(&mut self, ctx: &egui::Context) {
+        if !self.show_mascot_config {
+            return;
+        }
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let mut open = self.show_mascot_config;
+        let mut close_requested = false;
+        let mut save_requested = false;
+        let mut cancel_requested = false;
+        let mut reset_requested = false;
+        egui::Window::new("Configuración")
+            .id(egui::Id::new("mascot_config_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .min_width(380.0)
+            .max_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(8),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Configuración")
+                        .size(grafito_ui::tokens::TYPE_LG)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Ajustes mínimos de tu perfil. La personalización de Pou vive en la Perspectiva Mascota.",
+                    )
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_tertiary),
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.label(
+                    egui::RichText::new("Tu nombre")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.add_space(4.0);
+                let mut draft = self.avatar_draft.display_name.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .hint_text("Tu nombre")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(8.0, 6.0)),
+                );
+                if resp.changed() {
+                    let truncated: String = draft.chars().take(32).collect();
+                    self.avatar_draft.display_name = truncated;
+                    self.config_name_error = None;
+                }
+                ui.horizontal(|ui| {
+                    let count = self.avatar_draft.display_name.chars().count();
+                    ui.label(
+                        egui::RichText::new(format!("{count}/32"))
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_tertiary),
+                    );
+                    if let Some(err) = &self.config_name_error.clone() {
+                        ui.label(
+                            egui::RichText::new(err)
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.danger),
+                        );
+                    }
+                });
+                if let Some(err) = &self.config_name_error.clone() {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.danger),
+                    );
+                }
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Guardar")
+                                    .size(grafito_ui::tokens::TYPE_SM)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(theme.accent)
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.0, theme.accent)),
+                        )
+                        .clicked()
+                    {
+                        save_requested = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Cancelar")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                        )
+                        .clicked()
+                    {
+                        cancel_requested = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Restablecer")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                        )
+                        .clicked()
+                    {
+                        reset_requested = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Cerrar").clicked() {
+                            close_requested = true;
+                        }
+                    });
+                });
+            });
+        if reset_requested {
+            self.avatar_draft.display_name = "Estudiante".to_string();
+            self.config_name_error = None;
+        }
+        if save_requested {
+            let name = self.avatar_draft.display_name.clone();
+            match self.profile.set_display_name(&name) {
+                Ok(()) => {
+                    self.avatar_draft = self.profile.avatar.clone();
+                    self.config_name_error = None;
+                    let _ = std::fs::write(
+                        crate::utils::profile_path(),
+                        serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                    );
+                    self.notify("Nombre guardado", grafito_ui::toast::ToastKind::Success);
+                    open = false;
+                }
+                Err(err) => {
+                    self.config_name_error = Some(err);
+                }
+            }
+        }
+        if cancel_requested {
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+            open = false;
+        }
+        if close_requested {
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+            open = false;
+        }
+        if !open && self.show_mascot_config {
+            // Cierre con X sin guardar: revertir borrador
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+        }
+        self.show_mascot_config = open;
+    }
+
+    /// Configuración — solo nombre (alias unificado). El picker de mascota vive en la Perspectiva Mascota.
+    #[allow(dead_code)]
+    pub(crate) fn draw_unified_config_window(&mut self, ctx: &egui::Context) {
+        if !self.show_mascot_config {
+            return;
+        }
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let mut open = self.show_mascot_config;
+        let mut close_requested = false;
+        let mut save_requested = false;
+        let mut cancel_requested = false;
+        let mut reset_requested = false;
+        egui::Window::new("Configuración")
+            .id(egui::Id::new("unified_config_window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .min_width(380.0)
+            .max_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
+                    .shadow(egui::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(8),
+                    }),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Configuración")
+                        .size(grafito_ui::tokens::TYPE_LG)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Ajustes mínimos de tu perfil. La personalización de Pou vive en la Perspectiva Mascota.",
+                    )
+                    .size(grafito_ui::tokens::TYPE_XS)
+                    .color(theme.text_tertiary),
+                );
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.label(
+                    egui::RichText::new("Tu nombre")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong()
+                        .color(theme.text_primary),
+                );
+                ui.add_space(4.0);
+                let mut draft = self.avatar_draft.display_name.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .hint_text("Tu nombre")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(8.0, 6.0)),
+                );
+                if resp.changed() {
+                    let truncated: String = draft.chars().take(32).collect();
+                    self.avatar_draft.display_name = truncated;
+                    self.config_name_error = None;
+                }
+                ui.horizontal(|ui| {
+                    let count = self.avatar_draft.display_name.chars().count();
+                    ui.label(
+                        egui::RichText::new(format!("{count}/32"))
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_tertiary),
+                    );
+                    if let Some(err) = &self.config_name_error.clone() {
+                        ui.label(
+                            egui::RichText::new(err)
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.danger),
+                        );
+                    }
+                });
+                if let Some(err) = &self.config_name_error.clone() {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(err)
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.danger),
+                    );
+                }
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Guardar")
+                                    .size(grafito_ui::tokens::TYPE_SM)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(theme.accent)
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.0, theme.accent)),
+                        )
+                        .clicked()
+                    {
+                        save_requested = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Cancelar")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                        )
+                        .clicked()
+                    {
+                        cancel_requested = true;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Restablecer")
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .rounding(grafito_ui::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                        )
+                        .clicked()
+                    {
+                        reset_requested = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Cerrar").clicked() {
+                            close_requested = true;
+                        }
+                    });
+                });
+            });
+        if reset_requested {
+            self.avatar_draft.display_name = "Estudiante".to_string();
+            self.config_name_error = None;
+        }
+        if save_requested {
+            let name = self.avatar_draft.display_name.clone();
+            match self.profile.set_display_name(&name) {
+                Ok(()) => {
+                    self.avatar_draft = self.profile.avatar.clone();
+                    self.config_name_error = None;
+                    let _ = std::fs::write(
+                        crate::utils::profile_path(),
+                        serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                    );
+                    self.notify("Nombre guardado", grafito_ui::toast::ToastKind::Success);
+                    open = false;
+                }
+                Err(err) => {
+                    self.config_name_error = Some(err);
+                }
+            }
+        }
+        if cancel_requested {
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+            open = false;
+        }
+        if close_requested {
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+            open = false;
+        }
+        if !open && self.show_mascot_config {
+            self.avatar_draft = self.profile.avatar.clone();
+            self.config_name_error = None;
+        }
+        self.show_mascot_config = open;
+    }
 }
 
 /// Resumen en español de los cambios de la release 1.1.4 para la ventana
@@ -4556,7 +6091,7 @@ fn build_about_changelog() -> &'static [&'static str] {
         "Script aborta con error claro en recursión profunda; expand_all_cas limita a 50 iteraciones.",
         "Plot/Integral usan replace_variable de límite de palabra (exp(t) no se rompe).",
         "Toasts para errores de save_state/load_state.",
-        "Sistema de 10 perspectivas GeoGebra (Geometría, Álgebra, Cálculo, Estadística, Complejos, Dinámica, Datos, Examen).",
+        "Sistema de 11 perspectivas GeoGebra (Geometría, Álgebra, Cálculo, Estadística, Complejos, Dinámica, Datos, Examen, Mascota).",
         "Tool ghost universal con marcas de eje rojas/azules para interceptos.",
         "Herramientas de medición: Area, Circumference, Center, Length, Slope.",
         "Construcciones geométricas: Sector, Arc, Polygon booleans.",
