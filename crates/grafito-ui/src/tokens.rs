@@ -28,8 +28,8 @@ pub const FONT_FALLBACK_SANS: &str = "Inter";
 pub const TYPE_XS: f32 = 11.0;
 /// Texto pequeño: labels secundarios, captions — Inter 12.
 pub const TYPE_SM: f32 = 12.0;
-/// Texto base: cuerpo, inputs — Inter 15.
-pub const TYPE_BASE: f32 = 15.0;
+/// Texto base: cuerpo, inputs — Inter 16 (Scandinavian body 16-18).
+pub const TYPE_BASE: f32 = 16.0;
 /// Texto mediano: labels destacados, sub-headers — Inter 19 clampeado.
 pub const TYPE_MD: f32 = 16.0;
 /// Texto grande: headers de panel — Inter 19.

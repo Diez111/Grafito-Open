@@ -1628,8 +1628,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 /// el símbolo base.
 pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
-    let before = app.document.clone();
-    let undo_depth = app.undo_stack.len();
+    let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("complex_panel")
@@ -1799,7 +1798,11 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
                 });
         });
-    app.save_snapshot_if_semantically_changed(before, undo_depth);
+    snapshot.save_if_semantically_changed(
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+    );
 }
 
 /// Panel izquierdo de Atractores y Dinámica.

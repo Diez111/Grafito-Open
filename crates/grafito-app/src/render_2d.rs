@@ -757,13 +757,21 @@ mod overlay_layer_tests {
             let GeoObject::ImplicitCurve(curve) = document.get_object(*id).unwrap() else {
                 panic!("expected implicit curve");
             };
-            curve.cached_key.read().unwrap().is_some()
+            curve
+                .cached_key
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some()
         }));
         let GeoObject::ImplicitCurve(deferred) = document.get_object(ids[2]).unwrap() else {
             panic!("expected deferred implicit curve");
         };
         assert!(
-            deferred.cached_key.read().unwrap().is_none(),
+            deferred
+                .cached_key
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_none(),
             "a deferred cache miss must not overwrite or mark a cache as ready"
         );
     }

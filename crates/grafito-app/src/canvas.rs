@@ -1512,7 +1512,7 @@ mod tests {
         assert!(ids[..3].iter().all(|id| planned.contains(id)));
         assert!(ids[3..].iter().all(|id| !planned.contains(id)));
         assert!(document.objects_iter().all(|(_, object)| {
-            matches!(object, GeoObject::Surface3D(surface) if surface.cached_grid.read().unwrap().is_empty())
+            matches!(object, GeoObject::Surface3D(surface) if surface.cached_grid.read().unwrap_or_else(|p| p.into_inner()).is_empty())
         }));
     }
 

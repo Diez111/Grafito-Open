@@ -334,6 +334,19 @@ fn write_document_to_path(document: &Document, path: &Path) -> Result<(), String
 }
 
 pub(crate) fn documents_semantically_differ(before: &Document, after: &Document) -> bool {
+    // Fast path: version and object count are O(1). Only fall back to JSON when they differ
+    // but screen_size might be the only change (which we ignore).
+    if std::ptr::eq(before, after) {
+        return false;
+    }
+    if before.version == after.version
+        && before.objects_iter().count() == after.objects_iter().count()
+    {
+        // Check screen_size quickly before full JSON
+        if before.view().screen_size == after.view().screen_size {
+            return false;
+        }
+    }
     match (serde_json::to_value(before), serde_json::to_value(after)) {
         (Ok(before), Ok(after)) => before != after,
         _ => false,
@@ -1629,6 +1642,27 @@ impl GrafitoApp {
         self.tool_state.clear();
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Scandinavian: Instala Inter Variable como fuente principal (calm, 500/600)
+        {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "Inter".to_owned(),
+                egui::FontData::from_static(include_bytes!(
+                    "../../../assets/InterVariable.ttf"
+                )),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "Inter".to_owned());
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "Inter".to_owned());
+            cc.egui_ctx.set_fonts(fonts);
+        }
         let (gpu_renderer, gpu_scene_readiness) = if let Some(render_state) = &cc.wgpu_render_state
         {
             let renderer: Arc<RwLock<Option<grafito_render::Renderer>>> =
@@ -1941,6 +1975,7 @@ impl GrafitoApp {
     /// Guarda un único estado previo sólo cuando una interacción de panel
     /// alteró el contenido persistible del documento. Esto evita que los
     /// repaints y los `bump_version` internos generen entradas de undo.
+    #[allow(dead_code)]
     pub(crate) fn save_snapshot_if_semantically_changed(
         &mut self,
         before: Document,
