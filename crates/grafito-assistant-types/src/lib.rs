@@ -194,8 +194,10 @@ pub struct RequestBudget {
 impl Default for RequestBudget {
     fn default() -> Self {
         Self {
-            max_input_chars: 4_096,
-            max_output_chars: 4_096,
+            // 1M tokens ~ 4M chars, pero 1M chars ≈ 250k tokens es un buen default práctico
+            // investigado: deepseek-v4, mimo-2.5, muse-spark soportan 128k-1M tokens de contexto
+            max_input_chars: 1_000_000,
+            max_output_chars: 1_000_000,
             max_steps: 24,
             timeout_ms: 15_000,
         }
@@ -205,10 +207,10 @@ impl Default for RequestBudget {
 impl RequestBudget {
     /// Verifica que los límites sean finitos y suficientemente pequeños para el MVP.
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_input_chars == 0 || self.max_input_chars > 32_768 {
+        if self.max_input_chars == 0 || self.max_input_chars > 1_048_576 {
             return Err("assistant input budget is outside the allowed range".into());
         }
-        if self.max_output_chars == 0 || self.max_output_chars > 32_768 {
+        if self.max_output_chars == 0 || self.max_output_chars > 1_048_576 {
             return Err("assistant output budget is outside the allowed range".into());
         }
         if self.max_steps == 0 || self.max_steps > 128 {

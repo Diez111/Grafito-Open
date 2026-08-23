@@ -1097,7 +1097,7 @@ impl GrafitoApp {
         let mut request = AssistantRequest::remote(question.clone(), document_context);
         request.focus = focus;
         let plugin_instructions = self.plugin_instructions_budgeted();
-        let plugin_instruction_bytes = if plugin_instructions.is_empty() {
+        let _plugin_instruction_bytes = if plugin_instructions.is_empty() {
             0
         } else {
             plugin_instructions
@@ -1129,6 +1129,19 @@ impl GrafitoApp {
                     .saturating_add(REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES)
             })
             .unwrap_or_default();
+        // Con 1M de presupuesto, el catálogo puede ser grande pero lo acotamos a 32k para no saturar
+        let system_bytes = request.system_instructions.len()
+            + if request.system_instructions.is_empty() {
+                0
+            } else {
+                REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES
+            };
+        let transcription_bytes = request.transcription.text.len()
+            + request
+                .attachments
+                .iter()
+                .map(|a| a.transcription.text.len())
+                .sum::<usize>();
         let catalog_budget = request
             .budget
             .max_input_chars
@@ -1143,8 +1156,9 @@ impl GrafitoApp {
             )
             .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
             .saturating_sub(repair_feedback_bytes)
-            .saturating_sub(plugin_instruction_bytes)
-            .min(1_536);
+            .saturating_sub(system_bytes)
+            .saturating_sub(transcription_bytes)
+            .min(32_000);
         request.tool_catalog =
             grafito_command::assistant_context::assistant_tool_catalog(&question, catalog_budget);
         let catalog_overhead = if request.tool_catalog.is_empty() {
@@ -1167,7 +1181,8 @@ impl GrafitoApp {
             .saturating_sub(request.tool_catalog.len())
             .saturating_sub(catalog_overhead)
             .saturating_sub(repair_feedback_bytes)
-            .saturating_sub(plugin_instruction_bytes);
+            .saturating_sub(system_bytes)
+            .saturating_sub(transcription_bytes);
         request.conversation = match history_before_turn {
             Some(target_turn) => self
                 .assistant

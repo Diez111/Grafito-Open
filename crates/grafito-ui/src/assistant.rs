@@ -1554,7 +1554,9 @@ pub fn draw_assistant_settings_window(
         .default_width((screen.width() * 0.85).clamp(600.0, 780.0))
         .min_width(520.0)
         .max_width((screen.width() * 0.96).min(860.0))
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .default_height((screen.height() * 0.70).clamp(480.0, 600.0))
+        .min_height(400.0)
+        .max_height((screen.height() * 0.90).min(760.0))
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(theme.panel_bg)
