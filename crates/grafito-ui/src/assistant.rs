@@ -97,13 +97,15 @@ const ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT: f32 = 112.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT: f32 = 30.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_MESSAGE_HEIGHT: f32 = 20.0;
 const ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT: f32 = 20.0;
+#[allow(dead_code)]
 const ASSISTANT_HEADER_HEIGHT: f32 = 40.0;
 const ASSISTANT_REVEAL_BASE_SECONDS: f64 = 0.28;
 const ASSISTANT_REVEAL_PER_BLOCK_SECONDS: f64 = 0.18;
 const ASSISTANT_REVEAL_MAX_SECONDS: f64 = 1.5;
 const MAX_FOCUSED_CONTEXT_PREVIEW_CHARS: usize = 160;
-const MORA_NAME: &str = "Mora";
-const MORA_ACCESSIBLE_LABEL: &str = "Mora, asistente matemático";
+#[allow(dead_code)]
+const MORA_NAME: &str = "Mili";
+const MORA_ACCESSIBLE_LABEL: &str = "Mili, asistente matemático";
 // Fusión recomendada: **DeepSeek Flash** para TODO razonamiento lógico
 // (siempre el más barato) y **MiMo 2.5-VL** (Xiaomi) para capacidades de
 // visión, video y multimodal que DeepSeek no cubre.
@@ -318,6 +320,8 @@ pub struct AssistantPanelState {
     pub config_tab: usize,
     /// Nombre del usuario para saludo personalizado en el header.
     pub user_name: String,
+    /// Avatar super configurable para eye-tracking en el header.
+    pub avatar: grafito_profile::AvatarConfig,
 }
 
 impl Default for AssistantPanelState {
@@ -377,6 +381,7 @@ impl Default for AssistantPanelState {
             error: None,
             config_tab: 0,
             user_name: String::new(),
+            avatar: grafito_profile::AvatarConfig::default(),
         }
     }
 }
@@ -1400,6 +1405,12 @@ pub enum AssistantUiAction {
     RunMiniExam,
     /// Abrir Configuración en la pestaña Perfil/Mascota.
     OpenMascotConfig,
+    /// Explícame paso a paso — inicia enseñanza interactiva con burbujas, gráfica y pizarra.
+    ExplainStepwise(String),
+    /// Guardar cambios de avatar y nombre de perfil (unificado).
+    SaveAvatar,
+    /// Restablecer avatar al valor por defecto (borrador local).
+    ResetAvatar,
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -1532,26 +1543,27 @@ pub fn draw_assistant_settings_window(
     let mut open = state.settings_open;
     let mut action = None;
     let theme = current_theme(ctx);
-    // Configuración del asistente — título legado para test, ahora unificado como "Configuración"
+    // Configuración — ventana única Scandinavian, responsive, preview persistente
+    let screen = ctx.screen_rect();
     egui::Window::new("Configuración")
         .id(egui::Id::new("assistant_settings_window"))
         .open(&mut open)
         .resizable(true)
         .collapsible(false)
         .constrain(true)
-        .default_width(520.0)
-        .min_width(420.0)
-        .max_width(580.0)
-        .default_height(520.0)
-        .min_height(380.0)
-        .max_height((ctx.screen_rect().height() * 0.82).min(640.0))
+        .default_width((screen.width() * 0.88).clamp(640.0, 860.0))
+        .min_width(580.0)
+        .max_width((screen.width() * 0.96).min(920.0))
+        .default_height((screen.height() * 0.80).clamp(560.0, 720.0))
+        .min_height(520.0)
+        .max_height((screen.height() * 0.90).min(780.0))
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(theme.panel_bg)
                 .stroke(egui::Stroke::new(1.0, theme.separator))
                 .rounding(egui::Rounding::same(crate::tokens::RADIUS_LG))
-                .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
+                .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
                 .shadow(egui::Shadow {
                     offset: egui::vec2(0.0, 2.0),
                     blur: 8.0,
@@ -1564,7 +1576,7 @@ pub fn draw_assistant_settings_window(
                 state.key_status_checked = true;
                 action = Some(AssistantUiAction::LoadApiKey);
             }
-            // Tabs Scandinavian: Asistente | Perfil (unificado)
+            // Tabs Scandinavian: Asistente | Perfil
             ui.horizontal(|ui| {
                 let asis_sel = state.config_tab == 0;
                 if ui
@@ -1576,8 +1588,8 @@ pub fn draw_assistant_settings_window(
                 }
                 let perfil_sel = state.config_tab == 1;
                 if ui
-                    .selectable_label(perfil_sel, "Perfil / Pou")
-                    .on_hover_text("Tu nombre y compañero Pou")
+                    .selectable_label(perfil_sel, "Perfil")
+                    .on_hover_text("Tu nombre y avatar")
                     .clicked()
                 {
                     state.config_tab = 1;
@@ -1586,81 +1598,487 @@ pub fn draw_assistant_settings_window(
             ui.add_space(crate::tokens::SPACE_XS);
             ui.separator();
             ui.add_space(crate::tokens::SPACE_XS);
-            if state.config_tab == 1 {
-                let theme = current_theme(ctx);
-                ui.label(
-                    egui::RichText::new("Perfil y Pou")
-                        .strong()
-                        .size(crate::tokens::TYPE_SM)
-                        .color(theme.text_primary),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        "Tu nombre y la personalización de ropa, casa y juegos viven en la Perspectiva Mascota. Abrila para editar todo sin ventanas duplicadas.",
-                    )
-                    .size(crate::tokens::TYPE_XS)
-                    .color(theme.text_tertiary)
-                    .weak(),
-                );
-                ui.add_space(crate::tokens::SPACE_SM);
-                ui.label(
-                    egui::RichText::new("Tu nombre")
-                        .size(crate::tokens::TYPE_SM)
-                        .strong()
-                        .color(theme.text_primary),
-                );
-                ui.add_space(4.0);
-                let mut draft = state.user_name.clone();
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut draft)
-                        .hint_text("Tu nombre")
-                        .desired_width(f32::INFINITY)
-                        .margin(egui::vec2(8.0, 6.0)),
-                );
-                if resp.changed() {
-                    state.user_name = draft.chars().take(32).collect();
-                }
-                ui.horizontal(|ui| {
-                    let count = state.user_name.chars().count();
-                    ui.label(
-                        egui::RichText::new(format!("{count}/32"))
-                            .size(crate::tokens::TYPE_XS)
-                            .color(theme.text_tertiary),
-                    );
-                });
-                ui.add_space(crate::tokens::SPACE_SM);
-                if ui
-                    .add(
-                        egui::Button::new("Abrir Perspectiva Mascota")
-                            .fill(theme.accent)
-                            .stroke(egui::Stroke::NONE)
-                            .rounding(crate::tokens::RADIUS_MD),
-                    )
-                    .clicked()
-                {
-                    action = Some(AssistantUiAction::OpenMascotConfig);
-                }
-                ui.add_space(crate::tokens::SPACE_XS);
-                ui.label(
-                    egui::RichText::new("Tip: usa Configuración (gear) para volver a Asistente.")
-                        .size(10.0)
-                        .color(theme.text_tertiary)
-                        .italics(),
-                );
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt("assistant_settings_scroll")
-                    .auto_shrink([false, false])
-                    .max_height((ctx.screen_rect().height() * 0.72).min(560.0))
+            // Layout responsive: angosto (<640) → preview arriba, ancho → preview al costado, sin espacio vacío
+            let is_narrow = ui.available_width() < 640.0;
+            if is_narrow {
+                egui::Frame::none()
+                    .fill(theme.input_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .rounding(crate::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        if let Some(settings_action) = draw_assistant_settings_contents(ui, state) {
-                            action = Some(settings_action);
+                        draw_avatar_preview_pane(ui, state);
+                    });
+                ui.add_space(crate::tokens::SPACE_MD);
+                ui.separator();
+                ui.add_space(crate::tokens::SPACE_SM);
+                egui::ScrollArea::vertical()
+                    .id_salt("assistant_settings_scroll")
+                    .auto_shrink([false, true])
+                    .max_height(ui.available_height())
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let inner_action = if state.config_tab == 1 {
+                            draw_perfil_settings_contents(ui, state)
+                        } else {
+                            draw_assistant_settings_contents(ui, state)
+                        };
+                        if let Some(a) = inner_action {
+                            action = Some(a);
                         }
                     });
+            } else {
+                let avail_h = ui.available_height();
+                ui.horizontal_top(|ui| {
+                    let preview_w = (ui.available_width() * 0.42).clamp(200.0, 300.0);
+                    let spacing = crate::tokens::SPACE_LG;
+                    let total_w = ui.available_width();
+                    let left_w = (total_w - preview_w - spacing).max(380.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_w, avail_h),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("assistant_settings_scroll")
+                                .auto_shrink([false, true])
+                                .max_height(avail_h)
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    let inner_action = if state.config_tab == 1 {
+                                        draw_perfil_settings_contents(ui, state)
+                                    } else {
+                                        draw_assistant_settings_contents(ui, state)
+                                    };
+                                    if let Some(a) = inner_action {
+                                        action = Some(a);
+                                    }
+                                });
+                        },
+                    );
+                    ui.add_space(spacing);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(preview_w, avail_h),
+                        egui::Layout::top_down(egui::Align::Center),
+                        |ui| {
+                            egui::Frame::none()
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    theme.separator.gamma_multiply(0.08),
+                                ))
+                                .rounding(crate::tokens::RADIUS_LG)
+                                .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(preview_w - crate::tokens::SPACE_LG * 2.0);
+                                    ui.set_max_width(preview_w - crate::tokens::SPACE_LG * 2.0);
+                                    draw_avatar_preview_pane(ui, state);
+                                });
+                        },
+                    );
+                });
             }
         });
     state.settings_open = open;
+    action
+}
+
+fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
+    let theme = current_theme(ui.ctx());
+    let time = ui.input(|i| i.time);
+    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new("Vista previa")
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_tertiary)
+                .weak(),
+        );
+        ui.add_space(crate::tokens::SPACE_SM);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(168.0, 168.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, crate::tokens::RADIUS_LG, theme.input_bg);
+        painter.rect_stroke(
+            rect,
+            crate::tokens::RADIUS_LG,
+            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
+        );
+        let inner = rect.shrink(12.0);
+        crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
+        ui.add_space(crate::tokens::SPACE_SM);
+        let display = if state.user_name.trim().is_empty() {
+            state.avatar.display_name.clone()
+        } else {
+            state.user_name.clone()
+        };
+        let display = {
+            let t = display.trim();
+            if t.is_empty() {
+                "Estudiante".to_string()
+            } else {
+                t.to_string()
+            }
+        };
+        ui.label(
+            egui::RichText::new(display)
+                .strong()
+                .size(crate::tokens::TYPE_SM)
+                .color(theme.text_primary),
+        );
+        let assistant_name = state.avatar.assistant_name_or_default();
+        ui.label(
+            egui::RichText::new(&assistant_name)
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_secondary),
+        );
+        ui.add_space(crate::tokens::SPACE_XS);
+        // Acento como punto de color + nombre, no rgb crudo
+        let (accent_name, rgb, _) =
+            grafito_profile::AvatarConfig::accent_palette(state.avatar.accent_preset);
+        ui.horizontal(|ui| {
+            let dot_size = 8.0;
+            let (dot_rect, _) =
+                ui.allocate_exact_size(egui::vec2(dot_size, dot_size), egui::Sense::hover());
+            ui.painter().circle_filled(
+                dot_rect.center(),
+                dot_size * 0.5,
+                egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+            );
+            ui.label(
+                egui::RichText::new(accent_name)
+                    .size(10.0)
+                    .color(theme.text_tertiary),
+            );
+        });
+        ui.label(
+            egui::RichText::new(format!(
+                "{} · {}",
+                state.avatar.shape.label(),
+                state.avatar.eye_style.label(),
+            ))
+            .size(10.0)
+            .color(theme.text_tertiary)
+            .weak(),
+        );
+        ui.label(
+            egui::RichText::new(if state.avatar.eye_tracking {
+                "seguimiento activo"
+            } else {
+                "seguimiento fijo"
+            })
+            .size(9.0)
+            .color(theme.text_tertiary)
+            .italics()
+            .weak(),
+        );
+        ui.add_space(crate::tokens::SPACE_SM);
+        ui.label(
+            egui::RichText::new("Mové el puntero sobre el avatar")
+                .size(9.0)
+                .color(theme.text_tertiary)
+                .weak(),
+        );
+    });
+}
+
+fn draw_perfil_settings_contents(
+    ui: &mut egui::Ui,
+    state: &mut AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    let theme = current_theme(ui.ctx());
+    let mut action = None;
+    ui.label(
+        egui::RichText::new("Perfil y Avatar")
+            .size(crate::tokens::TYPE_LG)
+            .color(theme.text_primary),
+    );
+    ui.label(
+        egui::RichText::new(
+            "Personalizá tu nombre y el avatar vectorial. Los cambios se previsualizan a la derecha.",
+        )
+        .size(crate::tokens::TYPE_XS)
+        .color(theme.text_secondary.gamma_multiply(0.60))
+        .weak(),
+    );
+    ui.add_space(crate::tokens::SPACE_XL);
+    // Nombre — full width, con más aire
+    ui.label(
+        egui::RichText::new("Tu nombre")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_secondary.gamma_multiply(0.60)),
+    );
+    ui.add_space(crate::tokens::SPACE_XS);
+    let mut draft = state.user_name.clone();
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut draft)
+            .hint_text("Tu nombre")
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(10.0, 8.0)),
+    );
+    if resp.changed() {
+        let sanitized: String = draft.chars().take(32).collect();
+        state.user_name = sanitized.clone();
+        state.avatar.display_name = sanitized;
+    }
+    ui.horizontal(|ui| {
+        let count = state.user_name.chars().count();
+        ui.label(
+            egui::RichText::new(format!("{count}/32"))
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_tertiary),
+        );
+    });
+    ui.add_space(crate::tokens::SPACE_LG);
+    ui.separator();
+    ui.add_space(crate::tokens::SPACE_LG);
+    // Grid 2-col: Forma | Ojos estilo
+    egui::Grid::new("perfil_grid_top")
+        .num_columns(2)
+        .spacing([crate::tokens::SPACE_LG, crate::tokens::SPACE_MD])
+        .min_col_width((ui.available_width() - crate::tokens::SPACE_LG) * 0.5 - 4.0)
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("FORMA")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    for shape in grafito_profile::AvatarShape::all() {
+                        let sel = state.avatar.shape == *shape;
+                        if ui
+                            .selectable_label(sel, shape.label())
+                            .on_hover_text(shape.description())
+                            .clicked()
+                        {
+                            state.avatar.shape = *shape;
+                        }
+                    }
+                });
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("MIRADA")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    for style in grafito_profile::AvatarEyeStyle::all() {
+                        let sel = state.avatar.eye_style == *style;
+                        if ui.selectable_label(sel, style.label()).clicked() {
+                            state.avatar.eye_style = *style;
+                        }
+                    }
+                });
+            });
+            ui.end_row();
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("TAMAÑO")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.add(egui::Slider::new(&mut state.avatar.eye_size, 0..=100).show_value(false));
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("SEPARACIÓN")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.add(egui::Slider::new(&mut state.avatar.eye_spacing, 0..=100).show_value(false));
+            });
+            ui.end_row();
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("PUPILA")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.add(egui::Slider::new(&mut state.avatar.pupil_size, 0..=100).show_value(false));
+            });
+            ui.vertical(|ui| {
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.checkbox(&mut state.avatar.eye_tracking, "Seguimiento");
+            });
+        });
+    ui.add_space(crate::tokens::SPACE_LG);
+    // Boca · Rubor en 2 col + Accesorio full width
+    egui::Grid::new("perfil_grid_boca_rubor")
+        .num_columns(2)
+        .spacing([crate::tokens::SPACE_LG, crate::tokens::SPACE_MD])
+        .min_col_width((ui.available_width() - crate::tokens::SPACE_LG) * 0.5 - 4.0)
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("BOCA")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    for mouth in grafito_profile::AvatarMouthStyle::all() {
+                        let sel = state.avatar.mouth_style == *mouth;
+                        if ui.selectable_label(sel, mouth.label()).clicked() {
+                            state.avatar.mouth_style = *mouth;
+                        }
+                    }
+                });
+            });
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("RUBOR")
+                        .size(10.0)
+                        .color(theme.text_tertiary.gamma_multiply(0.55)),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    for blush in grafito_profile::AvatarBlush::all() {
+                        let sel = state.avatar.blush == *blush;
+                        if ui.selectable_label(sel, blush.label()).clicked() {
+                            state.avatar.blush = *blush;
+                        }
+                    }
+                });
+            });
+            ui.end_row();
+        });
+    ui.add_space(crate::tokens::SPACE_SM);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new("ACCESORIO")
+                .size(10.0)
+                .color(theme.text_tertiary.gamma_multiply(0.55)),
+        );
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        for acc in grafito_profile::AvatarAccessory::all() {
+            let sel = state.avatar.accessory == *acc;
+            if ui.selectable_label(sel, acc.label()).clicked() {
+                state.avatar.accessory = *acc;
+            }
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_LG);
+    // Acento
+    ui.label(
+        egui::RichText::new("ACENTO")
+            .size(10.0)
+            .color(theme.text_tertiary.gamma_multiply(0.55)),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        for preset in 0..6 {
+            let (name, rgb, _) = grafito_profile::AvatarConfig::accent_palette(preset);
+            let sel = state.avatar.accent_preset == preset;
+            let col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let btn = egui::Button::new(
+                egui::RichText::new(name)
+                    .size(crate::tokens::TYPE_XS)
+                    .color(if sel {
+                        egui::Color32::WHITE
+                    } else {
+                        theme.text_primary
+                    }),
+            )
+            .fill(if sel { col } else { col.gamma_multiply(0.18) })
+            .stroke(egui::Stroke::new(
+                1.0,
+                if sel {
+                    col
+                } else {
+                    theme.separator.gamma_multiply(0.10)
+                },
+            ))
+            .rounding(crate::tokens::RADIUS_PILL);
+            if ui
+                .add(btn)
+                .on_hover_text(format!("{} rgb({},{},{})", name, rgb[0], rgb[1], rgb[2]))
+                .clicked()
+            {
+                state.avatar.accent_preset = preset;
+            }
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_SM);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("PARPADEO")
+                .size(10.0)
+                .color(theme.text_tertiary.gamma_multiply(0.55)),
+        );
+        ui.add(egui::Slider::new(&mut state.avatar.blink_speed, 0..=100).show_value(false));
+        if state.avatar.blink_speed == 0 {
+            ui.label(
+                egui::RichText::new("sin")
+                    .size(10.0)
+                    .color(theme.text_tertiary),
+            );
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_LG);
+    ui.separator();
+    ui.add_space(crate::tokens::SPACE_LG);
+    // Botones Guardar / Cancelar / Restablecer
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("Guardar")
+                        .size(crate::tokens::TYPE_SM)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(theme.accent)
+                .rounding(crate::tokens::RADIUS_PILL)
+                .stroke(egui::Stroke::new(1.0, theme.accent)),
+            )
+            .clicked()
+        {
+            action = Some(AssistantUiAction::SaveAvatar);
+        }
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new("Cancelar").size(crate::tokens::TYPE_SM))
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
+            )
+            .clicked()
+        {
+            // Cierra sin guardar — el sync revertirá al perfil al próximo frame
+            state.settings_open = false;
+        }
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new("Restablecer").size(crate::tokens::TYPE_SM))
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
+            )
+            .clicked()
+        {
+            state.avatar = grafito_profile::AvatarConfig::default();
+            state.avatar.display_name = "Estudiante".to_string();
+            state.user_name = "Estudiante".to_string();
+            action = Some(AssistantUiAction::ResetAvatar);
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_XS);
+    ui.label(
+        egui::RichText::new(
+            "Tip: el avatar se usa en el header y en enseñanza paso a paso (morph a burbuja).",
+        )
+        .size(10.0)
+        .color(theme.text_tertiary)
+        .weak(),
+    );
     action
 }
 
@@ -1903,6 +2321,7 @@ fn draw_assistant_settings_contents(
 }
 
 /// Mini-gráfico de evolución de dominio (0..=1) de la rama más trabajada.
+#[allow(dead_code)]
 fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::theme::Theme) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
@@ -1932,6 +2351,7 @@ fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::them
 
 /// Tarjeta de progreso del tutor (memoria del usuario) con la siguiente
 /// recomendación y feedback ✓/✗ de la última explicación.
+#[allow(dead_code)]
 fn draw_tutor_card(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
@@ -1970,7 +2390,7 @@ fn draw_tutor_card(
                     );
                     if state.tutor_streak > 1 {
                         ui.label(
-                            egui::RichText::new(format!("🔥 racha {}", state.tutor_streak))
+                            egui::RichText::new(format!("Racha {}", state.tutor_streak))
                                 .color(theme.accent)
                                 .size(TYPE_XS)
                                 .strong(),
@@ -2050,12 +2470,6 @@ fn draw_panel_contents(
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let mut action = draw_assistant_header(ui, state, theme, visuals);
-    if state.tutor_total > 0 {
-        ui.add_space(SPACE_XS);
-        if let Some(child) = draw_tutor_card(ui, state) {
-            action = Some(child);
-        }
-    }
     ui.add_space(SPACE_XS);
 
     let composer_height = assistant_composer_height(state);
@@ -2173,12 +2587,25 @@ fn draw_panel_contents(
                     } else {
                         None
                     };
+                    let assistant_name = state.avatar.assistant_name_or_default();
                     if action.is_none() {
-                        action =
-                            draw_conversation_turn(ui, turn, proposal_state, reveal_here, cache);
+                        action = draw_conversation_turn(
+                            ui,
+                            turn,
+                            proposal_state,
+                            reveal_here,
+                            cache,
+                            &assistant_name,
+                        );
                     } else {
-                        let _ =
-                            draw_conversation_turn(ui, turn, proposal_state, reveal_here, cache);
+                        let _ = draw_conversation_turn(
+                            ui,
+                            turn,
+                            proposal_state,
+                            reveal_here,
+                            cache,
+                            &assistant_name,
+                        );
                     }
                     ui.add_space(SPACE_MD);
                 }
@@ -2520,7 +2947,7 @@ fn draw_mora_avatar(
     response.on_hover_text(MORA_ACCESSIBLE_LABEL)
 }
 
-/// Dibuja el avatar blob de Mora: forma orgánica cerrada con borde acento,
+/// Dibuja el avatar blob de Mili: forma orgánica cerrada con borde acento,
 /// ojos y un destello, adaptada al tema claro/oscuro.
 fn draw_blob_avatar(painter: &egui::Painter, rect: egui::Rect, theme: &crate::theme::Theme) {
     let center = rect.center();
@@ -2572,43 +2999,27 @@ fn draw_assistant_empty_state(
     _visuals: AssistantVisuals,
 ) {
     let theme = current_theme(ui.ctx());
-    ui.add_space(crate::tokens::SPACE_LG);
-    // Capítulo 1: heading + sub — left-aligned, restraint
-    ui.horizontal(|ui| {
+    let assistant_name = state.avatar.assistant_name_or_default();
+    // Centrado vertical + horizontal — Scandinavian restraint: sólo 2 estilos
+    let avail = ui.available_height();
+    if avail > 100.0 {
+        ui.add_space((avail - 72.0) * 0.38);
+    } else {
+        ui.add_space(crate::tokens::SPACE_XL);
+    }
+    ui.vertical_centered(|ui| {
         ui.label(
-            egui::RichText::new("Pregunta lo que quieras")
+            egui::RichText::new(format!("{assistant_name} — Asistente matemático"))
                 .color(theme.text_primary)
-                .strong()
-                .size(crate::tokens::TYPE_BASE),
+                .size(crate::tokens::TYPE_XL),
+        );
+        ui.add_space(crate::tokens::SPACE_XS);
+        ui.label(
+            egui::RichText::new("Escribí tu pregunta y presioná enviar.")
+                .color(theme.text_secondary.gamma_multiply(0.60))
+                .size(crate::tokens::TYPE_SM),
         );
     });
-    ui.add_space(crate::tokens::SPACE_XS);
-    ui.label(
-        egui::RichText::new("ej. “derivada de x³” o “animá la integral”")
-            .color(theme.text_secondary)
-            .size(crate::tokens::TYPE_XS),
-    );
-    ui.add_space(crate::tokens::SPACE_MD);
-    // Chips: una sola fila scrolleable horizontal o wrap denso 8px, peers idénticos
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        for (label, prompt) in suggestion_prompts(state.focus.is_some()) {
-            let btn = egui::Button::new(egui::RichText::new(label).size(crate::tokens::TYPE_XS))
-                .rounding(crate::tokens::RADIUS_MD)
-                .fill(theme.button_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator));
-            if ui.add(btn).clicked() {
-                state.problem = prompt.into();
-                state.clear_error();
-            }
-        }
-    });
-    ui.add_space(crate::tokens::SPACE_XS);
-    ui.label(
-        egui::RichText::new("Enter para enviar · Shift+Enter nueva línea")
-            .color(theme.text_tertiary)
-            .size(10.0),
-    );
 }
 
 fn draw_assistant_header(
@@ -2618,75 +3029,80 @@ fn draw_assistant_header(
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let mut action = None;
-    // Header Scandinavian — left-aligned, sin card pesada, hairline 10%
+    // Header Scandinavian — centered, avatar above name, transparent (no card)
     egui::Frame::none()
-        .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-        .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
+        .fill(egui::Color32::TRANSPARENT)
         .inner_margin(egui::Margin::symmetric(
             crate::tokens::SPACE_SM,
             crate::tokens::SPACE_SM,
         ))
         .show(ui, |ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ASSISTANT_HEADER_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.vertical(|ui| {
-                        let greeting = if state.user_name.trim().is_empty() {
-                            MORA_NAME.to_owned()
+            // Controles arriba a la derecha, sin romper el centrado
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if action_icon_button(ui, Icon::Close, theme.text_secondary, "Ocultar asistente")
+                    .clicked()
+                {
+                    action = Some(AssistantUiAction::HidePanel);
+                }
+                if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Configuración")
+                    .clicked()
+                {
+                    state.settings_open = true;
+                    state.config_tab = 0;
+                }
+                let can_clear = !state.is_pending && !state.conversation.is_empty();
+                ui.add_enabled_ui(can_clear, |ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
+                    )
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .fill(theme.button_bg.gamma_multiply(0.0))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
+                    if ui.add(btn).clicked() {
+                        action = Some(AssistantUiAction::ClearConversation);
+                    }
+                });
+            });
+            ui.vertical_centered(|ui| {
+                let time = ui.input(|i| i.time);
+                let hover_pos = ui.input(|i| i.pointer.hover_pos());
+                let avatar_cfg = state.avatar.clone();
+                let (avatar_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                if ui.is_rect_visible(avatar_rect) {
+                    let painter = ui.painter_at(avatar_rect);
+                    let tracking_hover =
+                        if !state.problem.is_empty() && state.problem.len() % 20 < 10 {
+                            hover_pos.map(|p| p + egui::vec2((time * 1.5).sin() as f32 * 1.2, 0.0))
                         } else {
-                            format!("Hola, {}", state.user_name.trim())
+                            hover_pos
                         };
-                        ui.label(
-                            egui::RichText::new(greeting)
-                                .color(theme.text_primary)
-                                .strong()
-                                .size(crate::tokens::TYPE_BASE),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("{MORA_NAME} · Asistente matemático"))
-                                .color(theme.text_secondary)
-                                .size(crate::tokens::TYPE_XS),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if action_icon_button(
-                            ui,
-                            Icon::Close,
-                            theme.text_secondary,
-                            "Ocultar asistente",
-                        )
-                        .clicked()
-                        {
-                            action = Some(AssistantUiAction::HidePanel);
-                        }
-                        if action_icon_button(
-                            ui,
-                            Icon::Settings,
-                            theme.text_secondary,
-                            "Configuración",
-                        )
-                        .clicked()
-                        {
-                            state.settings_open = true;
-                            state.config_tab = 0;
-                        }
-                        let can_clear = !state.is_pending && !state.conversation.is_empty();
-                        ui.add_enabled_ui(can_clear, |ui| {
-                            let btn = egui::Button::new(
-                                egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
-                            )
-                            .rounding(crate::tokens::RADIUS_PILL)
-                            .fill(theme.button_bg.gamma_multiply(0.0))
-                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
-                            if ui.add(btn).clicked() {
-                                action = Some(AssistantUiAction::ClearConversation);
-                            }
-                        });
-                    });
-                },
-            );
+                    crate::avatar::draw_avatar(
+                        &painter,
+                        avatar_rect,
+                        &avatar_cfg,
+                        time,
+                        tracking_hover,
+                    );
+                }
+                ui.add_space(crate::tokens::SPACE_XS);
+                let assistant_name = state.avatar.assistant_name_or_default();
+                let greeting = if state.user_name.trim().is_empty() {
+                    assistant_name.clone()
+                } else {
+                    format!("Hola, {}", state.user_name.trim())
+                };
+                ui.label(
+                    egui::RichText::new(greeting)
+                        .color(theme.text_primary)
+                        .size(crate::tokens::TYPE_BASE),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{assistant_name} · Asistente matemático"))
+                        .color(theme.text_secondary.gamma_multiply(0.60))
+                        .size(crate::tokens::TYPE_XS),
+                );
+            });
         });
     ui.add_space(crate::tokens::SPACE_SM);
     action
@@ -2739,7 +3155,7 @@ fn draw_assistant_composer(
                     egui::vec2(ui.available_width(), ASSISTANT_COMPOSER_EDITOR_HEIGHT),
                     egui::TextEdit::multiline(&mut state.problem)
                         .id_source("grafito_assistant_problem")
-                        .hint_text("Preguntá a Mora — ej. “derivada de x³” o “animá la integral”")
+                        .hint_text("Escribí tu pregunta")
                         .text_color(theme.input_text)
                         .frame(false)
                         .desired_rows(2)
@@ -2941,6 +3357,7 @@ fn draw_conversation_turn(
     proposal_state: AssistantProposalRenderState<'_>,
     reveal_clip: Option<RevealClip>,
     cache: &mut AssistantBlocksCache,
+    assistant_name: &str,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let is_user = matches!(turn.role, ConversationRole::User);
@@ -2978,7 +3395,7 @@ fn draw_conversation_turn(
                         let origin = turn
                             .origin
                             .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
-                        format!("{MORA_NAME} · {}", origin.public_label())
+                        format!("{assistant_name} · {}", origin.public_label())
                     };
                     ui.horizontal(|ui| {
                         ui.label(
@@ -2990,7 +3407,6 @@ fn draw_conversation_turn(
                     });
                     ui.add_space(SPACE_XS);
                     if is_user {
-                        // Texto usuario: left-aligned, color blanco sobre burbuja sage
                         let text_color = appearance.role_color;
                         draw_inline_text_with_color(ui, &turn.content, text_color);
                     } else {
@@ -3001,6 +3417,32 @@ fn draw_conversation_turn(
                             reveal_clip,
                             cache,
                         );
+                        // Botón explícito Scandinavian — Explícame paso a paso
+                        ui.add_space(SPACE_XS);
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Explícame paso a paso →")
+                                .color(theme.accent)
+                                .size(TYPE_XS)
+                                .strong(),
+                        )
+                        .rounding(crate::tokens::RADIUS_MD)
+                        .fill(theme.accent.gamma_multiply(0.08))
+                        .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)));
+                        if ui
+                            .add(btn)
+                            .on_hover_text("Abre burbujas interactivas, gráfica y pizarra")
+                            .clicked()
+                        {
+                            let topic = turn
+                                .content
+                                .lines()
+                                .next()
+                                .unwrap_or("concepto")
+                                .chars()
+                                .take(60)
+                                .collect::<String>();
+                            action = Some(AssistantUiAction::ExplainStepwise(topic));
+                        }
                     }
                     ui.add_space(SPACE_XS);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3047,8 +3489,9 @@ fn draw_pending_indicator(
             color: egui::Color32::from_black_alpha(8),
         })
         .show(ui, |ui| {
+            let assistant_name = state.avatar.assistant_name_or_default();
             ui.label(
-                egui::RichText::new(MORA_NAME)
+                egui::RichText::new(assistant_name)
                     .color(appearance.role_color)
                     .size(TYPE_SM)
                     .strong(),
@@ -4315,6 +4758,7 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     if has_focus {
         [
@@ -4450,7 +4894,7 @@ mod tests {
             });
         });
 
-        assert_eq!(MORA_NAME, "Mora");
+        assert_eq!(MORA_NAME, "Mili");
         assert_eq!(size, egui::vec2(32.0, 32.0));
     }
 
@@ -5216,6 +5660,7 @@ mod tests {
                                     },
                                     None,
                                     &mut AssistantBlocksCache::default(),
+                                    MORA_NAME,
                                 );
                             })
                             .response

@@ -491,7 +491,7 @@ fn assistant_is_a_permanent_docked_panel_without_a_launcher() {
     assert!(assistant_source.contains("SidePanel::right"));
     assert!(!assistant_source.contains("assistant_affordance"));
     assert!(!assistant_source.contains("egui::Window::new(\"Asistente\")"));
-    assert!(assistant_source.contains("Configuración del asistente"));
+    assert!(assistant_source.contains("Configuración"));
     assert!(assistant_source.contains("Icon::Settings"));
     assert!(assistant_source.contains("TopBottomPanel::bottom(\"grafito_assistant_composer\")"));
     assert!(

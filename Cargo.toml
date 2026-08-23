@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex"]
+members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex"]
 resolver = "2"
 
 [workspace.package]
@@ -24,6 +24,7 @@ rust-version = "1.88"
 # Core
 grafito-agent = { path = "crates/grafito-agent" }
 grafito-anim = { path = "crates/grafito-anim" }
+grafito-pedagogy = { path = "crates/grafito-pedagogy" }
 grafito-plugins = { path = "crates/grafito-plugins" }
 grafito-profile = { path = "crates/grafito-profile" }
 grafito-core = { path = "crates/grafito-core" }

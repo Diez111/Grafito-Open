@@ -139,8 +139,6 @@ pub enum Icon {
     // Tema
     Sun,
     Moon,
-    /// Pou outline habitáculo — marca Scandinavian calm (casita).
-    Pou,
 
     // Navegación
     ChevronLeft,
@@ -257,7 +255,6 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
 
         Icon::Sun => icon_sun(painter, inner, color, stroke_thick),
         Icon::Moon => icon_moon(painter, inner, color, stroke_thick),
-        Icon::Pou => icon_pou(painter, inner, color, stroke_thick),
 
         Icon::ChevronLeft => icon_chevron(painter, inner, color, stroke_thick, 180.0),
         Icon::ChevronRight => icon_chevron(painter, inner, color, stroke_thick, 0.0),
@@ -1574,33 +1571,6 @@ fn icon_moon(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
     ));
 }
 
-/// Pou outline habitáculo — casita minimal Scandinavian (techo triangular + base + puerta).
-fn icon_pou(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke) {
-    // Base rectangular — habitáculo
-    let base_top = r.min.y + r.height() * 0.45;
-    let base_bot = r.max.y - r.height() * 0.10;
-    let wall_l = r.min.x + r.width() * 0.18;
-    let wall_r = r.max.x - r.width() * 0.18;
-    let base_rect = Rect::from_min_max(pos2(wall_l, base_top), pos2(wall_r, base_bot));
-    painter.rect_stroke(base_rect, 1.0, stroke);
-    // Techo triangular
-    let apex = pos2(r.center().x, r.min.y + r.height() * 0.12);
-    let roof_l = pos2(wall_l - r.width() * 0.05, base_top);
-    let roof_r = pos2(wall_r + r.width() * 0.05, base_top);
-    painter.line_segment([roof_l, apex], stroke);
-    painter.line_segment([apex, roof_r], stroke);
-    // Puerta centrada — arco Scandinavian
-    let door_w = r.width() * 0.22;
-    let door_h = r.height() * 0.30;
-    let door_x = r.center().x - door_w / 2.0;
-    let door_y = base_bot - door_h;
-    let door_rect = Rect::from_min_max(pos2(door_x, door_y), pos2(door_x + door_w, base_bot));
-    painter.rect_stroke(door_rect, 1.0, stroke);
-    // Ventanita circular pequeña arriba de la puerta
-    let win_c = pos2(r.center().x, base_top + r.height() * 0.18);
-    painter.circle_stroke(win_c, r.width() * 0.07, stroke);
-}
-
 fn icon_chevron(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke, rot: f32) {
     let c = r.center();
     let s = r.width() * 0.3;
@@ -1827,7 +1797,6 @@ mod tests {
                     Icon::Shapes,
                     Icon::Notebook,
                     Icon::DrawCompass,
-                    Icon::Pou,
                 ] {
                     draw_icon(painter, rect, icon, egui::Color32::WHITE);
                 }
@@ -1922,7 +1891,6 @@ mod tests {
         let _ = Icon::Tools;
         let _ = Icon::Sun;
         let _ = Icon::Moon;
-        let _ = Icon::Pou;
         let _ = Icon::ChevronLeft;
         let _ = Icon::ChevronRight;
         let _ = Icon::ChevronUp;

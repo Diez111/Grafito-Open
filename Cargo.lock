@@ -1981,6 +1981,7 @@ dependencies = [
  "grafito-complex",
  "grafito-core",
  "grafito-geometry",
+ "grafito-pedagogy",
  "grafito-plugins",
  "grafito-profile",
  "grafito-render",
@@ -2090,6 +2091,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-pedagogy"
+version = "1.2.32-beta"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "grafito-plugins"
 version = "1.2.32-beta"
 dependencies = [
@@ -2138,6 +2147,7 @@ dependencies = [
  "grafito-command",
  "grafito-core",
  "grafito-geometry",
+ "grafito-pedagogy",
  "grafito-profile",
  "log",
  "once_cell",

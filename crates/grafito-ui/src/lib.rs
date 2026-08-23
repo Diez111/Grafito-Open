@@ -18,19 +18,16 @@
 
 pub mod animation;
 pub mod assistant;
+pub mod avatar;
 pub mod color_picker;
 pub mod command_palette;
 pub mod icons;
 pub mod pou;
+pub mod teaching;
 pub mod theme;
 pub mod toast;
 pub mod tokens;
 pub mod toolbar;
-
-/// Compat: `grafito_ui::avatar` como alias de `pou` para código legado (app.rs).
-pub mod avatar {
-    pub use crate::pou::*;
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]

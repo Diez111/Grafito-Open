@@ -16,6 +16,7 @@ pub mod exercise;
 pub mod feedback;
 pub mod level;
 pub mod scaffold;
+pub mod teaching;
 
 pub use curriculum::{Curriculum, LearningObjective};
 pub use exercise::{Exercise, ExerciseDifficulty, ExerciseGenerator, ExerciseKind};
@@ -23,6 +24,7 @@ pub use feedback::{Feedback, FeedbackEngine, Misconception};
 pub use level::PedagogicalLevel;
 pub use level::UTNProgram;
 pub use scaffold::{Scaffold, ScaffoldEngine};
+pub use teaching::{TeachingSession, TeachingStep, TeachingTopic};
 
 /// Error tipado del motor pedagógico.
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]

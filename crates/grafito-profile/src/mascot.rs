@@ -699,39 +699,223 @@ impl MascotConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AvatarConfig
+// Avatar super configurable — Scandinavian profesional
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Configuración de avatar/perfil del usuario (se persiste en StudentProfile).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarShape {
+    #[default]
+    Circle = 0,
+    Squircle = 1,
+    RoundedSquare = 2,
+    Hexagon = 3,
+}
+impl AvatarShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Circle => "Círculo",
+            Self::Squircle => "Squircle",
+            Self::RoundedSquare => "Cuadrado suave",
+            Self::Hexagon => "Hexágono",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Circle => "Clásico, calma perfecta.",
+            Self::Squircle => "Suave, moderno.",
+            Self::RoundedSquare => "Estructura, editorial.",
+            Self::Hexagon => "Geométrico, técnico.",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Circle,
+            Self::Squircle,
+            Self::RoundedSquare,
+            Self::Hexagon,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarEyeStyle {
+    #[default]
+    Round = 0,
+    Almond = 1,
+    Dot = 2,
+    Wide = 3,
+}
+impl AvatarEyeStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Round => "Redondo",
+            Self::Almond => "Almendrado",
+            Self::Dot => "Punto",
+            Self::Wide => "Amplio",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[Self::Round, Self::Almond, Self::Dot, Self::Wide]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarMouthStyle {
+    #[default]
+    Hidden = 0,
+    Line = 1,
+    Smile = 2,
+    Small = 3,
+}
+impl AvatarMouthStyle {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hidden => "Sin boca",
+            Self::Line => "Línea",
+            Self::Smile => "Sonrisa",
+            Self::Small => "Pequeña",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[Self::Hidden, Self::Line, Self::Smile, Self::Small]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarAccessory {
+    #[default]
+    None = 0,
+    Glasses = 1,
+    Sparkle = 2,
+    Halo = 3,
+}
+impl AvatarAccessory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Ninguno",
+            Self::Glasses => "Gafas",
+            Self::Sparkle => "Brillo",
+            Self::Halo => "Halo",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[Self::None, Self::Glasses, Self::Sparkle, Self::Halo]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AvatarBlush {
+    #[default]
+    None = 0,
+    Subtle = 1,
+    Strong = 2,
+}
+impl AvatarBlush {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Sin rubor",
+            Self::Subtle => "Sutil",
+            Self::Strong => "Marcado",
+        }
+    }
+    pub fn all() -> &'static [Self] {
+        &[Self::None, Self::Subtle, Self::Strong]
+    }
+}
+
+fn default_assistant_name() -> String {
+    "Mili".to_string()
+}
+
+/// Configuración de avatar super completa (12 dimensiones).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvatarConfig {
-    /// Nombre para mostrar (puede diferir de StudentProfile.name por migración).
     #[serde(default)]
     pub display_name: String,
-    /// Semilla para avatar blob (nombre o hash).
+    #[serde(default = "default_assistant_name")]
+    pub assistant_name: String,
     #[serde(default)]
     pub seed: String,
-    /// Preset de acento (0..5).
     #[serde(default)]
     pub accent_preset: u8,
-    /// Mascota asociada (habitáculo Pou).
+    #[serde(default)]
+    pub shape: AvatarShape,
+    #[serde(default)]
+    pub eye_style: AvatarEyeStyle,
+    #[serde(default)]
+    pub mouth_style: AvatarMouthStyle,
+    #[serde(default)]
+    pub accessory: AvatarAccessory,
+    #[serde(default)]
+    pub blush: AvatarBlush,
+    #[serde(default = "default_eye_size")]
+    pub eye_size: u8,
+    #[serde(default = "default_eye_spacing")]
+    pub eye_spacing: u8,
+    #[serde(default = "default_pupil_size")]
+    pub pupil_size: u8,
+    #[serde(default)]
+    pub blink_speed: u8,
+    #[serde(default = "default_true")]
+    pub eye_tracking: bool,
     #[serde(default)]
     pub mascot: Option<MascotConfig>,
+}
+
+fn default_eye_size() -> u8 {
+    50
+}
+fn default_eye_spacing() -> u8 {
+    50
+}
+fn default_pupil_size() -> u8 {
+    45
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AvatarConfig {
     fn default() -> Self {
         Self {
             display_name: String::new(),
+            assistant_name: default_assistant_name(),
             seed: "Estudiante".to_string(),
             accent_preset: 0,
-            mascot: Some(MascotConfig::default()),
+            shape: AvatarShape::default(),
+            eye_style: AvatarEyeStyle::default(),
+            mouth_style: AvatarMouthStyle::default(),
+            accessory: AvatarAccessory::default(),
+            blush: AvatarBlush::default(),
+            eye_size: default_eye_size(),
+            eye_spacing: default_eye_spacing(),
+            pupil_size: default_pupil_size(),
+            blink_speed: 50,
+            eye_tracking: true,
+            mascot: None,
         }
     }
 }
 
 impl AvatarConfig {
-    /// Valida el avatar. Mensajes en español.
+    /// Nombre del asistente saneado (fallback "Mili" si está vacío).
+    pub fn assistant_name_or_default(&self) -> String {
+        let trimmed = self.assistant_name.trim();
+        if trimmed.is_empty() {
+            return default_assistant_name();
+        }
+        let mut sanitized: String = trimmed.chars().filter(|c| !c.is_control()).collect();
+        if sanitized.chars().count() > MAX_NAME {
+            sanitized = sanitized.chars().take(MAX_NAME).collect();
+        }
+        let sanitized = sanitized.trim().to_string();
+        if sanitized.is_empty() {
+            default_assistant_name()
+        } else {
+            sanitized
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.display_name.chars().count() > 32 {
             return Err("El nombre no puede superar 32 caracteres".to_string());
@@ -739,26 +923,44 @@ impl AvatarConfig {
         if self.display_name.chars().any(|c| c.is_control()) {
             return Err("El nombre contiene caracteres no permitidos".to_string());
         }
-        if self.accent_preset > 5 {
-            return Err("Preset de acento fuera de rango (0..5)".to_string());
+        if self.assistant_name.chars().count() > MAX_NAME {
+            return Err(format!(
+                "El nombre del asistente no puede superar {MAX_NAME} caracteres"
+            ));
         }
-        if let Some(m) = &self.mascot {
-            m.validate()?;
+        if self.assistant_name.chars().any(|c| c.is_control()) {
+            return Err("El nombre del asistente contiene caracteres no permitidos".to_string());
+        }
+        if self.accent_preset > 5 {
+            return Err("Preset fuera de rango".to_string());
+        }
+        if self.eye_size > 100
+            || self.eye_spacing > 100
+            || self.pupil_size > 100
+            || self.blink_speed > 100
+        {
+            return Err("Parámetro fuera de rango 0..100".to_string());
         }
         Ok(())
     }
-
-    /// Paleta de acentos. Devuelve (nombre, rgb, descripción). El tercer campo
-    /// existe por compatibilidad con `let (_name, rgb, _) = ...` del app.
     pub fn accent_palette(preset: u8) -> (&'static str, [u8; 3], &'static str) {
         match preset % 6 {
-            0 => ("Sage", [107, 122, 111], "sage #6B7A6F — Scandinavian calm"),
+            0 => ("Sage", [107, 122, 111], "sage #6B7A6F"),
             1 => ("Stone", [120, 113, 108], "stone #78716C"),
             2 => ("Slate", [100, 116, 139], "slate #64748B"),
             3 => ("Moss", [101, 119, 90], "moss #65775A"),
             4 => ("Clay", [168, 123, 110], "clay #A87B6E"),
             _ => ("Ink", [68, 68, 68], "ink #444444"),
         }
+    }
+    pub fn eye_size_factor(&self) -> f32 {
+        0.06 + (self.eye_size as f32 / 100.0) * 0.05
+    }
+    pub fn eye_spacing_factor(&self) -> f32 {
+        0.12 + (self.eye_spacing as f32 / 100.0) * 0.14
+    }
+    pub fn pupil_ratio(&self) -> f32 {
+        0.28 + (self.pupil_size as f32 / 100.0) * 0.27
     }
 }
 

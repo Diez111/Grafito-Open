@@ -48,6 +48,7 @@ serde_json.workspace = true
 grafito-anim.workspace = true
 grafito-whiteboard.workspace = true
 grafito-profile.workspace = true
+grafito-pedagogy.workspace = true
 serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true

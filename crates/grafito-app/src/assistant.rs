@@ -450,7 +450,14 @@ impl GrafitoApp {
             .and_then(|branch| branch.last_study_epoch)
             .map(|last| grafito_profile::time_ago(last, epoch))
             .unwrap_or_default();
-        self.assistant.user_name = self.profile.display_name().to_owned();
+        if !self.assistant.settings_open {
+            self.assistant.user_name = self.profile.display_name().to_owned();
+            self.assistant.avatar = self.profile.avatar.clone();
+            self.avatar_draft = self.profile.avatar.clone();
+        } else {
+            // Mantener borrador vivo para preview persistente; sincroniza avatar_draft con assistant.avatar
+            self.avatar_draft = self.assistant.avatar.clone();
+        }
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
             match job.receiver.try_recv() {
@@ -809,8 +816,69 @@ impl GrafitoApp {
             AssistantUiAction::LearnIncorrect => self.record_learning(false),
             AssistantUiAction::RunMiniExam => self.run_mini_exam(ctx),
             AssistantUiAction::OpenMascotConfig => {
-                self.assistant.settings_open = false;
-                self.show_mascot_config = true;
+                self.assistant.settings_open = true;
+                self.assistant.config_tab = 1;
+                self.show_mascot_config = false;
+                // Sincroniza borrador al abrir para preview fiel
+                self.assistant.avatar = self.profile.avatar.clone();
+                self.assistant.user_name = self.profile.display_name().to_owned();
+                self.avatar_draft = self.profile.avatar.clone();
+            }
+            AssistantUiAction::SaveAvatar => {
+                let draft = self.assistant.avatar.clone();
+                match draft.validate() {
+                    Ok(()) => {
+                        let name = self.assistant.user_name.clone();
+                        let name_ref = if name.trim().is_empty() {
+                            "Estudiante"
+                        } else {
+                            name.trim()
+                        };
+                        match self.profile.set_display_name(name_ref) {
+                            Ok(()) => {
+                                self.profile.avatar = draft.clone();
+                                self.profile.mascot = None;
+                                self.avatar_draft = self.profile.avatar.clone();
+                                self.assistant.avatar = self.profile.avatar.clone();
+                                self.assistant.user_name = self.profile.display_name().to_owned();
+                                self.config_name_error = None;
+                                let _ = std::fs::write(
+                                    crate::utils::profile_path(),
+                                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                                );
+                                self.notify(
+                                    "Avatar guardado",
+                                    grafito_ui::toast::ToastKind::Success,
+                                );
+                                self.assistant.settings_open = false;
+                            }
+                            Err(err) => {
+                                self.config_name_error = Some(err.clone());
+                                self.notify(err, grafito_ui::toast::ToastKind::Error);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        self.config_name_error = Some(err.clone());
+                        self.notify(err, grafito_ui::toast::ToastKind::Error);
+                    }
+                }
+            }
+            AssistantUiAction::ResetAvatar => {
+                self.assistant.avatar = grafito_profile::AvatarConfig::default();
+                self.assistant.avatar.display_name = "Estudiante".to_string();
+                self.assistant.user_name = "Estudiante".to_string();
+                self.avatar_draft = self.assistant.avatar.clone();
+                self.config_name_error = None;
+                self.notify(
+                    "Avatar restablecido — pulsa Guardar para confirmar",
+                    grafito_ui::toast::ToastKind::Info,
+                );
+            }
+            AssistantUiAction::ExplainStepwise(topic) => {
+                // teaching_ui.start ya inicia el orchestrator con el template del primer paso
+                self.teaching_ui.start(&topic);
+                self.notify(format!("Enseñanza iniciada: {topic}"), ToastKind::Info);
             }
         }
     }
@@ -2305,12 +2373,27 @@ impl GrafitoApp {
 }
 
 fn remote_error_message(error: &str) -> String {
+    // Loguear el error real para auditoría (visible en `RUST_LOG=debug` o journalctl)
+    eprintln!("grafito: remote_error raw={}", error);
     if error.contains("llavero") || error.contains("API key") {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
+    } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
+        format!("La clave de API no es válida o expiró: {error}. Revisá la configuración avanzada.")
+    } else if error.contains("404") || error.contains("model") {
+        format!("El modelo no está disponible: {error}. Probá con deepseek-v4-flash.")
+    } else if error.contains("timeout") || error.contains("timed out") {
+        format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
+    } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
+        format!("Error de red: {error}. Revisá tu conexión.")
     } else {
-        "La consulta remota no se completó. Revisá la conexión y la configuración avanzada.".into()
+        // Mantener el mensaje genérico para el usuario, pero incluir el detalle técnico si es corto
+        if error.len() < 120 {
+            format!("La consulta remota no se completó: {error}. Revisá la conexión y la configuración avanzada.")
+        } else {
+            "La consulta remota no se completó. Revisá la conexión y la configuración avanzada.".into()
+        }
     }
 }
 

@@ -340,7 +340,7 @@ pub(crate) fn draw_top_bar(
                     draw_help_menu(ui, app);
                 }
 
-                // ── Right controls — Pou habitáculo al lado del toggle tema ──
+                // ── Right controls — avatar + tema ──
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing =
                         egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
@@ -418,91 +418,9 @@ pub(crate) fn draw_top_bar(
                             }
                         }
                     }
-                    // Nivel — solo en wide para no desbordar
-                    if !compact_top_chrome {
-                        let level = app.profile.level;
-                        let coins = app.profile.mascot_mut_or_default().coins;
-                        egui::Frame::none()
-                            .fill(theme.accent.gamma_multiply(0.09))
-                            .rounding(RADIUS_MD)
-                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("Nivel {level}"))
-                                            .size(11.0)
-                                            .strong()
-                                            .color(theme.accent),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(format!("· {coins}"))
-                                            .size(11.0)
-                                            .color(theme.text_tertiary),
-                                    );
-                                });
-                            });
-                        ui.add_space(4.0);
-                    }
-                    // Pou — ventana profesional Casa/Vestir/Jugar/Progreso (Scandinavian shell, playful)
+                    // Configuración — ventana única (Asistente + Perfil + preview persistente)
                     {
-                        let is_open = app.show_pou_window;
-                        let bg = if is_open {
-                            theme.accent.gamma_multiply(0.14)
-                        } else {
-                            theme.button_bg
-                        };
-                        let hover_bg = if is_open {
-                            theme.accent.gamma_multiply(0.22)
-                        } else {
-                            theme.button_hover
-                        };
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
-                        let resp = resp.on_hover_text("Pou — Casa / Vestir / Jugar / Progreso");
-                        let hovered = resp.hovered();
-                        let cur_bg = if hovered { hover_bg } else { bg };
-                        if ui.is_rect_visible(rect) {
-                            ui.painter().rect_filled(rect, RADIUS_MD, cur_bg);
-                            ui.painter().rect_stroke(
-                                rect,
-                                RADIUS_MD,
-                                egui::Stroke::new(
-                                    1.0,
-                                    if is_open {
-                                        theme.accent
-                                    } else {
-                                        theme.separator.gamma_multiply(0.10)
-                                    },
-                                ),
-                            );
-                            draw_icon(
-                                ui.painter(),
-                                rect.shrink(3.0),
-                                Icon::Pou,
-                                if is_open {
-                                    theme.accent
-                                } else {
-                                    theme.text_secondary
-                                },
-                            );
-                        }
-                        resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                true,
-                                "Pou — habitáculo",
-                            )
-                        });
-                        if resp.clicked() {
-                            app.show_pou_window = !app.show_pou_window;
-                            if app.show_pou_window {
-                                app.pou_tab = crate::app::PouTab::Casa;
-                            }
-                        }
-                    }
-                    // Configuración unificada — abre "Configuración" (cierra asistente si estaba abierto)
-                    {
-                        let is_open = app.show_mascot_config || app.assistant.settings_open;
+                        let is_open = app.assistant.settings_open;
                         let bg = if is_open {
                             theme.accent.gamma_multiply(0.14)
                         } else {
@@ -542,9 +460,9 @@ pub(crate) fn draw_top_bar(
                         }
                         if resp.clicked() {
                             let will_open = !is_open;
-                            app.show_mascot_config = will_open;
-                            app.assistant.settings_open = false;
+                            app.assistant.settings_open = will_open;
                             app.assistant.config_tab = 0;
+                            app.show_mascot_config = false;
                         }
                     }
                     if let Some(response) =
