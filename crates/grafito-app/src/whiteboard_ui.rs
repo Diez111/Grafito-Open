@@ -331,14 +331,14 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let mut toggle_assistant = false;
     egui::Frame::none()
         .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
         .rounding(egui::Rounding::same(12.0))
         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .shadow(egui::epaint::Shadow {
-            offset: vec2(0.0, 4.0),
-            blur: 14.0,
+            offset: vec2(0.0, 2.0),
+            blur: 8.0,
             spread: 0.0,
-            color: Color32::from_black_alpha(40),
+            color: Color32::from_black_alpha(8),
         })
         .show(ui, |ui| {
             let session = &app.whiteboard;

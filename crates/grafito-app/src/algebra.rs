@@ -243,7 +243,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     let border = if is_sel {
         egui::Stroke::new(1.0, theme.accent)
     } else {
-        egui::Stroke::new(1.0, theme.separator)
+        egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
     };
 
     let mut row_clicked = false;
@@ -385,7 +385,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
     let alg_fill = theme.panel_bg;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
     let txt_col = theme.text_primary;
     let _txt_dim = theme.text_tertiary;
 
@@ -393,7 +393,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     .default_width(220.0)
     .min_width(160.0)
     .resizable(true)
-    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.6))))
+    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
     .show(ctx, |ui| {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -605,7 +605,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 let border = if is_sel {
                     egui::Stroke::new(1.0, theme.accent)
                 } else {
-                    egui::Stroke::new(1.0, theme.separator)
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
                 };
 
                 let mut row_clicked = false;
@@ -716,49 +716,49 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         GeoObject::Line(l) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Circle(c) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Function(f) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point(p) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pt").size(10.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pt").size(10.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point3D(p) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pt").size(10.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pt").size(10.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Polygon(poly) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Pencil(pencil) => {
                                             ui.horizontal(|ui| {
                                                 ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pen").size(12.0).color(Color32::from_gray(130)));
+                                                ui.label(egui::RichText::new("pen").size(12.0).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true));
                                             });
                                         }
@@ -888,7 +888,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             });
                                             if !min.is_finite() || !max.is_finite() || min >= max {
                                                 ui.colored_label(
-                                                    Color32::RED,
+                                                    theme.danger,
                                                     "El mínimo debe ser finito y menor que el máximo.",
                                                 );
                                             }
@@ -985,7 +985,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     });
                                 } else {
                                     ui.colored_label(
-                                        Color32::RED,
+                                        theme.danger,
                                         "Corrige el rango antes de editar el valor.",
                                     );
                                 }

@@ -1018,12 +1018,12 @@ impl PouTab {
             Self::Progreso => "Progreso",
         }
     }
-    pub const fn icon(self) -> &'static str {
+    pub const fn icon(self) -> grafito_ui::icons::Icon {
         match self {
-            Self::Casa => "⌂",
-            Self::Vestir => "👕",
-            Self::Jugar => "🎮",
-            Self::Progreso => "📈",
+            Self::Casa => grafito_ui::icons::Icon::Pou,
+            Self::Vestir => grafito_ui::icons::Icon::Settings,
+            Self::Jugar => grafito_ui::icons::Icon::Play,
+            Self::Progreso => grafito_ui::icons::Icon::Analyze,
         }
     }
     pub fn all() -> [Self; 4] {
@@ -4136,7 +4136,7 @@ impl eframe::App for GrafitoApp {
                             zf_rect,
                             4.0,
                             theme.toolbar_bg,
-                            egui::Stroke::new(1.0, theme.separator),
+                            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
                         );
                         painter.text(
                             zf_rect.center(),
@@ -4571,7 +4571,7 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.toolbar_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
             )
             .show(ctx, |ui| {
@@ -4699,7 +4699,7 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.5, theme.separator))
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_LG))
                     .shadow(egui::Shadow {
@@ -4716,7 +4716,7 @@ impl GrafitoApp {
                     for tab in PouTab::all() {
                         let sel = self.pou_tab == tab;
                         let btn = egui::Button::new(
-                            egui::RichText::new(format!("{} {}", tab.icon(), tab.label()))
+                            egui::RichText::new(tab.label())
                                 .size(grafito_ui::tokens::TYPE_SM)
                                 .strong()
                                 .color(if sel {
@@ -4729,8 +4729,12 @@ impl GrafitoApp {
                         .rounding(grafito_ui::tokens::RADIUS_PILL)
                         .fill(if sel { theme.accent } else { theme.input_bg })
                         .stroke(egui::Stroke::new(
-                            1.5,
-                            if sel { theme.accent } else { theme.separator },
+                            1.0,
+                            if sel {
+                                theme.accent
+                            } else {
+                                theme.separator.gamma_multiply(0.10)
+                            },
                         ));
                         if ui.add(btn).clicked() {
                             self.pou_tab = tab;
@@ -4751,7 +4755,7 @@ impl GrafitoApp {
                             .inner_margin(egui::Margin::symmetric(8.0, 2.0))
                             .show(ui, |ui| {
                                 ui.label(
-                                    egui::RichText::new(format!("🪙 {coins}"))
+                                    egui::RichText::new(format!("{coins}"))
                                         .size(grafito_ui::tokens::TYPE_XS)
                                         .strong()
                                         .color(theme.accent),
@@ -4911,8 +4915,11 @@ impl GrafitoApp {
                     theme.success
                 };
                 ui.painter().rect_filled(filled, 5.0, col);
-                ui.painter()
-                    .rect_stroke(bar_rect, 5.0, egui::Stroke::new(1.0, theme.separator));
+                ui.painter().rect_stroke(
+                    bar_rect,
+                    5.0,
+                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+                );
             }
             ui.add_space(2.0);
         }
@@ -4969,7 +4976,7 @@ impl GrafitoApp {
         egui::Frame::none()
             .fill(theme.input_bg)
             .rounding(grafito_ui::tokens::RADIUS_LG)
-            .stroke(egui::Stroke::new(1.0, theme.separator))
+            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
                 ui.label(
@@ -5007,7 +5014,10 @@ impl GrafitoApp {
                                 egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)),
                             );
                         } else {
-                            btn = btn.stroke(egui::Stroke::new(1.0, theme.separator));
+                            btn = btn.stroke(egui::Stroke::new(
+                                1.0,
+                                theme.separator.gamma_multiply(0.10),
+                            ));
                         }
                         if ui.add_enabled(!owned && can_buy, btn).clicked() {
                             let mascot = self.profile.mascot_mut_or_default();
@@ -5076,7 +5086,7 @@ impl GrafitoApp {
                         egui::RichText::new("🍎 Alimentar").size(grafito_ui::tokens::TYPE_XS),
                     )
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                 )
                 .clicked()
             {
@@ -5101,7 +5111,7 @@ impl GrafitoApp {
                         egui::RichText::new("🎮 Jugar").size(grafito_ui::tokens::TYPE_XS),
                     )
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                 )
                 .clicked()
             {
@@ -5113,7 +5123,7 @@ impl GrafitoApp {
                         egui::RichText::new("💤 Dormir").size(grafito_ui::tokens::TYPE_XS),
                     )
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                 )
                 .clicked()
             {
@@ -5134,7 +5144,7 @@ impl GrafitoApp {
                         egui::RichText::new("✨ Personalizar").size(grafito_ui::tokens::TYPE_XS),
                     )
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .stroke(egui::Stroke::new(1.5, theme.separator)),
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                 )
                 .clicked()
             {
@@ -5183,7 +5193,7 @@ impl GrafitoApp {
                 ui.painter().rect_stroke(
                     rect,
                     grafito_ui::tokens::RADIUS_LG,
-                    egui::Stroke::new(1.5, theme.separator),
+                    egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10)),
                 );
                 // sutil sombra interior
                 ui.painter().rect_filled(
@@ -5348,7 +5358,8 @@ impl GrafitoApp {
                             .fill(theme.input_bg.gamma_multiply(0.5))
                             .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.6)));
                     } else if owned {
-                        btn = btn.stroke(egui::Stroke::new(1.0, theme.separator));
+                        btn = btn
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
                     } else {
                         btn = btn.fill(theme.separator.gamma_multiply(0.25));
                     }
@@ -5439,7 +5450,7 @@ impl GrafitoApp {
             for (idx, (title, desc, icon, reward)) in games_top.iter().enumerate() {
                 egui::Frame::none()
                     .fill(theme.input_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
@@ -5642,7 +5653,7 @@ impl GrafitoApp {
                 ] {
                     egui::Frame::none()
                         .fill(theme.input_bg)
-                        .stroke(egui::Stroke::new(1.0, theme.separator))
+                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                         .rounding(grafito_ui::tokens::RADIUS_LG)
                         .inner_margin(egui::Margin::same(10.0))
                         .show(ui, |ui| {
@@ -5678,7 +5689,12 @@ impl GrafitoApp {
                                                 .size(grafito_ui::tokens::TYPE_XS),
                                         )
                                         .rounding(grafito_ui::tokens::RADIUS_PILL)
-                                        .stroke(egui::Stroke::new(1.0, theme.separator)),
+                                        .stroke(
+                                            egui::Stroke::new(
+                                                1.0,
+                                                theme.separator.gamma_multiply(0.10),
+                                            ),
+                                        ),
                                     )
                                     .clicked()
                                 {
@@ -5706,7 +5722,10 @@ impl GrafitoApp {
                                     painter.circle_stroke(
                                         rect.center(),
                                         26.0,
-                                        egui::Stroke::new(1.5, theme.separator),
+                                        egui::Stroke::new(
+                                            1.5,
+                                            theme.separator.gamma_multiply(0.10),
+                                        ),
                                     );
                                     for i in 0..self.pou_fraction_target_den {
                                         let a0 = i as f32 / den * std::f32::consts::TAU
@@ -5733,7 +5752,10 @@ impl GrafitoApp {
                                                 rect.center()
                                                     + egui::vec2(a0.cos() * 26.0, a0.sin() * 26.0),
                                             ],
-                                            egui::Stroke::new(1.0, theme.separator),
+                                            egui::Stroke::new(
+                                                1.0,
+                                                theme.separator.gamma_multiply(0.10),
+                                            ),
                                         );
                                     }
                                 }
@@ -5852,8 +5874,11 @@ impl GrafitoApp {
                 4.0,
                 theme.accent,
             );
-            ui.painter()
-                .rect_stroke(bar_rect, 4.0, egui::Stroke::new(1.0, theme.separator));
+            ui.painter().rect_stroke(
+                bar_rect,
+                4.0,
+                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+            );
         }
         ui.add_space(grafito_ui::tokens::SPACE_SM);
         // Ramas con dominio
@@ -5861,7 +5886,7 @@ impl GrafitoApp {
             egui::Frame::none()
                 .fill(theme.input_bg)
                 .rounding(grafito_ui::tokens::RADIUS_LG)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
                     for branch in self.profile.branches.clone() {
@@ -5974,7 +5999,7 @@ impl GrafitoApp {
             egui::Frame::none()
                 .fill(theme.input_bg)
                 .rounding(grafito_ui::tokens::RADIUS_LG)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                 .inner_margin(egui::Margin::same(8.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -6147,7 +6172,7 @@ impl GrafitoApp {
             let branch = grafito_profile::exam::jump_exam_branch_id(level);
             egui::Frame::none()
                 .fill(theme.input_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                 .rounding(grafito_ui::tokens::RADIUS_PILL)
                 .inner_margin(egui::Margin::symmetric(6.0, 2.0))
                 .show(ui, |ui| {
@@ -6206,7 +6231,7 @@ impl GrafitoApp {
                 egui::Frame::none()
                     .fill(theme.input_bg)
                     .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .inner_margin(egui::Margin::same(8.0))
                     .show(ui, |ui| {
                         ui.label(
@@ -6343,7 +6368,7 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                     .shadow(egui::Shadow {
@@ -6484,7 +6509,7 @@ impl GrafitoApp {
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_PILL)
-                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                            .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                         )
                         .clicked()
                     {
@@ -6497,7 +6522,7 @@ impl GrafitoApp {
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_PILL)
-                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                            .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                         )
                         .clicked()
                     {
@@ -6574,7 +6599,7 @@ impl GrafitoApp {
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                     .shadow(egui::Shadow {
@@ -6670,7 +6695,7 @@ impl GrafitoApp {
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_PILL)
-                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                            .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                         )
                         .clicked()
                     {
@@ -6683,7 +6708,7 @@ impl GrafitoApp {
                                     .size(grafito_ui::tokens::TYPE_SM),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_PILL)
-                            .stroke(egui::Stroke::new(1.5, theme.separator)),
+                            .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                         )
                         .clicked()
                     {

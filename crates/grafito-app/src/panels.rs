@@ -575,7 +575,7 @@ fn color_picker_swatch(ui: &mut egui::Ui, color: Color, label: &str) -> egui::Re
 }
 
 /// Helper de retrocompatibilidad. Devuelve la tupla histórica
-/// `(is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col)`
+/// `(is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col)`
 /// usando el Theme activo.
 #[allow(clippy::type_complexity)]
 fn panel_theme_local(
@@ -617,7 +617,7 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .stroke(egui::Stroke::NONE)
         .rounding(egui::Rounding::same(RADIUS_LG))
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
@@ -666,7 +666,7 @@ fn draw_inspector_section(
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .stroke(egui::Stroke::NONE)
         .rounding(egui::Rounding::same(RADIUS_LG))
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
@@ -699,7 +699,7 @@ fn draw_inspector_empty_state(ui: &mut egui::Ui) {
             ui.add_space(48.0);
             egui::Frame::none()
                 .fill(theme.input_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .stroke(egui::Stroke::NONE)
                 .rounding(egui::Rounding::same(RADIUS_LG))
                 .inner_margin(egui::Margin::same(SPACE_MD))
                 .show(ui, |ui| {
@@ -921,7 +921,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
     let alg_fill = theme.panel_bg;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
     let txt_col = theme.text_primary;
     let txt_dim = theme.text_tertiary;
     let _hdr_col = theme.text_secondary;
@@ -929,7 +929,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     // ── CAS PANEL (tab 1) ──
     egui::SidePanel::left("cas_panel").show_separator_line(false)
         .default_width(260.0).min_width(180.0).resizable(true)
-        .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, sep_col)))
+        .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
         .show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -992,7 +992,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         for (i, entry) in app.document.cas_worksheet().iter().enumerate() {
                             let output_color = match entry.status {
                                 CasWorksheetStatus::Success => txt_col,
-                                CasWorksheetStatus::Error => Color32::from_rgb(210, 85, 75),
+                                CasWorksheetStatus::Error => theme.danger,
                             };
                             egui::Frame::none()
                                 .fill(theme.button_bg)
@@ -1025,7 +1025,8 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 }
 
 pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, _txt_col, txt_dim, _hdr_col) =
+        panel_theme_local(ctx);
 
     // ── VIEW/SETTINGS PANEL (tab 4) ──
     egui::SidePanel::left("view_panel")
@@ -1036,7 +1037,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1142,7 +1143,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 /// El círculo y la función se dibujan como overlay del canvas 2D para compartir
 /// exactamente la grilla, escala y perspectiva de Geometry2D.
 pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_trig_animation").show_separator_line(false)
         .default_width(280.0)
@@ -1152,7 +1153,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -1348,8 +1349,9 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
 }
 
 pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, _accent, alg_fill, sep_col, _txt_col, _txt_dim, _hdr_col) =
+    let (_is_dark, _accent, alg_fill, _sep_col, _txt_col, _txt_dim, _hdr_col) =
         panel_theme_local(ctx);
+    let theme = current_theme(ctx);
 
     egui::SidePanel::left("empty_panel")
         .show_separator_line(false)
@@ -1359,7 +1361,7 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             let height = ui.available_height().max(120.0);
@@ -1370,14 +1372,14 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.add_space(48.0);
                     ui.label(
                         egui::RichText::new("Sin panel aquí")
-                            .color(Color32::from_gray(150))
+                            .color(theme.text_tertiary)
                             .size(TYPE_SM),
                     );
                     ui.label(
                         egui::RichText::new(
                             "Cambiá de perspectiva o abrí un panel desde «Paneles».",
                         )
-                        .color(Color32::from_gray(120))
+                        .color(theme.text_secondary)
                         .size(TYPE_SM),
                     );
                 },
@@ -1392,7 +1394,7 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
 /// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
 #[allow(dead_code)] // Panel sin entrada en la UI desde que se quitó la pestaña «Datos».
 pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("stats_panel")
         .show_separator_line(false)
@@ -1402,7 +1404,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -1584,7 +1586,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     egui::pos2(plot.min.x, plot_bot),
                                     egui::pos2(plot.max.x, plot_bot),
                                 ],
-                                egui::Stroke::new(1.0, sep_col),
+                                egui::Stroke::new(1.0, _sep_col.gamma_multiply(0.10)),
                             );
                             // Barras
                             let bar_w = plot_w / bins as f32;
@@ -1632,7 +1634,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("complex_panel").show_separator_line(false)
         .default_width(260.0)
@@ -1641,7 +1643,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1811,7 +1813,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 /// Panel izquierdo de Atractores y Dinámica.
 pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::GeoObject;
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::left("attractor_panel").show_separator_line(false)
         .default_width(260.0)
@@ -1820,7 +1822,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -1910,7 +1912,7 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(SPACE_SM);
@@ -1924,8 +1926,9 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
 pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui::Ui) {
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
     use grafito_core::GeoObject;
-    let (is_dark, _accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) =
+    let (_is_dark, _accent, _alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) =
         panel_theme_local(ui.ctx());
+    let theme = current_theme(ui.ctx());
 
     egui::ScrollArea::vertical()
                 .id_salt("right_properties_scroll")
@@ -1946,11 +1949,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                     ui.add_space(SPACE_MD);
                     let mut changed = false;
 
-                    let label_col = if is_dark {
-                        Color32::from_gray(180)
-                    } else {
-                        Color32::from_gray(60)
-                    };
+                    let label_col = theme.text_secondary;
                     match &mut edited_object {
                 GeoObject::Cube3D(c) => {
                     ui.label(egui::RichText::new("Cubo 3D").color(label_col).strong());
@@ -2463,7 +2462,7 @@ fn set_complex_mapping_animation(
 /// Panel derecho: Coloración de dominio (Complejos).
 pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::GeoObject;
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_domain_coloring").show_separator_line(false)
         .default_width(280.0)
@@ -2472,7 +2471,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -2599,7 +2598,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
 pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     use grafito_core::{GeoObject, ObjectId};
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(app.undo_stack.len());
-    let (_is_dark, accent, alg_fill, sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("right_parameters")
         .show_separator_line(false)
@@ -2609,7 +2608,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -2750,7 +2749,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             draw_right_drawer_header(ui, app, "Regresión", theme.accent);
@@ -2970,7 +2969,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
     if !app.show_construction_protocol {
         return;
     }
-    let (_is_dark, accent, alg_fill, sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
+    let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, _hdr_col) = panel_theme_local(ctx);
 
     egui::SidePanel::right("construction_protocol").show_separator_line(false)
         .resizable(true)
@@ -2979,7 +2978,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
         .frame(
             egui::Frame::none()
                 .fill(alg_fill)
-                .stroke(egui::Stroke::new(1.0, sep_col)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -3058,7 +3057,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                             let output_str =
                                 if output.is_empty() { "—".to_string() } else { output };
                             let bg = if disabled {
-                                Color32::from_gray(60)
+                                _sep_col.gamma_multiply(0.10)
                             } else {
                                 Color32::TRANSPARENT
                             };
@@ -3124,7 +3123,7 @@ pub(crate) fn draw_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);
@@ -3180,7 +3179,7 @@ pub(crate) fn draw_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     egui::Frame::none()
                         .fill(theme.input_bg)
                         .rounding(egui::Rounding::same(RADIUS_LG))
-                        .stroke(egui::Stroke::new(1.0, theme.separator))
+                        .stroke(egui::Stroke::NONE)
                         .inner_margin(egui::Margin::same(SPACE_SM))
                         .show(ui, |ui| {
                             ui.label(
@@ -3264,7 +3263,7 @@ pub(crate) fn draw_right_mascota_panel(app: &mut GrafitoApp, ctx: &egui::Context
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(8.0);

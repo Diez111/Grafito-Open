@@ -295,11 +295,11 @@ pub(crate) fn draw_top_bar(
     let accent = theme.accent;
     let bar_fill = theme.panel_bg;
     let side_fill = theme.sidebar_bg;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
 
-    // ── Scandinavian single bar 40px — sin barra negra, altura compacta equilibrada
+    // ── Scandinavian single bar 48px — hairline 10% sin barra negra
     let top_bar_response = egui::TopBottomPanel::top("top_bar")
-        .exact_height(40.0)
+        .exact_height(grafito_ui::tokens::TOP_BAR_HEIGHT)
         .frame(
             egui::Frame::none()
                 .fill(bar_fill)
@@ -402,7 +402,7 @@ pub(crate) fn draw_top_bar(
                             ui.painter().rect_stroke(
                                 rect,
                                 RADIUS_MD,
-                                egui::Stroke::new(1.0, theme.separator),
+                                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
                             );
                             draw_icon(ui.painter(), rect.shrink(3.0), toggle_icon, accent);
                         }
@@ -471,7 +471,7 @@ pub(crate) fn draw_top_bar(
                                     if is_open {
                                         theme.accent
                                     } else {
-                                        theme.separator
+                                        theme.separator.gamma_multiply(0.10)
                                     },
                                 ),
                             );
@@ -524,7 +524,7 @@ pub(crate) fn draw_top_bar(
                                         if is_open {
                                             theme.accent
                                         } else {
-                                            theme.separator
+                                            theme.separator.gamma_multiply(0.10)
                                         },
                                     ),
                                 );
@@ -557,23 +557,8 @@ pub(crate) fn draw_top_bar(
                 });
             });
         });
-    // Cubre separador residual negro en ventana y fullscreen — Tooltip para estar por encima de todos los Panel
-    {
-        let top_rect = top_bar_response.response.rect;
-        ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Tooltip,
-            egui::Id::new("top_bar_cover"),
-        ))
-        .rect_filled(
-            egui::Rect::from_min_max(
-                egui::pos2(top_rect.min.x, top_rect.max.y - 2.0),
-                egui::pos2(top_rect.max.x, top_rect.max.y + 4.0),
-            ),
-            0.0,
-            bar_fill,
-        );
-    }
-    // ── LEFT SIDEBAR (56px, labeled tabs) ──
+    let _ = top_bar_response;
+    // ── LEFT SIDEBAR (60px icon rail) ──
     // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
     let tabs: &[(&str, Icon, &str)] = &[
@@ -594,7 +579,7 @@ pub(crate) fn draw_top_bar(
             .frame(
                 egui::Frame::none()
                     .fill(side_fill)
-                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10))),
+                    .stroke(egui::Stroke::NONE),
             )
             .show(ctx, |ui| {
                 #[cfg(feature = "profile")]
@@ -771,7 +756,7 @@ pub(crate) fn draw_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egui::Conte
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             if draw_geometry_utility_contents(app, ctx, ui) {
@@ -793,7 +778,7 @@ pub(crate) fn draw_compact_geometry_utility_dock(app: &mut GrafitoApp, ctx: &egu
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             if draw_geometry_utility_contents(app, ctx, ui) {
@@ -808,7 +793,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
 
     let theme = current_theme(ctx);
     let accent = theme.accent;
-    let sep_col = theme.separator;
+    let _sep_col = theme.separator;
     let txt_dim = theme.text_tertiary;
     let _txt_col = theme.text_primary;
 
@@ -821,7 +806,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
             .frame(
                 egui::Frame::none()
                     .fill(theme.input_bar_bg)
-                    .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10)))
+                    .stroke(egui::Stroke::NONE)
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
             )
             .show(ctx, |ui| {
@@ -857,7 +842,7 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
         .frame(
             egui::Frame::none()
                 .fill(theme.status_bar_bg)
-                .stroke(egui::Stroke::new(1.0, sep_col.gamma_multiply(0.10)))
+                .stroke(egui::Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
         )
         .show(ctx, |ui| {
@@ -1308,7 +1293,7 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .stroke(egui::Stroke::NONE)
                 .rounding(RADIUS_MD),
         )
         .open(&mut keep_open)
