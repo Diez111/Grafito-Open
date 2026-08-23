@@ -2514,16 +2514,14 @@ fn draw_panel_contents(
                 egui::Frame::none()
                     .fill(theme.danger.gamma_multiply(0.08))
                     .stroke(egui::Stroke::new(1.0, theme.danger.gamma_multiply(0.2)))
-                    .rounding(crate::tokens::RADIUS_XL)
-                    .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
-                    .shadow(egui::Shadow {
-                        offset: egui::vec2(0.0, 2.0),
-                        blur: 8.0,
-                        spread: 0.0,
-                        color: egui::Color32::from_black_alpha(8),
-                    })
+                    .rounding(crate::tokens::RADIUS_MD)
+                    .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        ui.colored_label(theme.danger, error);
+                        ui.label(
+                            egui::RichText::new(error)
+                                .color(theme.danger)
+                                .size(crate::tokens::TYPE_XS),
+                        );
                         if state.proposal_correction_available
                             && ui.small_button("Pedir una corrección").clicked()
                         {
@@ -3389,24 +3387,22 @@ fn draw_conversation_turn(
                 .show(ui, |ui| {
                     ui.set_min_width(120.0);
                     ui.set_max_width(max_bubble_width - crate::tokens::SPACE_SM * 2.0);
-                    // Label left-aligned
-                    let label = if is_user {
-                        "Vos".to_owned()
-                    } else {
+                    // Label solo para asistente — por color ya se distingue quién es quién
+                    if !is_user {
                         let origin = turn
                             .origin
                             .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
-                        format!("{assistant_name} · {}", origin.public_label())
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(label)
-                                .color(appearance.role_color)
-                                .size(TYPE_XS)
-                                .strong(),
-                        );
-                    });
-                    ui.add_space(SPACE_XS);
+                        let label = format!("{assistant_name} · {}", origin.public_label());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .color(appearance.role_color)
+                                    .size(TYPE_XS)
+                                    .strong(),
+                            );
+                        });
+                        ui.add_space(SPACE_XS);
+                    }
                     if is_user {
                         let text_color = appearance.role_color;
                         draw_inline_text_with_color(ui, &turn.content, text_color);

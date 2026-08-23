@@ -2004,7 +2004,7 @@ impl GrafitoApp {
                                     self.assistant.complete_request(outcome.final_text);
                                 }
                                 Err(error) => {
-                                    self.fail_assistant_request(remote_error_message(&error));
+                                    self.fail_assistant_request(error);
                                 }
                             }
                         }
@@ -2385,15 +2385,18 @@ fn remote_error_message(error: &str) -> String {
         format!("El modelo no está disponible: {error}. Probá con deepseek-v4-flash.")
     } else if error.contains("timeout") || error.contains("timed out") {
         format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
+    } else if error.contains("500") {
+        "Error interno del agente (500). Probá de nuevo o cambiá el modelo a deepseek-v4-flash."
+            .into()
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
     } else {
-        let truncated = if error.len() > 200 {
-            format!("{}…", &error[..200])
+        let truncated = if error.len() > 120 {
+            format!("{}…", &error[..120])
         } else {
             error.to_string()
         };
-        format!("La consulta remota no se completó: {truncated}. Revisá la conexión y la configuración avanzada.")
+        format!("Error: {truncated} — Revisá Configuración → Modelo")
     }
 }
 
