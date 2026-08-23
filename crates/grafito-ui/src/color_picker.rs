@@ -572,7 +572,11 @@ fn draw_checkerboard(painter: &egui::Painter, rect: Rect) {
             painter.rect_filled(
                 cell,
                 egui::Rounding::ZERO,
-                if (row + column) % 2 == 0 { light } else { dark },
+                if (row + column).is_multiple_of(2) {
+                    light
+                } else {
+                    dark
+                },
             );
             column += 1;
             x += cell_size;

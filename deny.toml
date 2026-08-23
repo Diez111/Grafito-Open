@@ -13,7 +13,7 @@ version = 2
 # See `.github/SECURITY.md` for the complete reachability analysis.
 ignore = [
     { id = "RUSTSEC-2025-0141", reason = "puffin 0.19.1 requires bincode 1.3.3; bincode 1.x has no maintained replacement and puffin 0.20 requires Rust 1.92." },
-    { id = "RUSTSEC-2024-0436", reason = "simba 0.9.1 requires paste 1.0.15, the latest 1.x release; nalgebra 0.34 requires Rust 1.87, above the workspace MSRV 1.81." },
+    { id = "RUSTSEC-2024-0436", reason = "simba 0.9.1 requires paste 1.0.15, the latest 1.x release; nalgebra 0.34 requires Rust 1.87, above the workspace MSRV 1.88." },
     { id = "RUSTSEC-2026-0192", reason = "eframe 0.29.1 pins owned_ttf_parser 0.25.1 and ttf-parser 0.25.1; remediation requires a coordinated eframe/wgpu framework migration." },
     { id = "RUSTSEC-2025-0165", reason = "geo 0.29.3 restricts i_overlay to <1.10, whose latest 1.9.4 requires i_tree ~0.8.3; geo 0.30 is a semver API migration requiring separate review." },
     { id = "RUSTSEC-2026-0194", reason = "Temporary through 2026-09-30; owner: Grafito maintainers. Affected attribute iteration is reached only when proc macros parse crate-shipped AT-SPI/Wayland XML at build time; zbus_xml 4 requires quick-xml ^0.30 and wayland-scanner 0.31.10 requires ^0.39, excluding fixed >=0.41. Remove on a compatible parent release or any reachability change; see .github/SECURITY.md." },

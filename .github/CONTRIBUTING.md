@@ -55,7 +55,7 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 
 ### Prerequisites
 
-- Rust 1.81 or later
+- Rust 1.88 or later
 - A C toolchain (Debian/Ubuntu: `build-essential`)
 - System dependencies: `libgmp-dev`, `libmpfr-dev`, `libmpc-dev`, `m4`, `pkg-config`, `libdbus-1-dev`
 - GPU with Vulkan, Metal, or DX12 support (for GPU compute shaders)

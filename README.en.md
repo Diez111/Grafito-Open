@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?label=version&color=blue" alt="Version" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3%2B-blue.svg" alt="License: GPLv3+" /></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.81%2B-orange.svg" alt="Rust 1.81+" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="Rust 1.88+" /></a>
   <a href="https://github.com/Diez111/Grafito/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito?style=social" alt="Stars" /></a>
 </p>
 
@@ -76,7 +76,7 @@ cd grafito
 cargo run -p grafito-app --release
 ```
 
-> Requires Rust 1.81+ and a C toolchain (`build-essential` on Debian/Ubuntu). GPU compute shaders need Vulkan, Metal, or DX12 support.
+> Requires Rust 1.88+ and a C toolchain (`build-essential` on Debian/Ubuntu). GPU compute shaders need Vulkan, Metal, or DX12 support.
 
 ---
 
@@ -231,7 +231,7 @@ grafito/
 
 | Layer | Technology | Version |
 |-------|------------|---------|
-| Language | Rust | 1.81+ |
+| Language | Rust | 1.88+ |
 | GUI | `eframe` / `egui` | 0.29 |
 | GPU | `wgpu` (WebGPU -> Vulkan/Metal/DX12) | 22.0 |
 | Linear Algebra | `glam`, `nalgebra` | 0.29 / 0.33 |

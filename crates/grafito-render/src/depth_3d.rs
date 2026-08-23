@@ -504,7 +504,7 @@ impl WorldMesh {
 }
 
 fn validate_part(vertices: &[Vertex3D], indices: &[u32]) -> Result<(), &'static str> {
-    if indices.len() % 3 != 0 {
+    if !indices.len().is_multiple_of(3) {
         return Err("3D mesh indices must form triangles");
     }
     if vertices.iter().any(|vertex| {
@@ -873,14 +873,14 @@ fn regular_polychoron_style_is_renderable(object: &RegularPolychoron4DObj) -> bo
     object.width.is_finite()
         && object.width > 0.0
         && color_is_renderable(object.color)
-        && object.fill_color.map_or(true, color_is_renderable)
+        && object.fill_color.is_none_or(color_is_renderable)
 }
 
 fn regular_polytope_style_is_renderable(object: &RegularPolytopeNDObj) -> bool {
     object.width.is_finite()
         && object.width > 0.0
         && color_is_renderable(object.color)
-        && object.fill_color.map_or(true, color_is_renderable)
+        && object.fill_color.is_none_or(color_is_renderable)
 }
 
 fn polychoron_projection_plan(

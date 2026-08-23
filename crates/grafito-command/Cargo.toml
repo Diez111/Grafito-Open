@@ -20,3 +20,6 @@ sha2.workspace = true
 [dev-dependencies]
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+
+[lints]
+workspace = true

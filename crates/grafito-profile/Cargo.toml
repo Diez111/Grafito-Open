@@ -11,3 +11,6 @@ description = "Memoria de aprendizaje del usuario (perfil pedagógico): nivel, r
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

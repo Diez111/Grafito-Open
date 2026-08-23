@@ -11,3 +11,6 @@ description = "Mathematical engine for complex variables and conformal mappings 
 [dependencies]
 serde.workspace = true
 num-complex.workspace = true
+
+[lints]
+workspace = true

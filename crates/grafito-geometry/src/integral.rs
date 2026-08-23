@@ -191,7 +191,7 @@ pub fn composite_simpson(ys: &[f64], dx: f64) -> f64 {
     }
 
     let intervals = n - 1;
-    if intervals % 2 == 0 {
+    if intervals.is_multiple_of(2) {
         let mut sum = ys[0] + ys[n - 1];
         for i in (1..n - 1).step_by(2) {
             sum += 4.0 * ys[i];

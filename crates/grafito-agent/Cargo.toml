@@ -11,3 +11,6 @@ description = "Núcleo agentico de Grafito: esquema de herramientas, enrutamient
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

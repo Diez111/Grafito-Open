@@ -11,3 +11,6 @@ description = "Pruebas de humo de release a nivel workspace para Grafito"
 [dependencies]
 grafito-core = { workspace = true }
 grafito-geometry = { workspace = true }
+
+[lints]
+workspace = true

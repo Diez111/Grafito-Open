@@ -2825,7 +2825,7 @@ fn preflight_homogeneous_assistant_scene(
         if created_ids.iter().any(|id| {
             staged
                 .get_object(*id)
-                .map_or(true, |object| match current_capability.view {
+                .is_none_or(|object| match current_capability.view {
                     grafito_command::assistant_context::AssistantGraphView::TwoD => {
                         object.render_space() != grafito_core::RenderSpace::D2
                     }
@@ -3223,7 +3223,7 @@ fn preflight_assistant_graph_command_with_camera(
     if created_ids.iter().any(|id| {
         staged
             .get_object(*id)
-            .map_or(true, |object| match capability.view {
+            .is_none_or(|object| match capability.view {
                 grafito_command::assistant_context::AssistantGraphView::TwoD => {
                     object.render_space() != grafito_core::RenderSpace::D2
                 }
@@ -4724,8 +4724,7 @@ mod tests {
     fn verified_remote_proposals_preflight_only_a_fixed_number_of_fenced_proposals() {
         let mut document = Document::new();
         document.set_view(ViewTransform::new(800.0, 600.0));
-        let response = std::iter::repeat("```grafito\nFunction[sin(x)]\n```")
-            .take(5)
+        let response = std::iter::repeat_n("```grafito\nFunction[sin(x)]\n```", 5)
             .collect::<Vec<_>>()
             .join("\n");
 

@@ -982,7 +982,7 @@ impl AssistantRequest {
                 "assistant repair requests cannot include images or image-upload consent".into(),
             );
         }
-        if self.conversation.len() % 2 != 0 {
+        if !self.conversation.len().is_multiple_of(2) {
             return Err("assistant conversation must contain complete exchanges".into());
         }
         for pair in self.conversation.chunks_exact(2) {

@@ -147,7 +147,7 @@ fn regular_polychoron_is_renderable(object: &RegularPolychoron4DObj) -> bool {
         && object.width.is_finite()
         && object.width > 0.0
         && color_is_renderable(object.color)
-        && object.fill_color.map_or(true, color_is_renderable)
+        && object.fill_color.is_none_or(color_is_renderable)
 }
 
 fn regular_polytope_is_renderable(object: &RegularPolytopeNDObj) -> bool {
@@ -164,7 +164,7 @@ fn regular_polytope_is_renderable(object: &RegularPolytopeNDObj) -> bool {
         && object.width.is_finite()
         && object.width > 0.0
         && color_is_renderable(object.color)
-        && object.fill_color.map_or(true, color_is_renderable)
+        && object.fill_color.is_none_or(color_is_renderable)
 }
 
 pub(crate) fn project_regular_polychoron_cpu(
@@ -2730,7 +2730,7 @@ impl GrafitoApp {
                     let needs_refresh = self
                         .attractor_cache
                         .get(&att.id)
-                        .map_or(true, |(cached_hash, _)| *cached_hash != param_hash);
+                        .is_none_or(|(cached_hash, _)| *cached_hash != param_hash);
                     if needs_refresh {
                         let atype = att.model();
                         let new_pts = integrate_attractor(

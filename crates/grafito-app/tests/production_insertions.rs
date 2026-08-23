@@ -17,7 +17,7 @@ fn cfg_test_ranges(source: &str) -> Vec<Range<usize>> {
         let open = source[item..].find('{').map(|offset| item + offset);
         let semicolon = source[item..].find(';').map(|offset| item + offset);
 
-        if semicolon.is_some_and(|semicolon| open.map_or(true, |open| semicolon < open)) {
+        if semicolon.is_some_and(|semicolon| open.is_none_or(|open| semicolon < open)) {
             let end = semicolon.expect("semicolon was checked") + 1;
             ranges.push(marker..end);
             cursor = end;

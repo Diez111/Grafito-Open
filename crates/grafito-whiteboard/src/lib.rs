@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 //! Pizarra de dibujo libre (inspirada en Excalidraw) como modelo puro y
 //! headless: trazos suavizados, formas, flechas, texto, borrado y selección.
 //! No depende de egui; la capa de dibujo vive en grafito-app/grafito-ui.
@@ -193,10 +194,8 @@ impl WhiteboardDoc {
         if self.elements.is_empty() {
             return "(pizarra vacía)".to_string();
         }
-        let mut description = format!(
-            "{} trazos, {} formas (rectángulos/elipses), {} flechas",
-            strokes, shapes, arrows
-        );
+        let mut description =
+            format!("{strokes} trazos, {shapes} formas (rectángulos/elipses), {arrows} flechas",);
         if !texts.is_empty() {
             description.push_str(", textos: ");
             description.push_str(&texts.join(", "));

@@ -12725,7 +12725,11 @@ fn cofactor_value(m: &Matrix, row: usize, col: usize) -> Option<f64> {
     }
     let minor = minor_matrix(m, row, col)?;
     let det = minor.determinant()?;
-    Some(if (row + col) % 2 == 0 { det } else { -det })
+    Some(if (row + col).is_multiple_of(2) {
+        det
+    } else {
+        -det
+    })
 }
 
 fn adjugate_matrix(m: &Matrix) -> Option<Matrix> {

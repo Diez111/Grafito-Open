@@ -595,8 +595,8 @@ fn find_asymptotes(
             label: format!("Asíntota horizontal: y = {:.4}", y_pos),
         });
     }
-    if let Some(y_neg) = y_neg
-        .filter(|y_neg| y_pos.map_or(true, |y_pos| (y_neg - y_pos).abs() > LIMIT_ABS_TOLERANCE))
+    if let Some(y_neg) =
+        y_neg.filter(|y_neg| y_pos.is_none_or(|y_pos| (y_neg - y_pos).abs() > LIMIT_ABS_TOLERANCE))
     {
         results.push(AnalysisResult {
             feature: AnalysisFeature::HorizontalAsymptote,
@@ -2362,8 +2362,7 @@ mod tests {
 
     #[test]
     fn taylor_analysis_rejects_growth_before_expanding_an_accepted_order() {
-        let expression = std::iter::repeat("sin(x)")
-            .take(16)
+        let expression = std::iter::repeat_n("sin(x)", 16)
             .collect::<Vec<_>>()
             .join("*");
 

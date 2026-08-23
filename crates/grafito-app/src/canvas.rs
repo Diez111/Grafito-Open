@@ -1018,7 +1018,7 @@ impl CallbackTrait for Canvas3DCallback {
                 resources.scene_readiness.mark_3d_cpu_only(current_key);
                 return vec![];
             }
-            buffers.depth_target_3d.as_ref().map_or(true, |target| {
+            buffers.depth_target_3d.as_ref().is_none_or(|target| {
                 !target.matches_size(target_width.max(1), target_height.max(1))
             })
         };

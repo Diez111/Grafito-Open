@@ -248,7 +248,7 @@ pub fn compile_complex_expr(
             prog.code.push(ComplexOp::BesselY.encode(0));
         }
         ComplexExpr::DerivZ(_) | ComplexExpr::DerivZConj(_) => {
-            return Err(CompileError::UnsupportedNode(format!("{:?}", expr)));
+            return Err(CompileError::UnsupportedNode(format!("{expr:?}")));
         }
     }
 

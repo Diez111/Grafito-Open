@@ -116,7 +116,7 @@ grafito-profile/pedagogy/plugins/assistant-types
 
 ### Fase 4 — Estabilidad Total (Puertas del AGENTS.md)
 - F3.1 fmt --check
-- F3.2 clippy --workspace --all-targets -- -D warnings (MSRV 1.81 + stable)
+- F3.2 clippy --workspace --all-targets -- -D warnings (MSRV 1.88 + stable)
 - F3.3 check --workspace --locked
 - F3.4 test --workspace --locked
 - F3.5 check examples/benches

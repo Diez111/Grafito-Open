@@ -2172,7 +2172,8 @@ fn color_picker_dialog_is_centered_foreground_and_constrained_to_a_safe_viewport
     assert!(picker.contains(".resizable(false)"));
     assert!(picker.contains(".constrain_to(color_picker_safe_viewport(ctx.screen_rect()))"));
     assert!(picker.contains(".fill(theme.panel_bg)"));
-    assert!(picker.contains("theme.separator"));
+    // Scandinavian: picker may use hairline or no border (Stroke::NONE) for seamless white
+    assert!(picker.contains("theme.separator") || picker.contains("Stroke::NONE"));
 
     let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
     let safe_viewport = crate::ui::color_picker_safe_viewport(viewport);

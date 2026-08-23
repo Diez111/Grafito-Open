@@ -3755,7 +3755,7 @@ impl Document {
         if self
             .cas_worksheet_bytes()?
             .checked_add(minimum_cell_bytes)
-            .map_or(true, |total| total > Self::MAX_CAS_WORKSHEET_BYTES)
+            .is_none_or(|total| total > Self::MAX_CAS_WORKSHEET_BYTES)
         {
             return Err(format!(
                 "CAS worksheet exceeds the {} byte limit",
@@ -3782,7 +3782,7 @@ impl Document {
         let total_bytes = self.cas_worksheet_bytes()?;
         if total_bytes
             .checked_add(entry_bytes)
-            .map_or(true, |total| total > Self::MAX_CAS_WORKSHEET_BYTES)
+            .is_none_or(|total| total > Self::MAX_CAS_WORKSHEET_BYTES)
         {
             return Err(format!(
                 "CAS worksheet exceeds the {} byte limit",

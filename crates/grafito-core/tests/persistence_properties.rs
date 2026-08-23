@@ -239,12 +239,10 @@ fn persistence_rejects_more_active_spreadsheet_cells_than_it_can_recompute() {
 
 #[test]
 fn raw_json_rejects_oversized_spreadsheet_dimensions_before_document_deserialization() {
-    let rows = std::iter::repeat("[]")
-        .take(Document::MAX_SPREADSHEET_ROWS + 1)
+    let rows = std::iter::repeat_n("[]", Document::MAX_SPREADSHEET_ROWS + 1)
         .collect::<Vec<_>>()
         .join(",");
-    let cells = std::iter::repeat("null")
-        .take(Document::MAX_SPREADSHEET_COLS + 1)
+    let cells = std::iter::repeat_n("null", Document::MAX_SPREADSHEET_COLS + 1)
         .collect::<Vec<_>>()
         .join(",");
 

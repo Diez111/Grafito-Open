@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 //! Grafito Geometry — Primitivas matemáticas y geometría computacional.
 //!
 //! Contiene el motor matemático: álgebra simbólica (CAS), evaluación de

@@ -3748,8 +3748,7 @@ mod tests {
 
     #[test]
     fn taylor_series_rejects_accepted_orders_that_exceed_the_ast_budget() {
-        let expression = std::iter::repeat("sin(x)")
-            .take(16)
+        let expression = std::iter::repeat_n("sin(x)", 16)
             .collect::<Vec<_>>()
             .join("*");
 

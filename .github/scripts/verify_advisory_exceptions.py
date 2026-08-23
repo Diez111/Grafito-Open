@@ -35,7 +35,6 @@ FORBIDDEN_WORKSPACE_DEPENDENCIES = {
     "zbus_xml",
 }
 REQUIRED_PROC_MACROS = {
-    "wayland-scanner@0.31.10",
     "zbus-lockstep-macros@0.4.4",
 }
 POLICY_SCRIPT = ".github/scripts/verify_advisory_exceptions.py"
@@ -101,50 +100,6 @@ EXPECTED_ANCESTOR_EDGES = {
         zbus-lockstep-macros@0.4.4 -> zbus_xml@4.0.0
         zbus-lockstep@0.4.4 -> zbus_xml@4.0.0
         zbus_xml@4.0.0 -> quick-xml@0.30.0
-        """
-    ),
-    "0.39.4": _edge_set(
-        """
-        accesskit_winit@0.22.4 -> winit@0.30.13
-        calloop-wayland-source@0.3.0 -> wayland-client@0.31.14
-        eframe@0.29.1 -> egui-wgpu@0.29.1
-        eframe@0.29.1 -> egui-winit@0.29.1
-        eframe@0.29.1 -> egui_glow@0.29.1
-        eframe@0.29.1 -> glutin-winit@0.5.0
-        eframe@0.29.1 -> winit@0.30.13
-        egui-wgpu@0.29.1 -> winit@0.30.13
-        egui-winit@0.29.1 -> accesskit_winit@0.22.4
-        egui-winit@0.29.1 -> smithay-clipboard@0.7.2
-        egui-winit@0.29.1 -> winit@0.30.13
-        egui_glow@0.29.1 -> egui-winit@0.29.1
-        egui_glow@0.29.1 -> winit@0.30.13
-        glutin-winit@0.5.0 -> winit@0.30.13
-        workspace:grafito-app -> eframe@0.29.1
-        workspace:grafito-app -> egui-wgpu@0.29.1
-        sctk-adwaita@0.10.1 -> smithay-client-toolkit@0.19.2
-        smithay-client-toolkit@0.19.2 -> calloop-wayland-source@0.3.0
-        smithay-client-toolkit@0.19.2 -> wayland-client@0.31.14
-        smithay-client-toolkit@0.19.2 -> wayland-cursor@0.31.14
-        smithay-client-toolkit@0.19.2 -> wayland-protocols-wlr@0.3.12
-        smithay-client-toolkit@0.19.2 -> wayland-protocols@0.32.12
-        smithay-client-toolkit@0.19.2 -> wayland-scanner@0.31.10
-        smithay-clipboard@0.7.2 -> smithay-client-toolkit@0.19.2
-        wayland-client@0.31.14 -> wayland-scanner@0.31.10
-        wayland-cursor@0.31.14 -> wayland-client@0.31.14
-        wayland-protocols-plasma@0.3.12 -> wayland-client@0.31.14
-        wayland-protocols-plasma@0.3.12 -> wayland-protocols@0.32.12
-        wayland-protocols-plasma@0.3.12 -> wayland-scanner@0.31.10
-        wayland-protocols-wlr@0.3.12 -> wayland-client@0.31.14
-        wayland-protocols-wlr@0.3.12 -> wayland-protocols@0.32.12
-        wayland-protocols-wlr@0.3.12 -> wayland-scanner@0.31.10
-        wayland-protocols@0.32.12 -> wayland-client@0.31.14
-        wayland-protocols@0.32.12 -> wayland-scanner@0.31.10
-        wayland-scanner@0.31.10 -> quick-xml@0.39.4
-        winit@0.30.13 -> sctk-adwaita@0.10.1
-        winit@0.30.13 -> smithay-client-toolkit@0.19.2
-        winit@0.30.13 -> wayland-client@0.31.14
-        winit@0.30.13 -> wayland-protocols-plasma@0.3.12
-        winit@0.30.13 -> wayland-protocols@0.32.12
         """
     ),
 }

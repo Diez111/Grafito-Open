@@ -33,3 +33,6 @@ harness = false
 [[bench]]
 name = "render_scenarios"
 harness = false
+
+[lints]
+workspace = true

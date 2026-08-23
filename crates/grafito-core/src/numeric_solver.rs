@@ -461,8 +461,8 @@ impl NumericSolver {
             }
         }
         for (index, bound) in bounds.iter().take(n).enumerate() {
-            let lower_valid = bound.lower.map_or(true, f64::is_finite);
-            let upper_valid = bound.upper.map_or(true, f64::is_finite);
+            let lower_valid = bound.lower.is_none_or(f64::is_finite);
+            let upper_valid = bound.upper.is_none_or(f64::is_finite);
             if !lower_valid
                 || !upper_valid
                 || matches!((bound.lower, bound.upper), (Some(lower), Some(upper)) if lower > upper)

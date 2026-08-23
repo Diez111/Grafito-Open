@@ -121,8 +121,7 @@ fn taylor_command_rejects_an_oversized_ast_before_expanding_its_first_derivative
     let mut document = Document::new();
     let before = document_snapshot(&document);
     let group = "(x+x+x+x+x+x)";
-    let expression = std::iter::repeat(group)
-        .take(100)
+    let expression = std::iter::repeat_n(group, 100)
         .collect::<Vec<_>>()
         .join("+");
     let mut input = format!("Taylor[{expression},x,0,1]");
@@ -140,8 +139,7 @@ fn taylor_command_rejects_an_oversized_ast_before_expanding_its_first_derivative
 fn taylor_command_rejects_an_accepted_order_when_derivative_growth_exceeds_the_work_budget() {
     let mut document = Document::new();
     let before = document_snapshot(&document);
-    let expression = std::iter::repeat("sin(x)")
-        .take(16)
+    let expression = std::iter::repeat_n("sin(x)", 16)
         .collect::<Vec<_>>()
         .join("*");
     let mut input = format!("Taylor[{expression},x,0,64]");

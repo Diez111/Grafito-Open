@@ -18,7 +18,7 @@ edition = "2021"
 authors = ["Grafito Contributors"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Diez111/Grafito"
-rust-version = "1.81"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Core
@@ -94,3 +94,6 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 1
+
+[workspace.lints.clippy]
+uninlined_format_args = "allow"

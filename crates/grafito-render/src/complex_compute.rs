@@ -17,7 +17,7 @@ pub(crate) fn complex_constant_pair_index(operand: u32) -> usize {
 
 pub(crate) fn pack_complex_constants(constants: &[f64]) -> Option<Vec<[f32; 2]>> {
     let pair_count = complex_constant_pair_index(u32::try_from(constants.len()).ok()?);
-    if constants.len() % 2 != 0 || pair_count > MAX_COMPLEX_CONSTANTS {
+    if !constants.len().is_multiple_of(2) || pair_count > MAX_COMPLEX_CONSTANTS {
         return None;
     }
 

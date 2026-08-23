@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 //! Sistema de plugins declarativos de Grafito.
 //!
 //! Un plugin es un directorio con un manifiesto grafito-plugin.toml que aporta

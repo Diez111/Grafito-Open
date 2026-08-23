@@ -57,7 +57,7 @@ Email us at [diezprocapoxd@gmail.com](mailto:diezprocapoxd@gmail.com) with the f
 ### Temporary quick-xml advisory exceptions
 
 `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` are temporary, explicit exceptions
-for the locked `quick-xml` 0.30.0 and 0.39.4 packages. They are not a general
+for the locked `quick-xml` 0.30.0 package. They are not a general
 advisory bypass.
 
 | Field | Value |
@@ -95,47 +95,6 @@ zbus-lockstep-macros@0.4.4 -> zbus-lockstep@0.4.4
 zbus-lockstep-macros@0.4.4 -> zbus_xml@4.0.0
 zbus-lockstep@0.4.4 -> zbus_xml@4.0.0
 zbus_xml@4.0.0 -> quick-xml@0.30.0
-quick-xml 0.39.4:
-accesskit_winit@0.22.4 -> winit@0.30.13
-calloop-wayland-source@0.3.0 -> wayland-client@0.31.14
-eframe@0.29.1 -> egui-wgpu@0.29.1
-eframe@0.29.1 -> egui-winit@0.29.1
-eframe@0.29.1 -> egui_glow@0.29.1
-eframe@0.29.1 -> glutin-winit@0.5.0
-eframe@0.29.1 -> winit@0.30.13
-egui-wgpu@0.29.1 -> winit@0.30.13
-egui-winit@0.29.1 -> accesskit_winit@0.22.4
-egui-winit@0.29.1 -> smithay-clipboard@0.7.2
-egui-winit@0.29.1 -> winit@0.30.13
-egui_glow@0.29.1 -> egui-winit@0.29.1
-egui_glow@0.29.1 -> winit@0.30.13
-glutin-winit@0.5.0 -> winit@0.30.13
-sctk-adwaita@0.10.1 -> smithay-client-toolkit@0.19.2
-smithay-client-toolkit@0.19.2 -> calloop-wayland-source@0.3.0
-smithay-client-toolkit@0.19.2 -> wayland-client@0.31.14
-smithay-client-toolkit@0.19.2 -> wayland-cursor@0.31.14
-smithay-client-toolkit@0.19.2 -> wayland-protocols-wlr@0.3.12
-smithay-client-toolkit@0.19.2 -> wayland-protocols@0.32.12
-smithay-client-toolkit@0.19.2 -> wayland-scanner@0.31.10
-smithay-clipboard@0.7.2 -> smithay-client-toolkit@0.19.2
-wayland-client@0.31.14 -> wayland-scanner@0.31.10
-wayland-cursor@0.31.14 -> wayland-client@0.31.14
-wayland-protocols-plasma@0.3.12 -> wayland-client@0.31.14
-wayland-protocols-plasma@0.3.12 -> wayland-protocols@0.32.12
-wayland-protocols-plasma@0.3.12 -> wayland-scanner@0.31.10
-wayland-protocols-wlr@0.3.12 -> wayland-client@0.31.14
-wayland-protocols-wlr@0.3.12 -> wayland-protocols@0.32.12
-wayland-protocols-wlr@0.3.12 -> wayland-scanner@0.31.10
-wayland-protocols@0.32.12 -> wayland-client@0.31.14
-wayland-protocols@0.32.12 -> wayland-scanner@0.31.10
-wayland-scanner@0.31.10 -> quick-xml@0.39.4
-winit@0.30.13 -> sctk-adwaita@0.10.1
-winit@0.30.13 -> smithay-client-toolkit@0.19.2
-winit@0.30.13 -> wayland-client@0.31.14
-winit@0.30.13 -> wayland-protocols-plasma@0.3.12
-winit@0.30.13 -> wayland-protocols@0.32.12
-workspace:grafito-app -> eframe@0.29.1
-workspace:grafito-app -> egui-wgpu@0.29.1
 ```
 <!-- reviewed-quick-xml-ancestor-edges:end -->
 
@@ -147,10 +106,9 @@ Grafito's release targets do not call those helpers. Every 0.39.4 route reaches
 the `wayland-scanner` proc macro through the Wayland protocol/toolkit graph.
 
 No compatible lockfile update exists. `zbus_xml` 4.0.0 requires quick-xml
-`^0.30`, while `wayland-scanner` 0.31.10 (the latest released scanner) requires
+`^0.30`, while `wayland-scanner` 0.31.11 (the latest released scanner) requires
 `^0.39`; neither range can select the patched 0.41 line. The eframe 0.31.1 line
-is the newest tested line that retains Rust 1.81, but it still resolves both
-vulnerable quick-xml versions and also changes wgpu 22 to 24. Even eframe 0.35.0
+is the newest tested line that retains Rust 1.88, but it still resolves the vulnerable quick-xml 0.30.0 version and also changes wgpu 22 to 24. Even eframe 0.35.0
 requires Rust 1.92 and still uses winit 0.30.13. Disabling AccessKit or Wayland
 would remove paths by regressing accessibility or native Linux support rather
 than by fixing the dependency.
@@ -159,7 +117,7 @@ Reachability is narrower than the package-level audit report:
 
 - For `RUSTSEC-2026-0194`, quick-xml 0.30.0 duplicate-attribute checking is
   reached through `zbus_xml` deserialization used by AT-SPI validation macros,
-  and quick-xml 0.39.4 is reached by `wayland-scanner` attribute iteration.
+  and quick-xml 0.30.0 is reached by wayland-scanner now via quick-xml 0.41.0 (patched); the former 0.39.4 path via `wayland-scanner` attribute iteration.
   Both consumers parse XML shipped inside locked dependency crates during
   compilation; Grafito accepts no XML through either path at runtime.
 - For `RUSTSEC-2026-0195`, neither consumer uses `NsReader`, the affected API.

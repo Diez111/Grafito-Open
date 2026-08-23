@@ -162,7 +162,7 @@ impl ComplexExpr {
                 } else {
                     vars.get(name)
                         .copied()
-                        .ok_or_else(|| format!("Unknown variable: {}", name))?
+                        .ok_or_else(|| format!("Unknown variable: {name}"))?
                 };
                 let mz = ComplexMatrix::from_complex(z);
                 Ok(mz.to_complex())
@@ -515,7 +515,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 '^' => Token::Caret,
                 '(' => Token::LParen,
                 ')' => Token::RParen,
-                _ => return Err(format!("Unknown char: {}", c)),
+                _ => return Err(format!("Unknown char: {c}")),
             };
             tokens.push(t);
             chars.next();
@@ -751,7 +751,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
                     "bessel_y" => Ok(ComplexExpr::BesselY(Box::new(arg))),
                     "deriv_z" => Ok(ComplexExpr::DerivZ(Box::new(arg))),
                     "deriv_z_conj" => Ok(ComplexExpr::DerivZConj(Box::new(arg))),
-                    _ => Err(format!("Unknown function: {}", name)),
+                    _ => Err(format!("Unknown function: {name}")),
                 }
             } else {
                 Ok(ComplexExpr::Var(name.clone()))
@@ -774,7 +774,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
             *pos += 1;
             Ok(expr)
         }
-        t => Err(format!("Unexpected token: {:?}", t)),
+        t => Err(format!("Unexpected token: {t:?}")),
     }
 }
 

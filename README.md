@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/Diez111/Grafito/releases"><img src="https://img.shields.io/github/v/release/Diez111/Grafito?label=versi%C3%B3n&color=blue" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licencia-GPLv3%2B-blue" /></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.81%2B-orange" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.88%2B-orange" /></a>
   <a href="https://github.com/Diez111/Grafito/stargazers"><img src="https://img.shields.io/github/stars/Diez111/Grafito?style=social" /></a>
 </p>
 
@@ -68,7 +68,7 @@ git clone https://github.com/Diez111/Grafito.git
 cd grafito
 cargo run -p grafito-app --release
 ```
-> Requiere Rust &ge; 1.81 y un compilador C (incluido en `build-essential` en Debian/Ubuntu). Los compute shaders GPU necesitan Vulkan, Metal o DX12.
+> Requiere Rust &ge; 1.88 y un compilador C (incluido en `build-essential` en Debian/Ubuntu). Los compute shaders GPU necesitan Vulkan, Metal o DX12.
 </details></p>
 
 ---

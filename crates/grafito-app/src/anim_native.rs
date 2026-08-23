@@ -273,7 +273,7 @@ fn draw_text_block(
         }
         // color variacion sutil por char para efecto YouTube
         let hash = (ch as u32).wrapping_mul(2654435761);
-        let filled = (hash % 5) != 0; // algunos espacios vacios para textura
+        let filled = !hash.is_multiple_of(5); // algunos espacios vacios para textura
         if filled {
             // dibujar borde suave
             draw_filled_rect(buf, w, h, cx, y, char_w, char_h, color);

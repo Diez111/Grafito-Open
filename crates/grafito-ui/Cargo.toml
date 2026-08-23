@@ -17,3 +17,6 @@ grafito-profile.workspace = true
 egui.workspace = true
 log.workspace = true
 once_cell.workspace = true
+
+[lints]
+workspace = true

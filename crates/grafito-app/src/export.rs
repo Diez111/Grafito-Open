@@ -1026,14 +1026,14 @@ impl<'a> SceneBuilder<'a> {
                 {
                     if current
                         .last()
-                        .map_or(true, |last| last.distance(start) > 1.0e-6)
+                        .is_none_or(|last| last.distance(start) > 1.0e-6)
                     {
                         flush(&mut current, &mut runs);
                         current.push(start);
                     }
                     if current
                         .last()
-                        .map_or(true, |last| last.distance(end) > 1.0e-6)
+                        .is_none_or(|last| last.distance(end) > 1.0e-6)
                     {
                         current.push(end);
                     }

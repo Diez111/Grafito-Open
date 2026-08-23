@@ -593,7 +593,7 @@ pub fn median(data: &[f64]) -> Option<f64> {
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         Some((sorted[n / 2 - 1] + sorted[n / 2]) / 2.0)
     } else {
         Some(sorted[n / 2])

@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 //! Aplicación de escritorio Grafito — raíz de módulos.
 //!
 //! La lógica de la aplicación está dividida en módulos específicos:

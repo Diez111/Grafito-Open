@@ -83,8 +83,8 @@ grep -Fq 'cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-featur
     exit 1
 }
 
-grep -Fq 'rust-version = "1.81"' "$PROJECT_ROOT/Cargo.toml" || {
-    echo "workspace rust-version is not the verified 1.81 minimum" >&2
+grep -Fq 'rust-version = "1.88"' "$PROJECT_ROOT/Cargo.toml" || {
+    echo "workspace rust-version is not the verified 1.88 minimum" >&2
     exit 1
 }
 for msrv_file in \
@@ -94,8 +94,8 @@ for msrv_file in \
     "$PROJECT_ROOT/README.md" \
     "$PROJECT_ROOT/README.en.md" \
     "$PROJECT_ROOT/packaging/README.md"; do
-    if grep -Fq '1.78' "$msrv_file" || ! grep -Fq '1.81' "$msrv_file"; then
-        echo "stale or missing Rust 1.81 MSRV documentation: $msrv_file" >&2
+    if grep -Fq '1.81' "$msrv_file" || ! grep -Fq '1.88' "$msrv_file"; then
+        echo "stale or missing Rust 1.88 MSRV documentation: $msrv_file" >&2
         exit 1
     fi
 done
@@ -124,7 +124,7 @@ for icon_size in 16 32 48 64 128 256 512; do
         echo "missing icon asset grafito-icon-${icon_size}x${icon_size}.png" >&2
         exit 1
     }
-    grep -Fq "grafito-icon-${icon_size}x${icon_size}.png" "$build_deb" || {
+    grep -Fq 'grafito-icon-${size}x${size}.png' "$build_deb" || {
         echo "build-deb.sh does not stage the ${icon_size}x${icon_size} icon" >&2
         exit 1
     }
