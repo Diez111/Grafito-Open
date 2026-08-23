@@ -2388,12 +2388,12 @@ fn remote_error_message(error: &str) -> String {
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
     } else {
-        // Mantener el mensaje genérico para el usuario, pero incluir el detalle técnico si es corto
-        if error.len() < 120 {
-            format!("La consulta remota no se completó: {error}. Revisá la conexión y la configuración avanzada.")
+        let truncated = if error.len() > 200 {
+            format!("{}…", &error[..200])
         } else {
-            "La consulta remota no se completó. Revisá la conexión y la configuración avanzada.".into()
-        }
+            error.to_string()
+        };
+        format!("La consulta remota no se completó: {truncated}. Revisá la conexión y la configuración avanzada.")
     }
 }
 

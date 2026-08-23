@@ -3377,7 +3377,7 @@ fn draw_conversation_turn(
         |ui| {
             ui.set_max_width(max_bubble_width);
             // ui.set_min_width(ui.available_width())
-            // Burbuja Scandinavian — radio 12, hairline 10%
+            // Burbuja Scandinavian — radio 12, hairline 10%, min width para no achatarse
             egui::Frame::none()
                 .fill(appearance.fill)
                 .stroke(egui::Stroke::new(
@@ -3387,6 +3387,7 @@ fn draw_conversation_turn(
                 .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
                 .show(ui, |ui| {
+                    ui.set_min_width(120.0);
                     ui.set_max_width(max_bubble_width - crate::tokens::SPACE_SM * 2.0);
                     // Label left-aligned
                     let label = if is_user {
