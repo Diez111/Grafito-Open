@@ -1725,11 +1725,12 @@ pub fn draw_assistant_settings_window(
             ui.add_space(crate::tokens::SPACE_XS);
             ui.separator();
             ui.add_space(crate::tokens::SPACE_XS);
-            // Layout responsive: angosto (<640) → preview arriba, ancho → preview al costado, sin espacio vacío
-            let is_narrow = ui.available_width() < 640.0;
+            // Layout responsive: angosto (<720) → preview arriba, ancho → preview al costado
+            // Scandinavian: preview con fondo levemente distinto para profesionalismo
+            let is_narrow = ui.available_width() < 720.0;
             if is_narrow {
                 egui::Frame::none()
-                    .fill(theme.input_bg)
+                    .fill(theme.input_bg.gamma_multiply(0.55))
                     .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(crate::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
@@ -1745,7 +1746,7 @@ pub fn draw_assistant_settings_window(
                     .auto_shrink([false, false])
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
+                        // No forzar min_width infinito: deja que el contenido respire y envuelva
                         let inner_action = match state.config_tab {
                             1 => draw_perfil_settings_contents(ui, state),
                             2 => draw_personality_settings_contents(ui, state),
@@ -1758,10 +1759,12 @@ pub fn draw_assistant_settings_window(
             } else {
                 let avail_h = ui.available_height();
                 ui.horizontal_top(|ui| {
-                    let preview_w = (ui.available_width() * 0.38).clamp(200.0, 280.0);
-                    let spacing = crate::tokens::SPACE_LG;
+                    // Preview proporcional pero con límites que evitan desborde
                     let total_w = ui.available_width();
-                    let left_w = (total_w - preview_w - spacing).max(360.0);
+                    let preview_w = (total_w * 0.36).clamp(220.0, 300.0);
+                    let spacing = crate::tokens::SPACE_LG;
+                    // Left flexible: mínimo 320 para que los chips no queden inutilizables
+                    let left_w = (total_w - preview_w - spacing).clamp(320.0, 560.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_w, avail_h),
                         egui::Layout::top_down(egui::Align::LEFT),
@@ -1771,7 +1774,7 @@ pub fn draw_assistant_settings_window(
                                 .auto_shrink([false, false])
                                 .max_height(avail_h)
                                 .show(ui, |ui| {
-                                    ui.set_min_width(ui.available_width());
+                                    // Deja que el contenido fluya sin forzar ancho infinito
                                     let inner_action = match state.config_tab {
                                         1 => draw_perfil_settings_contents(ui, state),
                                         2 => draw_personality_settings_contents(ui, state),
@@ -1789,9 +1792,10 @@ pub fn draw_assistant_settings_window(
                         egui::Layout::top_down(egui::Align::Center),
                         |ui| {
                             egui::Frame::none()
+                                .fill(theme.input_bg.gamma_multiply(0.55))
                                 .stroke(egui::Stroke::new(
                                     1.0,
-                                    theme.separator.gamma_multiply(0.08),
+                                    theme.separator.gamma_multiply(0.10),
                                 ))
                                 .rounding(crate::tokens::RADIUS_LG)
                                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
@@ -1813,27 +1817,30 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
     let theme = current_theme(ui.ctx());
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    // Contenedor sutilmente distinto ya viene del Frame padre (input_bg 55%); aquí solo el contenido centrado
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new("Vista previa")
                 .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary)
+                .color(theme.text_tertiary.gamma_multiply(0.85))
                 .weak(),
         );
         ui.add_space(crate::tokens::SPACE_SM);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(168.0, 168.0), egui::Sense::hover());
+        // Avatar: tamaño adaptativo al ancho disponible para nunca desbordar
+        let avail_w = ui.available_width();
+        let size = avail_w.min(168.0).clamp(120.0, 168.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        // Fondo: usa bg_color custom si existe, si no input_bg
         let bg_rect_col = if let Some(rgb) = state.avatar.bg_color {
             egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
         } else {
-            theme.input_bg
+            theme.panel_bg
         };
         painter.rect_filled(rect, crate::tokens::RADIUS_LG, bg_rect_col);
         painter.rect_stroke(
             rect,
             crate::tokens::RADIUS_LG,
-            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.12)),
         );
         let inner = rect.shrink(12.0);
         crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
@@ -1864,27 +1871,35 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
                 .color(theme.text_secondary),
         );
         ui.add_space(crate::tokens::SPACE_XS);
+        // Acento centrado profesional: pill con dot + nombre
         let rgb = state.avatar.accent_color();
         let accent_name = if state.avatar.accent_custom.is_some() {
             "Custom"
         } else {
             grafito_profile::AvatarConfig::accent_palette(state.avatar.accent_preset).0
         };
-        ui.horizontal(|ui| {
-            let dot_size = 8.0;
-            let (dot_rect, _) =
-                ui.allocate_exact_size(egui::vec2(dot_size, dot_size), egui::Sense::hover());
-            ui.painter().circle_filled(
-                dot_rect.center(),
-                dot_size * 0.5,
-                egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
-            );
-            ui.label(
-                egui::RichText::new(accent_name)
-                    .size(crate::tokens::TYPE_XS)
-                    .color(theme.text_tertiary),
-            );
-        });
+        let dot_col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        egui::Frame::none()
+            .fill(dot_col.gamma_multiply(0.12))
+            .rounding(crate::tokens::RADIUS_PILL)
+            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let dot_size = 8.0;
+                    let (dot_rect, _) = ui
+                        .allocate_exact_size(egui::vec2(dot_size, dot_size), egui::Sense::hover());
+                    ui.painter()
+                        .circle_filled(dot_rect.center(), dot_size * 0.5, dot_col);
+                    ui.label(
+                        egui::RichText::new(accent_name)
+                            .size(crate::tokens::TYPE_XS)
+                            .color(theme.text_tertiary)
+                            .strong(),
+                    );
+                });
+            });
+        ui.add_space(crate::tokens::SPACE_XS);
+        // Metadatos condensados en una línea wrap, centrada
         let bg_label = if state.avatar.bg_color.is_some() {
             "fondo custom"
         } else {
@@ -1902,15 +1917,6 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
             .weak(),
         );
         ui.label(
-            egui::RichText::new(format!(
-                "ojo {} · sep {} · pupila {}",
-                state.avatar.eye_size, state.avatar.eye_spacing, state.avatar.pupil_size
-            ))
-            .size(TYPE_2XS)
-            .color(theme.text_tertiary.gamma_multiply(0.85))
-            .weak(),
-        );
-        ui.label(
             egui::RichText::new(if state.avatar.eye_tracking {
                 "seguimiento activo"
             } else {
@@ -1921,11 +1927,11 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
             .italics()
             .weak(),
         );
-        ui.add_space(crate::tokens::SPACE_SM);
+        ui.add_space(crate::tokens::SPACE_XS);
         ui.label(
             egui::RichText::new("Mové el puntero sobre el avatar")
                 .size(TYPE_2XS)
-                .color(theme.text_tertiary)
+                .color(theme.text_tertiary.gamma_multiply(0.75))
                 .weak(),
         );
     });
@@ -2025,14 +2031,20 @@ fn draw_perfil_settings_contents(
     ui.separator();
     ui.add_space(crate::tokens::SPACE_MD);
     // Sección: Forma y mirada — 2 columnas con label sentence case
+    // ── Capítulo: Silueta ──
     ui.label(
-        egui::RichText::new("Apariencia")
+        egui::RichText::new("Silueta")
             .size(crate::tokens::TYPE_SM)
             .strong()
             .color(theme.text_primary),
     );
+    ui.label(
+        egui::RichText::new("Forma y paleta base")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_tertiary)
+            .weak(),
+    );
     ui.add_space(crate::tokens::SPACE_SM);
-    // Forma
     ui.label(
         egui::RichText::new("Forma")
             .size(crate::tokens::TYPE_XS)
@@ -2053,7 +2065,165 @@ fn draw_perfil_settings_contents(
         }
     });
     ui.add_space(crate::tokens::SPACE_SM);
-    // Mirada
+    ui.label(
+        egui::RichText::new("Acento")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_secondary),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        for preset in 0..6 {
+            let (name, rgb, _) = grafito_profile::AvatarConfig::accent_palette(preset);
+            let sel = state.avatar.accent_preset == preset && state.avatar.accent_custom.is_none();
+            let col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let btn = egui::Button::new(
+                egui::RichText::new(name)
+                    .size(crate::tokens::TYPE_XS)
+                    .color(if sel {
+                        egui::Color32::WHITE
+                    } else {
+                        theme.text_primary
+                    }),
+            )
+            .fill(if sel { col } else { col.gamma_multiply(0.18) })
+            .stroke(egui::Stroke::new(
+                1.0,
+                if sel {
+                    col
+                } else {
+                    theme.separator.gamma_multiply(0.12)
+                },
+            ))
+            .rounding(crate::tokens::RADIUS_PILL);
+            if ui
+                .add(btn)
+                .on_hover_text(format!("{} rgb({},{},{})", name, rgb[0], rgb[1], rgb[2]))
+                .clicked()
+            {
+                state.avatar.accent_preset = preset;
+                state.avatar.accent_custom = None;
+            }
+        }
+        let custom_sel = state.avatar.accent_custom.is_some();
+        let custom_col = state.avatar.accent_custom.map_or(theme.accent, |rgb| {
+            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+        });
+        let btn = egui::Button::new(
+            egui::RichText::new("Custom")
+                .size(crate::tokens::TYPE_XS)
+                .color(if custom_sel {
+                    egui::Color32::WHITE
+                } else {
+                    theme.text_primary
+                }),
+        )
+        .fill(if custom_sel {
+            custom_col
+        } else {
+            theme.input_bg
+        })
+        .stroke(egui::Stroke::new(
+            1.0,
+            if custom_sel {
+                custom_col
+            } else {
+                theme.separator
+            },
+        ))
+        .rounding(crate::tokens::RADIUS_PILL);
+        if ui.add(btn).on_hover_text("Color personalizado").clicked() {
+            state.avatar.accent_custom = Some([107, 122, 111]);
+            state.avatar.accent_preset = 99;
+        }
+    });
+    if let Some(rgb) = state.avatar.accent_custom {
+        ui.add_space(crate::tokens::SPACE_XS);
+        let mut col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        if ui.color_edit_button_srgba(&mut col).changed() {
+            state.avatar.accent_custom = Some([col.r(), col.g(), col.b()]);
+        }
+        ui.label(
+            egui::RichText::new(format!(
+                "#{:02X}{:02X}{:02X}  ·  click para editar",
+                col.r(),
+                col.g(),
+                col.b()
+            ))
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_tertiary)
+            .weak(),
+        );
+        if ui.small_button("Usar presets").clicked() {
+            state.avatar.accent_custom = None;
+            state.avatar.accent_preset = 0;
+        }
+    }
+    ui.add_space(crate::tokens::SPACE_SM);
+    ui.label(
+        egui::RichText::new("Fondo del avatar")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_secondary),
+    );
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        let is_none = state.avatar.bg_color.is_none();
+        if ui
+            .selectable_label(is_none, "Tema")
+            .on_hover_text("Usa el fondo del tema")
+            .clicked()
+        {
+            state.avatar.bg_color = None;
+        }
+        for (name, rgb) in [
+            ("Blanco", [255, 255, 255]),
+            ("Crema", [253, 245, 230]),
+            ("Gris", [240, 240, 240]),
+            ("Oscuro", [30, 30, 35]),
+        ] {
+            let sel = state.avatar.bg_color == Some(rgb);
+            let col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+            let btn = egui::Button::new(egui::RichText::new(name).size(crate::tokens::TYPE_XS))
+                .fill(col)
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    if sel { theme.accent } else { theme.separator },
+                ))
+                .rounding(crate::tokens::RADIUS_PILL);
+            if ui.add(btn).clicked() {
+                state.avatar.bg_color = Some(rgb);
+            }
+        }
+    });
+    if let Some(rgb) = state.avatar.bg_color {
+        ui.add_space(crate::tokens::SPACE_XS);
+        let mut col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        if ui.color_edit_button_srgba(&mut col).changed() {
+            state.avatar.bg_color = Some([col.r(), col.g(), col.b()]);
+        }
+        ui.label(
+            egui::RichText::new(format!("#{:02X}{:02X}{:02X}", col.r(), col.g(), col.b()))
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_tertiary)
+                .weak(),
+        );
+    }
+    ui.add_space(crate::tokens::SPACE_MD);
+    ui.separator();
+    ui.add_space(crate::tokens::SPACE_SM);
+    // ── Capítulo: Rostro ──
+    ui.label(
+        egui::RichText::new("Rostro")
+            .size(crate::tokens::TYPE_SM)
+            .strong()
+            .color(theme.text_primary),
+    );
+    ui.label(
+        egui::RichText::new("Ojos, boca y detalles")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_tertiary)
+            .weak(),
+    );
+    ui.add_space(crate::tokens::SPACE_SM);
     ui.label(
         egui::RichText::new("Mirada")
             .size(crate::tokens::TYPE_XS)
@@ -2069,8 +2239,7 @@ fn draw_perfil_settings_contents(
             }
         }
     });
-    ui.add_space(crate::tokens::SPACE_MD);
-    // Sliders con valor numérico — Scandinavian: label + slider + valor pill
+    ui.add_space(crate::tokens::SPACE_SM);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Tamaño ojos")
@@ -2149,17 +2318,7 @@ fn draw_perfil_settings_contents(
                 .weak(),
         );
     });
-    ui.add_space(crate::tokens::SPACE_MD);
-    ui.separator();
     ui.add_space(crate::tokens::SPACE_SM);
-    // Boca, rubor, accesorio
-    ui.label(
-        egui::RichText::new("Rasgos")
-            .size(crate::tokens::TYPE_SM)
-            .strong()
-            .color(theme.text_primary),
-    );
-    ui.add_space(crate::tokens::SPACE_XS);
     ui.label(
         egui::RichText::new("Boca")
             .size(crate::tokens::TYPE_XS)
@@ -2205,158 +2364,21 @@ fn draw_perfil_settings_contents(
         }
     });
     ui.add_space(crate::tokens::SPACE_MD);
-    // Acento + fondo
+    ui.separator();
+    ui.add_space(crate::tokens::SPACE_SM);
+    // ── Capítulo: Animación ──
     ui.label(
-        egui::RichText::new("Color")
+        egui::RichText::new("Animación")
             .size(crate::tokens::TYPE_SM)
             .strong()
             .color(theme.text_primary),
     );
-    ui.add_space(crate::tokens::SPACE_XS);
     ui.label(
-        egui::RichText::new("Acento")
-            .size(crate::tokens::TYPE_XS)
-            .color(theme.text_secondary),
-    );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        for preset in 0..6 {
-            let (name, rgb, _) = grafito_profile::AvatarConfig::accent_palette(preset);
-            let sel = state.avatar.accent_preset == preset && state.avatar.accent_custom.is_none();
-            let col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-            let btn = egui::Button::new(
-                egui::RichText::new(name)
-                    .size(crate::tokens::TYPE_XS)
-                    .color(if sel {
-                        egui::Color32::WHITE
-                    } else {
-                        theme.text_primary
-                    }),
-            )
-            .fill(if sel { col } else { col.gamma_multiply(0.18) })
-            .stroke(egui::Stroke::new(
-                1.0,
-                if sel {
-                    col
-                } else {
-                    theme.separator.gamma_multiply(0.12)
-                },
-            ))
-            .rounding(crate::tokens::RADIUS_PILL);
-            if ui
-                .add(btn)
-                .on_hover_text(format!("{} rgb({},{},{})", name, rgb[0], rgb[1], rgb[2]))
-                .clicked()
-            {
-                state.avatar.accent_preset = preset;
-                state.avatar.accent_custom = None;
-            }
-        }
-        // Custom pill
-        let custom_sel = state.avatar.accent_custom.is_some();
-        let custom_col = state.avatar.accent_custom.map_or(theme.accent, |rgb| {
-            egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-        });
-        let btn = egui::Button::new(
-            egui::RichText::new("Custom")
-                .size(crate::tokens::TYPE_XS)
-                .color(if custom_sel {
-                    egui::Color32::WHITE
-                } else {
-                    theme.text_primary
-                }),
-        )
-        .fill(if custom_sel {
-            custom_col
-        } else {
-            theme.input_bg
-        })
-        .stroke(egui::Stroke::new(
-            1.0,
-            if custom_sel {
-                custom_col
-            } else {
-                theme.separator
-            },
-        ))
-        .rounding(crate::tokens::RADIUS_PILL);
-        if ui.add(btn).on_hover_text("Color personalizado").clicked() {
-            state.avatar.accent_custom = Some([107, 122, 111]);
-            state.avatar.accent_preset = 99;
-        }
-    });
-    // Custom color picker si activo
-    if let Some(rgb) = state.avatar.accent_custom {
-        ui.add_space(crate::tokens::SPACE_XS);
-        let mut col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        if ui.color_edit_button_srgba(&mut col).changed() {
-            state.avatar.accent_custom = Some([col.r(), col.g(), col.b()]);
-        }
-        ui.label(
-            egui::RichText::new(format!(
-                "#{:02X}{:02X}{:02X}  ·  click para editar",
-                col.r(),
-                col.g(),
-                col.b()
-            ))
+        egui::RichText::new("Parpadeo y seguimiento")
             .size(crate::tokens::TYPE_XS)
             .color(theme.text_tertiary)
             .weak(),
-        );
-        if ui.small_button("Usar presets").clicked() {
-            state.avatar.accent_custom = None;
-            state.avatar.accent_preset = 0;
-        }
-    }
-    ui.add_space(crate::tokens::SPACE_SM);
-    ui.label(
-        egui::RichText::new("Fondo del avatar")
-            .size(crate::tokens::TYPE_XS)
-            .color(theme.text_secondary),
     );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-        let is_none = state.avatar.bg_color.is_none();
-        if ui
-            .selectable_label(is_none, "Tema")
-            .on_hover_text("Usa el fondo del tema")
-            .clicked()
-        {
-            state.avatar.bg_color = None;
-        }
-        for (name, rgb) in [
-            ("Blanco", [255, 255, 255]),
-            ("Crema", [253, 245, 230]),
-            ("Gris", [240, 240, 240]),
-            ("Oscuro", [30, 30, 35]),
-        ] {
-            let sel = state.avatar.bg_color == Some(rgb);
-            let col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-            let btn = egui::Button::new(egui::RichText::new(name).size(crate::tokens::TYPE_XS))
-                .fill(col)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    if sel { theme.accent } else { theme.separator },
-                ))
-                .rounding(crate::tokens::RADIUS_PILL);
-            if ui.add(btn).clicked() {
-                state.avatar.bg_color = Some(rgb);
-            }
-        }
-    });
-    if let Some(rgb) = state.avatar.bg_color {
-        ui.add_space(crate::tokens::SPACE_XS);
-        let mut col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        if ui.color_edit_button_srgba(&mut col).changed() {
-            state.avatar.bg_color = Some([col.r(), col.g(), col.b()]);
-        }
-        ui.label(
-            egui::RichText::new(format!("#{:02X}{:02X}{:02X}", col.r(), col.g(), col.b()))
-                .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary)
-                .weak(),
-        );
-    }
     ui.add_space(crate::tokens::SPACE_SM);
     ui.horizontal(|ui| {
         ui.label(
@@ -2789,21 +2811,26 @@ fn draw_personality_settings_contents(
                         .outer_margin(egui::Margin::symmetric(0.0, 2.0))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                let label = egui::Label::new(
-                                    egui::RichText::new(format!("• {}", fact.text))
-                                        .size(crate::tokens::TYPE_XS)
-                                        .color(theme.text_primary),
-                                )
-                                .wrap();
-                                ui.add(label);
+                                let mut should_remove = false;
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.small_button("✕").on_hover_text("Olvidar").clicked()
                                         {
-                                            to_remove = Some(idx);
+                                            should_remove = true;
                                         }
                                     },
+                                );
+                                if should_remove {
+                                    to_remove = Some(idx);
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("• {}", fact.text))
+                                            .size(crate::tokens::TYPE_XS)
+                                            .color(theme.text_primary),
+                                    )
+                                    .wrap(),
                                 );
                             });
                         });
