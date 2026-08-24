@@ -1157,6 +1157,7 @@ pub(crate) fn color_picker_safe_viewport(viewport: egui::Rect) -> egui::Rect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorPickerDialogAction {
     Apply,
+    #[allow(dead_code)]
     Cancel,
     Dismiss,
 }
@@ -1199,7 +1200,6 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     let mut keep_open = true;
     let mut outcome = grafito_ui::color_picker::ColorPickerOutcome::default();
-    let mut dialog_action = None;
     let theme = current_theme(ctx);
 
     egui::Window::new("Selector de Color")
@@ -1212,30 +1212,50 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::NONE)
-                .rounding(RADIUS_MD),
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .shadow(egui::Shadow {
+                    offset: egui::vec2(0.0, 2.0),
+                    blur: 8.0,
+                    spread: 0.0,
+                    color: egui::Color32::from_black_alpha(8),
+                }),
         )
         .open(&mut keep_open)
         .show(ctx, |ui| {
             outcome = picker.show(ui, &mut app.color_favorites);
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancelar").clicked() {
-                    dialog_action = Some(ColorPickerDialogAction::Cancel);
-                }
-                if ui.button("Aplicar").clicked() {
-                    dialog_action = Some(ColorPickerDialogAction::Apply);
-                }
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("Los cambios se aplican al instante")
+                        .size(11.0)
+                        .color(theme.text_tertiary)
+                        .weak()
+                        .italics(),
+                );
             });
         });
 
+    // Live apply — sin botón Aplicar
+    if outcome.color_changed {
+        let color = picker.to_color();
+        let _ = apply_color_picker_dialog_action(
+            ColorPickerDialogAction::Apply,
+            &mut app.document,
+            target,
+            object_id,
+            color,
+            &mut app.undo_stack,
+            &mut app.redo_stack,
+        );
+    }
     if outcome.any_changed() {
         ctx.request_repaint();
     }
 
-    let dialog_action =
-        dialog_action.or_else(|| (!keep_open).then_some(ColorPickerDialogAction::Dismiss));
+    let dialog_action = (!keep_open).then_some(ColorPickerDialogAction::Dismiss);
     if let Some(action) = dialog_action {
+        // Cerrar sin revertir — el color ya está aplicado en vivo
         let _ = apply_color_picker_dialog_action(
             action,
             &mut app.document,

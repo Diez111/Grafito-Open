@@ -997,6 +997,35 @@ impl GrafitoApp {
                     }
                 }
             }
+            AssistantUiAction::LiveSaveAvatar => {
+                // Guardado live sin cerrar ventana — para cambios de color/forma inmediatos
+                let draft = self.assistant.avatar.clone();
+                let mut long_mem = self.assistant.long_memory.clone();
+                long_mem.preferences.custom_instructions = draft.custom_instructions.clone();
+                long_mem.preferences.language = draft.language.clone();
+                if let Some(m) = draft.mascot.as_ref() {
+                    long_mem.preferences.tone = m.personality.label().to_string();
+                }
+                if draft.validate().is_ok() && long_mem.preferences.validate().is_ok() {
+                    let name = self.assistant.user_name.clone();
+                    let name_ref = if name.trim().is_empty() {
+                        "Estudiante"
+                    } else {
+                        name.trim()
+                    };
+                    if self.profile.set_display_name(name_ref).is_ok() {
+                        self.profile.avatar = draft.clone();
+                        if let Some(mascot) = draft.mascot.clone() {
+                            self.profile.avatar.mascot = Some(mascot.clone());
+                            self.profile.mascot = Some(mascot);
+                        }
+                        self.profile.long_memory = long_mem.clone();
+                        self.avatar_draft = self.profile.avatar.clone();
+                        // No cerrar ventana, no toast ruidoso
+                        spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
+                    }
+                }
+            }
             AssistantUiAction::ResetAvatar => {
                 self.assistant.avatar = grafito_profile::AvatarConfig::default();
                 self.assistant.avatar.display_name = "Estudiante".to_string();

@@ -90,28 +90,26 @@ impl HsvColorPicker {
         !colors_match(self.to_color(), color_before)
     }
 
-    /// Dibujar el color picker completo.
+    /// Dibujar el color picker completo — Scandinavian, quiet.
     pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
         let color_before = self.to_color();
-
+        ui.add_space(4.0);
         ui.columns(2, |cols| {
-            // Columna Izquierda: Rueda
+            // Rueda — protagonista visual
             cols[0].vertical_centered(|ui| {
-                let _ = self.show_wheel(ui, 136.0);
+                let _ = self.show_wheel(ui, 148.0);
             });
-
-            // Columna Derecha: Slider y Preview
-            cols[1].vertical_centered(|ui| {
-                ui.add_space(2.0);
-                let _ = self.show_value_slider(ui, 136.0);
-                ui.add_space(8.0);
-                let _ = self.show_opacity_slider(ui, 136.0);
-                ui.add_space(8.0);
-                let _ = self.show_preview(ui, 136.0);
+            // Controles — apilados con ritmo 8
+            cols[1].vertical(|ui| {
+                ui.add_space(4.0);
+                let _ = self.show_value_slider(ui, 148.0);
+                ui.add_space(10.0);
+                let _ = self.show_opacity_slider(ui, 148.0);
+                ui.add_space(10.0);
+                let _ = self.show_preview(ui, 148.0);
             });
         });
-
-        ui.add_space(12.0);
+        ui.add_space(14.0);
         let favorites_outcome = self.show_favorites(ui, favorites);
 
         ColorPickerOutcome {
@@ -222,14 +220,13 @@ impl HsvColorPicker {
         false
     }
 
-    /// Dibujar slider de valor (brightness) sin saltos y con indicador no recortado
+    /// Dibujar slider de valor (brightness) — Scandinavian quiet
     fn show_value_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
-        let height = 24.0;
-
+        let height = 22.0;
         ui.label(
-            egui::RichText::new("Valor (Brillo):")
-                .strong()
-                .color(ui.visuals().hyperlink_color),
+            egui::RichText::new("Brillo")
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(4.0);
 
@@ -324,12 +321,12 @@ impl HsvColorPicker {
         false
     }
 
-    /// Expone la opacidad sin mezclarla con la rueda HSV.
+    /// Opacidad — quiet
     fn show_opacity_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
-            egui::RichText::new("Opacidad:")
-                .strong()
-                .color(ui.visuals().hyperlink_color),
+            egui::RichText::new("Opacidad")
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
         );
         let response = ui.add_sized(
             [width, 20.0],
@@ -343,12 +340,12 @@ impl HsvColorPicker {
         response.changed()
     }
 
-    /// Dibujar preview de color (actual vs nuevo) como una tarjeta unificada dividida
+    /// Preview — tarjeta dividida original / nuevo
     fn show_preview(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
-            egui::RichText::new("Previsualización:")
-                .strong()
-                .color(ui.visuals().hyperlink_color),
+            egui::RichText::new("Previsualización")
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(4.0);
 
@@ -436,14 +433,13 @@ impl HsvColorPicker {
         changed
     }
 
-    /// Dibujar colores favoritos alineados y centrados horizontalmente.
+    /// Favoritos — centrados, quiet
     fn show_favorites(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
         let mut outcome = ColorPickerOutcome::default();
-
         ui.label(
-            egui::RichText::new("Favoritos:")
-                .strong()
-                .color(ui.visuals().hyperlink_color),
+            egui::RichText::new("Favoritos")
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
         );
         ui.add_space(4.0);
 

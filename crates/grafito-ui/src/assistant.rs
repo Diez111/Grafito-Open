@@ -1528,6 +1528,8 @@ pub enum AssistantUiAction {
     ApplyRawCommand(String),
     /// Guardar cambios de avatar y nombre de perfil (unificado).
     SaveAvatar,
+    /// Guardado automático sin cerrar ventana (cambios live).
+    LiveSaveAvatar,
     /// Restablecer avatar al valor por defecto (borrador local).
     ResetAvatar,
 }
@@ -1871,7 +1873,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
                 .color(theme.text_secondary),
         );
         ui.add_space(crate::tokens::SPACE_XS);
-        // Acento centrado profesional: pill con dot + nombre
+        // Acento centrado profesional: pill con dot + nombre — una sola etiqueta centrada
         let rgb = state.avatar.accent_color();
         let accent_name = if state.avatar.accent_custom.is_some() {
             "Custom"
@@ -1880,22 +1882,38 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         };
         let dot_col = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
         egui::Frame::none()
-            .fill(dot_col.gamma_multiply(0.12))
+            .fill(dot_col.gamma_multiply(0.14))
+            .stroke(egui::Stroke::new(1.0, dot_col.gamma_multiply(0.22)))
             .rounding(crate::tokens::RADIUS_PILL)
-            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let dot_size = 8.0;
-                    let (dot_rect, _) = ui
-                        .allocate_exact_size(egui::vec2(dot_size, dot_size), egui::Sense::hover());
-                    ui.painter()
-                        .circle_filled(dot_rect.center(), dot_size * 0.5, dot_col);
-                    ui.label(
-                        egui::RichText::new(accent_name)
-                            .size(crate::tokens::TYPE_XS)
-                            .color(theme.text_tertiary)
-                            .strong(),
+                ui.vertical_centered(|ui| {
+                    let mut job = egui::text::LayoutJob::default();
+                    job.append(
+                        "● ",
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::new(
+                                crate::tokens::TYPE_XS,
+                                egui::FontFamily::Proportional,
+                            ),
+                            color: dot_col,
+                            ..Default::default()
+                        },
                     );
+                    job.append(
+                        accent_name,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::new(
+                                crate::tokens::TYPE_XS,
+                                egui::FontFamily::Proportional,
+                            ),
+                            color: theme.text_primary.gamma_multiply(0.85),
+                            ..Default::default()
+                        },
+                    );
+                    ui.label(job);
                 });
             });
         ui.add_space(crate::tokens::SPACE_XS);
@@ -1943,6 +1961,8 @@ fn draw_perfil_settings_contents(
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let mut action = None;
+    let _avatar_before = state.avatar.clone();
+    let _user_name_before = state.user_name.clone();
     ui.label(
         egui::RichText::new("Perfil y avatar")
             .size(crate::tokens::TYPE_BASE)
@@ -2410,58 +2430,45 @@ fn draw_perfil_settings_contents(
     ui.add_space(crate::tokens::SPACE_MD);
     ui.separator();
     ui.add_space(crate::tokens::SPACE_SM);
-    // Botones Guardar / Cancelar / Restablecer
+    // Guardado automático — los cambios se toman al instante, sin Aplicar/Cancelar
     ui.horizontal(|ui| {
-        if ui
-            .add(
-                egui::Button::new(
-                    egui::RichText::new("Guardar")
-                        .size(crate::tokens::TYPE_SM)
-                        .strong()
-                        .color(egui::Color32::WHITE),
+        ui.label(
+            egui::RichText::new("Guardado automático")
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_tertiary.gamma_multiply(0.85))
+                .weak()
+                .italics(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Restablecer").size(crate::tokens::TYPE_XS),
+                    )
+                    .rounding(crate::tokens::RADIUS_PILL)
+                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
                 )
-                .fill(theme.accent)
-                .rounding(crate::tokens::RADIUS_PILL)
-                .stroke(egui::Stroke::new(1.0, theme.accent)),
-            )
-            .clicked()
-        {
-            action = Some(AssistantUiAction::SaveAvatar);
-        }
-        if ui
-            .add(
-                egui::Button::new(egui::RichText::new("Cancelar").size(crate::tokens::TYPE_SM))
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
-            )
-            .clicked()
-        {
-            // Cierra sin guardar — el sync revertirá al perfil al próximo frame
-            state.settings_open = false;
-        }
-        if ui
-            .add(
-                egui::Button::new(egui::RichText::new("Restablecer").size(crate::tokens::TYPE_SM))
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
-            )
-            .clicked()
-        {
-            state.avatar = grafito_profile::AvatarConfig::default();
-            state.avatar.display_name = "Estudiante".to_string();
-            state.user_name = "Estudiante".to_string();
-            action = Some(AssistantUiAction::ResetAvatar);
-        }
+                .on_hover_text("Vuelve a valores por defecto")
+                .clicked()
+            {
+                state.avatar = grafito_profile::AvatarConfig::default();
+                state.avatar.display_name = "Estudiante".to_string();
+                state.user_name = "Estudiante".to_string();
+                action = Some(AssistantUiAction::ResetAvatar);
+            }
+        });
     });
     ui.add_space(crate::tokens::SPACE_XS);
     ui.label(
-        egui::RichText::new(
-            "Tip: el avatar se usa en el header y en enseñanza paso a paso (morph a burbuja).",
-        )
-        .size(10.0)
-        .color(theme.text_tertiary)
-        .weak(),
+        egui::RichText::new("Los cambios se aplican al instante y se previsualizan a la derecha.")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_tertiary)
+            .weak(),
     );
+    if action.is_none() && (state.avatar != _avatar_before || state.user_name != _user_name_before)
+    {
+        action = Some(AssistantUiAction::LiveSaveAvatar);
+    }
     action
 }
 
@@ -2480,6 +2487,8 @@ fn draw_personality_settings_contents(
         .as_ref()
         .map(|m| m.personality)
         .unwrap_or_default();
+    let _avatar_before = state.avatar.clone();
+    let _long_before = state.long_memory.clone();
     let assist_name = state.avatar.assistant_name_or_default();
     ui.label(
         egui::RichText::new(format!("Personalidad de {}", assist_name))
@@ -2524,35 +2533,43 @@ fn draw_personality_settings_contents(
             }
         }
     });
-    // Descripción del seleccionado
+    // Descripción del seleccionado — centrada y estructurada
     if let Some(p) = grafito_profile::Personality::all()
         .iter()
         .find(|p| **p == current_personality)
     {
-        ui.label(
-            egui::RichText::new(p.description())
-                .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary)
-                .italics()
-                .weak(),
-        );
-    }
-    // Preview snippet
-    ui.add_space(crate::tokens::SPACE_XS);
-    egui::Frame::none()
-        .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
-        .rounding(crate::tokens::RADIUS_MD)
-        .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
-        .show(ui, |ui| {
-            let snippet = current_personality.system_prompt_snippet();
+        ui.add_space(crate::tokens::SPACE_XS);
+        ui.vertical_centered(|ui| {
             ui.label(
-                egui::RichText::new(format!("\"{}\"", snippet))
+                egui::RichText::new(p.description())
                     .size(crate::tokens::TYPE_XS)
-                    .color(theme.text_tertiary)
+                    .color(theme.text_secondary.gamma_multiply(0.85))
                     .italics()
                     .weak(),
             );
+        });
+    }
+    // Preview snippet — centrado, pill sutil
+    ui.add_space(crate::tokens::SPACE_XS);
+    egui::Frame::none()
+        .fill(theme.input_bg.gamma_multiply(0.85))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .rounding(crate::tokens::RADIUS_LG)
+        .inner_margin(egui::Margin::symmetric(
+            crate::tokens::SPACE_MD,
+            crate::tokens::SPACE_SM,
+        ))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                let snippet = current_personality.system_prompt_snippet();
+                ui.label(
+                    egui::RichText::new(format!("“{}”", snippet))
+                        .size(crate::tokens::TYPE_XS)
+                        .color(theme.text_tertiary)
+                        .italics()
+                        .weak(),
+                );
+            });
         });
     ui.add_space(crate::tokens::SPACE_MD);
     ui.separator();
@@ -2908,6 +2925,20 @@ fn draw_personality_settings_contents(
             .color(theme.text_tertiary)
             .weak(),
     );
+    if action.is_none() && (state.avatar != _avatar_before || state.long_memory != _long_before) {
+        // Guardado live sin cerrar ventana — para sliders y chips inmediatos
+        let live_personality = state
+            .avatar
+            .mascot
+            .as_ref()
+            .map(|m| m.personality)
+            .unwrap_or(current_personality);
+        state.long_memory.preferences.tone = live_personality.label().to_string();
+        state.long_memory.preferences.custom_instructions =
+            state.avatar.custom_instructions.clone();
+        state.long_memory.preferences.language = state.avatar.language.clone();
+        action = Some(AssistantUiAction::LiveSaveAvatar);
+    }
     action
 }
 
