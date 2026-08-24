@@ -630,288 +630,231 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             app.handle_assistant_action(ctx, action);
         }
     }
-    // Fondo atenuado + pizarra compacta centrada (Scandinavian)
-    egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme.canvas_bg))
+    let mut keep_open = app.whiteboard_open;
+    egui::Window::new("Pizarra")
+        .id(egui::Id::new("whiteboard_window"))
+        .collapsible(false)
+        .resizable(true)
+        .min_size(vec2(420.0, 320.0))
+        .max_size(vec2(720.0, 560.0))
+        .default_size(vec2(560.0, 380.0))
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .shadow(egui::Shadow {
+                    offset: vec2(0.0, 4.0),
+                    blur: 16.0,
+                    spread: 0.0,
+                    color: Color32::from_black_alpha(20),
+                }),
+        )
+        .open(&mut keep_open)
         .show(ctx, |ui| {
-            // Centrar vertical y horizontalmente
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                let available = ui.available_rect_before_wrap();
-                let target = egui::vec2(560.0, 420.0);
-                let max = available.size() - egui::vec2(40.0, 40.0);
-                let size = egui::vec2(
-                    target.x.min(max.x.max(360.0)),
-                    target.y.min(max.y.max(300.0)),
+            ui.vertical(|ui| {
+                draw_toolbar(ui, app);
+                let anim = ui.ctx().animate_bool(
+                    egui::Id::new("whiteboard_palette"),
+                    app.whiteboard.show_palette,
                 );
-                egui::Frame::none()
-                    .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.12)))
-                    .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::same(12.0))
-                    .shadow(egui::Shadow {
-                        offset: vec2(0.0, 4.0),
-                        blur: 16.0,
-                        spread: 0.0,
-                        color: Color32::from_black_alpha(20),
-                    })
-                    .show(ui, |ui| {
-                        ui.set_min_size(size);
-                        ui.set_max_size(size);
-                        ui.vertical(|ui| {
-                            draw_toolbar(ui, app);
-                            // Palette animada debajo de la toolbar
-                            let anim = ui.ctx().animate_bool(
-                                egui::Id::new("whiteboard_palette"),
-                                app.whiteboard.show_palette,
-                            );
-                            if anim > 0.01 {
-                                let bg = theme.panel_bg.gamma_multiply(anim * 0.98 + 0.02);
-                                let stroke_alpha = 0.10 * anim;
-                                egui::Frame::none()
-                                    .fill(bg)
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        theme.separator.gamma_multiply(stroke_alpha),
-                                    ))
-                                    .rounding(grafito_ui::tokens::RADIUS_MD)
-                                    .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+                if anim > 0.01 {
+                    let bg = theme.panel_bg.gamma_multiply(anim * 0.98 + 0.02);
+                    let stroke_a = 0.10 * anim;
+                    egui::Frame::none()
+                        .fill(bg)
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            theme.separator.gamma_multiply(stroke_a),
+                        ))
+                        .rounding(grafito_ui::tokens::RADIUS_MD)
+                        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+                        .show(ui, |ui| {
+                            ui.scope(|ui| {
+                                ui.style_mut().visuals.override_text_color =
+                                    Some(theme.text_primary.gamma_multiply(anim));
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Color")
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .color(theme.text_secondary.gamma_multiply(anim))
+                                            .strong(),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let (r, _) = ui.allocate_exact_size(
+                                                vec2(20.0, 20.0),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                r.center(),
+                                                10.0,
+                                                app.whiteboard.pen_color.gamma_multiply(anim),
+                                            );
+                                            ui.painter().circle_stroke(
+                                                r.center(),
+                                                10.0,
+                                                Stroke::new(
+                                                    1.0,
+                                                    theme.separator.gamma_multiply(0.25 * anim),
+                                                ),
+                                            );
+                                        },
+                                    );
+                                });
+                                ui.add_space(SPACE_XS);
+                                const PALETTE: &[[u8; 3]] = &[
+                                    [250, 250, 249],
+                                    [212, 212, 216],
+                                    [107, 122, 111],
+                                    [100, 116, 139],
+                                    [168, 123, 110],
+                                    [91, 125, 177],
+                                    [196, 91, 91],
+                                    [209, 183, 91],
+                                ];
+                                let mut picked: Option<Color32> = None;
+                                egui::Grid::new("whiteboard_palette_grid")
+                                    .num_columns(4)
+                                    .spacing(vec2(8.0, 8.0))
                                     .show(ui, |ui| {
-                                        ui.scope(|ui| {
-                                            ui.style_mut().visuals.override_text_color =
-                                                Some(theme.text_primary.gamma_multiply(anim));
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new("Color")
-                                                        .size(grafito_ui::tokens::TYPE_XS)
-                                                        .color(theme.text_secondary.gamma_multiply(anim))
-                                                        .strong(),
-                                                );
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(egui::Align::Center),
-                                                    |ui| {
-                                                        let (r, _) = ui.allocate_exact_size(
-                                                            vec2(20.0, 20.0),
-                                                            Sense::hover(),
-                                                        );
-                                                        ui.painter().circle_filled(
-                                                            r.center(),
-                                                            10.0,
-                                                            app.whiteboard.pen_color.gamma_multiply(anim),
-                                                        );
-                                                        ui.painter().circle_stroke(
-                                                            r.center(),
-                                                            10.0,
-                                                            Stroke::new(
-                                                                1.0,
-                                                                theme
-                                                                    .separator
-                                                                    .gamma_multiply(0.25 * anim),
-                                                            ),
-                                                        );
-                                                    },
-                                                );
-                                            });
-                                            ui.add_space(SPACE_XS);
-                                            const PALETTE: &[[u8; 3]] = &[
-                                                [250, 250, 249],
-                                                [212, 212, 216],
-                                                [107, 122, 111],
-                                                [100, 116, 139],
-                                                [168, 123, 110],
-                                                [91, 125, 177],
-                                                [196, 91, 91],
-                                                [209, 183, 91],
-                                            ];
-                                            let mut picked: Option<Color32> = None;
-                                            egui::Grid::new("whiteboard_palette_grid")
-                                                .num_columns(4)
-                                                .spacing(vec2(8.0, 8.0))
-                                                .show(ui, |ui| {
-                                                    for (idx, rgb) in PALETTE.iter().enumerate() {
-                                                        let col = Color32::from_rgb(
-                                                            rgb[0], rgb[1], rgb[2],
-                                                        )
-                                                        .gamma_multiply(anim);
-                                                        let is_sel =
-                                                            app.whiteboard.pen_color == col;
-                                                        let (rect, resp) = ui.allocate_exact_size(
-                                                            vec2(28.0, 28.0),
-                                                            Sense::click(),
-                                                        );
-                                                        if ui.is_rect_visible(rect) {
-                                                            let p = ui.painter();
-                                                            p.circle_filled(
-                                                                rect.center(), 13.0, col,
-                                                            );
-                                                            p.circle_stroke(
-                                                                rect.center(),
-                                                                13.0,
-                                                                Stroke::new(
-                                                                    if is_sel { 2.0 } else { 1.0 },
-                                                                    if is_sel {
-                                                                        theme.accent
-                                                                            .gamma_multiply(anim)
-                                                                    } else {
-                                                                        theme
-                                                                            .separator
-                                                                            .gamma_multiply(
-                                                                                0.25 * anim,
-                                                                            )
-                                                                    },
-                                                                ),
-                                                            );
-                                                            if is_sel {
-                                                                p.circle_filled(
-                                                                    rect.center(),
-                                                                    3.0,
-                                                                    theme
-                                                                        .accent
-                                                                        .gamma_multiply(anim),
-                                                                );
-                                                            }
-                                                        }
-                                                        if resp
-                                                            .on_hover_text(format!(
-                                                                "#{:02X}{:02X}{:02X}",
-                                                                rgb[0], rgb[1], rgb[2]
-                                                            ))
-                                                            .clicked()
-                                                        {
-                                                            picked = Some(Color32::from_rgb(
-                                                                rgb[0], rgb[1], rgb[2],
-                                                            ));
-                                                        }
-                                                        if idx % 4 == 3 {
-                                                            ui.end_row();
-                                                        }
-                                                    }
-                                                });
-                                            if let Some(col) = picked {
-                                                app.whiteboard.pen_color = col;
-                                            }
-                                            ui.add_space(SPACE_SM);
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new("Grosor")
-                                                        .size(grafito_ui::tokens::TYPE_XS)
-                                                        .color(
+                                        for (idx, rgb) in PALETTE.iter().enumerate() {
+                                            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+                                                .gamma_multiply(anim);
+                                            let is_sel = app.whiteboard.pen_color == col;
+                                            let (rect, resp) = ui.allocate_exact_size(
+                                                vec2(28.0, 28.0),
+                                                Sense::click(),
+                                            );
+                                            if ui.is_rect_visible(rect) {
+                                                let painter = ui.painter();
+                                                painter.circle_filled(rect.center(), 13.0, col);
+                                                painter.circle_stroke(
+                                                    rect.center(),
+                                                    13.0,
+                                                    Stroke::new(
+                                                        if is_sel { 2.0 } else { 1.0 },
+                                                        if is_sel {
+                                                            theme.accent.gamma_multiply(anim)
+                                                        } else {
                                                             theme
-                                                                .text_secondary
-                                                                .gamma_multiply(anim),
-                                                        ),
-                                                );
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
+                                                                .separator
+                                                                .gamma_multiply(0.25 * anim)
+                                                        },
                                                     ),
-                                                    |ui| {
-                                                        let txt = format!(
-                                                            "{:.1}",
-                                                            app.whiteboard.pen_width
-                                                        );
-                                                        egui::Frame::none()
-                                                            .fill(
-                                                                theme
-                                                                    .input_bg
-                                                                    .gamma_multiply(anim),
-                                                            )
-                                                            .rounding(
-                                                                grafito_ui::tokens::RADIUS_PILL,
-                                                            )
-                                                            .inner_margin(
-                                                                egui::Margin::symmetric(8.0, 2.0),
-                                                            )
-                                                            .show(ui, |ui| {
-                                                                ui.label(
-                                                                    egui::RichText::new(txt)
-                                                                        .size(grafito_ui::tokens::TYPE_XS)
-                                                                        .strong()
-                                                                        .color(
-                                                                            theme
-                                                                                .text_primary
-                                                                                .gamma_multiply(
-                                                                                    anim,
-                                                                                ),
-                                                                        ),
-                                                                );
-                                                            });
-                                                        let mut w = app.whiteboard.pen_width;
-                                                        let resp = ui.add(
-                                                            egui::Slider::new(
-                                                                &mut w, 1.0..=6.0,
-                                                            )
-                                                            .show_value(false)
-                                                            .trailing_fill(true),
-                                                        );
-                                                        if resp.changed() {
-                                                            app.whiteboard.pen_width =
-                                                                w.clamp(1.0, 6.0);
-                                                        }
-                                                    },
                                                 );
-                                            });
-                                            ui.add_space(SPACE_XS);
-                                            ui.vertical_centered(|ui| {
-                                                ui.label(
-                                                    egui::RichText::new(
-                                                        "Toca un color para aplicar — se guarda al instante",
-                                                    )
-                                                    .size(10.0)
-                                                    .color(
-                                                        theme
-                                                            .text_tertiary
-                                                            .gamma_multiply(0.85 * anim),
-                                                    )
-                                                    .weak()
-                                                    .italics(),
-                                                );
-                                            });
-                                        });
+                                                if is_sel {
+                                                    painter.circle_filled(
+                                                        rect.center(),
+                                                        3.0,
+                                                        theme.accent.gamma_multiply(anim),
+                                                    );
+                                                }
+                                            }
+                                            if resp
+                                                .on_hover_text(format!(
+                                                    "#{:02X}{:02X}{:02X}",
+                                                    rgb[0], rgb[1], rgb[2]
+                                                ))
+                                                .clicked()
+                                            {
+                                                picked =
+                                                    Some(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                                            }
+                                            if idx % 4 == 3 {
+                                                ui.end_row();
+                                            }
+                                        }
                                     });
+                                if let Some(col) = picked {
+                                    app.whiteboard.pen_color = col;
+                                }
                                 ui.add_space(SPACE_SM);
-                            }
-                            // Canvas — ocupa el resto de la altura
-                            let canvas_h = (size.y - 88.0
-                                - if app.whiteboard.show_palette {
-                                    148.0
-                                        * ui.ctx().animate_bool(
-                                            egui::Id::new("whiteboard_palette"),
-                                            true,
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Grosor")
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .color(theme.text_secondary.gamma_multiply(anim)),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let txt = format!("{:.1}", app.whiteboard.pen_width);
+                                            egui::Frame::none()
+                                                .fill(theme.input_bg.gamma_multiply(anim))
+                                                .rounding(grafito_ui::tokens::RADIUS_PILL)
+                                                .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                                                .show(ui, |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(txt)
+                                                            .size(grafito_ui::tokens::TYPE_XS)
+                                                            .strong()
+                                                            .color(
+                                                                theme
+                                                                    .text_primary
+                                                                    .gamma_multiply(anim),
+                                                            ),
+                                                    );
+                                                });
+                                            let mut w = app.whiteboard.pen_width;
+                                            let resp = ui.add(
+                                                egui::Slider::new(&mut w, 1.0..=6.0)
+                                                    .show_value(false)
+                                                    .trailing_fill(true),
+                                            );
+                                            if resp.changed() {
+                                                app.whiteboard.pen_width = w.clamp(1.0, 6.0);
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add_space(SPACE_XS);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Toca un color para aplicar — se guarda al instante",
                                         )
-                                } else {
-                                    0.0
-                                })
-                            .max(200.0);
-                            let (canvas_rect, _) = ui.allocate_exact_size(
-                                vec2(size.x - 24.0, canvas_h),
-                                Sense::click_and_drag(),
-                            );
-                            // Fondo del canvas levemente distinto para profesionalismo
-                            ui.painter().rect_filled(
-                                canvas_rect,
-                                grafito_ui::tokens::RADIUS_MD,
-                                theme.canvas_bg.gamma_multiply(0.96),
-                            );
-                            ui.painter().rect_stroke(
-                                canvas_rect,
-                                grafito_ui::tokens::RADIUS_MD,
-                                Stroke::new(
-                                    1.0,
-                                    theme.separator.gamma_multiply(0.08),
-                                ),
-                            );
-                            app.whiteboard.handle_canvas_input(canvas_rect, ui);
-                            app.whiteboard.draw(ui, canvas_rect);
+                                        .size(10.0)
+                                        .color(theme.text_tertiary.gamma_multiply(0.85 * anim))
+                                        .weak()
+                                        .italics(),
+                                    );
+                                });
+                            });
                         });
-                    });
-                ui.add_space(24.0);
+                    ui.add_space(SPACE_SM);
+                }
+                // Canvas compacto — altura fija 260 para elegancia, sin desborde
+                let canvas_h = 260.0;
+                let (canvas_rect, _) = ui.allocate_exact_size(
+                    vec2(ui.available_width(), canvas_h),
+                    Sense::click_and_drag(),
+                );
+                // Fondo sutil para diferenciar del panel
+                ui.painter().rect_filled(
+                    canvas_rect,
+                    grafito_ui::tokens::RADIUS_MD,
+                    theme.canvas_bg.gamma_multiply(0.96),
+                );
+                ui.painter().rect_stroke(
+                    canvas_rect,
+                    grafito_ui::tokens::RADIUS_MD,
+                    Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
+                );
+                app.whiteboard.handle_canvas_input(canvas_rect, ui);
+                app.whiteboard.draw(ui, canvas_rect);
             });
         });
+    if !keep_open {
+        app.whiteboard.show_palette = false;
+        app.whiteboard_open = false;
+    }
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         if app.whiteboard.show_palette {
             app.whiteboard.show_palette = false;
-        } else {
+        } else if app.whiteboard_open {
             app.whiteboard_open = false;
         }
     }
