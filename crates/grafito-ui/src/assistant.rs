@@ -1962,7 +1962,7 @@ fn draw_perfil_settings_contents(
     let mut draft = state.user_name.clone();
     let resp = ui.add(
         egui::TextEdit::singleline(&mut draft)
-            .hint_text("Ej: María González")
+            .hint_text("María González")
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(10.0, 8.0)),
     );
@@ -2000,7 +2000,7 @@ fn draw_perfil_settings_contents(
     let mut assist_draft = state.avatar.assistant_name.clone();
     let resp2 = ui.add(
         egui::TextEdit::singleline(&mut assist_draft)
-            .hint_text("Ej: Mili, Mora, Ada")
+            .hint_text("Mili")
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(10.0, 8.0)),
     );
@@ -2679,7 +2679,7 @@ fn draw_personality_settings_contents(
     let mut ci = state.avatar.custom_instructions.clone();
     let resp = ui.add(
         egui::TextEdit::multiline(&mut ci)
-            .hint_text("Ej: Explica como si tuviera 12 años. Usa ejemplos con x² paso a paso. Sé breve y directo. No uses jerga.")
+            .hint_text("Explica como si tuviera 12 años. Usa ejemplos con x² paso a paso. Sé breve y directo.")
             .desired_rows(3)
             .desired_width(f32::INFINITY)
             .margin(egui::vec2(8.0, 6.0)),
@@ -2816,34 +2816,6 @@ fn draw_personality_settings_contents(
         }
     }
     ui.add_space(crate::tokens::SPACE_SM);
-    // Nuevo recuerdo — wrap correcto con Layout
-    ui.horizontal(|ui| {
-        let avail = ui.available_width();
-        let btn_w = 74.0;
-        let edit_w = (avail - btn_w - crate::tokens::SPACE_SM).max(140.0);
-        let resp = ui.add_sized(
-            egui::vec2(edit_w, 22.0),
-            egui::TextEdit::singleline(&mut state.new_fact_draft)
-                .hint_text("Ej: prefiero ejemplos con x² paso a paso"),
-        );
-        let can_add = !state.new_fact_draft.trim().is_empty();
-        if ui
-            .add_enabled(can_add, egui::Button::new("Recordar").small())
-            .clicked()
-            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && can_add)
-        {
-            let text = state.new_fact_draft.trim().to_string();
-            state.new_fact_draft.clear();
-            let epoch = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            state
-                .long_memory
-                .push_fact(grafito_profile::Fact::new(text, epoch, 0.8));
-        }
-    });
-    ui.add_space(crate::tokens::SPACE_XS);
     if !state.long_memory.summary.is_empty() {
         egui::CollapsingHeader::new("Resumen")
             .default_open(false)
@@ -3033,42 +3005,106 @@ fn draw_assistant_settings_contents(
     }
 
     if state.use_api_key() {
-        ui.add_space(SPACE_SM);
+        ui.add_space(crate::tokens::SPACE_SM);
         ui.separator();
-        ui.add_space(SPACE_XS);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Clave de API").size(TYPE_XS));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if state.key_available && ui.small_button("Eliminar").clicked() {
-                    action = Some(AssistantUiAction::ClearApiKey);
-                }
+        ui.add_space(crate::tokens::SPACE_SM);
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+            .rounding(crate::tokens::RADIUS_LG)
+            .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Clave de API")
+                            .size(crate::tokens::TYPE_SM)
+                            .strong()
+                            .color(theme.text_primary),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (status, col) = if state.key_available {
+                            ("Guardada", theme.success)
+                        } else {
+                            ("No guardada", theme.text_tertiary)
+                        };
+                        egui::Frame::none()
+                            .fill(col.gamma_multiply(0.12))
+                            .rounding(crate::tokens::RADIUS_PILL)
+                            .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(status)
+                                        .size(crate::tokens::TYPE_XS)
+                                        .strong()
+                                        .color(col),
+                                );
+                            });
+                    });
+                });
+                ui.add_space(crate::tokens::SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Se guarda en el llavero del sistema y nunca se muestra.")
+                        .size(crate::tokens::TYPE_XS)
+                        .color(theme.text_tertiary)
+                        .weak(),
+                );
+                ui.add_space(crate::tokens::SPACE_SM);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.api_key_draft)
+                        .password(true)
+                        .hint_text("Pega tu clave aquí")
+                        .desired_width(f32::INFINITY)
+                        .margin(egui::vec2(10.0, 8.0)),
+                );
+                let has_input = !state.api_key_draft.trim().is_empty();
+                let save_with_enter =
+                    resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.add_space(crate::tokens::SPACE_SM);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    if ui
+                        .add_enabled(
+                            has_input,
+                            egui::Button::new(
+                                egui::RichText::new("Guardar")
+                                    .size(crate::tokens::TYPE_SM)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(theme.accent)
+                            .rounding(crate::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.0, theme.accent)),
+                        )
+                        .clicked()
+                        || (save_with_enter && has_input)
+                    {
+                        action = Some(AssistantUiAction::SaveApiKey);
+                    }
+                    if ui
+                        .add_enabled(
+                            state.key_available,
+                            egui::Button::new(
+                                egui::RichText::new("Eliminar").size(crate::tokens::TYPE_SM),
+                            )
+                            .rounding(crate::tokens::RADIUS_PILL)
+                            .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.12))),
+                        )
+                        .on_hover_text("Borra la clave del llavero")
+                        .clicked()
+                    {
+                        action = Some(AssistantUiAction::ClearApiKey);
+                    }
+                    if has_input {
+                        ui.label(
+                            egui::RichText::new("↵ para guardar")
+                                .size(crate::tokens::TYPE_XS)
+                                .color(theme.text_tertiary)
+                                .weak(),
+                        );
+                    }
+                });
             });
-        });
-        ui.add_space(SPACE_XS);
-        ui.horizontal(|ui| {
-            let button_width = 76.0;
-            let key_editor = ui.add_sized(
-                egui::vec2(
-                    (ui.available_width() - button_width - SPACE_SM).max(120.0),
-                    ui.spacing().interact_size.y,
-                ),
-                egui::TextEdit::singleline(&mut state.api_key_draft)
-                    .password(true)
-                    .hint_text("Pegar una nueva clave"),
-            );
-            let save_with_enter =
-                key_editor.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui
-                .add_enabled(
-                    !state.api_key_draft.trim().is_empty(),
-                    egui::Button::new("Guardar").min_size(egui::vec2(button_width, 0.0)),
-                )
-                .clicked()
-                || save_with_enter
-            {
-                action = Some(AssistantUiAction::SaveApiKey);
-            }
-        });
     }
     ui.add_space(SPACE_SM);
     ui.separator();
