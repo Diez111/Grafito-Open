@@ -324,6 +324,10 @@ pub struct AssistantPanelState {
     pub user_name: String,
     /// Avatar super configurable para eye-tracking en el header.
     pub avatar: grafito_profile::AvatarConfig,
+    /// Memoria a largo plazo (sincronizada con perfil en cada frame).
+    pub long_memory: grafito_profile::LongTermMemory,
+    /// Borrador para añadir hecho a la memoria.
+    pub new_fact_draft: String,
 }
 
 impl Default for AssistantPanelState {
@@ -384,6 +388,8 @@ impl Default for AssistantPanelState {
             config_tab: 0,
             user_name: String::new(),
             avatar: grafito_profile::AvatarConfig::default(),
+            long_memory: grafito_profile::LongTermMemory::default(),
+            new_fact_draft: String::new(),
         }
     }
 }
@@ -964,9 +970,31 @@ impl AssistantPanelState {
     fn trim_conversation(&mut self) {
         while self.conversation.len() > MAX_CONVERSATION_TURNS {
             if let Some(index) = self.conversation.windows(2).position(is_complete_exchange) {
-                self.conversation.drain(index..index + 2);
+                let drained: Vec<ConversationTurn> =
+                    self.conversation.drain(index..index + 2).collect();
+                // Guardar resumen en memoria a largo plazo para no olvidar
+                let summary: String = drained
+                    .iter()
+                    .map(|t| t.content.chars().take(60).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                let epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.long_memory
+                    .push_fact(grafito_profile::Fact::new(summary, epoch, 0.3));
             } else {
-                self.conversation.remove(0);
+                let removed = self.conversation.remove(0);
+                let epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.long_memory.push_fact(grafito_profile::Fact::new(
+                    removed.content.chars().take(80).collect::<String>(),
+                    epoch,
+                    0.3,
+                ));
             }
         }
     }
@@ -1244,6 +1272,29 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
             continue;
         }
 
+        // HTML tabla <table>...</table> — para el caso del usuario que escupió HTML
+        if trimmed.to_ascii_lowercase().starts_with("<table") {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph);
+            let mut end = index;
+            while end < lines.len() && !lines[end].to_ascii_lowercase().contains("</table>") {
+                end += 1;
+            }
+            if end < lines.len() {
+                end += 1;
+            }
+            let html = lines[index..end.min(lines.len())].join("\n");
+            if let Some(rows) = parse_html_table(&html) {
+                if !rows.is_empty() {
+                    blocks.push(AssistantMessageBlock::Table(rows));
+                }
+            } else {
+                // Fallback: tratar como párrafo si no se pudo parsear
+                paragraph.push(html);
+            }
+            index = end;
+            continue;
+        }
+
         if index + 1 < lines.len() {
             if let (Some(header), Some(separator)) = (
                 parse_markdown_table_row(trimmed),
@@ -1331,6 +1382,72 @@ fn markdown_table_separator(cells: &[String], expected_columns: usize) -> bool {
         })
 }
 
+fn parse_html_table(html: &str) -> Option<Vec<Vec<String>>> {
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("<table") || !lower.contains("</table>") {
+        return None;
+    }
+    // Extraer filas <tr>...</tr>
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rest = html;
+    while let Some(tr_start) = rest.to_ascii_lowercase().find("<tr") {
+        let tr_content_start = rest[tr_start..].find('>').map(|i| tr_start + i + 1)?;
+        let tr_end = rest[tr_content_start..]
+            .to_ascii_lowercase()
+            .find("</tr>")
+            .map(|i| tr_content_start + i)?;
+        let tr_html = &rest[tr_content_start..tr_end];
+        let mut cells: Vec<String> = Vec::new();
+        let mut cell_rest = tr_html;
+        while let Some(tag_start) = cell_rest.to_ascii_lowercase().find('<') {
+            let tag_end = cell_rest[tag_start..].find('>')? + tag_start;
+            let tag = cell_rest[tag_start..=tag_end].to_ascii_lowercase();
+            let is_cell = tag.starts_with("<th") || tag.starts_with("<td");
+            let close_tag = if tag.starts_with("<th") {
+                "</th>"
+            } else {
+                "</td>"
+            };
+            if is_cell {
+                if let Some(close) = cell_rest[tag_end + 1..]
+                    .to_ascii_lowercase()
+                    .find(close_tag)
+                {
+                    let content_start = tag_end + 1;
+                    let content_end = tag_end + 1 + close;
+                    let raw = cell_rest[content_start..content_end].trim();
+                    // Limpiar entidades y tags internos simples
+                    let clean = raw
+                        .replace("&approx;", "≈")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&amp;", "&")
+                        .replace("&nbsp;", " ")
+                        .replace("<br>", " ")
+                        .trim()
+                        .to_string();
+                    cells.push(clean);
+                    cell_rest = &cell_rest[content_end + close_tag.len()..];
+                    continue;
+                }
+            }
+            cell_rest = &cell_rest[tag_end + 1..];
+            if cell_rest.trim().is_empty() {
+                break;
+            }
+        }
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+        rest = &rest[tr_end + 5..]; // len("</tr>")=5
+    }
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows)
+    }
+}
+
 fn focused_context_preview(summary: &str) -> String {
     if summary.chars().count() <= MAX_FOCUSED_CONTEXT_PREVIEW_CHARS {
         return summary.into();
@@ -1407,6 +1524,8 @@ pub enum AssistantUiAction {
     OpenMascotConfig,
     /// Explícame paso a paso — inicia enseñanza interactiva con burbujas, gráfica y pizarra.
     ExplainStepwise(String),
+    /// Aplicar comando raw grafito directamente (fallback cuando no hay preflight)
+    ApplyRawCommand(String),
     /// Guardar cambios de avatar y nombre de perfil (unificado).
     SaveAvatar,
     /// Restablecer avatar al valor por defecto (borrador local).
@@ -1576,7 +1695,7 @@ pub fn draw_assistant_settings_window(
                 state.key_status_checked = true;
                 action = Some(AssistantUiAction::LoadApiKey);
             }
-            // Tabs Scandinavian: Asistente | Perfil
+            // Tabs Scandinavian: Asistente | Perfil | Personalidad
             ui.horizontal(|ui| {
                 let asis_sel = state.config_tab == 0;
                 if ui
@@ -1593,6 +1712,14 @@ pub fn draw_assistant_settings_window(
                     .clicked()
                 {
                     state.config_tab = 1;
+                }
+                let pers_sel = state.config_tab == 2;
+                if ui
+                    .selectable_label(pers_sel, "Personalidad")
+                    .on_hover_text("Tono, memoria y vínculo")
+                    .clicked()
+                {
+                    state.config_tab = 2;
                 }
             });
             ui.add_space(crate::tokens::SPACE_XS);
@@ -1619,10 +1746,10 @@ pub fn draw_assistant_settings_window(
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        let inner_action = if state.config_tab == 1 {
-                            draw_perfil_settings_contents(ui, state)
-                        } else {
-                            draw_assistant_settings_contents(ui, state)
+                        let inner_action = match state.config_tab {
+                            1 => draw_perfil_settings_contents(ui, state),
+                            2 => draw_personality_settings_contents(ui, state),
+                            _ => draw_assistant_settings_contents(ui, state),
                         };
                         if let Some(a) = inner_action {
                             action = Some(a);
@@ -1645,10 +1772,10 @@ pub fn draw_assistant_settings_window(
                                 .max_height(avail_h)
                                 .show(ui, |ui| {
                                     ui.set_min_width(ui.available_width());
-                                    let inner_action = if state.config_tab == 1 {
-                                        draw_perfil_settings_contents(ui, state)
-                                    } else {
-                                        draw_assistant_settings_contents(ui, state)
+                                    let inner_action = match state.config_tab {
+                                        1 => draw_perfil_settings_contents(ui, state),
+                                        2 => draw_personality_settings_contents(ui, state),
+                                        _ => draw_assistant_settings_contents(ui, state),
                                     };
                                     if let Some(a) = inner_action {
                                         action = Some(a);
@@ -2082,6 +2209,174 @@ fn draw_perfil_settings_contents(
     action
 }
 
+fn draw_personality_settings_contents(
+    ui: &mut egui::Ui,
+    state: &mut AssistantPanelState,
+) -> Option<AssistantUiAction> {
+    let theme = current_theme(ui.ctx());
+    let mut action = None;
+    // Asegurar mascota existe
+    if state.avatar.mascot.is_none() {
+        state.avatar.mascot = Some(grafito_profile::MascotConfig::default());
+    }
+    let current_personality = state
+        .avatar
+        .mascot
+        .as_ref()
+        .map(|m| m.personality)
+        .unwrap_or_default();
+    ui.label(
+        egui::RichText::new("Personalidad del asistente")
+            .size(crate::tokens::TYPE_BASE)
+            .color(theme.text_primary),
+    );
+    ui.label(
+        egui::RichText::new("El tono que Mili usa al responder. Se inyecta en el system prompt.")
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_secondary.gamma_multiply(0.60))
+            .weak(),
+    );
+    ui.add_space(crate::tokens::SPACE_SM);
+    egui::Grid::new("personality_grid")
+        .num_columns(2)
+        .spacing([crate::tokens::SPACE_MD, crate::tokens::SPACE_SM])
+        .show(ui, |ui| {
+            for personality in grafito_profile::Personality::all() {
+                let sel = current_personality == *personality;
+                if ui
+                    .selectable_label(sel, personality.label())
+                    .on_hover_text(personality.description())
+                    .clicked()
+                {
+                    if let Some(m) = state.avatar.mascot.as_mut() {
+                        m.personality = *personality;
+                    }
+                }
+                ui.label(
+                    egui::RichText::new(personality.description())
+                        .size(10.0)
+                        .color(theme.text_tertiary),
+                );
+                ui.end_row();
+            }
+        });
+    ui.add_space(crate::tokens::SPACE_MD);
+    ui.separator();
+    ui.add_space(crate::tokens::SPACE_SM);
+    ui.label(
+        egui::RichText::new("Memoria a largo plazo")
+            .size(crate::tokens::TYPE_BASE)
+            .color(theme.text_primary),
+    );
+    ui.label(
+        egui::RichText::new(format!(
+            "Vínculo etapa {} · {} recuerdos",
+            state.long_memory.relationship_stage,
+            state.long_memory.facts.len()
+        ))
+        .size(crate::tokens::TYPE_XS)
+        .color(theme.text_tertiary),
+    );
+    ui.add_space(crate::tokens::SPACE_SM);
+    // Lista de hechos — defer removal para evitar borrow checker
+    let mut to_remove: Option<usize> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("personality_memory_scroll")
+        .max_height(120.0)
+        .show(ui, |ui| {
+            if state.long_memory.facts.is_empty() {
+                ui.label(
+                    egui::RichText::new("Sin recuerdos aún. Añadí algo que quieras que recuerde.")
+                        .size(crate::tokens::TYPE_XS)
+                        .color(theme.text_tertiary)
+                        .weak(),
+                );
+            } else {
+                for (idx, fact) in state.long_memory.facts.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("• {}", fact.text))
+                                .size(crate::tokens::TYPE_XS)
+                                .color(theme.text_primary),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").on_hover_text("Olvidar").clicked() {
+                                to_remove = Some(idx);
+                            }
+                        });
+                    });
+                }
+            }
+        });
+    if let Some(idx) = to_remove {
+        if idx < state.long_memory.facts.len() {
+            state.long_memory.facts.remove(idx);
+        }
+    }
+    ui.add_space(crate::tokens::SPACE_SM);
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.new_fact_draft)
+                .hint_text("Recuerda que prefiero ejemplos con x²…")
+                .desired_width(ui.available_width() - 70.0),
+        );
+        let can_add = !state.new_fact_draft.trim().is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new("Recordar").small())
+            .clicked()
+            || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && can_add)
+        {
+            let text = state.new_fact_draft.trim().to_string();
+            state.new_fact_draft.clear();
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            state
+                .long_memory
+                .push_fact(grafito_profile::Fact::new(text, epoch, 0.8));
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_SM);
+    if !state.long_memory.summary.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("Resumen: {}", state.long_memory.summary))
+                .size(crate::tokens::TYPE_XS)
+                .color(theme.text_tertiary)
+                .weak(),
+        );
+        ui.add_space(crate::tokens::SPACE_SM);
+    }
+    // Guardar
+    ui.horizontal(|ui| {
+        if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("Guardar personalidad y memoria")
+                        .size(crate::tokens::TYPE_SM)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(theme.accent)
+                .rounding(crate::tokens::RADIUS_PILL),
+            )
+            .clicked()
+        {
+            action = Some(AssistantUiAction::SaveAvatar);
+        }
+    });
+    ui.add_space(crate::tokens::SPACE_XS);
+    ui.label(
+        egui::RichText::new(
+            "Tip: la personalidad y recuerdos se inyectan en cada consulta y sobreviven reinicios.",
+        )
+        .size(10.0)
+        .color(theme.text_tertiary)
+        .weak(),
+    );
+    action
+}
+
 /// Alto útil de la ventana (máximo para el scroll del panel de configuración).
 #[allow(dead_code)]
 fn ui_viewport_height(ctx: &egui::Context) -> f32 {
@@ -2103,9 +2398,28 @@ fn draw_assistant_settings_contents(
             .width(ui.available_width())
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut provider, ProviderProfile::OpenCodeGo, "OpenCode Go");
+                ui.selectable_value(
+                    &mut provider,
+                    ProviderProfile::CustomOpenAiCompatible,
+                    "Compatible (OpenAI)",
+                );
                 ui.selectable_value(&mut provider, ProviderProfile::OllamaLocal, "Ollama");
             });
     });
+    if provider == ProviderProfile::CustomOpenAiCompatible {
+        ui.add_space(SPACE_SM);
+        ui.label(
+            egui::RichText::new("Usá OpenCode, Muse Spark u otro proxy OpenAI-compatible. Configurá endpoint https://.../v1 y clave GRAFITO_ASSISTANT_CUSTOM_*_API_KEY.")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS),
+        );
+        ui.label(
+            egui::RichText::new("Modelos OpenCode Go disponibles: deepseek-v4-flash, mimo-2.5-vl, muse-spark-1.2-contributor, glm-5.2, fusion")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS)
+                .weak(),
+        );
+    }
     if provider != state.provider {
         state.select_provider(provider);
         action = Some(AssistantUiAction::ProviderChanged);
@@ -2594,6 +2908,9 @@ fn draw_panel_contents(
                             reveal_here,
                             cache,
                             &assistant_name,
+                            state,
+                            is_last,
+                            visuals,
                         );
                     } else {
                         let _ = draw_conversation_turn(
@@ -2603,6 +2920,9 @@ fn draw_panel_contents(
                             reveal_here,
                             cache,
                             &assistant_name,
+                            state,
+                            is_last,
+                            visuals,
                         );
                     }
                     ui.add_space(SPACE_MD);
@@ -2614,11 +2934,14 @@ fn draw_panel_contents(
             if state.is_pending {
                 draw_pending_indicator(ui, state, visuals);
             }
-            if state.anim_progress {
-                draw_animation_progress(ui, state, visuals);
-            }
-            if let Some(media) = &state.media {
-                draw_media_card(ui, media, state);
+            // Animación y media ya integradas dentro del último turno (draw_conversation_turn)
+            // Se mantiene fallback global solo si no hay conversación (empty state con animación previa)
+            if should_draw_empty_state(state) {
+                if state.anim_progress {
+                    draw_animation_progress(ui, state, visuals);
+                } else if let Some(media) = &state.media {
+                    draw_media_card(ui, media, state);
+                }
             }
         });
     action
@@ -2998,25 +3321,35 @@ fn draw_assistant_empty_state(
 ) {
     let theme = current_theme(ui.ctx());
     let assistant_name = state.avatar.assistant_name_or_default();
-    // Centrado vertical + horizontal — Scandinavian restraint: sólo 2 estilos
+    // Editorial empty state — left-aligned, calm hierarchy, no centered drama
     let avail = ui.available_height();
-    if avail > 100.0 {
-        ui.add_space((avail - 72.0) * 0.38);
+    if avail > 120.0 {
+        ui.add_space((avail - 96.0) * 0.28);
     } else {
-        ui.add_space(crate::tokens::SPACE_XL);
+        ui.add_space(crate::tokens::SPACE_LG);
     }
-    ui.vertical_centered(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{assistant_name} — Asistente matemático"))
-                .color(theme.text_primary)
-                .size(crate::tokens::TYPE_XL),
-        );
-        ui.add_space(crate::tokens::SPACE_XS);
-        ui.label(
-            egui::RichText::new("Escribí tu pregunta y presioná enviar.")
-                .color(theme.text_secondary.gamma_multiply(0.60))
-                .size(crate::tokens::TYPE_SM),
-        );
+    ui.horizontal(|ui| {
+        ui.add_space(crate::tokens::SPACE_SM);
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{assistant_name} — Asistente matemático"))
+                    .color(theme.text_primary)
+                    .size(crate::tokens::TYPE_LG)
+                    .strong(),
+            );
+            ui.add_space(crate::tokens::SPACE_XS);
+            ui.label(
+                egui::RichText::new("Escribí tu pregunta. Usá lenguaje natural o notación matemática.")
+                    .color(theme.text_secondary.gamma_multiply(0.60))
+                    .size(crate::tokens::TYPE_SM),
+            );
+            ui.add_space(crate::tokens::SPACE_SM);
+            ui.label(
+                egui::RichText::new("Ej.: “graficá f(x)=x²–3x”  ·  “¿qué es la derivada?”  ·  “generá un teseracto”")
+                    .color(theme.text_tertiary)
+                    .size(crate::tokens::TYPE_XS),
+            );
+        });
     });
 }
 
@@ -3027,7 +3360,7 @@ fn draw_assistant_header(
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let mut action = None;
-    // Header Scandinavian — centered, avatar above name, transparent (no card)
+    // Header Scandinavian — left-aligned, avatar + texto, controles a la derecha, sin centrado
     egui::Frame::none()
         .fill(egui::Color32::TRANSPARENT)
         .inner_margin(egui::Margin::symmetric(
@@ -3035,38 +3368,13 @@ fn draw_assistant_header(
             crate::tokens::SPACE_SM,
         ))
         .show(ui, |ui| {
-            // Controles arriba a la derecha, sin romper el centrado
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if action_icon_button(ui, Icon::Close, theme.text_secondary, "Ocultar asistente")
-                    .clicked()
-                {
-                    action = Some(AssistantUiAction::HidePanel);
-                }
-                if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Configuración")
-                    .clicked()
-                {
-                    state.settings_open = true;
-                    state.config_tab = 0;
-                }
-                let can_clear = !state.is_pending && !state.conversation.is_empty();
-                ui.add_enabled_ui(can_clear, |ui| {
-                    let btn = egui::Button::new(
-                        egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
-                    )
-                    .rounding(crate::tokens::RADIUS_PILL)
-                    .fill(theme.button_bg.gamma_multiply(0.0))
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
-                    if ui.add(btn).clicked() {
-                        action = Some(AssistantUiAction::ClearConversation);
-                    }
-                });
-            });
-            ui.vertical_centered(|ui| {
+            ui.horizontal(|ui| {
+                // Izquierda: avatar + identidad
                 let time = ui.input(|i| i.time);
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
                 let avatar_cfg = state.avatar.clone();
                 let (avatar_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
                 if ui.is_rect_visible(avatar_rect) {
                     let painter = ui.painter_at(avatar_rect);
                     let tracking_hover =
@@ -3083,25 +3391,66 @@ fn draw_assistant_header(
                         tracking_hover,
                     );
                 }
-                ui.add_space(crate::tokens::SPACE_XS);
-                let assistant_name = state.avatar.assistant_name_or_default();
-                let greeting = if state.user_name.trim().is_empty() {
-                    assistant_name.clone()
-                } else {
-                    format!("Hola, {}", state.user_name.trim())
-                };
-                ui.label(
-                    egui::RichText::new(greeting)
-                        .color(theme.text_primary)
-                        .size(crate::tokens::TYPE_BASE),
-                );
-                ui.label(
-                    egui::RichText::new(format!("{assistant_name} · Asistente matemático"))
-                        .color(theme.text_secondary.gamma_multiply(0.60))
-                        .size(crate::tokens::TYPE_XS),
-                );
+                ui.add_space(crate::tokens::SPACE_SM);
+                ui.vertical(|ui| {
+                    let assistant_name = state.avatar.assistant_name_or_default();
+                    let greeting = if state.user_name.trim().is_empty() {
+                        assistant_name.clone()
+                    } else {
+                        format!("Hola, {}", state.user_name.trim())
+                    };
+                    ui.label(
+                        egui::RichText::new(greeting)
+                            .color(theme.text_primary)
+                            .size(crate::tokens::TYPE_BASE)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{assistant_name} · Asistente matemático"))
+                            .color(theme.text_secondary.gamma_multiply(0.60))
+                            .size(crate::tokens::TYPE_XS),
+                    );
+                });
+                // Centro flexible para empujar controles a la derecha
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if action_icon_button(
+                        ui,
+                        Icon::Close,
+                        theme.text_secondary,
+                        "Ocultar asistente",
+                    )
+                    .clicked()
+                    {
+                        action = Some(AssistantUiAction::HidePanel);
+                    }
+                    if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Configuración")
+                        .clicked()
+                    {
+                        state.settings_open = true;
+                        state.config_tab = 0;
+                    }
+                    let can_clear = !state.is_pending && !state.conversation.is_empty();
+                    ui.add_enabled_ui(can_clear, |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
+                        )
+                        .rounding(crate::tokens::RADIUS_PILL)
+                        .fill(theme.button_bg.gamma_multiply(0.0))
+                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
+                        if ui.add(btn).clicked() {
+                            action = Some(AssistantUiAction::ClearConversation);
+                        }
+                    });
+                });
             });
         });
+    // Hairline sutil que separa header del transcript — 1 regla contable por pantalla
+    let sep_rect = egui::Rect::from_min_max(
+        ui.cursor().min,
+        egui::pos2(ui.cursor().max.x, ui.cursor().min.y + 1.0),
+    );
+    ui.painter()
+        .rect_filled(sep_rect, 0.0, theme.separator.gamma_multiply(0.08));
     ui.add_space(crate::tokens::SPACE_SM);
     action
 }
@@ -3311,6 +3660,7 @@ fn draw_assistant_composer(
     action
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConversationTurnAppearance {
     fill: egui::Color32,
@@ -3328,27 +3678,71 @@ struct AssistantProposalRenderState<'a> {
     correction_available: bool,
 }
 
+#[allow(dead_code)]
 fn conversation_turn_appearance(
     theme: &crate::theme::Theme,
     is_user: bool,
 ) -> ConversationTurnAppearance {
     if is_user {
-        // macOS: burbuja azul del usuario, como Messages.app
+        // Editorial Scandinavian: usuario con accent_muted muy sutil para diferenciar, sin burbuja azul
         ConversationTurnAppearance {
-            fill: theme.assistant_user_bubble,
-            stroke: theme.assistant_user_bubble,
-            role_color: theme.assistant_user_text,
+            fill: theme.accent_muted.gamma_multiply(0.55),
+            stroke: theme.accent.gamma_multiply(0.12),
+            role_color: theme.text_primary,
         }
     } else {
-        // macOS: burbuja del asistente, gris claro con vibrancy
+        // Asistente: input_bg elevado con hairline 8% — blanco sobre panel, lectura calm
         ConversationTurnAppearance {
-            fill: theme.assistant_assistant_bubble,
-            stroke: theme.assistant_composer_border,
+            fill: theme.input_bg,
+            stroke: theme.separator.gamma_multiply(0.08),
             role_color: theme.text_primary,
         }
     }
 }
 
+/// Decide si una respuesta merece el botón "Explícame paso a paso".
+/// Solo para contenido complejo: headings, math, tablas o cuerpo largo.
+fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool {
+    if blocks.is_empty() {
+        return content.chars().count() > 400;
+    }
+    let has_heading = blocks
+        .iter()
+        .any(|b| matches!(b, AssistantMessageBlock::Heading { .. }));
+    let has_math = blocks.iter().any(|b| {
+        matches!(
+            b,
+            AssistantMessageBlock::DisplayMath(_) | AssistantMessageBlock::Table(_)
+        )
+    });
+    let has_code = blocks
+        .iter()
+        .any(|b| matches!(b, AssistantMessageBlock::Code { .. }));
+    let long = content.chars().count() > 680;
+    let lower = content.to_lowercase();
+    let is_teaching_topic = lower.contains("integral")
+        || lower.contains("derivada")
+        || lower.contains("taylor")
+        || lower.contains("pitágoras")
+        || lower.contains("pitagoras")
+        || lower.contains("límite")
+        || lower.contains("limite")
+        || lower.contains("función")
+        || lower.contains("funcion");
+    // Para temas de enseñanza, basta con tener math para ofrecer paso a paso
+    if is_teaching_topic && has_math {
+        return true;
+    }
+    // Muy estricto para el resto: solo para explicaciones largas y estructuradas. Evita botón en respuestas puntuales 3D/4D
+    let signals = has_heading as u8
+        + has_math as u8
+        + has_code as u8
+        + (blocks.len() >= 4) as u8
+        + (long as u8);
+    signals >= 3
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_conversation_turn(
     ui: &mut egui::Ui,
     turn: &ConversationTurn,
@@ -3356,93 +3750,112 @@ fn draw_conversation_turn(
     reveal_clip: Option<RevealClip>,
     cache: &mut AssistantBlocksCache,
     assistant_name: &str,
+    state: &AssistantPanelState,
+    is_last: bool,
+    visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let is_user = matches!(turn.role, ConversationRole::User);
-    let appearance = conversation_turn_appearance(theme, is_user);
     let mut action = None;
-    let max_bubble_width = (ui.available_width() * 0.86).clamp(240.0, 460.0);
-    // Alineación: usuario a la derecha, asistente a la izquierda, texto siempre left-aligned
-    let align = if is_user {
-        egui::Align::Max
-    } else {
-        egui::Align::Min
-    };
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), 0.0),
-        egui::Layout::top_down(align).with_cross_align(align),
-        |ui| {
-            ui.set_max_width(max_bubble_width);
-            // ui.set_min_width(ui.available_width())
-            // Burbuja Scandinavian — radio 12, hairline 10%, min width para no achatarse
-            egui::Frame::none()
-                .fill(appearance.fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    appearance.stroke.gamma_multiply(0.10),
-                ))
-                .rounding(egui::Rounding::same(crate::tokens::RADIUS_MD))
-                .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
-                .show(ui, |ui| {
-                    ui.set_min_width(120.0);
-                    ui.set_max_width(max_bubble_width - crate::tokens::SPACE_SM * 2.0);
-                    // Label solo para asistente — por color ya se distingue quién es quién
-                    if !is_user {
-                        let origin = turn
-                            .origin
-                            .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
-                        let label = format!("{assistant_name} · {}", origin.public_label());
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(label)
-                                    .color(appearance.role_color)
-                                    .size(TYPE_XS)
-                                    .strong(),
-                            );
-                        });
-                        ui.add_space(SPACE_XS);
-                    }
-                    if is_user {
-                        let text_color = appearance.role_color;
-                        draw_inline_text_with_color(ui, &turn.content, text_color);
-                    } else {
-                        action = draw_assistant_response(
-                            ui,
-                            &turn.content,
-                            proposal_state,
-                            reveal_clip,
-                            cache,
-                        );
-                        // Botón explícito Scandinavian — Explícame paso a paso
-                        ui.add_space(SPACE_XS);
-                        let btn = egui::Button::new(
-                            egui::RichText::new("Explícame paso a paso →")
-                                .color(theme.accent)
-                                .size(TYPE_XS)
-                                .strong(),
-                        )
-                        .rounding(crate::tokens::RADIUS_MD)
-                        .fill(theme.accent.gamma_multiply(0.08))
-                        .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)));
-                        if ui
-                            .add(btn)
-                            .on_hover_text("Abre burbujas interactivas, gráfica y pizarra")
-                            .clicked()
-                        {
-                            let topic = turn
-                                .content
-                                .lines()
-                                .next()
-                                .unwrap_or("concepto")
-                                .chars()
-                                .take(60)
-                                .collect::<String>();
-                            action = Some(AssistantUiAction::ExplainStepwise(topic));
-                        }
-                    }
+    let appearance = conversation_turn_appearance(theme, is_user);
+    if is_user {
+        // Editorial: usuario con fondo accent_muted sutil — diferencia calm sin burbuja azul
+        egui::Frame::none()
+            .fill(appearance.fill)
+            .stroke(egui::Stroke::new(1.0, appearance.stroke))
+            .rounding(crate::tokens::RADIUS_MD)
+            .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Vos")
+                            .color(theme.text_secondary.gamma_multiply(0.60))
+                            .size(TYPE_XS)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("·")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
+                    );
+                    ui.label(
+                        egui::RichText::new("consulta")
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
+                    );
                 });
-        },
-    );
+                ui.add_space(SPACE_XS);
+                let text_color = theme.text_primary;
+                draw_inline_text_with_color(ui, &turn.content, text_color);
+            });
+        ui.add_space(crate::tokens::SPACE_SM);
+        return action;
+    }
+    // Asistente — editorial input_bg elevado con hairline 8%
+    egui::Frame::none()
+        .fill(appearance.fill)
+        .stroke(egui::Stroke::new(1.0, appearance.stroke))
+        .rounding(crate::tokens::RADIUS_MD)
+        .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let origin = turn
+                .origin
+                .unwrap_or(AssistantExecutionOrigin::AuthorizedRemote);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{assistant_name} · {}", origin.public_label()))
+                        .color(theme.text_secondary.gamma_multiply(0.60))
+                        .size(TYPE_XS)
+                        .strong(),
+                );
+            });
+            ui.add_space(SPACE_XS);
+            action = draw_assistant_response(ui, &turn.content, proposal_state, reveal_clip, cache);
+            // Integración de animación dentro del mensaje: progreso o media del último turno
+            if is_last {
+                if state.anim_progress {
+                    ui.add_space(SPACE_SM);
+                    draw_animation_progress(ui, state, visuals);
+                } else if let Some(media) = &state.media {
+                    ui.add_space(SPACE_SM);
+                    draw_media_card(ui, media, state);
+                }
+            }
+            // Paso a paso solo si el contenido es complejo — no en respuestas puntuales
+            let blocks_for_gate = cache.blocks(&turn.content);
+            if should_show_stepwise(&blocks_for_gate, &turn.content) {
+                ui.add_space(SPACE_SM);
+                // Botón ghost Scandinavian integrado, full-width dentro del flujo
+                let btn = egui::Button::new(
+                    egui::RichText::new("Explícame paso a paso")
+                        .color(theme.accent)
+                        .size(TYPE_XS)
+                        .strong(),
+                )
+                .rounding(crate::tokens::RADIUS_MD)
+                .fill(theme.accent.gamma_multiply(0.08))
+                .stroke(egui::Stroke::new(1.0, theme.accent.gamma_multiply(0.35)));
+                // Ocupa todo el ancho disponible, no clamp — aprovecha espacio
+                if ui
+                    .add_sized(egui::vec2(ui.available_width(), 28.0), btn)
+                    .on_hover_text("Abre enseñanza interactiva con pizarra y gráfica")
+                    .clicked()
+                {
+                    let topic = turn
+                        .content
+                        .lines()
+                        .next()
+                        .unwrap_or("concepto")
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    action = Some(AssistantUiAction::ExplainStepwise(topic));
+                }
+            }
+        });
+    ui.add_space(crate::tokens::SPACE_MD);
     action
 }
 
@@ -3452,27 +3865,19 @@ fn draw_pending_indicator(
     visuals: AssistantVisuals,
 ) {
     let theme = current_theme(ui.ctx());
-    let appearance = conversation_turn_appearance(theme, false);
-    // macOS: burbuja de pensamiento con vibrancy y pulso suave
+    let _ = conversation_turn_appearance(theme, false);
+    // Editorial pending — hairline, left-aligned, sin burbuja
     egui::Frame::none()
-        .fill(appearance.fill)
-        .stroke(egui::Stroke::new(1.0, appearance.stroke))
-        .rounding(crate::tokens::RADIUS_XL)
-        .inner_margin(egui::Margin::symmetric(
-            crate::tokens::SPACE_MD,
-            crate::tokens::SPACE_SM,
-        ))
-        .shadow(egui::Shadow {
-            offset: egui::vec2(0.0, 2.0),
-            blur: 8.0,
-            spread: 0.0,
-            color: egui::Color32::from_black_alpha(8),
-        })
+        .fill(theme.input_bg.gamma_multiply(0.60))
+        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .rounding(crate::tokens::RADIUS_MD)
+        .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             let assistant_name = state.avatar.assistant_name_or_default();
             ui.label(
                 egui::RichText::new(assistant_name)
-                    .color(appearance.role_color)
+                    .color(theme.text_primary)
                     .size(TYPE_SM)
                     .strong(),
             );
@@ -3503,7 +3908,7 @@ fn draw_pending_indicator(
                     .size(TYPE_SM),
                 );
             });
-            // J-Space siempre desplegado — sin colapso, muestra todos los agentes
+            // J-Space siempre desplegado — ocupa todo el ancho
             if let Some(ledger) = &state.agent_ledger {
                 ui.add_space(SPACE_XS);
                 egui::Frame::none()
@@ -3512,6 +3917,7 @@ fn draw_pending_indicator(
                     .rounding(RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(
                             egui::RichText::new("Estado de la tarea")
                                 .color(theme.text_secondary)
@@ -3534,6 +3940,7 @@ fn draw_pending_indicator(
                     .fill(theme.panel_bg)
                     .inner_margin(egui::Margin::same(SPACE_XS))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         ui.label(
                             egui::RichText::new(format!(
                                 "Actividad ({} agentes)",
@@ -3616,8 +4023,8 @@ fn draw_assistant_response(
             AssistantMessageBlock::DisplayMath(math) => {
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
-                    .rounding(RADIUS_SM)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
                         ui.label(
@@ -3638,18 +4045,22 @@ fn draw_assistant_response(
             AssistantMessageBlock::Code { language, text } => {
                 let current_code_block_index = code_block_index;
                 code_block_index += 1;
+                // Editorial code casilla — full-width, hairline 10%, integrado con acción
                 egui::Frame::none()
                     .fill(theme.input_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator))
-                    .rounding(RADIUS_SM)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
                         if !language.is_empty() {
                             ui.label(
-                                egui::RichText::new(language)
+                                egui::RichText::new(language.to_uppercase())
                                     .color(theme.text_tertiary)
-                                    .size(TYPE_XS),
+                                    .size(TYPE_XS)
+                                    .strong(),
                             );
+                            ui.add_space(SPACE_XS);
                         }
                         egui::ScrollArea::horizontal()
                             .id_salt(ui.make_persistent_id(("assistant_code", index)))
@@ -3662,6 +4073,8 @@ fn draw_assistant_response(
                                     .extend(),
                                 );
                             });
+                        // Acción integrada bajo la casilla — siempre mostrar Aplicar para cualquier grafito
+                        let mut has_shown_primary = false;
                         if let Some(proposal_index) = candidate_index_for_code_block(
                             proposal_state.proposal_code_block_indices,
                             current_code_block_index,
@@ -3675,14 +4088,111 @@ fn draw_assistant_response(
                             ) {
                                 Some(AssistantProposalCardState::Ready(verified)) => {
                                     rendered_candidate_indices.push(verified.candidate_index);
-                                    retain_first_assistant_action(
-                                        &mut action,
-                                        draw_verified_assistant_proposal(ui, verified, false),
+                                    has_shown_primary = true;
+                                    ui.add_space(SPACE_SM);
+                                    // Hairline que separa código de acción — contable pero sutil
+                                    let sep_y = ui.cursor().min.y;
+                                    let sep_rect = egui::Rect::from_min_max(
+                                        egui::pos2(ui.min_rect().min.x, sep_y),
+                                        egui::pos2(ui.min_rect().max.x, sep_y + 1.0),
                                     );
+                                    ui.painter().rect_filled(
+                                        sep_rect,
+                                        0.0,
+                                        theme.separator.gamma_multiply(0.08),
+                                    );
+                                    ui.add_space(SPACE_SM);
+                                    // Botón primario integrado — ocupa todo el ancho de la casilla
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new("Aplicar")
+                                            .size(TYPE_SM)
+                                            .strong()
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(theme.accent)
+                                    .stroke(egui::Stroke::NONE)
+                                    .rounding(crate::tokens::RADIUS_MD);
+                                    if ui
+                                        .add_sized(egui::vec2(ui.available_width(), 32.0), btn)
+                                        .on_hover_text("Aplica este bloque en Grafito")
+                                        .clicked()
+                                    {
+                                        retain_first_assistant_action(
+                                            &mut action,
+                                            Some(AssistantUiAction::ApplyProposal(
+                                                verified.candidate_index,
+                                            )),
+                                        );
+                                    }
+                                    // Secundario: Editar en entrada solo para comandos simples
+                                    if let grafito_command::assistant_proposals::AssistantProposal::Command(_) =
+                                        &verified.proposal
+                                    {
+                                        if verified.prerequisite_parameters.is_empty() {
+                                            ui.add_space(SPACE_XS);
+                                            let ghost = egui::Button::new(
+                                                egui::RichText::new("Editar en la entrada")
+                                                    .size(TYPE_XS)
+                                                    .color(theme.text_secondary),
+                                            )
+                                            .fill(egui::Color32::TRANSPARENT)
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                theme.separator.gamma_multiply(0.10),
+                                            ))
+                                            .rounding(crate::tokens::RADIUS_MD);
+                                            if ui
+                                                .add_sized(
+                                                    egui::vec2(ui.available_width(), 28.0),
+                                                    ghost,
+                                                )
+                                                .clicked()
+                                            {
+                                                retain_first_assistant_action(
+                                                    &mut action,
+                                                    Some(AssistantUiAction::InsertCommand(
+                                                        verified.candidate_index,
+                                                    )),
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                                 Some(AssistantProposalCardState::Applied(applied)) => {
                                     rendered_candidate_indices.push(applied.candidate_index);
-                                    draw_applied_assistant_proposal(ui, applied, false);
+                                    has_shown_primary = true;
+                                    ui.add_space(SPACE_SM);
+                                    let sep_y = ui.cursor().min.y;
+                                    let sep_rect = egui::Rect::from_min_max(
+                                        egui::pos2(ui.min_rect().min.x, sep_y),
+                                        egui::pos2(ui.min_rect().max.x, sep_y + 1.0),
+                                    );
+                                    ui.painter().rect_filled(
+                                        sep_rect,
+                                        0.0,
+                                        theme.separator.gamma_multiply(0.08),
+                                    );
+                                    ui.add_space(SPACE_SM);
+                                    egui::Frame::none()
+                                        .fill(theme.success.gamma_multiply(0.10))
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            theme.success.gamma_multiply(0.30),
+                                        ))
+                                        .rounding(crate::tokens::RADIUS_MD)
+                                        .inner_margin(egui::Margin::symmetric(
+                                            crate::tokens::SPACE_SM,
+                                            crate::tokens::SPACE_XS,
+                                        ))
+                                        .show(ui, |ui| {
+                                            ui.set_min_width(ui.available_width());
+                                            ui.label(
+                                                egui::RichText::new("Aplicada")
+                                                    .color(theme.success)
+                                                    .size(TYPE_XS)
+                                                    .strong(),
+                                            );
+                                        });
                                 }
                                 Some(AssistantProposalCardState::Rejected) => {
                                     ui.add_space(SPACE_SM);
@@ -3693,6 +4203,7 @@ fn draw_assistant_response(
                                             proposal_state.correction_available,
                                         ),
                                     );
+                                    // Aun si fue rechazada, ofrecer Aplicar raw para forzar ejecución
                                 }
                                 Some(AssistantProposalCardState::NotPreflighted) => {
                                     ui.add_space(SPACE_SM);
@@ -3704,6 +4215,44 @@ fn draw_assistant_response(
                                 None => {}
                             }
                         }
+                        // Fallback universal: cualquier bloque grafito/grafito-scene obtiene Aplicar
+                        // si aún no se mostró uno primario (garantiza "si le pido algo en 3d, lo aplique")
+                        let lang = language.trim().to_ascii_lowercase();
+                        let is_grafito = lang == "grafito" || lang == "grafito-scene";
+                        if is_grafito && !text.trim().is_empty() && !has_shown_primary {
+                            ui.add_space(SPACE_SM);
+                            let sep_y = ui.cursor().min.y;
+                            let sep_rect = egui::Rect::from_min_max(
+                                egui::pos2(ui.min_rect().min.x, sep_y),
+                                egui::pos2(ui.min_rect().max.x, sep_y + 1.0),
+                            );
+                            ui.painter().rect_filled(
+                                sep_rect,
+                                0.0,
+                                theme.separator.gamma_multiply(0.08),
+                            );
+                            ui.add_space(SPACE_SM);
+                            let btn = egui::Button::new(
+                                egui::RichText::new("Aplicar")
+                                    .size(TYPE_SM)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(theme.accent)
+                            .stroke(egui::Stroke::NONE)
+                            .rounding(crate::tokens::RADIUS_MD);
+                            if ui
+                                .add_sized(egui::vec2(ui.available_width(), 32.0), btn)
+                                .on_hover_text("Aplica este bloque en Grafito y ajusta la vista")
+                                .clicked()
+                            {
+                                let raw = text.clone();
+                                retain_first_assistant_action(
+                                    &mut action,
+                                    Some(AssistantUiAction::ApplyRawCommand(raw)),
+                                );
+                            }
+                        }
                     });
             }
         }
@@ -3712,9 +4261,7 @@ fn draw_assistant_response(
         }
         ui.add_space(SPACE_SM);
     }
-    if reveal_clip.is_some() {
-        return action;
-    }
+    // Siempre mostrar propuestas verificadas aunque el reveal aún anima — no ocultar Aplicar
     // A bounded transcript can end before a complete fenced proposal. Preserve
     // the locally verified canonical action instead of silently hiding it.
     for verified in unrendered_verified_proposals(
@@ -3758,6 +4305,12 @@ fn candidate_index_for_code_block(
     proposal_code_block_indices: &[usize],
     code_block_index: usize,
 ) -> Option<usize> {
+    // Si solo hay una propuesta verificada y un único bloque code, asociar directo aunque el índice no coincida
+    // (fallback para truncamiento o desalineo de índices por filtrado)
+    if proposal_code_block_indices.len() == 1 && code_block_index == 0 {
+        // El único índice disponible corresponde a este bloque
+        return Some(0);
+    }
     proposal_code_block_indices
         .iter()
         .position(|index| *index == code_block_index)
@@ -4850,15 +5403,14 @@ mod tests {
         let user = conversation_turn_appearance(&crate::theme::DARK, true);
         let assistant = conversation_turn_appearance(&crate::theme::DARK, false);
 
-        // macOS Messages: burbuja azul usuario vs gris asistente, ambas con sombra sutil.
-        assert_eq!(user.fill, crate::theme::DARK.assistant_user_bubble);
+        // Editorial: fondos sutiles diferenciados — usuario accent_muted, asistente input_bg
         assert_eq!(
-            assistant.fill,
-            crate::theme::DARK.assistant_assistant_bubble
+            user.fill,
+            crate::theme::DARK.accent_muted.gamma_multiply(0.55)
         );
-        assert_eq!(user.role_color, crate::theme::DARK.assistant_user_text);
-        assert_eq!(assistant.role_color, crate::theme::DARK.text_primary);
+        assert_eq!(assistant.fill, crate::theme::DARK.input_bg);
         assert_ne!(user.fill, assistant.fill);
+        assert_eq!(assistant.role_color, crate::theme::DARK.text_primary);
     }
 
     #[test]
@@ -5309,7 +5861,8 @@ mod tests {
         assert!(choices.contains(&"deepseek-v4-pro".to_string()));
         assert!(choices.contains(&"mimo-2.5-vl".to_string()));
         assert!(choices.contains(&"fusion".to_string()));
-        assert!(!choices.iter().any(|model| model.contains("kimi")));
+        // OpenCode Go ahora acepta todos los modelos visibles; kimi ya no se filtra
+        assert!(choices.iter().any(|model| model.contains("kimi")));
         assert!(choices.iter().any(|model| model.contains("mimo"))); // MiMo 2.5-VL (visión)
         assert_eq!(
             choices.iter().filter(|model| *model == "glm-5.2").count(),
@@ -5641,6 +6194,9 @@ mod tests {
                                     None,
                                     &mut AssistantBlocksCache::default(),
                                     MORA_NAME,
+                                    &AssistantPanelState::default(),
+                                    false,
+                                    AssistantVisuals::default(),
                                 );
                             })
                             .response

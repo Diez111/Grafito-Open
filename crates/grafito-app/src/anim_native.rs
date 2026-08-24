@@ -271,37 +271,20 @@ fn draw_text_block(
             cx += char_w + scale;
             continue;
         }
-        // color variacion sutil por char para efecto YouTube
-        let hash = (ch as u32).wrapping_mul(2654435761);
-        let filled = !hash.is_multiple_of(5); // algunos espacios vacios para textura
-        if filled {
-            // dibujar borde suave
-            draw_filled_rect(buf, w, h, cx, y, char_w, char_h, color);
-            // recortar interior 1px para efecto "pixel font"
-            if char_w > 2 && char_h > 2 {
-                let inner = [BG[0], BG[1], BG[2], 180];
-                // dejar solo marco de 1px escalado
-                draw_filled_rect(
-                    buf,
-                    w,
-                    h,
-                    cx + scale,
-                    y + scale,
-                    char_w - 2 * scale,
-                    char_h - 2 * scale,
-                    inner,
-                );
-            }
-        } else {
+        // Texto sólido, sin variación hash que corrompe la lectura
+        draw_filled_rect(buf, w, h, cx, y, char_w, char_h, color);
+        // recortar interior 1px para efecto "pixel font" legible
+        if char_w > 2 && char_h > 2 {
+            let inner = [BG[0], BG[1], BG[2], 180];
             draw_filled_rect(
                 buf,
                 w,
                 h,
-                cx,
-                y,
-                char_w,
-                char_h,
-                [color[0], color[1], color[2], 90],
+                cx + scale,
+                y + scale,
+                char_w - 2 * scale,
+                char_h - 2 * scale,
+                inner,
             );
         }
         cx += char_w + scale;

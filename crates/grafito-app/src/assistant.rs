@@ -451,8 +451,30 @@ impl GrafitoApp {
             .map(|last| grafito_profile::time_ago(last, epoch))
             .unwrap_or_default();
         if !self.assistant.settings_open {
+            // Sincronizar memoria larga bidireccionalmente: si el estado tiene hechos nuevos (trim), persistirlos
+            if self.assistant.long_memory.facts.len() > self.profile.long_memory.facts.len() {
+                for fact in self.assistant.long_memory.facts.clone() {
+                    if !self
+                        .profile
+                        .long_memory
+                        .facts
+                        .iter()
+                        .any(|f| f.text == fact.text)
+                    {
+                        self.profile.long_memory.facts.push(fact);
+                    }
+                }
+                self.profile.long_memory.summary = self.assistant.long_memory.summary.clone();
+                self.profile.long_memory.relationship_stage =
+                    self.assistant.long_memory.relationship_stage;
+                let _ = std::fs::write(
+                    crate::utils::profile_path(),
+                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                );
+            }
             self.assistant.user_name = self.profile.display_name().to_owned();
             self.assistant.avatar = self.profile.avatar.clone();
+            self.assistant.long_memory = self.profile.long_memory.clone();
             self.avatar_draft = self.profile.avatar.clone();
         } else {
             // Mantener borrador vivo para preview persistente; sincroniza avatar_draft con assistant.avatar
@@ -638,12 +660,55 @@ impl GrafitoApp {
     ) {
         match action {
             AssistantUiAction::Submit => {
-                // La IA anima sola cuando le pedís «animá…»: se muestra el
-                // progreso en el chat y la tarjeta se reproduce al terminar.
-                let wants_animation = self.assistant.problem.to_lowercase().contains("anim");
+                // Solo anima si pedís explícitamente "anim..." (animá, animación, animar)
+                let problem_clone = self.assistant.problem.clone();
+                let lower = problem_clone.to_lowercase();
+                let wants_animation = lower.contains("anim");
+                // Guardar para animación con template correcto
+                let anim_template = if wants_animation {
+                    crate::anim_native::detect_template_for_concept(&problem_clone).to_string()
+                } else {
+                    String::new()
+                };
+                let anim_concept = problem_clone.clone();
+                // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
+                // y evita "tomo una ya hecha" (stale derivative)
+                if self.assistant_runtime.anim_job.is_some() {
+                    self.assistant_runtime.anim_job = None;
+                    self.assistant.anim_progress = false;
+                }
+                // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
+                if lower.contains("recuerda que")
+                    || lower.contains("prefiero")
+                    || lower.contains("me gusta")
+                    || lower.contains("no me gusta")
+                    || lower.contains("soy ")
+                {
+                    let epoch = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let fact_text = if let Some(pos) = lower.find("recuerda que") {
+                        problem_clone[pos + "recuerda que".len()..]
+                            .trim()
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    } else {
+                        problem_clone.chars().take(100).collect::<String>()
+                    };
+                    if !fact_text.trim().is_empty() {
+                        self.profile.remember_fact(&fact_text, epoch, 0.9);
+                        self.assistant.long_memory = self.profile.long_memory.clone();
+                        let _ = std::fs::write(
+                            crate::utils::profile_path(),
+                            serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
+                        );
+                    }
+                }
                 self.start_local_assistant_request(ctx);
                 if wants_animation {
-                    self.run_assistant_animation(ctx);
+                    self.run_assistant_animation_with(ctx, &anim_template, &anim_concept);
                 }
             }
             AssistantUiAction::AuthorizeRemote => {
@@ -822,6 +887,7 @@ impl GrafitoApp {
                 // Sincroniza borrador al abrir para preview fiel
                 self.assistant.avatar = self.profile.avatar.clone();
                 self.assistant.user_name = self.profile.display_name().to_owned();
+                self.assistant.long_memory = self.profile.long_memory.clone();
                 self.avatar_draft = self.profile.avatar.clone();
             }
             AssistantUiAction::SaveAvatar => {
@@ -838,16 +904,18 @@ impl GrafitoApp {
                             Ok(()) => {
                                 self.profile.avatar = draft.clone();
                                 self.profile.mascot = None;
+                                self.profile.long_memory = self.assistant.long_memory.clone();
                                 self.avatar_draft = self.profile.avatar.clone();
                                 self.assistant.avatar = self.profile.avatar.clone();
                                 self.assistant.user_name = self.profile.display_name().to_owned();
+                                self.assistant.long_memory = self.profile.long_memory.clone();
                                 self.config_name_error = None;
                                 let _ = std::fs::write(
                                     crate::utils::profile_path(),
                                     serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
                                 );
                                 self.notify(
-                                    "Avatar guardado",
+                                    "Avatar y memoria guardados",
                                     grafito_ui::toast::ToastKind::Success,
                                 );
                                 self.assistant.settings_open = false;
@@ -874,6 +942,104 @@ impl GrafitoApp {
                     "Avatar restablecido — pulsa Guardar para confirmar",
                     grafito_ui::toast::ToastKind::Info,
                 );
+            }
+            AssistantUiAction::ApplyRawCommand(raw) => {
+                // Extrae el primer comando grafito limpio hasta el corchete final, sin texto trailing
+                // (evita "no se permite texto después del corchete final" cuando el LLM añade "explicacion" tras el comando)
+                let mut command_text = raw.trim().to_string();
+                if command_text.is_empty() {
+                    self.reject_assistant_command();
+                    return;
+                }
+                // Si el bloque contiene múltiples líneas (grafito-scene), intentar quedarnos con todas las líneas que parezcan comando
+                // Para bloque simple, quedarnos solo hasta el primer ']' balanceado
+                let trimmed = command_text.trim();
+                if trimmed.lines().count() == 1 {
+                    if let Some(open) = trimmed.find('[') {
+                        let mut depth = 0i32;
+                        let mut close_idx: Option<usize> = None;
+                        for (i, ch) in trimmed[open..].char_indices() {
+                            if ch == '[' {
+                                depth += 1;
+                            } else if ch == ']' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close_idx = Some(open + i);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(close) = close_idx {
+                            // Solo si hay texto no-espacio después del cierre, recortar
+                            if !trimmed[close + 1..].trim().is_empty() {
+                                // Verificar que el prefijo sea un comando válido antes de recortar
+                                let candidate = trimmed[..=close].trim();
+                                if grafito_command::assistant_proposals::parse_assistant_command(
+                                    candidate,
+                                )
+                                .is_some()
+                                {
+                                    command_text = candidate.to_string();
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Multi-línea: filtrar solo líneas que son comandos completos
+                    let filtered: Vec<String> = trimmed
+                        .lines()
+                        .map(|l| l.trim())
+                        .filter(|l| {
+                            !l.is_empty()
+                                && grafito_command::assistant_proposals::parse_assistant_command(l)
+                                    .is_some()
+                        })
+                        .map(|s| s.to_string())
+                        .collect();
+                    if !filtered.is_empty() {
+                        command_text = filtered.join("\n");
+                    }
+                }
+                // Intenta parsear como comando de grafito para manejar vista 2D/3D/4D
+                if let Some(inv) =
+                    grafito_command::assistant_proposals::parse_assistant_command(&command_text)
+                {
+                    if let Some(view) = assistant_graph_view(&inv) {
+                        if let Some(perspective) =
+                            assistant_graph_perspective(view, self.current_view)
+                        {
+                            self.set_perspective(perspective);
+                        }
+                    }
+                } else if command_text.lines().count() > 1 {
+                    // Para escena multi-línea, inferir vista de la primera línea válida
+                    if let Some(first) = command_text.lines().next() {
+                        if let Some(inv) =
+                            grafito_command::assistant_proposals::parse_assistant_command(
+                                first.trim(),
+                            )
+                        {
+                            if let Some(view) = assistant_graph_view(&inv) {
+                                if let Some(perspective) =
+                                    assistant_graph_perspective(view, self.current_view)
+                                {
+                                    self.set_perspective(perspective);
+                                }
+                            }
+                        }
+                    }
+                }
+                let outcome = self.execute_command_and_record(&command_text, self.ui_time);
+                match &outcome {
+                    grafito_command::commands::CommandOutcome::Error(msg) => {
+                        self.show_assistant_error(msg.clone());
+                    }
+                    _ => {
+                        self.ensure_algebra_panel_visible();
+                        self.notify("Comando aplicado en Grafito.", ToastKind::Success);
+                    }
+                }
+                ctx.request_repaint();
             }
             AssistantUiAction::ExplainStepwise(topic) => {
                 // teaching_ui.start ya inicia el orchestrator con el template del primer paso
@@ -1142,7 +1308,8 @@ impl GrafitoApp {
                 .iter()
                 .map(|a| a.transcription.text.len())
                 .sum::<usize>();
-        let catalog_budget = request
+        // Presupuesto equitativo: garantiza catálogo útil incluso con historia larga
+        let raw_catalog = request
             .budget
             .max_input_chars
             .saturating_sub(question.len())
@@ -1157,8 +1324,9 @@ impl GrafitoApp {
             .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
             .saturating_sub(repair_feedback_bytes)
             .saturating_sub(system_bytes)
-            .saturating_sub(transcription_bytes)
-            .min(32_000);
+            .saturating_sub(transcription_bytes);
+        // Garantiza mínimo 1K para herramientas relevantes (evita catálogo vacío que deja al LLM ciego)
+        let catalog_budget = raw_catalog.clamp(1024, 32_000);
         request.tool_catalog =
             grafito_command::assistant_context::assistant_tool_catalog(&question, catalog_budget);
         let catalog_overhead = if request.tool_catalog.is_empty() {
@@ -1426,11 +1594,15 @@ impl GrafitoApp {
     }
 
     fn run_assistant_animation_with(&mut self, ctx: &egui::Context, template: &str, concept: &str) {
+        // Si hay una animación en curso, cancelarla para regenerar la nueva (evita "tomo una ya hecha")
         if self.assistant_runtime.anim_job.is_some() {
-            return;
+            self.assistant_runtime.anim_job = None;
+            self.assistant.anim_progress = false;
         }
-        // Limpia animación previa para no confundir
-        self.assistant.set_media(None, ctx);
+        // No destruir texturas durante el draw (evita wgpu panic 'Texture has been destroyed').
+        // La media previa se mantiene visible hasta que la nueva la reemplace en sync_assistant_for_frame
+        // (inicio del próximo frame). Solo limpiar si es la primera vez o si el usuario lo pidió explícitamente.
+        let _ = ctx;
         // Motor externo si está configurado; si no (o si falla), se usa la
         // animación nativa de Rust para que «Animá» siempre produzca algo.
         let engine = self
@@ -1472,17 +1644,24 @@ impl GrafitoApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let repaint = ctx.clone();
         let template_owned = template.to_string();
+        let concept_owned = concept.clone();
         std::thread::spawn(move || {
+            // Generador nativo correcto: usa el dispatcher que elige por concepto y template
             let native = || {
-                let title = if template_owned == "integral-area" {
-                    "Teorema de Pitágoras (nativa)".into()
-                } else {
-                    "Derivada como pendiente (nativa)".into()
-                };
-                let frames = if template_owned == "integral-area" {
-                    crate::anim_native::render_pitagoras_frames(480, 360)
-                } else {
-                    crate::anim_native::render_native_animation_frames(480, 360)
+                let frames = crate::anim_native::render_anim_for_concept(
+                    &template_owned,
+                    &concept_owned,
+                    480,
+                    360,
+                );
+                let title = match template_owned.as_str() {
+                    "integral-area" => "Integral — área bajo la curva (nativa)".to_string(),
+                    "derivative-slope" => "Derivada como pendiente (nativa)".to_string(),
+                    "pitagoras" | "pythagoras" => "Teorema de Pitágoras (nativa)".to_string(),
+                    "taylor-series" => "Serie de Taylor (nativa)".to_string(),
+                    "conformal-map" => "Mapeo conforme (nativa)".to_string(),
+                    "universal" => format!("{} (nativa)", concept_owned),
+                    _ => format!("{} (nativa)", concept_owned),
                 };
                 grafito_ui::assistant::AssistantMedia { title, frames }
             };
@@ -1500,10 +1679,15 @@ impl GrafitoApp {
                     match grafito_anim::run_job(&config, &request, None, |_| {}) {
                         Ok(result) => match load_gif_frames(&result.media_path) {
                             Ok(frames) if !frames.is_empty() => {
-                                let title = if template_owned == "integral-area" {
-                                    "Teorema de Pitágoras".into()
-                                } else {
-                                    "Derivada como pendiente".into()
+                                let title = match template_owned.as_str() {
+                                    "integral-area" => "Integral — área bajo la curva".to_string(),
+                                    "derivative-slope" => "Derivada como pendiente".to_string(),
+                                    "pitagoras" | "pythagoras" => {
+                                        "Teorema de Pitágoras".to_string()
+                                    }
+                                    "taylor-series" => "Serie de Taylor".to_string(),
+                                    "conformal-map" => "Mapeo conforme".to_string(),
+                                    _ => concept_owned.clone(),
                                 };
                                 Ok(grafito_ui::assistant::AssistantMedia { title, frames })
                             }
@@ -2350,8 +2534,30 @@ impl GrafitoApp {
                 "Completá la configuración avanzada antes de consultar remotamente.".into(),
             );
         }
-        let mut settings =
-            ProviderSettings::for_profile(self.assistant.provider, self.assistant.model.trim());
+        let mut settings = if self.assistant.provider == ProviderProfile::CustomOpenAiCompatible {
+            // Compatible genérico: por defecto reusa el endpoint OpenCode Go para muse-spark/glm/mimo sin config extra.
+            // Si el usuario define GRAFITO_ASSISTANT_CUSTOM_*_API_KEY, se usará esa clave.
+            ProviderSettings::custom_openai_compatible(
+                "https://opencode.ai/zen/go/v1",
+                self.assistant.model.trim(),
+                "GRAFITO_ASSISTANT_CUSTOM_OPENCODE_API_KEY",
+            )
+            .or_else(|_| {
+                ProviderSettings::custom_openai_compatible(
+                    "https://opencode.ai/zen/go/v1",
+                    self.assistant.model.trim(),
+                    "GRAFITO_ASSISTANT_CUSTOM_API_KEY",
+                )
+            })
+            .unwrap_or_else(|_| {
+                ProviderSettings::for_profile(
+                    ProviderProfile::OpenCodeGo,
+                    self.assistant.model.trim(),
+                )
+            })
+        } else {
+            ProviderSettings::for_profile(self.assistant.provider, self.assistant.model.trim())
+        };
         if self.assistant.vision_enabled {
             let capabilities = ProviderCapabilities {
                 vision: true,
@@ -2379,6 +2585,19 @@ impl GrafitoApp {
         }
         if let Some(key) = self.assistant_runtime.key_for(self.assistant.provider) {
             return Ok(Some(key));
+        }
+        // Fallback: si es Compatible y no hay clave para Custom, reusa la de OpenCodeGo
+        if self.assistant.provider == ProviderProfile::CustomOpenAiCompatible {
+            if let Some(key) = self.assistant_runtime.key_for(ProviderProfile::OpenCodeGo) {
+                return Ok(Some(key));
+            }
+            if let Ok(Some(key)) = assistant_credentials::load(ProviderProfile::OpenCodeGo) {
+                self.assistant.key_available = true;
+                self.assistant.key_status_checked = true;
+                self.assistant_runtime
+                    .remember_key(ProviderProfile::OpenCodeGo, key.clone());
+                return Ok(Some(key));
+            }
         }
         match assistant_credentials::load(self.assistant.provider) {
             Ok(Some(key)) => {

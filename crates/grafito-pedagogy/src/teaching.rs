@@ -122,7 +122,7 @@ impl TeachingSession {
                 TeachingStep::new("d3", "Grafiquemos f y f'", "Arriba: x² (parábola). Abajo: 2x (recta). Notá cómo la pendiente de la parábola crece linealmente.")
                     .with_math("Gráfica: f(x)=x² y f'(x)=2x").with_whiteboard("Dos ejes: parábola y recta").with_manim("derivative-slope"),
                 TeachingStep::new("d4", "Probemos en la pizarra", "Dibujá tu propia función en la pizarra y calculá la derivada en un punto. Usá la herramienta de tangente.")
-                    .with_whiteboard("Pizarra libre para trazar y medir pendiente").with_manim("universal"),
+                    .with_whiteboard("Pizarra libre para trazar y medir pendiente"),
             ],
             TeachingTopic::Integral => vec![
                 TeachingStep::new("i1", "¿Qué es la integral?", "La integral es el área bajo la curva. Si la derivada es la pendiente, la integral es la acumulación.")
@@ -130,7 +130,7 @@ impl TeachingSession {
                 TeachingStep::new("i2", "Aproximación con rectángulos", "Suma de rectángulos de ancho pequeño. Cuando el ancho tiende a cero, la suma es el área exacta.")
                     .with_math("Suma de Riemann: Σ f(xᵢ)Δx").with_whiteboard("Rectángulos bajo la curva").with_manim("integral-area"),
                 TeachingStep::new("i3", "Visualicemos el área", "La región sombreada es la integral. Cambiá los límites y mirá cómo cambia el área.")
-                    .with_whiteboard("Región sombreada con límites móviles").with_manim("integral-area"),
+                    .with_whiteboard("Región sombreada con límites móviles"),
             ],
             TeachingTopic::Pitagoras => vec![
                 TeachingStep::new("p1", "Teorema de Pitágoras", "En un triángulo rectángulo, c² = a² + b². La hipotenusa al cuadrado es la suma de los catetos al cuadrado.")
@@ -138,14 +138,44 @@ impl TeachingSession {
                 TeachingStep::new("p2", "Demostración visual", "Los dos cuadrados de los catetos juntos tienen la misma área que el cuadrado de la hipotenusa.")
                     .with_whiteboard("Animación de áreas que se reordenan").with_manim("pitagoras"),
             ],
-            _ => vec![
-                TeachingStep::new("g1", "Exploremos el concepto", format!("Vamos a desglosar: {}", original))
-                    .with_math(original).with_whiteboard("Pizarra para explorar").with_manim("universal"),
-                TeachingStep::new("g2", "Grafiquemos", "Visualizá la función y sus propiedades en el canvas.")
-                    .with_whiteboard("Gráfica interactiva").with_manim("universal"),
-                TeachingStep::new("g3", "Practiquemos", "Usá la pizarra para dibujar y la consola para probar valores.")
-                    .with_whiteboard("Pizarra libre").with_manim("universal"),
+            TeachingTopic::Funcion => vec![
+                TeachingStep::new("f1", "¿Qué es una función?", "Una función asigna a cada x un único y. Pensala como una máquina: entra x, sale f(x).")
+                    .with_math(original).with_whiteboard("Ejes con puntos (x, f(x))").with_manim("universal"),
+                TeachingStep::new("f2", "Grafiquemos", "Mirá la curva en el canvas y explorá dominio, cortes y extremos.")
+                    .with_whiteboard("Curva con ejes y marcas").with_manim("derivative-slope"),
+                TeachingStep::new("f3", "Probemos valores", "Cambiá x y observá cómo responde f(x). Probá en la pizarra.")
+                    .with_whiteboard("Tabla de valores x→f(x)").with_manim("universal"),
             ],
+            TeachingTopic::Limite => vec![
+                TeachingStep::new("l1", "Idea de límite", "El límite describe hacia dónde tiende f(x) cuando x se acerca a un valor, aunque f no esté definida ahí.")
+                    .with_math("lim_{x→a} f(x) = L").with_whiteboard("Recta con hueco en a").with_manim("derivative-slope"),
+                TeachingStep::new("l2", "Acercamiento", "Acerquemos x a a por izquierda y derecha y miremos f(x).")
+                    .with_whiteboard("Flechas hacia a").with_manim("derivative-slope"),
+                TeachingStep::new("l3", "Calculémoslo", "Usá factorización o sustitución para resolverlo y verificá en la gráfica.")
+                    .with_math(original).with_whiteboard("Pizarra para cálculo paso a paso"),
+            ],
+            _ => {
+                // General — selección por complejidad, no todo a la vez
+                let is_short = original.trim().chars().count() < 24;
+                let has_math_chars = original.contains(['x', 'y', '=', '+', '-', '/', '∫', '√']);
+                if is_short && !has_math_chars {
+                    vec![
+                        TeachingStep::new("g1", "Concepto", format!("Vamos a desglosar: {}", original))
+                            .with_whiteboard("Pizarra para explorar"),
+                        TeachingStep::new("g2", "Profundicemos", "Hagamos un ejemplo concreto y verifiquémoslo gráficamente.")
+                            .with_whiteboard("Ejemplo con gráfica"),
+                    ]
+                } else {
+                    vec![
+                        TeachingStep::new("g1", "Exploremos el concepto", format!("Vamos a desglosar: {}", original))
+                            .with_math(original).with_whiteboard("Pizarra para explorar"),
+                        TeachingStep::new("g2", "Grafiquemos", "Visualizá la función y sus propiedades en el canvas.")
+                            .with_whiteboard("Gráfica interactiva").with_manim("universal"),
+                        TeachingStep::new("g3", "Practiquemos", "Usá la pizarra para dibujar y la consola para probar valores.")
+                            .with_whiteboard("Pizarra libre"),
+                    ]
+                }
+            }
         }
     }
     pub fn current(&self) -> Option<&TeachingStep> {

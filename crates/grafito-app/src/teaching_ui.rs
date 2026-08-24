@@ -8,6 +8,7 @@ use crate::manim_orchestrator::{ManimOrchestrator, OrchestratorState};
 use crate::whiteboard_ui::WhiteboardSession;
 use egui::{Color32, Stroke};
 use grafito_pedagogy::TeachingSession;
+use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_whiteboard::WhiteboardDoc;
 use std::time::{Duration, Instant};
 
@@ -26,13 +27,94 @@ pub struct TeachingUiState {
     pub anim_textures: Vec<egui::TextureHandle>,
 }
 
+fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::WhiteboardElement> {
+    use grafito_whiteboard::WhiteboardElement;
+    let lower = hint.to_lowercase();
+    let mut elems = Vec::new();
+    if lower.contains("secante") || lower.contains("tangente") || lower.contains("pendiente") {
+        // Curva x² como trazo suave + secante + tangente
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![
+                (-3.0, 9.0),
+                (-2.0, 4.0),
+                (-1.0, 1.0),
+                (0.0, 0.0),
+                (1.0, 1.0),
+                (2.0, 4.0),
+            ],
+            color: (55, 55, 55),
+            width: 2.0,
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (-1.0, 1.0),
+            to: (1.0, 1.0),
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (0.5, 0.25),
+            to: (1.5, 2.25),
+        });
+    } else if lower.contains("rectángulo")
+        || lower.contains("rectangulo")
+        || lower.contains("riemann")
+        || lower.contains("área")
+        || lower.contains("area")
+    {
+        // 4 rectángulos de Riemann bajo x² entre 0 y 2
+        for i in 0..4 {
+            let x = i as f64 * 0.5;
+            let y = x * x * 0.5 + 0.2;
+            elems.push(WhiteboardElement::Rectangle {
+                min: (x, 0.0),
+                max: (x + 0.45, y),
+                fill: None,
+            });
+        }
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, 0.0), (2.0, 2.0)],
+            color: (55, 55, 55),
+            width: 1.5,
+        });
+    } else if lower.contains("pitágoras")
+        || lower.contains("pitagoras")
+        || lower.contains("triángulo")
+    {
+        elems.push(WhiteboardElement::Rectangle {
+            min: (-2.0, -1.0),
+            max: (0.0, 1.0),
+            fill: None,
+        });
+        elems.push(WhiteboardElement::Rectangle {
+            min: (0.0, -1.0),
+            max: (2.0, 1.0),
+            fill: None,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-2.0, -1.0), (2.0, -1.0), (0.0, 1.0), (-2.0, -1.0)],
+            color: (55, 55, 55),
+            width: 2.0,
+        });
+    } else if lower.contains("pizarra libre") || lower.contains("libre") {
+        // Vacía para que el usuario dibuje
+    } else if !hint.trim().is_empty() {
+        // Fallback: texto centrado
+        elems.push(WhiteboardElement::Text {
+            at: (-1.5, 0.0),
+            text: hint.chars().take(40).collect(),
+            size: 14.0,
+        });
+    }
+    elems
+}
+
 impl TeachingUiState {
     pub fn start(&mut self, topic: &str) {
         let session = TeachingSession::for_topic(topic);
-        // Inicializar pizarra con hint del primer paso
+        // Inicializar pizarra con elementos vectoriales reales según hint
         if let Some(step) = session.current() {
-            let doc = WhiteboardDoc::default();
-            let _ = &step.whiteboard_hint;
+            let mut doc = WhiteboardDoc::default();
+            for elem in whiteboard_elements_for_hint(&step.whiteboard_hint) {
+                doc.add(elem);
+            }
             self.whiteboard.doc = doc;
             // Iniciar orquestación manim para el primer paso — cancela cualquier job previo
             if let Some(tmpl) = &step.manim_template {
@@ -49,6 +131,12 @@ impl TeachingUiState {
         if let Some(session) = &mut self.session {
             let ok = session.advance();
             if let Some(step) = session.current() {
+                // Hidratar pizarra del nuevo paso
+                let mut doc = WhiteboardDoc::default();
+                for elem in whiteboard_elements_for_hint(&step.whiteboard_hint) {
+                    doc.add(elem);
+                }
+                self.whiteboard.doc = doc;
                 if let Some(tmpl) = &step.manim_template {
                     // Avanzar implica nuevo concepto → cancelar previo y relanzar
                     self.orchestrator.cancel();
@@ -135,6 +223,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
     let mut should_close = false;
     let mut should_advance = false;
     let theme = grafito_ui::theme::current_theme(ctx);
+    let _ = opened_at;
     egui::Window::new("Enseñanza — Paso a paso")
         .id(egui::Id::new("teaching_overlay"))
         .collapsible(false)
@@ -159,53 +248,17 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
         )
         .show(ctx, |ui| {
             let time = ui.input(|i| i.time);
-            // Header con avatar morph a burbuja (ANIM_MICRO 180ms ease-out)
+            let hover_pos = ui.input(|i| i.pointer.hover_pos());
+            // Header Scandinavian — left-aligned, avatar pequeño + título, cierre con icono
             ui.horizontal(|ui| {
-                // Progreso morph 0..1 con ease-out cúbico basado en opened_at snapshot
-                let raw_t = opened_at
-                    .map(|opened| {
-                        let elapsed_ms =
-                            Instant::now().duration_since(opened).as_secs_f32() * 1000.0;
-                        (elapsed_ms / grafito_ui::tokens::ANIM_MICRO).clamp(0.0, 1.0)
-                    })
-                    .unwrap_or(1.0);
-                let eased = 1.0 - (1.0 - raw_t).powi(3);
-                if raw_t < 1.0 {
-                    ui.ctx().request_repaint();
-                }
-                // Base 36×36 avatar, morph rect interpolado via avatar_bubble_morph_rect
-                let base_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(36.0, 36.0));
-                let (target_rect, target_radius) =
-                    grafito_ui::avatar::avatar_bubble_morph_rect(base_rect, eased);
-                let target_size = target_rect.size();
-                let (alloc_rect, _) = ui.allocate_exact_size(target_size, egui::Sense::hover());
-                let morph_rect = egui::Rect::from_min_size(alloc_rect.min, target_size);
-                // Fondo burbuja que se expande desde el avatar
-                ui.painter().rect_filled(
-                    morph_rect,
-                    target_radius,
-                    theme.accent.gamma_multiply(0.08),
-                );
-                ui.painter().rect_stroke(
-                    morph_rect,
-                    target_radius,
-                    Stroke::new(1.0, theme.accent.gamma_multiply(0.12)),
-                );
-                // Avatar centrado dentro de la burbuja, con press scale 0.97
-                let hover_pos = ui.input(|i| i.pointer.hover_pos());
                 let cfg = grafito_profile::AvatarConfig::default();
-                let is_pressed = ui.input(|i| i.pointer.any_down())
-                    && alloc_rect
-                        .contains(hover_pos.unwrap_or(egui::pos2(f32::INFINITY, f32::INFINITY)));
-                let scale = if is_pressed { 0.97 } else { 1.0 };
-                let avatar_size = 32.0 * scale;
-                let avatar_rect = egui::Rect::from_center_size(
-                    morph_rect.center(),
-                    egui::vec2(avatar_size, avatar_size),
-                );
-                let painter = ui.painter_at(avatar_rect);
-                grafito_ui::avatar::draw_avatar(&painter, avatar_rect, &cfg, time, hover_pos);
-                ui.add_space(8.0);
+                let (avatar_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                if ui.is_rect_visible(avatar_rect) {
+                    let painter = ui.painter_at(avatar_rect);
+                    grafito_ui::avatar::draw_avatar(&painter, avatar_rect, &cfg, time, hover_pos);
+                }
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new(topic_label.clone())
@@ -214,19 +267,20 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                             .color(theme.text_primary),
                     );
                     ui.label(
-                        egui::RichText::new(format!("Paso {}/{}", current_idx + 1, step_count))
+                        egui::RichText::new(format!("Paso {} de {}", current_idx + 1, step_count))
                             .size(grafito_ui::tokens::TYPE_XS)
-                            .color(theme.text_secondary),
+                            .color(theme.text_secondary.gamma_multiply(0.60)),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✕ Cerrar").clicked() {
+                    if action_icon_button(ui, Icon::Close, theme.text_secondary, "Cerrar").clicked()
+                    {
                         should_close = true;
                     }
                 });
             });
             ui.add_space(grafito_ui::tokens::SPACE_SM);
-            // Barra progreso
+            // Barra progreso — hairline 4px, sin animación extra
             let (r, _) =
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
             ui.painter()
@@ -237,7 +291,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                 theme.accent,
             );
             ui.add_space(grafito_ui::tokens::SPACE_SM);
-            // Burbuja principal — snapshot del paso actual
+            // Contenido principal — editorial, left-aligned, sin burbuja morph
             if let Some(step) = current_step {
                 egui::Frame::none()
                     .fill(Color32::WHITE)
@@ -284,30 +338,55 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                             );
                         }
                     });
-                // Whiteboard preview (mini)
-                ui.add_space(grafito_ui::tokens::SPACE_SM);
-                let (wb_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 120.0),
-                    egui::Sense::hover(),
-                );
-                if ui.is_rect_visible(wb_rect) {
-                    ui.painter().rect_filled(
-                        wb_rect,
-                        grafito_ui::tokens::RADIUS_MD,
-                        theme.input_bg,
-                    );
-                    ui.painter().rect_stroke(
-                        wb_rect,
-                        grafito_ui::tokens::RADIUS_MD,
-                        Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
-                    );
-                    ui.painter().text(
-                        wb_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        format!("Pizarra: {}", step.whiteboard_hint),
-                        egui::FontId::proportional(11.0),
-                        theme.text_tertiary,
-                    );
+                // Pizarra vectorial real — usa WhiteboardSession con elementos según hint
+                if !step.whiteboard_hint.is_empty() || !state.whiteboard.doc.is_empty() {
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
+                    egui::Frame::none()
+                        .fill(theme.input_bg)
+                        .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                        .rounding(grafito_ui::tokens::RADIUS_MD)
+                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Pizarra")
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_tertiary)
+                                        .strong(),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("· {}", step.whiteboard_hint))
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_secondary),
+                                );
+                            });
+                            ui.add_space(4.0);
+                            let (wb_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 120.0),
+                                egui::Sense::click_and_drag(),
+                            );
+                            // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
+                            state.whiteboard.draw(ui, wb_rect);
+                            // Permitir dibujar encima (pencil) dentro del overlay
+                            state.whiteboard.handle_canvas_input(wb_rect, ui);
+                            if ui.is_rect_visible(wb_rect) {
+                                // Borde sutil por encima del draw para definición
+                                ui.painter().rect_stroke(
+                                    wb_rect,
+                                    grafito_ui::tokens::RADIUS_MD,
+                                    Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
+                                );
+                                // Hint centrado sobre grilla
+                                ui.painter().text(
+                                    wb_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    &step.whiteboard_hint,
+                                    egui::FontId::proportional(11.0),
+                                    theme.text_tertiary.gamma_multiply(0.85),
+                                );
+                            }
+                        });
                 }
                 // Animación nativa fallback (si completó)
                 if !anim_textures.is_empty() {
@@ -360,41 +439,60 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                     });
                     ui.ctx().request_repaint_after(Duration::from_millis(48));
                 }
-                // Manim orchestrator ledger
+                // Ledger colapsable — no ocupa altura si no se necesita
                 if let Some(ledger) = &ledger {
-                    ui.add_space(4.0);
-                    egui::Frame::none()
-                        .fill(theme.input_bg)
-                        .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-                        .rounding(grafito_ui::tokens::RADIUS_MD)
-                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(ledger)
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(theme.text_secondary),
-                            );
-                        });
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new("Detalle de generación")
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_tertiary),
+                    )
+                    .id_salt("teaching_ledger")
+                    .show(ui, |ui| {
+                        egui::Frame::none()
+                            .fill(theme.input_bg)
+                            .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+                            .rounding(grafito_ui::tokens::RADIUS_MD)
+                            .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(ledger)
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(theme.text_secondary),
+                                );
+                            });
+                    });
                 }
             }
             ui.add_space(grafito_ui::tokens::SPACE_MD);
+            // Controles profesionales — primaria llena ancho, secundaria ghost, iconografía limpia
             ui.horizontal(|ui| {
-                let btn_label = if is_last {
-                    "Finalizar ✓"
+                ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                let primary_label = if is_last { "Finalizar" } else { "Siguiente" };
+                let primary_icon = if is_last {
+                    Icon::Check
                 } else {
-                    "Siguiente →"
+                    Icon::ChevronRight
                 };
+                // Botón primario: fill accent, 36h, RADIUS_MD, left-aligned label + right icon
+                let btn = egui::Button::new(
+                    egui::RichText::new(primary_label)
+                        .strong()
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .color(Color32::WHITE),
+                )
+                .fill(theme.accent)
+                .stroke(Stroke::NONE)
+                .rounding(grafito_ui::tokens::RADIUS_MD);
+                // Tamaño igual para primaria, ocupa espacio proporcional
                 if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(btn_label)
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(theme.accent)
-                        .rounding(grafito_ui::tokens::RADIUS_MD),
-                    )
+                    .add_sized(egui::vec2(140.0, 36.0), btn)
+                    .on_hover_text(if is_last {
+                        "Cierra la enseñanza"
+                    } else {
+                        "Avanza al siguiente paso"
+                    })
                     .clicked()
                 {
                     if is_last {
@@ -403,18 +501,24 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                         should_advance = true;
                     }
                 }
-                if ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new("Cerrar").size(grafito_ui::tokens::TYPE_XS),
-                        )
-                        .rounding(grafito_ui::tokens::RADIUS_MD)
-                        .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
-                    )
-                    .clicked()
-                {
-                    should_close = true;
+                // Icono decorativo pequeño al lado (no duplica label, solo indica dirección)
+                let icon_color = theme.accent;
+                let (icon_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                if ui.is_rect_visible(icon_rect) {
+                    grafito_ui::icons::draw_icon(ui.painter(), icon_rect, primary_icon, icon_color);
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ghost = egui::Button::new(
+                        egui::RichText::new("Cerrar").size(grafito_ui::tokens::TYPE_SM),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.12)))
+                    .rounding(grafito_ui::tokens::RADIUS_MD);
+                    if ui.add_sized(egui::vec2(96.0, 36.0), ghost).clicked() {
+                        should_close = true;
+                    }
+                });
             });
         });
     if should_advance {

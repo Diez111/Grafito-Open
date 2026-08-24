@@ -1301,17 +1301,15 @@ mod tests {
 
     #[test]
     fn conversation_turn_accepts_the_default_remote_output_limit() {
-        let turn =
-            ConversationTurn::assistant("x".repeat(RequestBudget::default().max_output_chars));
+        let turn = ConversationTurn::assistant("x".repeat(MAX_CONVERSATION_TURN_CHARS));
 
         assert!(turn.validate().is_ok());
     }
 
     #[test]
     fn conversation_turn_rejects_one_character_over_the_default_remote_output_limit() {
-        let turn = ConversationTurn::assistant(
-            "x".repeat(RequestBudget::default().max_output_chars.saturating_add(1)),
-        );
+        let turn =
+            ConversationTurn::assistant("x".repeat(MAX_CONVERSATION_TURN_CHARS.saturating_add(1)));
 
         assert!(turn.validate().is_err());
     }

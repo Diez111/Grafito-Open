@@ -70,9 +70,10 @@ impl WhiteboardSession {
         let before = self.world_from_screen(screen, rect);
         self.zoom = (self.zoom * factor).clamp(0.2, 6.0);
         let after = self.world_from_screen(screen, rect);
+        // Corregido drift: pan está en píxeles, delta mundo debe escalarse por zoom
         self.pan = (
-            self.pan.0 - (before.0 - after.0),
-            self.pan.1 - (before.1 - after.1),
+            self.pan.0 - (before.0 - after.0) * self.zoom,
+            self.pan.1 - (before.1 - after.1) * self.zoom,
         );
     }
 
@@ -177,7 +178,13 @@ impl WhiteboardSession {
         let theme = current_theme(ui.ctx());
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, theme.canvas_bg);
-        draw_grid(painter, rect, self.pan, self.zoom, theme.separator);
+        draw_grid(
+            painter,
+            rect,
+            self.pan,
+            self.zoom,
+            theme.separator.gamma_multiply(0.10),
+        );
         for element in self.doc.elements() {
             draw_element(painter, element, rect, self);
         }

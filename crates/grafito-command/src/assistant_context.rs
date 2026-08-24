@@ -1075,14 +1075,21 @@ pub fn assistant_tool_catalog(problem: &str, max_bytes: usize) -> String {
     ]
     .iter()
     .any(|term| normalized_problem.contains(term));
+    // Para ejemplos de cálculo (integral/derivada) queremos ofrecer Function como EJECUTABLE
+    // aunque no haya pedido gráfico explícito, para que haya bloque Aplicar y no solo LaTeX.
+    let calculus_example_request = ["integral", "derivada", "derivar", "deriva", "primitiva"]
+        .iter()
+        .any(|term| normalized_problem.contains(term));
     let mut candidates = Vec::new();
     for node in &assistant_knowledge_graph().nodes {
         let default_function = generic_graph_request
             && !complex_request
             && !specialized_request
             && node.canonical == "Function";
+        let calculus_boost = calculus_example_request && node.canonical == "Function";
         let score = node.relevance_score(&terms)
             + usize::from(default_function) * 250
+            + usize::from(calculus_boost) * 200
             + usize::from(catalog_overview_request);
         if score == 0 {
             continue;

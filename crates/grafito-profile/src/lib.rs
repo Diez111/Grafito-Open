@@ -3,9 +3,11 @@
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
 pub mod exam;
+pub mod long_memory;
 pub mod mascot;
 
 // Re-exportar tipos de avatar/mascota en la raíz
+pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{
     AvatarAccessory, AvatarBlush, AvatarConfig, AvatarEyeStyle, AvatarMouthStyle, AvatarShape,
     DailyMission, FurnitureKind, HouseTheme, MascotConfig, MascotMood, MascotSpecies, Outfit,
@@ -83,6 +85,9 @@ pub struct StudentProfile {
     /// Se mantiene sincronizada con `avatar.mascot` en helpers.
     #[serde(default)]
     pub mascot: Option<MascotConfig>,
+    /// Memoria a largo plazo (hechos, preferencias, vínculo).
+    #[serde(default)]
+    pub long_memory: LongTermMemory,
 }
 
 impl Default for StudentProfile {
@@ -98,6 +103,7 @@ impl Default for StudentProfile {
             best_streak: 0,
             avatar: AvatarConfig::default(),
             mascot: None,
+            long_memory: LongTermMemory::default(),
         }
     }
 }
@@ -271,41 +277,71 @@ impl StudentProfile {
 
     /// Resumen comprimido para el prompt del tutor (memoria del usuario).
     pub fn memory(&self) -> String {
-        if self.branches.is_empty() {
-            return "Estudiante nuevo: sin ramas registradas todavía.".to_string();
-        }
-        let covered = self.branches.iter().filter(|b| b.covered).count();
-        let pct = covered as f32 / self.branches.len().max(1) as f32 * 100.0;
-        let mut text = format!(
-            "Nivel {}, XP {}. Racha: {}. Cobertura: {covered}/{} ({pct:.0}%).\n",
-            self.level,
-            self.xp,
-            self.streak,
-            self.branches.len()
-        );
-        for branch in &self.branches {
-            text.push_str(&format!(
-                "- {}: {} (dominio {:.0}%).\n",
-                branch.name,
-                if branch.covered {
-                    "cubierta"
-                } else {
-                    "pendiente"
-                },
-                branch.mastery * 100.0
+        let mut base = if self.branches.is_empty() {
+            "Estudiante nuevo: sin ramas registradas todavía.".to_string()
+        } else {
+            let covered = self.branches.iter().filter(|b| b.covered).count();
+            let pct = covered as f32 / self.branches.len().max(1) as f32 * 100.0;
+            let mut t = format!(
+                "Nivel {}, XP {}. Racha: {}. Cobertura: {covered}/{} ({pct:.0}%).\n",
+                self.level,
+                self.xp,
+                self.streak,
+                self.branches.len()
+            );
+            for branch in &self.branches {
+                t.push_str(&format!(
+                    "- {}: {} (dominio {:.0}%).\n",
+                    branch.name,
+                    if branch.covered {
+                        "cubierta"
+                    } else {
+                        "pendiente"
+                    },
+                    branch.mastery * 100.0
+                ));
+            }
+            if let Some(event) = self.history.last() {
+                t.push_str(&format!(
+                    "Última actividad: {:?} en {}.\n",
+                    event.kind, event.branch_id
+                ));
+            }
+            t
+        };
+        // Añadir personalidad/ánimo y memoria larga
+        if let Some(m) = self.avatar.mascot.as_ref().or(self.mascot.as_ref()) {
+            base.push_str(&format!(
+                "Personalidad mascota: {}.\n",
+                m.personality.system_prompt_snippet()
             ));
+            let mood = m.update_mood(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                false,
+            );
+            base.push_str(&format!("Ánimo actual: {}.\n", mood.label()));
         }
-        if let Some(event) = self.history.last() {
-            text.push_str(&format!(
-                "Última actividad: {:?} en {}.\n",
-                event.kind, event.branch_id
-            ));
+        let long = self.long_memory.render_for_prompt();
+        if !long.is_empty() {
+            base.push_str(&format!("\n[Memoria largo plazo]\n{long}"));
         }
-        if text.chars().count() > MAX_MEMORY_CHARS {
-            let cut: String = text.chars().take(MAX_MEMORY_CHARS - 20).collect();
+        if base.chars().count() > MAX_MEMORY_CHARS + 800 {
+            let cut: String = base.chars().take(MAX_MEMORY_CHARS + 800 - 20).collect();
             format!("{cut}…\n[resumen recortado]")
         } else {
-            text
+            base
+        }
+    }
+
+    /// Guarda un recuerdo episódico (ej. preferencia detectada).
+    pub fn remember_fact(&mut self, text: &str, epoch: u64, importance: f32) {
+        let fact = Fact::new(text, epoch, importance);
+        self.long_memory.push_fact(fact);
+        if self.long_memory.first_seen_epoch.is_none() {
+            self.long_memory.first_seen_epoch = Some(epoch);
         }
     }
 }
