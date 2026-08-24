@@ -36,6 +36,9 @@ pub const REMOTE_TOOL_CATALOG_PROMPT_PREFIX: &str =
 /// Bytes reservados para el encabezado remoto del catálogo de herramientas.
 pub const REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES: usize =
     REMOTE_TOOL_CATALOG_PROMPT_PREFIX.len();
+pub const REMOTE_CONTEXT_PROMPT_PREFIX: &str =
+    "\n\nDocument context (visible objects and variables, use the most recent Function if the user does not specify one):\n";
+pub const REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES: usize = REMOTE_CONTEXT_PROMPT_PREFIX.len();
 /// Encabezado que el transporte añade al diagnóstico local de una propuesta remota.
 pub const REMOTE_REPAIR_FEEDBACK_PROMPT_PREFIX: &str =
     "\n\nLocal proposal verification feedback (repair once; use only executable catalog syntax):\n";

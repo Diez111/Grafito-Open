@@ -9,8 +9,9 @@ use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
     AssistantRequest, AssistantResponse, AttachmentLimits, ImmutableDocumentContext,
     LocalAssistantStatus, ProposedPlan, ProviderCapabilities, ProviderProfile,
-    REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES, REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES,
-    REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES, REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
+    REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
+    REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
+    REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
 };
 use grafito_command::assistant_proposals::{
     assistant_fenced_proposals, execute_assistant_command, execute_assistant_parameter,
@@ -1286,6 +1287,24 @@ impl GrafitoApp {
             .as_ref()
             .map(|focus| focus.summary.len())
             .unwrap_or_default();
+        let context_bytes =
+            if request.context.objects.is_empty() && request.context.variables.is_empty() {
+                0
+            } else {
+                let mut len = REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES;
+                len += 30; // "Objetos visibles:\n" etc.
+                for (k, v) in &request.context.variables {
+                    len += k.len() + format!("{v}").len() + 4;
+                }
+                for obj in &request.context.objects {
+                    len += obj.label.len()
+                        + obj.kind.len()
+                        + obj.fingerprint.chars().take(120).collect::<String>().len()
+                        + 10;
+                }
+                len += 120; // instrucción Taylor
+                len
+            };
         let repair_feedback_bytes = repair_feedback
             .as_ref()
             .map(|feedback| {
@@ -1321,6 +1340,7 @@ impl GrafitoApp {
                     .map(|_| REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES)
                     .unwrap_or_default(),
             )
+            .saturating_sub(context_bytes)
             .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
             .saturating_sub(repair_feedback_bytes)
             .saturating_sub(system_bytes)
@@ -1346,6 +1366,7 @@ impl GrafitoApp {
                     .map(|_| REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES)
                     .unwrap_or_default(),
             )
+            .saturating_sub(context_bytes)
             .saturating_sub(request.tool_catalog.len())
             .saturating_sub(catalog_overhead)
             .saturating_sub(repair_feedback_bytes)

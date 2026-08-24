@@ -12,8 +12,9 @@ use grafito_agent::schema::ToolSchema;
 use grafito_assistant_types::{
     AssistantOperation, AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole,
     DerivationStep, ImageAttachment, LocalAssistantStatus, PrivacyMode, ProposedPlan,
-    ProviderCapabilities, ProviderProfile, REMOTE_FOCUS_PROMPT_PREFIX,
-    REMOTE_REPAIR_FEEDBACK_PROMPT_PREFIX, REMOTE_TOOL_CATALOG_PROMPT_PREFIX,
+    ProviderCapabilities, ProviderProfile, REMOTE_CONTEXT_PROMPT_PREFIX,
+    REMOTE_FOCUS_PROMPT_PREFIX, REMOTE_REPAIR_FEEDBACK_PROMPT_PREFIX,
+    REMOTE_TOOL_CATALOG_PROMPT_PREFIX,
 };
 use grafito_geometry::{
     ast::{parse_ast, Expr},
@@ -46,8 +47,8 @@ const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
-const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
-const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied. Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands. When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
+const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
+const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
 const REMOTE_TETRAHEDRON_GUIDANCE: &str = "For a tetrahedron, emit exactly one one-line grafito block with Tetrahedron[x, y, z, edge] and finite literal values. Do not emit Polyhedron, NumericArray, or a grafito-scene block.";
 const REMOTE_4D_POLYTOPE_GUIDANCE: &str = "For a regular 4D polytope, emit exactly one one-line grafito block with the appropriate named command: Pentachoron4D[scale, {xy, xz, xw, yz, yw, zw}], Tesseract4D[scale, {xy, xz, xw, yz, yw, zw}], SixteenCell4D[scale, {xy, xz, xw, yz, yw, zw}], TwentyFourCell4D[scale, {xy, xz, xw, yz, yw, zw}], OneTwentyCell4D[scale, {xy, xz, xw, yz, yw, zw}], or SixHundredCell4D[scale, {xy, xz, xw, yz, yw, zw}]. For higher-dimensional regular families use SimplexND[n, scale, {lexicographic-plane angles}], HypercubeND[n, scale, {lexicographic-plane angles}], or CrossPolytopeND[n, scale, {lexicographic-plane angles}]. Never substitute 3D Tetrahedron, bare Hypercube or tesseract, or many Segment3D edge lines.";
@@ -1344,6 +1345,33 @@ fn remote_system_prompt(request: &AssistantRequest) -> String {
 fn remote_prompt(request: &AssistantRequest) -> Result<String, String> {
     let problem = request.problem.trim();
     let mut prompt = problem.to_owned();
+    // Document context: todos los objetos visibles, para que el LLM sea consciente de TODAS las capacidades y use la función correcta
+    if !request.context.objects.is_empty() || !request.context.variables.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(REMOTE_CONTEXT_PROMPT_PREFIX.trim_start_matches('\n'));
+        if !request.context.variables.is_empty() {
+            prompt.push_str("Variables: ");
+            prompt.push_str(
+                &request
+                    .context
+                    .variables
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            prompt.push('\n');
+        }
+        prompt.push_str("Objetos visibles:\n");
+        for obj in &request.context.objects {
+            // fingerprint es JSON del objeto, recortado a 120 chars para no saturar prompt
+            let fp: String = obj.fingerprint.chars().take(120).collect();
+            prompt.push_str(&format!("- {} [{}]: {}\n", obj.label, obj.kind, fp));
+        }
+        prompt.push_str("Si el usuario pide Taylor/Integral/Derivada sin especificar función, usa la última Function visible arriba (no sin(x) por defecto).\n");
+    }
     if let Some(focus) = &request.focus {
         if !prompt.is_empty() {
             prompt.push_str("\n\n");
