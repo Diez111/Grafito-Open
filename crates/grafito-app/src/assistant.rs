@@ -466,8 +466,13 @@ impl GrafitoApp {
             .map(|last| grafito_profile::time_ago(last, epoch))
             .unwrap_or_default();
         if !self.assistant.settings_open {
-            // Sincronizar memoria larga bidireccionalmente: si el estado tiene hechos nuevos (trim), persistirlos
-            if self.assistant.long_memory.facts.len() > self.profile.long_memory.facts.len() {
+            // Sincronizar memoria larga bidireccionalmente
+            let mut needs_save = false;
+            if self.assistant.long_memory.facts.len() != self.profile.long_memory.facts.len()
+                || self.assistant.long_memory.summary != self.profile.long_memory.summary
+                || self.assistant.long_memory.enabled != self.profile.long_memory.enabled
+                || self.assistant.long_memory.preferences != self.profile.long_memory.preferences
+            {
                 for fact in self.assistant.long_memory.facts.clone() {
                     if !self
                         .profile
@@ -477,21 +482,53 @@ impl GrafitoApp {
                         .any(|f| f.text == fact.text)
                     {
                         self.profile.long_memory.facts.push(fact);
+                        needs_save = true;
                     }
+                }
+                // También detectar borrados en UI
+                let before = self.profile.long_memory.facts.len();
+                self.profile.long_memory.facts.retain(|pf| {
+                    self.assistant
+                        .long_memory
+                        .facts
+                        .iter()
+                        .any(|af| af.text == pf.text)
+                });
+                if self.profile.long_memory.facts.len() != before {
+                    needs_save = true;
                 }
                 self.profile.long_memory.summary = self.assistant.long_memory.summary.clone();
                 self.profile.long_memory.relationship_stage =
                     self.assistant.long_memory.relationship_stage;
-                // I/O en background thread para no bloquear UI (60fps)
-                spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
+                self.profile.long_memory.enabled = self.assistant.long_memory.enabled;
+                self.profile.long_memory.preferences =
+                    self.assistant.long_memory.preferences.clone();
+                if needs_save
+                    || self.assistant.long_memory.summary != self.profile.long_memory.summary
+                {
+                    spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
+                }
+            }
+            // Sincronizar avatar (incluye nuevos campos bg, accent_custom, instrucciones)
+            // Pero preservar si el perfil cambió externamente por nivel up (evolución)
+            // Si hay diferencia en evolución, merge
+            if self.assistant.avatar != self.profile.avatar {
+                // Si no hay edición pendiente, clonar perfil → assistant
+                self.assistant.avatar = self.profile.avatar.clone();
             }
             self.assistant.user_name = self.profile.display_name().to_owned();
-            self.assistant.avatar = self.profile.avatar.clone();
             self.assistant.long_memory = self.profile.long_memory.clone();
             self.avatar_draft = self.profile.avatar.clone();
         } else {
-            // Mantener borrador vivo para preview persistente; sincroniza avatar_draft con assistant.avatar
+            // Ventana abierta: preview persistente + merge no destructivo de progreso externo
+            // Sincronizar solo campos de progreso (nivel, branch) va en tutor_*, no en avatar
+            // Mantener avatar_draft sincronizado para preview
             self.avatar_draft = self.assistant.avatar.clone();
+            // Si el perfil ganó XP mientras se edita, no sobrescribir avatar; solo actualizar long_memory si es externa (no editar facts manualmente mientras abierta)
+            if self.assistant.long_memory.enabled != self.profile.long_memory.enabled {
+                // respetar cambio externo si el usuario no tocó el toggle en esta sesión
+                // No-op: el toggle de la UI tiene prioridad
+            }
         }
         self.poll_assistant_jobs(ctx);
         if let Some(job) = self.assistant_runtime.anim_job.as_mut() {
@@ -903,7 +940,18 @@ impl GrafitoApp {
             }
             AssistantUiAction::SaveAvatar => {
                 let draft = self.assistant.avatar.clone();
-                match draft.validate() {
+                // Sincronizar preferencias de memoria con avatar
+                let mut long_mem = self.assistant.long_memory.clone();
+                long_mem.preferences.custom_instructions = draft.custom_instructions.clone();
+                long_mem.preferences.language = draft.language.clone();
+                // tone viene de mascot personality
+                if let Some(m) = draft.mascot.as_ref() {
+                    long_mem.preferences.tone = m.personality.label().to_string();
+                }
+                match draft
+                    .validate()
+                    .and_then(|_| long_mem.preferences.validate())
+                {
                     Ok(()) => {
                         let name = self.assistant.user_name.clone();
                         let name_ref = if name.trim().is_empty() {
@@ -914,14 +962,19 @@ impl GrafitoApp {
                         match self.profile.set_display_name(name_ref) {
                             Ok(()) => {
                                 self.profile.avatar = draft.clone();
-                                self.profile.mascot = None;
-                                self.profile.long_memory = self.assistant.long_memory.clone();
+                                // Preservar mascota: sincronizar personality si cambió
+                                if let Some(mascot) = draft.mascot.clone() {
+                                    self.profile.avatar.mascot = Some(mascot.clone());
+                                    self.profile.mascot = Some(mascot);
+                                } else if self.profile.mascot.is_some() {
+                                    // mantener existente
+                                }
+                                self.profile.long_memory = long_mem.clone();
                                 self.avatar_draft = self.profile.avatar.clone();
                                 self.assistant.avatar = self.profile.avatar.clone();
                                 self.assistant.user_name = self.profile.display_name().to_owned();
                                 self.assistant.long_memory = self.profile.long_memory.clone();
                                 self.config_name_error = None;
-                                // I/O en background thread para no bloquear UI (60fps)
                                 spawn_profile_save(
                                     self.profile.clone(),
                                     crate::utils::profile_path(),

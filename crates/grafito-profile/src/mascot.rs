@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Longitud máxima del nombre de la mascota (caracteres).
-pub const MAX_NAME: usize = 24;
+pub const MAX_NAME: usize = 48;
+/// Longitud máxima del nombre visible del estudiante.
+pub const MAX_DISPLAY_NAME: usize = 64;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Especies
@@ -66,6 +68,10 @@ pub enum Personality {
     Curioso = 1,
     Energico = 2,
     Dulce = 3,
+    Socratico = 4,
+    Olimpico = 5,
+    Amigo = 6,
+    Minimal = 7,
 }
 
 impl Personality {
@@ -75,6 +81,10 @@ impl Personality {
             Self::Curioso => "Curioso",
             Self::Energico => "Enérgico",
             Self::Dulce => "Dulce",
+            Self::Socratico => "Socrático",
+            Self::Olimpico => "Olímpico",
+            Self::Amigo => "Amigo",
+            Self::Minimal => "Minimal",
         }
     }
 
@@ -84,6 +94,10 @@ impl Personality {
             Self::Curioso => "Pregunta todo, explora sin miedo.",
             Self::Energico => "Vitalidad alta, siempre en movimiento.",
             Self::Dulce => "Cariñoso y empático.",
+            Self::Socratico => "Pregunta para que descubras la respuesta.",
+            Self::Olimpico => "Retos exigentes, precisión y velocidad.",
+            Self::Amigo => "Cercano, humor ligero y aliento.",
+            Self::Minimal => "Directo, breve y sin rodeos.",
         }
     }
 
@@ -94,11 +108,24 @@ impl Personality {
             Self::Curioso => "La mascota es curiosa: hace preguntas y propone retos.",
             Self::Energico => "La mascota es enérgica: tono dinámico y motivador.",
             Self::Dulce => "La mascota es dulce: tono cálido y afectuoso.",
+            Self::Socratico => "La mascota es socrática: guía con preguntas, no revela la solución de inmediato.",
+            Self::Olimpico => "La mascota es olímpica: exige rigor, propone problemas difíciles y celebra la excelencia.",
+            Self::Amigo => "La mascota es amiga: tono cercano, humor sutil y apoyo constante.",
+            Self::Minimal => "La mascota es minimal: respuestas breves, directas y esenciales.",
         }
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::Chill, Self::Curioso, Self::Energico, Self::Dulce]
+        &[
+            Self::Chill,
+            Self::Curioso,
+            Self::Energico,
+            Self::Dulce,
+            Self::Socratico,
+            Self::Olimpico,
+            Self::Amigo,
+            Self::Minimal,
+        ]
     }
 }
 
@@ -709,6 +736,8 @@ pub enum AvatarShape {
     Squircle = 1,
     RoundedSquare = 2,
     Hexagon = 3,
+    Blob = 4,
+    Star = 5,
 }
 impl AvatarShape {
     pub fn label(self) -> &'static str {
@@ -717,6 +746,8 @@ impl AvatarShape {
             Self::Squircle => "Squircle",
             Self::RoundedSquare => "Cuadrado suave",
             Self::Hexagon => "Hexágono",
+            Self::Blob => "Orgánico",
+            Self::Star => "Estrella",
         }
     }
     pub fn description(self) -> &'static str {
@@ -725,6 +756,8 @@ impl AvatarShape {
             Self::Squircle => "Suave, moderno.",
             Self::RoundedSquare => "Estructura, editorial.",
             Self::Hexagon => "Geométrico, técnico.",
+            Self::Blob => "Orgánico, amable y blando.",
+            Self::Star => "Estrella, expresivo y distintivo.",
         }
     }
     pub fn all() -> &'static [Self] {
@@ -733,6 +766,8 @@ impl AvatarShape {
             Self::Squircle,
             Self::RoundedSquare,
             Self::Hexagon,
+            Self::Blob,
+            Self::Star,
         ]
     }
 }
@@ -744,6 +779,8 @@ pub enum AvatarEyeStyle {
     Almond = 1,
     Dot = 2,
     Wide = 3,
+    Winky = 4,
+    Closed = 5,
 }
 impl AvatarEyeStyle {
     pub fn label(self) -> &'static str {
@@ -752,10 +789,19 @@ impl AvatarEyeStyle {
             Self::Almond => "Almendrado",
             Self::Dot => "Punto",
             Self::Wide => "Amplio",
+            Self::Winky => "Guiño",
+            Self::Closed => "Cerrado",
         }
     }
     pub fn all() -> &'static [Self] {
-        &[Self::Round, Self::Almond, Self::Dot, Self::Wide]
+        &[
+            Self::Round,
+            Self::Almond,
+            Self::Dot,
+            Self::Wide,
+            Self::Winky,
+            Self::Closed,
+        ]
     }
 }
 
@@ -766,6 +812,8 @@ pub enum AvatarMouthStyle {
     Line = 1,
     Smile = 2,
     Small = 3,
+    Open = 4,
+    Teeth = 5,
 }
 impl AvatarMouthStyle {
     pub fn label(self) -> &'static str {
@@ -774,10 +822,19 @@ impl AvatarMouthStyle {
             Self::Line => "Línea",
             Self::Smile => "Sonrisa",
             Self::Small => "Pequeña",
+            Self::Open => "Abierta",
+            Self::Teeth => "Dientes",
         }
     }
     pub fn all() -> &'static [Self] {
-        &[Self::Hidden, Self::Line, Self::Smile, Self::Small]
+        &[
+            Self::Hidden,
+            Self::Line,
+            Self::Smile,
+            Self::Small,
+            Self::Open,
+            Self::Teeth,
+        ]
     }
 }
 
@@ -788,6 +845,8 @@ pub enum AvatarAccessory {
     Glasses = 1,
     Sparkle = 2,
     Halo = 3,
+    Hat = 4,
+    Beard = 5,
 }
 impl AvatarAccessory {
     pub fn label(self) -> &'static str {
@@ -796,10 +855,19 @@ impl AvatarAccessory {
             Self::Glasses => "Gafas",
             Self::Sparkle => "Brillo",
             Self::Halo => "Halo",
+            Self::Hat => "Gorro",
+            Self::Beard => "Barba",
         }
     }
     pub fn all() -> &'static [Self] {
-        &[Self::None, Self::Glasses, Self::Sparkle, Self::Halo]
+        &[
+            Self::None,
+            Self::Glasses,
+            Self::Sparkle,
+            Self::Halo,
+            Self::Hat,
+            Self::Beard,
+        ]
     }
 }
 
@@ -827,7 +895,7 @@ fn default_assistant_name() -> String {
     "Mili".to_string()
 }
 
-/// Configuración de avatar super completa (12 dimensiones).
+/// Configuración de avatar super completa (extendida: bg, accent custom, estilo avanzado).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvatarConfig {
     #[serde(default)]
@@ -838,6 +906,27 @@ pub struct AvatarConfig {
     pub seed: String,
     #[serde(default)]
     pub accent_preset: u8,
+    /// Color custom cuando accent_preset == 99 (HEX libre).
+    #[serde(default)]
+    pub accent_custom: Option<[u8; 3]>,
+    /// Color de fondo del avatar (None = theme.input_bg).
+    #[serde(default)]
+    pub bg_color: Option<[u8; 3]>,
+    /// Instrucciones custom del usuario (estilo ChatGPT, 800c).
+    #[serde(default)]
+    pub custom_instructions: String,
+    /// Rasgos de personalidad finos 0..100
+    #[serde(default = "default_50")]
+    pub verbosity: u8,
+    #[serde(default = "default_30")]
+    pub humor: u8,
+    #[serde(default = "default_50")]
+    pub formality: u8,
+    #[serde(default = "default_60")]
+    pub empathy: u8,
+    /// Idioma preferido es/en/auto
+    #[serde(default)]
+    pub language: String,
     #[serde(default)]
     pub shape: AvatarShape,
     #[serde(default)]
@@ -874,6 +963,15 @@ fn default_pupil_size() -> u8 {
 fn default_true() -> bool {
     true
 }
+fn default_50() -> u8 {
+    50
+}
+fn default_30() -> u8 {
+    30
+}
+fn default_60() -> u8 {
+    60
+}
 
 impl Default for AvatarConfig {
     fn default() -> Self {
@@ -882,6 +980,14 @@ impl Default for AvatarConfig {
             assistant_name: default_assistant_name(),
             seed: "Estudiante".to_string(),
             accent_preset: 0,
+            accent_custom: None,
+            bg_color: None,
+            custom_instructions: String::new(),
+            verbosity: 50,
+            humor: 30,
+            formality: 50,
+            empathy: 60,
+            language: String::new(),
             shape: AvatarShape::default(),
             eye_style: AvatarEyeStyle::default(),
             mouth_style: AvatarMouthStyle::default(),
@@ -917,8 +1023,10 @@ impl AvatarConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.display_name.chars().count() > 32 {
-            return Err("El nombre no puede superar 32 caracteres".to_string());
+        if self.display_name.chars().count() > MAX_DISPLAY_NAME {
+            return Err(format!(
+                "El nombre no puede superar {MAX_DISPLAY_NAME} caracteres"
+            ));
         }
         if self.display_name.chars().any(|c| c.is_control()) {
             return Err("El nombre contiene caracteres no permitidos".to_string());
@@ -931,36 +1039,56 @@ impl AvatarConfig {
         if self.assistant_name.chars().any(|c| c.is_control()) {
             return Err("El nombre del asistente contiene caracteres no permitidos".to_string());
         }
-        if self.accent_preset > 5 {
+        if self.accent_preset > 99 && self.accent_custom.is_none() {
             return Err("Preset fuera de rango".to_string());
         }
         if self.eye_size > 100
             || self.eye_spacing > 100
             || self.pupil_size > 100
             || self.blink_speed > 100
+            || self.verbosity > 100
+            || self.humor > 100
+            || self.formality > 100
+            || self.empathy > 100
         {
             return Err("Parámetro fuera de rango 0..100".to_string());
+        }
+        if self.custom_instructions.chars().count() > 800 {
+            return Err("Instrucciones no pueden superar 800 caracteres".to_string());
+        }
+        if !self.language.is_empty() && !["es", "en", "auto"].contains(&self.language.as_str()) {
+            return Err("Idioma debe ser es, en o auto".to_string());
         }
         Ok(())
     }
     pub fn accent_palette(preset: u8) -> (&'static str, [u8; 3], &'static str) {
-        match preset % 6 {
+        match preset % 7 {
             0 => ("Sage", [107, 122, 111], "sage #6B7A6F"),
             1 => ("Stone", [120, 113, 108], "stone #78716C"),
             2 => ("Slate", [100, 116, 139], "slate #64748B"),
             3 => ("Moss", [101, 119, 90], "moss #65775A"),
             4 => ("Clay", [168, 123, 110], "clay #A87B6E"),
-            _ => ("Ink", [68, 68, 68], "ink #444444"),
+            5 => ("Ink", [68, 68, 68], "ink #444444"),
+            _ => ("Custom", [107, 122, 111], "custom"),
         }
     }
+    pub fn accent_color(&self) -> [u8; 3] {
+        if let Some(rgb) = self.accent_custom {
+            return rgb;
+        }
+        Self::accent_palette(self.accent_preset).1
+    }
+    pub fn bg_color_or_default(&self) -> Option<[u8; 3]> {
+        self.bg_color
+    }
     pub fn eye_size_factor(&self) -> f32 {
-        0.06 + (self.eye_size as f32 / 100.0) * 0.05
+        0.07 + (self.eye_size as f32 / 100.0) * 0.07
     }
     pub fn eye_spacing_factor(&self) -> f32 {
-        0.12 + (self.eye_spacing as f32 / 100.0) * 0.14
+        0.14 + (self.eye_spacing as f32 / 100.0) * 0.16
     }
     pub fn pupil_ratio(&self) -> f32 {
-        0.28 + (self.pupil_size as f32 / 100.0) * 0.27
+        0.30 + (self.pupil_size as f32 / 100.0) * 0.30
     }
 }
 
@@ -969,8 +1097,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn max_name_is_24() {
-        assert_eq!(MAX_NAME, 24);
+    fn max_name_is_48_and_display_64() {
+        assert_eq!(MAX_NAME, 48);
+        assert_eq!(MAX_DISPLAY_NAME, 64);
     }
 
     #[test]
@@ -1051,7 +1180,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(m.sanitized_name(), "Pou");
-        m.name = "a".repeat(30);
+        m.name = "a".repeat(MAX_NAME + 1);
         assert!(m.validate().is_err());
         m.name = "a".repeat(MAX_NAME);
         assert!(m.validate().is_ok());
@@ -1088,8 +1217,42 @@ mod tests {
     fn avatar_validate() {
         let mut a = AvatarConfig::default();
         assert!(a.validate().is_ok());
-        a.display_name = "a".repeat(33);
+        a.display_name = "a".repeat(MAX_DISPLAY_NAME + 1);
         assert!(a.validate().is_err());
+        a.display_name = String::new();
+        a.assistant_name = "a".repeat(MAX_NAME + 1);
+        assert!(a.validate().is_err());
+        a.assistant_name = "a".to_string();
+        a.custom_instructions = "x".repeat(801);
+        assert!(a.validate().is_err());
+        a.custom_instructions = String::new();
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn avatar_new_fields_serde_roundtrip() {
+        let a = AvatarConfig {
+            bg_color: Some([200, 100, 50]),
+            accent_custom: Some([10, 20, 30]),
+            custom_instructions: "Sé breve".to_string(),
+            verbosity: 80,
+            language: "es".to_string(),
+            shape: AvatarShape::Star,
+            eye_style: AvatarEyeStyle::Winky,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AvatarConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+    }
+
+    #[test]
+    fn personality_all_8() {
+        assert_eq!(Personality::all().len(), 8);
+        assert_eq!(AvatarShape::all().len(), 6);
+        assert_eq!(AvatarEyeStyle::all().len(), 6);
+        assert_eq!(AvatarMouthStyle::all().len(), 6);
+        assert_eq!(AvatarAccessory::all().len(), 6);
     }
 
     #[test]

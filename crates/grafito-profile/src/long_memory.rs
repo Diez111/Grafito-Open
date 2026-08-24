@@ -4,9 +4,9 @@
 use serde::{Deserialize, Serialize};
 
 const MAX_FACTS: usize = 50;
-const MAX_FACT_LEN: usize = 120;
-#[allow(dead_code)] // TODO P2: remover MAX_PREF_LEN cuando Preferences se persista con límite (reservado para UI)
+const MAX_FACT_LEN: usize = 160;
 const MAX_PREF_LEN: usize = 80;
+const MAX_CUSTOM_INSTRUCTIONS: usize = 800;
 
 /// Hecho episódico recordado (qué dijo/hizo el usuario).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,13 +41,17 @@ impl Fact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
-    pub tone: String, // chill, curioso, energético, dulce
+    pub tone: String, // chill, curioso, energético, dulce, socrático...
     #[serde(default)]
     pub detail_level: String, // breve, medio, detallado
     #[serde(default)]
-    pub language: String, // es, en
+    pub language: String, // es, en, auto
     #[serde(default)]
     pub goal: String, // examen, olimpiada, hobby
+    #[serde(default)]
+    pub custom_instructions: String, // instrucciones libres 800c
+    #[serde(default)]
+    pub verbosity: String, // compat legacy
 }
 
 #[allow(clippy::derivable_impls)]
@@ -58,7 +62,27 @@ impl Default for Preferences {
             detail_level: String::new(),
             language: String::new(),
             goal: String::new(),
+            custom_instructions: String::new(),
+            verbosity: String::new(),
         }
+    }
+}
+
+impl Preferences {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.custom_instructions.chars().count() > MAX_CUSTOM_INSTRUCTIONS {
+            return Err(format!(
+                "Instrucciones no pueden superar {MAX_CUSTOM_INSTRUCTIONS} caracteres"
+            ));
+        }
+        if self.tone.chars().count() > MAX_PREF_LEN
+            || self.detail_level.chars().count() > MAX_PREF_LEN
+            || self.language.chars().count() > MAX_PREF_LEN
+            || self.goal.chars().count() > MAX_PREF_LEN
+        {
+            return Err("Preferencia demasiado larga".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -77,6 +101,12 @@ pub struct LongTermMemory {
     pub last_summary_epoch: Option<u64>,
     #[serde(default)]
     pub summary: String, // resumen condensado de charla antigua
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[allow(clippy::derivable_impls)]
@@ -89,6 +119,7 @@ impl Default for LongTermMemory {
             first_seen_epoch: None,
             last_summary_epoch: None,
             summary: String::new(),
+            enabled: true,
         }
     }
 }
@@ -144,7 +175,15 @@ impl LongTermMemory {
 
     /// Render para prompt (acotado).
     pub fn render_for_prompt(&self) -> String {
-        if self.facts.is_empty() && self.summary.is_empty() {
+        if !self.enabled {
+            return String::new();
+        }
+        if self.facts.is_empty()
+            && self.summary.is_empty()
+            && self.preferences.tone.is_empty()
+            && self.preferences.goal.is_empty()
+            && self.preferences.custom_instructions.is_empty()
+        {
             return String::new();
         }
         let mut out = String::new();
@@ -157,8 +196,26 @@ impl LongTermMemory {
         if !self.preferences.tone.is_empty() {
             out.push_str(&format!("Preferencia tono: {}.\n", self.preferences.tone));
         }
+        if !self.preferences.detail_level.is_empty() {
+            out.push_str(&format!(
+                "Nivel detalle: {}.\n",
+                self.preferences.detail_level
+            ));
+        }
+        if !self.preferences.language.is_empty() {
+            out.push_str(&format!("Idioma: {}.\n", self.preferences.language));
+        }
         if !self.preferences.goal.is_empty() {
             out.push_str(&format!("Objetivo: {}.\n", self.preferences.goal));
+        }
+        if !self.preferences.custom_instructions.is_empty() {
+            let trimmed: String = self
+                .preferences
+                .custom_instructions
+                .chars()
+                .take(MAX_CUSTOM_INSTRUCTIONS)
+                .collect();
+            out.push_str(&format!("Instrucciones: {}.\n", trimmed));
         }
         out.push_str(&format!("Vínculo: etapa {}.\n", self.relationship_stage));
         out
@@ -192,5 +249,28 @@ mod tests {
         m.push_fact(Fact::new("odia anim automática", 0, 0.9));
         let r = m.render_for_prompt();
         assert!(r.contains("odia"));
+    }
+
+    #[test]
+    fn render_includes_new_prefs() {
+        let mut m = LongTermMemory::default();
+        m.preferences.custom_instructions = "Sé breve".to_string();
+        m.preferences.language = "es".to_string();
+        let r = m.render_for_prompt();
+        assert!(r.contains("Sé breve"));
+        assert!(r.contains("es"));
+        m.enabled = false;
+        assert!(m.render_for_prompt().is_empty());
+    }
+
+    #[test]
+    fn custom_instructions_truncated() {
+        let mut p = Preferences {
+            custom_instructions: "a".repeat(900),
+            ..Default::default()
+        };
+        assert!(p.validate().is_err());
+        p.custom_instructions = "a".repeat(800);
+        assert!(p.validate().is_ok());
     }
 }

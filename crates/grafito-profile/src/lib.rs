@@ -12,7 +12,7 @@ pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{
     AvatarAccessory, AvatarBlush, AvatarConfig, AvatarEyeStyle, AvatarMouthStyle, AvatarShape,
     DailyMission, FurnitureKind, HouseTheme, MascotConfig, MascotMood, MascotSpecies, Outfit,
-    OutfitLayer, OutfitTier, Personality, ShopItem, Wardrobe, MAX_NAME,
+    OutfitLayer, OutfitTier, Personality, ShopItem, Wardrobe, MAX_DISPLAY_NAME, MAX_NAME,
 };
 
 use serde::{Deserialize, Serialize};
@@ -283,8 +283,11 @@ impl StudentProfile {
         if trimmed.is_empty() {
             return Err("El nombre no puede estar vacío".to_string());
         }
-        if trimmed.chars().count() > 32 {
-            return Err("El nombre no puede superar 32 caracteres".to_string());
+        if trimmed.chars().count() > crate::mascot::MAX_DISPLAY_NAME {
+            return Err(format!(
+                "El nombre no puede superar {} caracteres",
+                crate::mascot::MAX_DISPLAY_NAME
+            ));
         }
         self.name = trimmed.to_string();
         self.avatar.display_name = trimmed.to_string();
@@ -328,7 +331,7 @@ impl StudentProfile {
             }
             t
         };
-        // Añadir personalidad/ánimo y memoria larga
+        // Añadir personalidad/ánimo y memoria larga + avatar rasgos finos
         if let Some(m) = self.avatar.mascot.as_ref().or(self.mascot.as_ref()) {
             base.push_str(&format!(
                 "Personalidad mascota: {}.\n",
@@ -342,6 +345,26 @@ impl StudentProfile {
                 false,
             );
             base.push_str(&format!("Ánimo actual: {}.\n", mood.label()));
+        }
+        if !self.avatar.custom_instructions.trim().is_empty() {
+            let ci: String = self.avatar.custom_instructions.chars().take(800).collect();
+            base.push_str(&format!("Instrucciones usuario: {ci}.\n"));
+        }
+        if self.avatar.verbosity != 50
+            || self.avatar.humor != 30
+            || self.avatar.formality != 50
+            || self.avatar.empathy != 60
+        {
+            base.push_str(&format!(
+                "Rasgos: verbosidad {} humor {} formalidad {} empatía {}.\n",
+                self.avatar.verbosity,
+                self.avatar.humor,
+                self.avatar.formality,
+                self.avatar.empathy
+            ));
+        }
+        if !self.avatar.language.trim().is_empty() {
+            base.push_str(&format!("Idioma preferido: {}.\n", self.avatar.language));
         }
         let long = self.long_memory.render_for_prompt();
         if !long.is_empty() {

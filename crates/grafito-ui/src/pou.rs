@@ -62,7 +62,10 @@ pub fn draw_mascot(
     bg: Color32,
     outfit: u8,
 ) {
-    let _ = bg;
+    // Fondo respetado (círculo sutil detrás si bg != transparente)
+    if bg != Color32::TRANSPARENT {
+        painter.circle_filled(rect.center(), rect.width().min(rect.height()) * 0.45, bg);
+    }
     let mood = MascotMood::from_u8(mood);
     let species = match species % 3 {
         1 => MascotSpecies::Axolotl,

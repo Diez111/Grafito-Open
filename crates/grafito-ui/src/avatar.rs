@@ -11,9 +11,10 @@ use grafito_profile::{
 
 // ── Helpers de color ───────────────────────────────────────────────────────
 fn accent_color(config: &AvatarConfig) -> Color32 {
-    let (_, rgb, _) = AvatarConfig::accent_palette(config.accent_preset);
+    let rgb = config.accent_color();
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
+#[allow(dead_code)]
 fn accent_muted(config: &AvatarConfig) -> Color32 {
     let c = accent_color(config);
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 32)
@@ -109,12 +110,35 @@ fn shape_points(center: Pos2, radius: f32, shape: AvatarShape) -> Vec<Pos2> {
                 })
                 .collect()
         }
+        AvatarShape::Blob => {
+            // orgánico blob 20 puntos con variación radial
+            let n = 20;
+            (0..n)
+                .map(|i| {
+                    let t = i as f32 / n as f32 * std::f32::consts::TAU;
+                    let r = radius * (1.0 + 0.12 * (t * 3.0).sin() + 0.06 * (t * 5.0).cos());
+                    center + vec2(t.cos() * r, t.sin() * r)
+                })
+                .collect()
+        }
+        AvatarShape::Star => {
+            let n = 10;
+            (0..n)
+                .map(|i| {
+                    let t =
+                        i as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                    let r = if i % 2 == 0 { radius } else { radius * 0.45 };
+                    center + vec2(t.cos() * r, t.sin() * r)
+                })
+                .collect()
+        }
     }
 }
 
 // ── Dibujo principal ───────────────────────────────────────────────────────
 /// Dibuja avatar completo. `hover_pos` es la posición global del puntero
 /// (si está dentro del rect, los ojos lo siguen). `time` para animación sutil.
+/// `bg` permite fondo custom; `None` usa input_bg del tema oscuro/claro.
 pub fn draw_avatar(
     painter: &Painter,
     rect: Rect,
@@ -122,19 +146,32 @@ pub fn draw_avatar(
     time: f64,
     hover_pos: Option<Pos2>,
 ) {
+    draw_avatar_with_bg(painter, rect, config, time, hover_pos, None);
+}
+
+pub fn draw_avatar_with_bg(
+    painter: &Painter,
+    rect: Rect,
+    config: &AvatarConfig,
+    time: f64,
+    hover_pos: Option<Pos2>,
+    bg_override: Option<Color32>,
+) {
     let center = rect.center();
     let radius = rect.width().min(rect.height()) * 0.42;
     let theme_accent = accent_color(config);
-    let _theme_muted = accent_muted(config);
     let theme_strong = accent_strong(config);
 
-    // Fondo shape
+    // Fondo shape — usa bg_color custom o blanco/input_bg según tema
+    let bg = if let Some(o) = bg_override {
+        o
+    } else if let Some(rgb) = config.bg_color {
+        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    } else {
+        Color32::WHITE
+    };
     let points = shape_points(center, radius, config.shape);
-    painter.add(Shape::convex_polygon(
-        points.clone(),
-        Color32::WHITE,
-        Stroke::NONE,
-    ));
+    painter.add(Shape::convex_polygon(points.clone(), bg, Stroke::NONE));
     painter.add(Shape::closed_line(points, Stroke::new(1.5, theme_accent)));
 
     // Sombra sutil — Scandinavian 0,2,8 alpha 8
@@ -285,6 +322,50 @@ pub fn draw_avatar(
                 let pupil_pos = eye_center + offset * 0.5;
                 painter.circle_filled(pupil_pos, pupil_r, theme_strong);
             }
+            AvatarEyeStyle::Winky => {
+                // un ojo guiña
+                let is_left = eye_center == left_eye;
+                if is_left {
+                    // cerrado con línea
+                    painter.line_segment(
+                        [
+                            eye_center + vec2(-eye_r * 0.9, 0.0),
+                            eye_center + vec2(eye_r * 0.9, 0.0),
+                        ],
+                        Stroke::new(1.6, theme_strong),
+                    );
+                    painter.line_segment(
+                        [
+                            eye_center + vec2(-eye_r * 0.6, -2.0),
+                            eye_center + vec2(eye_r * 0.6, -2.0),
+                        ],
+                        Stroke::new(1.0, theme_accent.gamma_multiply(0.35)),
+                    );
+                } else {
+                    painter.circle_filled(eye_center, eye_r, Color32::WHITE);
+                    painter.circle_stroke(
+                        eye_center,
+                        eye_r,
+                        Stroke::new(1.0, theme_accent.gamma_multiply(0.25)),
+                    );
+                    let pupil_pos = eye_center + offset;
+                    painter.circle_filled(pupil_pos, pupil_r, theme_strong);
+                    painter.circle_filled(
+                        pupil_pos + vec2(pupil_r * 0.35, -pupil_r * 0.35),
+                        pupil_r * 0.32,
+                        Color32::WHITE,
+                    );
+                }
+            }
+            AvatarEyeStyle::Closed => {
+                painter.line_segment(
+                    [
+                        eye_center + vec2(-eye_r * 0.9, 0.0),
+                        eye_center + vec2(eye_r * 0.9, 0.0),
+                    ],
+                    Stroke::new(1.5, theme_strong),
+                );
+            }
         }
     }
 
@@ -313,6 +394,31 @@ pub fn draw_avatar(
         }
         AvatarMouthStyle::Small => {
             painter.circle_filled(pos2(center.x, mouth_y), radius * 0.045, theme_strong);
+        }
+        AvatarMouthStyle::Open => {
+            painter.circle_filled(
+                pos2(center.x, mouth_y),
+                radius * 0.07,
+                Color32::from_rgb(60, 60, 65),
+            );
+            painter.circle_filled(
+                pos2(center.x, mouth_y + 2.0),
+                radius * 0.04,
+                Color32::from_rgb(200, 80, 80),
+            );
+        }
+        AvatarMouthStyle::Teeth => {
+            let rect =
+                Rect::from_center_size(pos2(center.x, mouth_y), vec2(radius * 0.28, radius * 0.10));
+            painter.rect_filled(rect, 4.0, Color32::WHITE);
+            painter.rect_stroke(rect, 4.0, Stroke::new(1.2, theme_strong));
+            painter.line_segment(
+                [
+                    pos2(rect.center().x, rect.min.y),
+                    pos2(rect.center().x, rect.max.y),
+                ],
+                Stroke::new(1.0, theme_strong.gamma_multiply(0.6)),
+            );
         }
     }
 
@@ -365,6 +471,36 @@ pub fn draw_avatar(
                 ));
             }
             painter.add(Shape::closed_line(pts, Stroke::new(1.8, theme_accent)));
+        }
+        AvatarAccessory::Hat => {
+            let top = pos2(center.x, center.y - radius * 1.05);
+            let base = center.y - radius * 0.65;
+            let left = center.x - radius * 0.45;
+            let right = center.x + radius * 0.45;
+            painter.add(Shape::convex_polygon(
+                vec![top, pos2(right, base), pos2(left, base)],
+                theme_accent.gamma_multiply(0.85),
+                Stroke::new(1.4, theme_strong),
+            ));
+            painter.rect_filled(
+                Rect::from_min_max(pos2(left - 6.0, base - 4.0), pos2(right + 6.0, base + 4.0)),
+                3.0,
+                theme_accent,
+            );
+        }
+        AvatarAccessory::Beard => {
+            let beard_center = pos2(center.x, mouth_y + radius * 0.08);
+            let points = vec![
+                beard_center + vec2(-radius * 0.20, -radius * 0.05),
+                beard_center + vec2(radius * 0.20, -radius * 0.05),
+                beard_center + vec2(radius * 0.12, radius * 0.18),
+                beard_center + vec2(-radius * 0.12, radius * 0.18),
+            ];
+            painter.add(Shape::convex_polygon(
+                points,
+                theme_strong.gamma_multiply(0.85),
+                Stroke::NONE,
+            ));
         }
     }
 }
