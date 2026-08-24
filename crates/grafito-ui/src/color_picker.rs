@@ -91,8 +91,9 @@ impl HsvColorPicker {
     }
 
     /// Dibujar el color picker completo — Scandinavian, quiet.
-    /// Previsualización eliminada: el cambio es vivo sobre el objeto, no necesita tarjeta Original/Nuevo.
+    /// Previsualización y opacidad eliminadas: vivo y opaco.
     pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
+        self.alpha = 1.0;
         let color_before = self.to_color();
         ui.add_space(4.0);
         // Rueda protagonista centrada
@@ -100,13 +101,11 @@ impl HsvColorPicker {
             let _ = self.show_wheel(ui, 160.0);
         });
         ui.add_space(16.0);
-        // Controles apilados, ancho completo, ritmo 10
+        // Brillo — único control, ancho completo
         let w = ui.available_width().min(280.0);
         ui.vertical_centered(|ui| {
             ui.set_max_width(w);
             let _ = self.show_value_slider(ui, w);
-            ui.add_space(10.0);
-            let _ = self.show_opacity_slider(ui, w);
         });
         ui.add_space(14.0);
         let favorites_outcome = self.show_favorites(ui, favorites);
@@ -320,7 +319,8 @@ impl HsvColorPicker {
         false
     }
 
-    /// Opacidad — quiet
+    #[allow(dead_code)]
+    /// Opacidad — quiet (no usado, eliminado a petición)
     fn show_opacity_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
             egui::RichText::new("Opacidad")
