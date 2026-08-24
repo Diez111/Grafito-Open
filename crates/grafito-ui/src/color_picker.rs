@@ -91,23 +91,22 @@ impl HsvColorPicker {
     }
 
     /// Dibujar el color picker completo — Scandinavian, quiet.
+    /// Previsualización eliminada: el cambio es vivo sobre el objeto, no necesita tarjeta Original/Nuevo.
     pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
         let color_before = self.to_color();
         ui.add_space(4.0);
-        ui.columns(2, |cols| {
-            // Rueda — protagonista visual
-            cols[0].vertical_centered(|ui| {
-                let _ = self.show_wheel(ui, 148.0);
-            });
-            // Controles — apilados con ritmo 8
-            cols[1].vertical(|ui| {
-                ui.add_space(4.0);
-                let _ = self.show_value_slider(ui, 148.0);
-                ui.add_space(10.0);
-                let _ = self.show_opacity_slider(ui, 148.0);
-                ui.add_space(10.0);
-                let _ = self.show_preview(ui, 148.0);
-            });
+        // Rueda protagonista centrada
+        ui.vertical_centered(|ui| {
+            let _ = self.show_wheel(ui, 160.0);
+        });
+        ui.add_space(16.0);
+        // Controles apilados, ancho completo, ritmo 10
+        let w = ui.available_width().min(280.0);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(w);
+            let _ = self.show_value_slider(ui, w);
+            ui.add_space(10.0);
+            let _ = self.show_opacity_slider(ui, w);
         });
         ui.add_space(14.0);
         let favorites_outcome = self.show_favorites(ui, favorites);
@@ -340,7 +339,8 @@ impl HsvColorPicker {
         response.changed()
     }
 
-    /// Preview — tarjeta dividida original / nuevo
+    #[allow(dead_code)]
+    /// Preview — tarjeta dividida original / nuevo (no usado: vivo)
     fn show_preview(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
             egui::RichText::new("Previsualización")
