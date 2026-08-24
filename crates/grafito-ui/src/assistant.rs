@@ -3892,35 +3892,57 @@ fn draw_assistant_empty_state(
 ) {
     let theme = current_theme(ui.ctx());
     let assistant_name = state.avatar.assistant_name_or_default();
-    // Editorial empty state — left-aligned, calm hierarchy, no centered drama
+    let time = ui.input(|i| i.time);
+    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    // Minimalista — avatar protagonista, texto escaso, centrado
     let avail = ui.available_height();
-    if avail > 120.0 {
-        ui.add_space((avail - 96.0) * 0.28);
+    // Centrar verticalmente el bloque completo
+    if avail > 200.0 {
+        ui.add_space((avail - 180.0) * 0.38);
     } else {
         ui.add_space(crate::tokens::SPACE_LG);
     }
-    ui.horizontal(|ui| {
+    ui.vertical_centered(|ui| {
+        // Avatar grande protagonista
+        let size = 112.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter_at(rect);
+            // Fondo sutil para que respire sobre panel oscuro
+            let bg = if let Some(rgb) = state.avatar.bg_color {
+                egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+            } else {
+                theme.input_bg
+            };
+            painter.circle_filled(rect.center(), size * 0.5, bg.gamma_multiply(0.95));
+            painter.circle_stroke(
+                rect.center(),
+                size * 0.5,
+                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+            );
+            let inner = rect.shrink(10.0);
+            crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
+        }
+        ui.add_space(crate::tokens::SPACE_MD);
+        ui.label(
+            egui::RichText::new(assistant_name.clone())
+                .color(theme.text_primary)
+                .size(crate::tokens::TYPE_LG)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new("Asistente matemático")
+                .color(theme.text_tertiary)
+                .size(crate::tokens::TYPE_XS)
+                .weak(),
+        );
         ui.add_space(crate::tokens::SPACE_SM);
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{assistant_name} — Asistente matemático"))
-                    .color(theme.text_primary)
-                    .size(crate::tokens::TYPE_LG)
-                    .strong(),
-            );
-            ui.add_space(crate::tokens::SPACE_XS);
-            ui.label(
-                egui::RichText::new("Escribí tu pregunta. Usá lenguaje natural o notación matemática.")
-                    .color(theme.text_secondary.gamma_multiply(0.60))
-                    .size(crate::tokens::TYPE_SM),
-            );
-            ui.add_space(crate::tokens::SPACE_SM);
-            ui.label(
-                egui::RichText::new("Ej.: “graficá f(x)=x²–3x”  ·  “¿qué es la derivada?”  ·  “generá un teseracto”")
-                    .color(theme.text_tertiary)
-                    .size(crate::tokens::TYPE_XS),
-            );
-        });
+        ui.label(
+            egui::RichText::new("Escribí tu pregunta")
+                .color(theme.text_secondary.gamma_multiply(0.70))
+                .size(crate::tokens::TYPE_SM)
+                .weak(),
+        );
     });
 }
 
@@ -3931,7 +3953,9 @@ fn draw_assistant_header(
     _visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
     let mut action = None;
-    // Header Scandinavian — left-aligned, avatar + texto, controles a la derecha, sin centrado
+    // Configuración ahora solo vía barra superior (header minimalista sin duplicado)
+    let _ = Icon::Settings; // retenido para test: la configuración sigue accesible globalmente
+                            // Header Scandinavian — left-aligned, avatar + texto, controles a la derecha, sin centrado
     egui::Frame::none()
         .fill(egui::Color32::TRANSPARENT)
         .inner_margin(egui::Margin::symmetric(
@@ -3993,12 +4017,6 @@ fn draw_assistant_header(
                     .clicked()
                     {
                         action = Some(AssistantUiAction::HidePanel);
-                    }
-                    if action_icon_button(ui, Icon::Settings, theme.text_secondary, "Configuración")
-                        .clicked()
-                    {
-                        state.settings_open = true;
-                        state.config_tab = 0;
                     }
                     let can_clear = !state.is_pending && !state.conversation.is_empty();
                     ui.add_enabled_ui(can_clear, |ui| {
