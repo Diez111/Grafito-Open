@@ -13,7 +13,7 @@ use grafito_whiteboard::{
     WhiteboardTool,
 };
 
-/// Sesión de pizarra activa (overlay).
+/// Sesión de pizarra activa (overlay) — con color y grosor del lápiz.
 #[derive(Clone)]
 pub struct WhiteboardSession {
     pub doc: WhiteboardDoc,
@@ -24,6 +24,9 @@ pub struct WhiteboardSession {
     pub zoom: f64,
     active_text: Option<usize>,
     marquee: Option<((f64, f64), (f64, f64))>,
+    pub pen_color: Color32,
+    pub pen_width: f32,
+    pub show_palette: bool,
 }
 
 impl Default for WhiteboardSession {
@@ -37,18 +40,35 @@ impl Default for WhiteboardSession {
             zoom: 1.0,
             active_text: None,
             marquee: None,
+            // Color claro para canvas oscuro (Scandinavian: ink sobre near-black)
+            pen_color: Color32::from_rgb(240, 241, 244),
+            pen_width: 2.0,
+            show_palette: false,
         }
     }
 }
 
 impl WhiteboardSession {
     pub fn world_from_screen(&self, screen: Pos2, rect: Rect) -> (f64, f64) {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 || !self.zoom.is_finite() || self.zoom == 0.0
+        {
+            return (0.0, 0.0);
+        }
+        if !screen.x.is_finite() || !screen.y.is_finite() {
+            return (0.0, 0.0);
+        }
         let x = (screen.x - rect.center().x - self.pan.0 as f32) / self.zoom as f32;
         let y = (screen.y - rect.center().y - self.pan.1 as f32) / self.zoom as f32;
+        if !x.is_finite() || !y.is_finite() {
+            return (0.0, 0.0);
+        }
         (x as f64, y as f64)
     }
 
     fn screen_from_world(&self, world: (f64, f64), rect: Rect) -> Pos2 {
+        if !world.0.is_finite() || !world.1.is_finite() || !rect.center().x.is_finite() {
+            return rect.center();
+        }
         pos2(
             rect.center().x + self.pan.0 as f32 + world.0 as f32 * self.zoom as f32,
             rect.center().y + self.pan.1 as f32 + world.1 as f32 * self.zoom as f32,
@@ -61,6 +81,17 @@ impl WhiteboardSession {
         self.pencil_points.clear();
         self.marquee = None;
         self.active_text = None;
+        // Palette solo para herramientas con color; la mantenemos si ya estaba abierta
+        if !matches!(
+            tool,
+            WhiteboardTool::Pencil
+                | WhiteboardTool::Rectangle
+                | WhiteboardTool::Ellipse
+                | WhiteboardTool::Arrow
+                | WhiteboardTool::Text
+        ) {
+            self.show_palette = false;
+        }
     }
 
     pub fn clear(&mut self) {
@@ -69,22 +100,40 @@ impl WhiteboardSession {
     }
 
     pub fn zoom_at(&mut self, factor: f64, screen: Pos2, rect: Rect) {
+        if !factor.is_finite() || factor <= 0.0 || !screen.x.is_finite() {
+            return;
+        }
         let before = self.world_from_screen(screen, rect);
         self.zoom = (self.zoom * factor).clamp(0.2, 6.0);
+        if !self.zoom.is_finite() {
+            self.zoom = 1.0;
+        }
         let after = self.world_from_screen(screen, rect);
+        if !before.0.is_finite() || !after.0.is_finite() {
+            return;
+        }
         // Corregido drift: pan está en píxeles, delta mundo debe escalarse por zoom
-        self.pan = (
-            self.pan.0 - (before.0 - after.0) * self.zoom,
-            self.pan.1 - (before.1 - after.1) * self.zoom,
-        );
+        let dx = (before.0 - after.0) * self.zoom;
+        let dy = (before.1 - after.1) * self.zoom;
+        if dx.is_finite() && dy.is_finite() {
+            self.pan = (self.pan.0 - dx, self.pan.1 - dy);
+        }
     }
 
     pub fn handle_pointer(&mut self, world: (f64, f64), pressed: bool, released: bool) {
+        if !world.0.is_finite() || !world.1.is_finite() {
+            return;
+        }
         if pressed {
+            // Validar herramienta antes de iniciar interacción
             self.interaction = WhiteboardInteraction::begin(world, self.tool);
             self.marquee = None;
             if self.tool == WhiteboardTool::Pencil {
                 self.pencil_points = vec![world];
+                // Capar puntos para evitar DoS
+                if self.pencil_points.len() > 4096 {
+                    self.pencil_points.truncate(4096);
+                }
             }
             if self.tool == WhiteboardTool::Select {
                 self.marquee = Some((world, world));
@@ -97,6 +146,7 @@ impl WhiteboardSession {
         self.interaction.update(world);
         if self.tool == WhiteboardTool::Pencil
             && matches!(self.interaction, WhiteboardInteraction::Creating { .. })
+            && self.pencil_points.len() < 4096
         {
             self.pencil_points.push(world);
         }
@@ -115,10 +165,16 @@ impl WhiteboardSession {
             WhiteboardTool::Pencil => {
                 let points = smooth_stroke(&self.pencil_points, 3);
                 if points.len() >= 2 {
+                    // Validar puntos finitos para evitar crashes por NaN
+                    if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+                        self.pencil_points.clear();
+                        return;
+                    }
+                    let c = self.pen_color;
                     self.doc.add(WhiteboardElement::Stroke {
                         points,
-                        color: (55, 55, 55),
-                        width: 2.0,
+                        color: (c.r(), c.g(), c.b()),
+                        width: self.pen_width.clamp(1.0, 8.0) as f64,
                     });
                 }
                 self.pencil_points.clear();
@@ -178,46 +234,70 @@ impl WhiteboardSession {
     }
 
     pub fn draw(&self, ui: &mut egui::Ui, rect: Rect) {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 || !rect.min.x.is_finite() {
+            return;
+        }
         let theme = current_theme(ui.ctx());
         let painter = ui.painter();
+        // Fondo con ligera diferencia para profesionalismo (canvas_bg ya es near-black)
         painter.rect_filled(rect, 0.0, theme.canvas_bg);
-        draw_grid(
-            painter,
-            rect,
-            self.pan,
-            self.zoom,
-            theme.separator.gamma_multiply(0.10),
-        );
-        for element in self.doc.elements() {
-            draw_element(painter, element, rect, self);
+        let grid_col = theme.separator.gamma_multiply(0.10);
+        if grid_col.a() > 0 {
+            draw_grid(painter, rect, self.pan, self.zoom, grid_col);
         }
-        // Trazo en vivo del lápiz: se dibuja mientras se arrastra (natural).
+        for element in self.doc.elements() {
+            // Proteger contra elementos con NaN
+            if let Some((min, max)) = element.bounds() {
+                if !min.0.is_finite() || !max.0.is_finite() {
+                    continue;
+                }
+            }
+            draw_element(painter, element, rect, self, theme);
+        }
+        // Trazo en vivo del lápiz: vivo, con color y grosor actuales
         if self.tool == WhiteboardTool::Pencil && !self.pencil_points.is_empty() {
-            let accent = theme.accent;
-            let stroke = Stroke::new(2.0 * self.zoom as f32, Color32::from_rgb(55, 55, 55));
+            let stroke = Stroke::new(
+                self.pen_width.clamp(1.0, 8.0) * self.zoom as f32,
+                self.pen_color,
+            );
             for pair in self.pencil_points.windows(2) {
+                if !pair[0].0.is_finite() || !pair[1].0.is_finite() {
+                    continue;
+                }
                 let a = self.screen_from_world(pair[0], rect);
                 let b = self.screen_from_world(pair[1], rect);
-                painter.line_segment([a, b], stroke);
+                if a.x.is_finite() && b.x.is_finite() {
+                    painter.line_segment([a, b], stroke);
+                }
             }
             if self.pencil_points.len() == 1 {
                 let p = self.screen_from_world(self.pencil_points[0], rect);
-                painter.circle_filled(p, 1.5 * self.zoom as f32, accent);
+                if p.x.is_finite() {
+                    painter.circle_filled(
+                        p,
+                        (self.pen_width * 0.75).clamp(1.0, 6.0) * self.zoom as f32,
+                        self.pen_color,
+                    );
+                }
             }
         }
         if let Some(preview) = self.interaction.preview() {
-            draw_element(painter, &preview, rect, self);
+            draw_element(painter, &preview, rect, self, theme);
         }
         if let Some((a, b)) = self.marquee {
-            let (pa, pb) = (
-                self.screen_from_world(a, rect),
-                self.screen_from_world(b, rect),
-            );
-            painter.rect_stroke(
-                Rect::from_two_pos(pa, pb),
-                0.0,
-                Stroke::new(1.0, theme.accent.gamma_multiply(0.6)),
-            );
+            if a.0.is_finite() && b.0.is_finite() {
+                let (pa, pb) = (
+                    self.screen_from_world(a, rect),
+                    self.screen_from_world(b, rect),
+                );
+                if pa.x.is_finite() && pb.x.is_finite() {
+                    painter.rect_stroke(
+                        Rect::from_two_pos(pa, pb),
+                        2.0,
+                        Stroke::new(1.5, theme.accent.gamma_multiply(0.6)),
+                    );
+                }
+            }
         }
     }
 
@@ -282,51 +362,80 @@ fn draw_element(
     element: &WhiteboardElement,
     rect: Rect,
     session: &WhiteboardSession,
+    theme: &grafito_ui::theme::Theme,
 ) {
-    let stroke = Stroke::new(1.8, Color32::from_rgb(70, 70, 70));
+    // Stroke para formas: usar text_primary para visibilidad en ambos temas (claro sobre oscuro, oscuro sobre claro)
+    let shape_stroke = Stroke::new(
+        1.8 * session.zoom as f32,
+        theme.text_primary.gamma_multiply(0.92),
+    );
+    let text_color = theme.text_primary;
     match element {
-        WhiteboardElement::Stroke { points, width, .. } => {
+        WhiteboardElement::Stroke {
+            points,
+            width,
+            color,
+        } => {
+            let col = Color32::from_rgb(color.0, color.1, color.2);
             for pair in points.windows(2) {
+                if !pair[0].0.is_finite() || !pair[1].0.is_finite() {
+                    continue;
+                }
                 let a = session.screen_from_world(pair[0], rect);
                 let b = session.screen_from_world(pair[1], rect);
+                if !a.x.is_finite() || !b.x.is_finite() {
+                    continue;
+                }
                 painter.line_segment(
                     [a, b],
-                    Stroke::new(
-                        (*width as f32) * session.zoom as f32,
-                        Color32::from_rgb(55, 55, 55),
-                    ),
+                    Stroke::new((*width as f32) * session.zoom as f32, col),
                 );
             }
         }
         WhiteboardElement::Rectangle { min, max, .. } => {
+            if !min.0.is_finite() || !max.0.is_finite() {
+                return;
+            }
             let a = session.screen_from_world(*min, rect);
             let b = session.screen_from_world(*max, rect);
-            painter.rect_stroke(Rect::from_two_pos(a, b), RADIUS_MD, stroke);
+            if a.x.is_finite() && b.x.is_finite() {
+                painter.rect_stroke(Rect::from_two_pos(a, b), RADIUS_MD, shape_stroke);
+            }
         }
         WhiteboardElement::Ellipse { center, rx, .. } => {
+            if !center.0.is_finite() || !rx.is_finite() {
+                return;
+            }
             let radius = (*rx as f32 * session.zoom as f32).max(2.0);
-            painter.circle_stroke(session.screen_from_world(*center, rect), radius, stroke);
+            let c = session.screen_from_world(*center, rect);
+            if c.x.is_finite() {
+                painter.circle_stroke(c, radius, shape_stroke);
+            }
         }
         WhiteboardElement::Arrow { from, to } => {
+            if !from.0.is_finite() || !to.0.is_finite() {
+                return;
+            }
             let a = session.screen_from_world(*from, rect);
             let b = session.screen_from_world(*to, rect);
-            painter.line_segment([a, b], stroke);
-            let wing = arrow_tip(*from, *to, 0.55);
-            let wing_a = session.screen_from_world(wing.0, rect);
-            let wing_b = session.screen_from_world(wing.1, rect);
-            painter.line_segment([wing_a, b], stroke);
-            painter.line_segment([wing_b, b], stroke);
+            if a.x.is_finite() && b.x.is_finite() {
+                painter.line_segment([a, b], shape_stroke);
+                let wing = arrow_tip(*from, *to, 0.55);
+                let wing_a = session.screen_from_world(wing.0, rect);
+                let wing_b = session.screen_from_world(wing.1, rect);
+                if wing_a.x.is_finite() {
+                    painter.line_segment([wing_a, b], shape_stroke);
+                    painter.line_segment([wing_b, b], shape_stroke);
+                }
+            }
         }
         WhiteboardElement::Text { at, text, size } => {
-            if !text.is_empty() {
+            if !text.is_empty() && at.0.is_finite() && size.is_finite() {
                 let font = egui::FontId::monospace((*size as f32) * session.zoom as f32);
-                painter.text(
-                    session.screen_from_world(*at, rect),
-                    egui::Align2::LEFT_TOP,
-                    text,
-                    font,
-                    Color32::from_rgb(50, 50, 50),
-                );
+                let pos = session.screen_from_world(*at, rect);
+                if pos.x.is_finite() {
+                    painter.text(pos, egui::Align2::LEFT_TOP, text, font, text_color);
+                }
             }
         }
     }
@@ -339,10 +448,16 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let mut close = false;
     let mut ask_ai = false;
     let mut toggle_assistant = false;
+    let mut toggle_palette = false;
+    // Capturar estado necesario sin prestar &app.whiteboard largo
+    let tool = app.whiteboard.tool;
+    let pen_color = app.whiteboard.pen_color;
+    let pen_width = app.whiteboard.pen_width;
+    let palette_open = app.whiteboard.show_palette;
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-        .rounding(egui::Rounding::same(RADIUS_MD))
+        .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_LG))
         .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
         .shadow(egui::epaint::Shadow {
             offset: vec2(0.0, SHADOW_WINDOW_OFFSET_Y),
@@ -351,7 +466,6 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
             color: Color32::from_black_alpha(grafito_ui::tokens::SHADOW_ALPHA),
         })
         .show(ui, |ui| {
-            let session = &app.whiteboard;
             egui::ScrollArea::horizontal()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -364,7 +478,7 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
                                 .strong(),
                         );
                         ui.separator();
-                        for (icon, tool, tip) in [
+                        for (icon, t, tip) in [
                             (Icon::Move, WhiteboardTool::Select, "Seleccionar"),
                             (Icon::Pencil, WhiteboardTool::Pencil, "Lápiz libre"),
                             (Icon::Shapes, WhiteboardTool::Rectangle, "Rectángulo"),
@@ -373,7 +487,7 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
                             (Icon::Notebook, WhiteboardTool::Text, "Texto"),
                             (Icon::Eraser, WhiteboardTool::Eraser, "Borrador"),
                         ] {
-                            let selected = session.tool == tool;
+                            let selected = tool == t;
                             if action_icon_button(
                                 ui,
                                 icon,
@@ -386,7 +500,50 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
                             )
                             .clicked()
                             {
-                                selected_tool = Some(tool);
+                                selected_tool = Some(t);
+                            }
+                        }
+                        // ——— Color y grosor (solo para herramientas con trazo) ———
+                        let supports_color = matches!(
+                            tool,
+                            WhiteboardTool::Pencil
+                                | WhiteboardTool::Rectangle
+                                | WhiteboardTool::Ellipse
+                                | WhiteboardTool::Arrow
+                                | WhiteboardTool::Text
+                        );
+                        if supports_color {
+                            ui.separator();
+                            // Swatch circular con borde que indica apertura
+                            let (swatch_rect, swatch_resp) =
+                                ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                            if ui.is_rect_visible(swatch_rect) {
+                                let painter = ui.painter();
+                                painter.circle_filled(swatch_rect.center(), 9.0, pen_color);
+                                painter.circle_stroke(
+                                    swatch_rect.center(),
+                                    9.0,
+                                    Stroke::new(
+                                        1.5,
+                                        if palette_open {
+                                            theme.accent
+                                        } else {
+                                            theme.separator.gamma_multiply(0.30)
+                                        },
+                                    ),
+                                );
+                                // Anillo interior que sugiere grosor
+                                painter.circle_stroke(
+                                    swatch_rect.center(),
+                                    (pen_width * 1.1).clamp(2.0, 7.0),
+                                    Stroke::new(1.0, Color32::from_black_alpha(25)),
+                                );
+                            }
+                            if swatch_resp
+                                .on_hover_text("Color y grosor del trazo")
+                                .clicked()
+                            {
+                                toggle_palette = true;
                             }
                         }
                         ui.separator();
@@ -427,22 +584,23 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
                     });
                 });
         });
-    if let Some(tool) = selected_tool {
-        app.whiteboard.set_tool(tool);
+    if let Some(t) = selected_tool {
+        app.whiteboard.set_tool(t);
+    }
+    if toggle_palette {
+        app.whiteboard.show_palette = !app.whiteboard.show_palette;
     }
     if clear {
         app.whiteboard.clear();
     }
     if close {
+        app.whiteboard.show_palette = false;
         app.whiteboard_open = false;
     }
     if toggle_assistant {
         app.show_whiteboard_assistant = !app.show_whiteboard_assistant;
     }
     if ask_ai {
-        // El asistente «ve» el dibujo por su descripción estructurada y lo
-        // explica con DeepSeek V4 Flash (seam listo para un modelo de visión
-        // barato como MiniMax/MiMo 2.5-VL sin tocar el flujo del usuario).
         let description = app.whiteboard.doc.describe();
         app.assistant.problem =
             format!("Entendé este dibujo de la pizarra de Grafito y explicámelo: {description}");
@@ -451,6 +609,201 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
             "Pidiendo análisis de la pizarra…",
             grafito_ui::toast::ToastKind::Info,
         );
+    }
+}
+
+fn draw_pencil_palette(ctx: &egui::Context, app: &mut crate::GrafitoApp) {
+    let theme = current_theme(ctx);
+    // Animación suave para despliegue (0..1)
+    let anim = ctx.animate_bool(
+        egui::Id::new("whiteboard_palette_anim"),
+        app.whiteboard.show_palette,
+    );
+    if anim <= 0.01 {
+        return;
+    }
+    // Deslizamiento sutil -8 → 0 y alpha
+    let y_off = egui::lerp(-8.0..=0.0, anim);
+    let alpha = anim;
+    let pen_color = app.whiteboard.pen_color;
+    let mut pen_width = app.whiteboard.pen_width;
+    // Paleta Scandinavian: 8 colores pensados para canvas oscuro y claro
+    const PALETTE: &[[u8; 3]] = &[
+        [250, 250, 249], // blanco cálido (dark canvas)
+        [212, 212, 216], // gris claro
+        [107, 122, 111], // sage
+        [100, 116, 139], // slate
+        [168, 123, 110], // clay
+        [91, 125, 177],  // blue
+        [196, 91, 91],   // red
+        [209, 183, 91],  // yellow
+    ];
+    egui::Area::new(egui::Id::new("whiteboard_palette"))
+        .anchor(
+            egui::Align2::CENTER_TOP,
+            vec2(0.0, grafito_ui::tokens::TYPE_BASE + 44.0 + y_off),
+        )
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            // Opacidad animada vía Frame alpha
+            let bg = theme.panel_bg.gamma_multiply(alpha * 0.98 + 0.02);
+            let stroke = theme.separator.gamma_multiply(0.12 * alpha);
+            egui::Frame::none()
+                .fill(bg)
+                .stroke(Stroke::new(1.0, stroke))
+                .rounding(grafito_ui::tokens::RADIUS_LG)
+                .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+                .shadow(egui::epaint::Shadow {
+                    offset: vec2(0.0, 2.0),
+                    blur: 12.0,
+                    spread: 0.0,
+                    color: Color32::from_black_alpha((18.0 * alpha) as u8),
+                })
+                .show(ui, |ui| {
+                    ui.set_min_width(260.0);
+                    // Título quiet
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Color")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_secondary)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Swatch grande del color actual
+                            let (r, resp) =
+                                ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 10.0, pen_color);
+                            ui.painter().circle_stroke(
+                                r.center(),
+                                10.0,
+                                Stroke::new(1.0, theme.separator.gamma_multiply(0.25 * alpha)),
+                            );
+                            resp.on_hover_text(format!(
+                                "Actual #{:02X}{:02X}{:02X}",
+                                pen_color.r(),
+                                pen_color.g(),
+                                pen_color.b()
+                            ));
+                        });
+                    });
+                    ui.add_space(SPACE_XS);
+                    // Grid de colores 4x2
+                    let mut picked: Option<Color32> = None;
+                    egui::Grid::new("whiteboard_palette_grid")
+                        .num_columns(4)
+                        .spacing(vec2(8.0, 8.0))
+                        .show(ui, |ui| {
+                            for (idx, rgb) in PALETTE.iter().enumerate() {
+                                let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                                let is_sel = pen_color == col;
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+                                if ui.is_rect_visible(rect) {
+                                    let p = ui.painter();
+                                    p.circle_filled(rect.center(), 13.0, col);
+                                    p.circle_stroke(
+                                        rect.center(),
+                                        13.0,
+                                        Stroke::new(
+                                            if is_sel { 2.0 } else { 1.0 },
+                                            if is_sel {
+                                                theme.accent
+                                            } else {
+                                                theme.separator.gamma_multiply(0.25 * alpha)
+                                            },
+                                        ),
+                                    );
+                                    if is_sel {
+                                        // Check sutil
+                                        p.circle_filled(rect.center(), 3.0, theme.accent);
+                                    }
+                                }
+                                if resp
+                                    .on_hover_text(format!(
+                                        "#{:02X}{:02X}{:02X}",
+                                        rgb[0], rgb[1], rgb[2]
+                                    ))
+                                    .clicked()
+                                {
+                                    picked = Some(col);
+                                }
+                                if idx % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    if let Some(col) = picked {
+                        app.whiteboard.pen_color = col;
+                    }
+                    ui.add_space(SPACE_SM);
+                    // Grosor — label + slider quiet
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Grosor")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(theme.text_secondary),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let txt = format!("{:.1}", pen_width);
+                            egui::Frame::none()
+                                .fill(theme.input_bg.gamma_multiply(alpha))
+                                .rounding(grafito_ui::tokens::RADIUS_PILL)
+                                .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(txt)
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .strong()
+                                            .color(theme.text_primary.gamma_multiply(alpha)),
+                                    );
+                                });
+                            // Slider sin valor numérico extra
+                            let resp = ui.add(
+                                egui::Slider::new(&mut pen_width, 1.0..=6.0)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            );
+                            if resp.changed() {
+                                app.whiteboard.pen_width = pen_width.clamp(1.0, 6.0);
+                            }
+                        });
+                    });
+                    // Hint sutil
+                    ui.add_space(SPACE_XS);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(
+                                "Toca un color para aplicar — se guarda al instante",
+                            )
+                            .size(10.0)
+                            .color(theme.text_tertiary.gamma_multiply(0.85 * alpha))
+                            .weak()
+                            .italics(),
+                        );
+                    });
+                });
+            // Sincronizar grosor si cambió via slider
+            app.whiteboard.pen_width = pen_width;
+        });
+    // Clic fuera para cerrar — si palette abierta y click en canvas fuera de palette, cerrar
+    if app.whiteboard.show_palette
+        && ctx.input(|i| i.pointer.any_pressed())
+        && ctx.input(|i| {
+            if let Some(pos) = i.pointer.interact_pos() {
+                // Si no está sobre la palette (aprox 280x160 centrada arriba), cerrar
+                let palette_rect = egui::Rect::from_center_size(
+                    pos2(ctx.screen_rect().center().x, 56.0),
+                    vec2(280.0, 160.0),
+                );
+                !palette_rect.contains(pos)
+            } else {
+                false
+            }
+        })
+    {
+        // No cerrar si el click fue sobre la toolbar misma (swatch)
+        // Para simplicidad, no auto-cerrar en este MVP — requiere hit-test preciso
     }
 }
 
@@ -493,8 +846,14 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             app.whiteboard.handle_canvas_input(rect, ui);
             app.whiteboard.draw(ui, rect);
         });
+    // Palette elegante con animación (vive por encima del canvas)
+    draw_pencil_palette(ctx, app);
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-        app.whiteboard_open = false;
+        if app.whiteboard.show_palette {
+            app.whiteboard.show_palette = false;
+        } else {
+            app.whiteboard_open = false;
+        }
     }
     let mut typed = Vec::new();
     let mut backspace = false;

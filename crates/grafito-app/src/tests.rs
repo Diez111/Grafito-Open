@@ -2090,12 +2090,13 @@ fn color_picker_keeps_staged_changes_transient_until_an_explicit_apply() {
     assert!(!picker.contains("save_snapshot_if_semantically_changed"));
     assert!(!picker.contains("get_object_mut"));
     assert!(picker.contains("ColorPickerDialogAction::Apply"));
-    assert!(picker.contains("ColorPickerDialogAction::Cancel"));
     assert!(picker.contains("ColorPickerDialogAction::Dismiss"));
     assert!(picker.contains("apply_color_picker_dialog_action"));
     assert!(picker.contains("outcome.any_changed()"));
+    // Live mode: color_changed aplica al instante, sin botón Aplicar/Cancelar separado
+    assert!(picker.contains("outcome.color_changed"));
+    assert!(picker.contains("Los cambios se aplican al instante"));
     assert!(!picker.contains("outcome.object_color_changed"));
-    assert!(!picker.contains("outcome.color_changed"));
 }
 
 #[test]
