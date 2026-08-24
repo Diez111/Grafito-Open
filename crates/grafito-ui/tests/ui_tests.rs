@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Tests de integración para los módulos públicos de `grafito-ui`.
 //!
 //! Cubren la paleta de comandos (búsqueda/filtrado), el sistema de temas

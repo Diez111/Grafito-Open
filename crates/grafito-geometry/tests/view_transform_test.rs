@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el ViewTransform está correctamente implementado
 //! (mismas pruebas que las de grafito-geometry/src/types.rs).
 

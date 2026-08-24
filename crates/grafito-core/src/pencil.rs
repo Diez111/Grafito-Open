@@ -96,7 +96,9 @@ impl PencilObj {
     /// Añade un punto al final del trazo. Usado durante el arrastre.
     pub fn push(&mut self, p: Point2) {
         while self.points.len() >= MAX_PENCIL_POINTS {
-            let last = *self.points.last().expect("non-empty full Pencil stroke");
+            let Some(last) = self.points.last().copied() else {
+                break;
+            };
             let mut decimated: Vec<_> = self.points.iter().step_by(2).copied().collect();
             if decimated.last() != Some(&last) {
                 decimated.push(last);

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{
     deserialize_document, serialize_document, AnimationMode, CasWorksheetStatus, CircleObj,
     DataTableObj, Document, FitMetadata, Fractal2DObj, FunctionObj, GeoObject, PencilObj, PointObj,

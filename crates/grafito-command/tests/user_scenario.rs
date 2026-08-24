@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Reproduce los escenarios exactos del usuario.
 
 use grafito_command::commands::process_input;

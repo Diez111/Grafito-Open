@@ -84,10 +84,9 @@ pub fn normalize_scientific_notation(expression: &str) -> Result<String, String>
             normalized.push_str(&decimal_literal(value));
             index = end;
         } else {
-            let character = expression[index..]
-                .chars()
-                .next()
-                .expect("index remains within a valid UTF-8 expression");
+            let Some(character) = expression[index..].chars().next() else {
+                break;
+            };
             normalized.push(character);
             index += character.len_utf8();
         }

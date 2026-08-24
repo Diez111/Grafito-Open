@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test del scanline fill para `x^2 + y^2 < 1` con view grande.
 
 use grafito_geometry::ast::Expr;

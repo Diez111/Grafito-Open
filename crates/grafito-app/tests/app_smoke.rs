@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 #[test]
 fn test_app_help_cli() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_grafito"))

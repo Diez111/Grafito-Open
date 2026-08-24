@@ -71,6 +71,12 @@ pub fn serialize_document(document: &Document) -> Result<String, DocumentPersist
 
 /// Deserializes either the current envelope or a legacy raw `Document` JSON.
 pub fn deserialize_document(json: &str) -> Result<Document, DocumentPersistenceError> {
+    let json = json.strip_prefix('\u{FEFF}').unwrap_or(json);
+    if json.contains('\0') {
+        return Err(DocumentPersistenceError::InvalidJson(
+            "document JSON must not contain NUL".to_string(),
+        ));
+    }
     // Validate untrusted text before any model deserialization.
     let value = parse_document_json(json).map_err(DocumentPersistenceError::InvalidJson)?;
 
@@ -135,14 +141,33 @@ pub fn write_document_atomic(
 /// Reads and validates a document file in either supported on-disk format.
 pub fn read_document_file(path: impl AsRef<Path>) -> Result<Document, DocumentPersistenceError> {
     let path = path.as_ref();
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(DocumentPersistenceError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "document source must be a regular file",
-        )));
-    }
-    let file = File::open(path)?;
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(DocumentPersistenceError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "document source must be a regular file",
+            )));
+        }
+        file
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(DocumentPersistenceError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "document source must be a regular file",
+            )));
+        }
+        File::open(path)?
+    };
     let mut bytes = Vec::new();
     file.take(MAX_DOCUMENT_SIZE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
@@ -152,9 +177,15 @@ pub fn read_document_file(path: impl AsRef<Path>) -> Result<Document, DocumentPe
             MAX_DOCUMENT_SIZE_BYTES
         )));
     }
-    let json = String::from_utf8(bytes)
+    let json_raw = String::from_utf8(bytes)
         .map_err(|error| DocumentPersistenceError::InvalidJson(error.to_string()))?;
-    deserialize_document(&json)
+    let json = json_raw.strip_prefix('\u{FEFF}').unwrap_or(&json_raw);
+    if json.contains('\0') {
+        return Err(DocumentPersistenceError::InvalidJson(
+            "document JSON must not contain NUL".to_string(),
+        ));
+    }
+    deserialize_document(json)
 }
 
 /// The raw Document format predates envelopes. Saves from before constraint
@@ -225,7 +256,11 @@ fn swap_y_z_variables(expression: &str) -> String {
                 .peek()
                 .is_some_and(|next| next.is_alphanumeric() || *next == '_')
             {
-                identifier.push(characters.next().expect("peeked identifier character"));
+                if let Some(ch) = characters.next() {
+                    identifier.push(ch);
+                } else {
+                    break;
+                }
             }
             push_swapped(&mut output, &identifier);
         } else {
@@ -240,6 +275,21 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Validate parent is a real directory, not a symlink — TOCTOU mitigation.
+        let parent_fd = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)?;
+        if !parent_fd.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "parent must be a directory",
+            ));
+        }
+    }
     let file_name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -270,7 +320,14 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         return Err(error);
     }
     #[cfg(unix)]
-    File::open(parent)?.sync_all()?;
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)?
+            .sync_all()?;
+    }
     Ok(())
 }
 
@@ -280,8 +337,24 @@ fn apply_destination_permissions(temporary_file: &File, destination: &Path) -> i
 
     // Keep temporary content private while it is being written, then retain the
     // destination's visible permission bits only at the atomic replacement point.
+    // Use symlink_metadata to avoid following a symlink, and verify regular files
+    // via O_NOFOLLOW to mitigate TOCTOU races.
     let mode = match fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_file() => metadata.permissions().mode() & 0o777,
+        Ok(metadata) if metadata.file_type().is_symlink() => 0o600,
+        Ok(metadata) if metadata.file_type().is_file() => {
+            use std::os::unix::fs::OpenOptionsExt;
+            match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(destination)
+            {
+                Ok(file) if file.metadata()?.is_file() => metadata.permissions().mode() & 0o777,
+                Ok(_) => 0o600,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => 0o600,
+                Err(error) if error.raw_os_error() == Some(libc::ELOOP) => 0o600,
+                Err(error) => return Err(error),
+            }
+        }
         Ok(_) => 0o600,
         Err(error) if error.kind() == io::ErrorKind::NotFound => 0o600,
         Err(error) => return Err(error),
@@ -786,8 +859,13 @@ mod tests {
 
     #[test]
     fn persistence_accepts_polygon_at_vertex_limit() {
+        // Generate a near-circular polygon to avoid degenerate colinear rejection.
         let vertices = (0..crate::validation::MAX_POLYGON_VERTICES)
-            .map(|x| Point2::new(x as f64, 0.0))
+            .map(|i| {
+                let angle = 2.0 * std::f64::consts::PI * i as f64
+                    / crate::validation::MAX_POLYGON_VERTICES as f64;
+                Point2::new(angle.cos() * 100.0, angle.sin() * 100.0)
+            })
             .collect();
         let mut document = Document::new();
         document.add_object(GeoObject::Polygon(PolygonObj::new(vertices)));

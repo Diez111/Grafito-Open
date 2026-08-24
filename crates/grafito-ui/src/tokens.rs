@@ -24,6 +24,8 @@ pub const FONT_FALLBACK_SANS: &str = "Inter";
 // Type scale — Scandinavian (Inter 12 / 15 / 19)
 // ═══════════════════════════════════════════════════════════
 
+/// Texto doble-extra-pequeño: micro hints, eye-tracking status.
+pub const TYPE_2XS: f32 = 9.0;
 /// Texto extra-pequeño: notas, metadatos, hints.
 pub const TYPE_XS: f32 = 11.0;
 /// Texto pequeño: labels secundarios, captions — Inter 12.
@@ -127,6 +129,7 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn type_scale_is_monotonic() {
+        assert!(TYPE_2XS < TYPE_XS);
         assert!(TYPE_XS < TYPE_SM);
         assert!(TYPE_SM < TYPE_BASE);
         assert!(TYPE_BASE < TYPE_MD);

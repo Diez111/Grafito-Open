@@ -43,7 +43,17 @@ cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release -p grafito-app --lo
 
 # Variables
 PKG_NAME="grafito"
-CARGO_VERSION="$(grep -E '^version\s*=\s*"' "$ROOT_DIR/Cargo.toml" | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"
+# Robust version extraction: prefer cargo metadata (locked, exact), fallback to grep
+if command -v jq >/dev/null 2>&1; then
+    CARGO_VERSION="$(cargo metadata --locked --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[] | select(.name=="grafito-app") | .version' | head -1)"
+elif command -v python3 >/dev/null 2>&1; then
+    CARGO_VERSION="$(python3 -c "import json, subprocess; data=json.loads(subprocess.check_output(['cargo','metadata','--locked','--format-version','1','--no-deps'], text=True)); print(next((p['version'] for p in data['packages'] if p['name']=='grafito-app'), ''))" 2>/dev/null || true)"
+else
+    CARGO_VERSION=""
+fi
+if [[ -z "${CARGO_VERSION:-}" ]]; then
+    CARGO_VERSION="$(grep -E '^version\s*=\s*"' "$ROOT_DIR/Cargo.toml" | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"
+fi
 [[ -n "$CARGO_VERSION" ]] || { echo "ERROR: could not read the workspace version." >&2; exit 1; }
 PKG_VERSION="$(debian_version_from_cargo "$CARGO_VERSION")"
 dpkg --validate-version "$PKG_VERSION"

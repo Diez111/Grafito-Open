@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! Perfil pedagógico del usuario (ADR-0001): memoria de aprendizaje que el
 //! tutor-orquestador «Mora» usa para adaptar el plan, ir ramificando y medir
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
@@ -15,11 +16,19 @@ pub use mascot::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Límites explícitos para que la memoria nunca crezca sin cota.
 const MAX_BRANCHES: usize = 128;
 const MAX_HISTORY_EVENTS: usize = 2_000;
 const MAX_MEMORY_CHARS: usize = 2_400;
+
+/// Tasa EMA para actualizar dominio en aciertos: mastery += EMA_ALPHA * (1 - mastery).
+const EMA_ALPHA: f64 = 0.15;
+/// Umbral de dominio para cubrir rama.
+const MASTER_THRESHOLD: f64 = 0.8;
+/// Retención EMA en fallos: mastery *= EMA_RETENTION (0.95).
+const EMA_RETENTION: f64 = 0.95;
 
 /// Estado de una rama de estudio (ej. Álgebra, Cálculo, Geometría 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,8 +41,9 @@ pub struct BranchState {
     pub last_study_epoch: Option<u64>,
     /// Histórico (epoch, dominio) por rama, acotado a 64 muestras, para
     /// graficar la evolución. `#[serde(default)]` permite leer perfiles viejos.
+    /// VecDeque para rotación O(1) con `pop_front` (LRU 64).
     #[serde(default)]
-    pub domain_history: Vec<(u64, f32)>,
+    pub domain_history: VecDeque<(u64, f32)>,
 }
 
 /// Tipo de evento de aprendizaje registrado.
@@ -135,16 +145,17 @@ impl StudentProfile {
         if self.mascot.is_none() {
             self.mascot = self.avatar.mascot.clone();
         }
-        self.avatar.mascot.as_mut().unwrap()
+        self.avatar.mascot.get_or_insert_with(MascotConfig::default)
     }
 
-    /// Asegura que la rama exista; devuelve su índice (MAX si hay límite).
-    pub fn ensure_branch(&mut self, id: &str, name: &str) -> usize {
+    /// Asegura que la rama exista; devuelve su índice o `None` si se alcanzó el límite.
+    /// Fail-closed: los llamantes deben manejar `None` en lugar de usar sentinel `usize::MAX`.
+    pub fn ensure_branch(&mut self, id: &str, name: &str) -> Option<usize> {
         if let Some(index) = self.branches.iter().position(|b| b.id == id) {
-            return index;
+            return Some(index);
         }
         if self.branches.len() >= MAX_BRANCHES {
-            return usize::MAX;
+            return None;
         }
         self.branches.push(BranchState {
             id: id.to_string(),
@@ -152,36 +163,42 @@ impl StudentProfile {
             covered: false,
             mastery: 0.0,
             last_study_epoch: None,
-            domain_history: Vec::new(),
+            domain_history: VecDeque::new(),
         });
-        self.branches.len() - 1
+        Some(self.branches.len() - 1)
+    }
+
+    /// Compatibilidad: variante sentinel legada que retorna `usize::MAX` si no hay espacio.
+    /// Preferir `ensure_branch` que retorna `Option`.
+    #[deprecated(note = "Usar ensure_branch que retorna Option<usize>")]
+    pub fn ensure_branch_legacy(&mut self, id: &str, name: &str) -> usize {
+        self.ensure_branch(id, name).unwrap_or(usize::MAX)
     }
 
     /// Registra una respuesta y actualiza dominio (EMA) y progreso.
     pub fn record_outcome(&mut self, branch_id: &str, name: &str, epoch: u64, correct: bool) {
-        let index = self.ensure_branch(branch_id, name);
-        if index == usize::MAX {
+        let Some(index) = self.ensure_branch(branch_id, name) else {
             return;
-        }
+        };
         let branch = &mut self.branches[index];
         if correct {
-            branch.mastery += 0.15 * (1.0 - branch.mastery);
+            branch.mastery += (EMA_ALPHA as f32) * (1.0 - branch.mastery);
             self.xp = self.xp.saturating_add(10);
             self.streak = self.streak.saturating_add(1);
             self.best_streak = self.best_streak.max(self.streak);
-            if branch.mastery >= 0.8 && !branch.covered {
+            if branch.mastery >= (MASTER_THRESHOLD as f32) && !branch.covered {
                 branch.covered = true;
                 self.xp = self.xp.saturating_add(40);
             }
         } else {
-            branch.mastery *= 0.95;
+            branch.mastery *= EMA_RETENTION as f32;
             self.streak = 0;
         }
         branch.last_study_epoch = Some(epoch);
-        // Evolución de dominio acotada (64 muestras por rama).
-        branch.domain_history.push((epoch, branch.mastery));
+        // Evolución de dominio acotada (64 muestras por rama) — VecDeque LRU.
+        branch.domain_history.push_back((epoch, branch.mastery));
         if branch.domain_history.len() > 64 {
-            branch.domain_history.remove(0);
+            branch.domain_history.pop_front();
         }
         self.push_event(StudyEvent {
             epoch,
@@ -207,13 +224,15 @@ impl StudentProfile {
 
     pub fn record_exam(&mut self, result: ExamResult) {
         let index = self.ensure_branch(&result.branch_id, &result.branch_id);
-        if index != usize::MAX && result.passed {
-            let branch = &mut self.branches[index];
-            branch.mastery = branch
-                .mastery
-                .max(result.score as f32 / result.total.max(1) as f32);
-            branch.covered = true;
-            self.xp = self.xp.saturating_add(60);
+        if let Some(idx) = index {
+            if result.passed {
+                let branch = &mut self.branches[idx];
+                branch.mastery = branch
+                    .mastery
+                    .max(result.score as f32 / result.total.max(1) as f32);
+                branch.covered = true;
+                self.xp = self.xp.saturating_add(60);
+            }
         }
         self.push_event(StudyEvent {
             epoch: result.epoch,
@@ -457,12 +476,12 @@ mod tests {
         assert!(branch.domain_history.len() >= 2);
         let last = branch
             .domain_history
-            .last()
+            .back()
             .map(|entry| entry.1)
             .unwrap_or(0.0);
         let first = branch
             .domain_history
-            .first()
+            .front()
             .map(|entry| entry.1)
             .unwrap_or(1.0);
         assert!(last >= first, "el dominio sube con los aciertos");

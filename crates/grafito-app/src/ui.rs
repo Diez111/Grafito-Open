@@ -15,6 +15,7 @@ use grafito_ui::tokens::{
     SPACING_MINIMAL_Y,
 };
 use grafito_ui::Tool;
+use std::collections::VecDeque;
 
 pub(crate) struct CommandInputResponse {
     pub submitted: bool,
@@ -1086,8 +1087,8 @@ pub(crate) fn apply_color_picker_object_color_change(
     document: &mut grafito_core::Document,
     object_id: grafito_core::ObjectId,
     color: grafito_geometry::Color,
-    undo_stack: &mut Vec<grafito_core::Document>,
-    redo_stack: &mut Vec<grafito_core::ChangeSet>,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
 ) -> Result<bool, String> {
     let Some(object) = document.get_object(object_id) else {
         return Ok(false);
@@ -1110,8 +1111,8 @@ pub(crate) fn apply_color_picker_regular_polychoron_fill_color_change(
     document: &mut grafito_core::Document,
     object_id: grafito_core::ObjectId,
     color: grafito_geometry::Color,
-    undo_stack: &mut Vec<grafito_core::Document>,
-    redo_stack: &mut Vec<grafito_core::ChangeSet>,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
 ) -> Result<bool, String> {
     let Some(grafito_core::GeoObject::RegularPolychoron4D(polychoron)) =
         document.get_object(object_id)
@@ -1166,8 +1167,8 @@ pub(crate) fn apply_color_picker_dialog_action(
     target: ColorPickerTarget,
     object_id: grafito_core::ObjectId,
     color: grafito_geometry::Color,
-    undo_stack: &mut Vec<grafito_core::Document>,
-    redo_stack: &mut Vec<grafito_core::ChangeSet>,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
 ) -> Result<bool, String> {
     match action {
         ColorPickerDialogAction::Apply => match target {
@@ -1303,7 +1304,7 @@ pub(crate) fn similarity_score(query: &str, candidate: &str) -> f64 {
     }
 
     if c.contains(&q) {
-        return 1.2 - (c.find(&q).unwrap() as f64 * 0.05); // Contiene el query
+        return 1.2 - (c.find(&q).unwrap_or(0) as f64 * 0.05); // Contiene el query
     }
 
     // Distancia de Levenshtein para tolerancia a erratas

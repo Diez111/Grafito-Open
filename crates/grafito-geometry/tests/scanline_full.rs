@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Reproduce EXACTAMENTE el algoritmo del scanline fill del render
 //! (incluyendo linear refinement) y verifica que produce los segmentos
 //! correctos.

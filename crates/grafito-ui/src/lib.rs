@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Grafito UI — Componentes y paneles de interfaz construidos con egui.
 //!
 //! Provee la toolbar, la paleta de comandos, el panel de álgebra, el selector

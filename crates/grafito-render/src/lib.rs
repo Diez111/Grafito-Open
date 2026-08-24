@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Grafito Render — Renderizador 2D/3D acelerado por GPU con wgpu.
 //!
 //! Este crate convierte un [`Document`] en geometría
@@ -17,7 +19,6 @@
 #![allow(
     clippy::too_many_arguments,
     clippy::needless_range_loop,
-    dead_code,
     clippy::manual_clamp
 )]
 
@@ -323,6 +324,7 @@ pub use depth_3d::{Vertex3D, WorldMesh};
 /// Per-canvas render targets owned by the 3D callback. The texture is sampled
 /// during callback paint because egui-wgpu does not expose a depth attachment
 /// for its active render pass.
+#[allow(dead_code)] // TODO P2: color_texture/depth_texture kept alive for GPU lifetime, reads via views
 pub struct DepthRenderTarget {
     color_texture: wgpu::Texture,
     pub color_view: wgpu::TextureView,
@@ -636,12 +638,15 @@ pub struct Renderer {
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
     pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
     pub vector_compute: Option<crate::vector_compute::VectorComputePipeline>,
+    #[allow(dead_code)]
+    // TODO: remover dead_code tras activar fill_compute (actualmente siempre None para ahorrar 128 MiB)
     pub fill_compute: Option<crate::fill_compute::FillComputePipeline>,
     pub complex_compute: Option<crate::complex_compute::ComplexComputePipeline>,
     pub domain_coloring_compute:
         Option<crate::domain_coloring_compute::DomainColoringComputePipeline>,
 }
 
+#[allow(dead_code)] // TODO P2: hsv_to_rgb reservado para paleta alternativa (usado en tests de color)
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color {
     let c = v * s;
     let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());

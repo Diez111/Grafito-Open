@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::commands::{
     execute_cas_command, expand_all_cas, process_input, CasCmd, CommandOutcome,
 };

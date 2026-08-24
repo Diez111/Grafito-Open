@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el cache maneja expresiones vacías o malformed.
 
 use grafito_core::{ImplicitCurveObj, RelationOperator};

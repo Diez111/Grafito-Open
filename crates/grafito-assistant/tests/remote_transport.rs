@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use base64::Engine;
 use grafito_assistant::{
     build_anthropic_messages_payload, build_chat_completion_payload, build_fusion_audit_payload,

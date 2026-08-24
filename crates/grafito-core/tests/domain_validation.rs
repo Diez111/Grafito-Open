@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{
     deserialize_document, serialize_document, CircleObj, ComplexGridObj, Cube3DObj, Document,
     EllipseObj, GeoObject, LineObj, ParametricCurve2DObj, ParametricCurve3DObj, PointObj,

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! **Test de regresión crítico**: el cache de segments_or_compute debe
 //! invalidarse cuando cambia la expresión, no solo cuando cambian los
 //! view bounds.

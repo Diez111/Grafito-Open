@@ -1,4 +1,5 @@
 use glam::Vec3;
+use std::collections::VecDeque;
 
 const _: [(); 0] = [(); crate::app::DEFAULT_KEYBOARD_VISIBLE as usize];
 const _: [(); 0] = [(); crate::app::DEFAULT_CONSTRUCTION_PROTOCOL_VISIBLE as usize];
@@ -642,8 +643,8 @@ fn four_d_tools_create_select_typed_centered_defaults_and_reset_to_select() {
     for tool in [Tool::Tesseract4D, Tool::Hypercube5D] {
         let mut document = grafito_core::Document::new();
         let mut selected = None;
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
         let mut current_tool = tool;
 
         let (id, action) = crate::render_3d::create_centered_four_d_tool_object(
@@ -693,11 +694,11 @@ fn rejected_four_d_tool_insertion_preserves_the_document_history_and_tool_state(
         .expect("capacity fixture contains objects");
     let before = serde_json::to_value(&document).expect("serialize full document");
     let mut selected_object = Some(selected);
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
     let mut current_tool = Tool::Tesseract4D;
 
     let error = crate::render_3d::create_centered_four_d_tool_object(
@@ -846,8 +847,8 @@ fn zero_radius_circle_tool_is_rejected_without_history_or_document_mutation() {
     assert_eq!(second.objects.len(), 1);
 
     let before = serde_json::to_value(&document).expect("serialize document before rejection");
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = Vec::new();
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::new();
     let error = crate::app::commit_object_insertions(
         &mut document,
         &mut undo_stack,
@@ -1042,11 +1043,11 @@ fn at_capacity_single_tool_insertion_returns_error_without_clearing_history() {
 
     let mut document = document_at_object_capacity();
     let before = serde_json::to_value(&document).expect("serialize full document");
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     let error = crate::app::commit_object_insertions(
         &mut document,
@@ -1077,11 +1078,11 @@ fn eraser_stroke_saves_exactly_one_snapshot_and_noop_keeps_redo() {
     let mut document = grafito_core::Document::new();
     let first = document.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
     let second = document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 0.0))));
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: document.clone(),
         after: document.clone(),
-    }];
+    }]);
     let mut stroke_has_mutated = false;
 
     assert!(crate::app::erase_object_for_stroke(
@@ -1104,11 +1105,11 @@ fn eraser_stroke_saves_exactly_one_snapshot_and_noop_keeps_redo() {
     assert!(redo_stack.is_empty());
 
     let mut noop_document = grafito_core::Document::new();
-    let mut noop_undo_stack = Vec::new();
-    let mut noop_redo_stack = vec![grafito_core::ChangeSet {
+    let mut noop_undo_stack = VecDeque::new();
+    let mut noop_redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: noop_document.clone(),
         after: noop_document.clone(),
-    }];
+    }]);
     let mut noop_stroke_has_mutated = false;
     assert!(!crate::app::erase_object_for_stroke(
         &mut noop_document,
@@ -1131,11 +1132,11 @@ fn failed_conic_tool_commit_preserves_document_and_history() {
         .collect();
     let before = serde_json::to_value(&document).expect("document should serialize");
     let version_before = document.version;
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: document.clone(),
         after: document.clone(),
-    }];
+    }]);
 
     let error = crate::app::commit_conic_by_five_points(
         &mut document,
@@ -1169,11 +1170,11 @@ fn interactive_conic_tools_commit_outputs_and_history_only_after_propagation() {
         Point2::new(4.0, -3.0),
     )));
     let object_count_before = document.object_count();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: document.clone(),
         after: document.clone(),
-    }];
+    }]);
 
     crate::app::commit_ellipse_by_foci(
         &mut document,
@@ -1237,11 +1238,11 @@ fn failed_interactive_conic_tools_preserve_document_and_history() {
         .expect("conflicting distance constraint should stage for regression");
     let before = serde_json::to_value(&document).expect("document should serialize");
     let version_before = document.version;
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: document.clone(),
         after: document.clone(),
-    }];
+    }]);
 
     for error in [
         crate::app::commit_ellipse_by_foci(
@@ -1577,11 +1578,11 @@ fn invalid_command_submission_does_not_request_an_undo_snapshot() {
     let mut after = before.clone();
     let mut input = "FooBar[]".to_string();
     let outcome = crate::commands::process_input(&mut after, &mut input);
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: before.clone(),
         after: before.clone(),
-    }];
+    }]);
 
     assert!(matches!(
         outcome,
@@ -1604,11 +1605,11 @@ fn informational_command_submission_does_not_request_an_undo_snapshot() {
     let mut after = before.clone();
     let mut input = "Simplify[x + 0]".to_string();
     let outcome = crate::commands::process_input(&mut after, &mut input);
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: before.clone(),
         after: before.clone(),
-    }];
+    }]);
 
     assert!(matches!(
         outcome,
@@ -1631,13 +1632,13 @@ fn ordinary_message_submission_records_history_shows_info_and_stays_out_of_undo(
     let mut after = before.clone();
     let mut input = "Simplify[x + 0]".to_string();
     let outcome = crate::commands::process_input(&mut after, &mut input);
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: before.clone(),
         after: before.clone(),
-    }];
+    }]);
     let mut cas_result = String::new();
-    let mut cas_history = Vec::new();
+    let mut cas_history = VecDeque::new();
     let mut toasts = grafito_ui::toast::ToastManager::default();
 
     crate::app::save_command_snapshot_if_mutated(
@@ -1673,7 +1674,7 @@ fn ordinary_message_submission_records_history_shows_info_and_stays_out_of_undo(
 #[test]
 fn no_op_command_outcome_stays_quiet() {
     let mut cas_result = String::new();
-    let mut cas_history = Vec::new();
+    let mut cas_history = VecDeque::new();
     let mut toasts = grafito_ui::toast::ToastManager::default();
 
     crate::app::apply_command_outcome(
@@ -1696,7 +1697,7 @@ fn no_op_command_outcome_stays_quiet() {
 #[test]
 fn error_command_outcome_keeps_persistent_feedback_and_history() {
     let mut cas_result = String::new();
-    let mut cas_history = Vec::new();
+    let mut cas_history = VecDeque::new();
     let mut toasts = grafito_ui::toast::ToastManager::default();
 
     crate::app::apply_command_outcome(
@@ -1729,11 +1730,11 @@ fn persisted_cas_error_cells_request_undo_even_when_the_command_failed() {
             grafito_core::CasWorksheetStatus::Error,
         )
         .expect("fixture worksheet cell is valid");
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: before.clone(),
         after: before.clone(),
-    }];
+    }]);
 
     crate::app::save_cas_worksheet_snapshot_if_mutated(
         before,
@@ -1983,11 +1984,11 @@ fn deferred_panel_snapshot_is_idle_without_a_document_snapshot_and_records_one_e
         Point3D::new(0.0, 0.0, 0.0),
         2.0,
     )));
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(undo_stack.len());
     assert!(!snapshot.is_captured());
@@ -2032,11 +2033,11 @@ fn deferred_panel_snapshot_ignores_no_op_and_rejected_replacements_without_compa
             RegularPolychoron::Tesseract,
         )))
         .expect("fixture inserts");
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(undo_stack.len());
 
     assert!(
@@ -2163,11 +2164,11 @@ fn color_picker_real_color_change_replaces_once_and_records_one_undo() {
     let id = document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))));
     let previous_color = document.get_object(id).expect("point exists").color();
     let version_before = document.version;
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(crate::ui::apply_color_picker_object_color_change(
         &mut document,
@@ -2205,11 +2206,11 @@ fn color_picker_dialog_commits_only_on_apply_and_discards_cancel_or_dismiss() {
     let original = document.get_object(id).expect("point exists").color();
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     for action in [
         ColorPickerDialogAction::Cancel,
@@ -2287,11 +2288,11 @@ fn color_picker_dialog_apply_of_untouched_hsv_roundtrip_preserves_document_and_h
         .set_color(original);
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(!crate::ui::apply_color_picker_dialog_action(
         ColorPickerDialogAction::Apply,
@@ -2331,11 +2332,11 @@ fn color_picker_dialog_apply_of_untouched_hsv_roundtrip_fill_preserves_document_
         .expect("fixture inserts");
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(!crate::ui::apply_color_picker_dialog_action(
         ColorPickerDialogAction::Apply,
@@ -2370,11 +2371,11 @@ fn color_picker_dialog_apply_routes_a_polychoron_fill_target_once() {
         )))
         .expect("fixture inserts");
     let edge_color = document.get_object(id).expect("polychoron exists").color();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(crate::ui::apply_color_picker_dialog_action(
         ColorPickerDialogAction::Apply,
@@ -2405,11 +2406,11 @@ fn color_picker_equal_or_missing_color_change_preserves_document_and_history() {
     let current_color = document.get_object(id).expect("point exists").color();
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(!crate::ui::apply_color_picker_object_color_change(
         &mut document,
@@ -2474,11 +2475,11 @@ fn color_picker_rejected_color_preserves_document_and_history() {
     let id = document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))));
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     let error = crate::ui::apply_color_picker_object_color_change(
         &mut document,
@@ -2518,11 +2519,11 @@ fn color_picker_polychoron_fill_change_replaces_once_and_records_one_undo() {
         _ => panic!("fixture remains a regular polychoron"),
     };
     let version_before = document.version;
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     assert!(
         crate::ui::apply_color_picker_regular_polychoron_fill_color_change(
@@ -2576,11 +2577,11 @@ fn color_picker_polychoron_fill_no_ops_preserve_document_and_history() {
     };
     let version_before = document.version;
     let before = document.clone();
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     for id in [polychoron_id, no_fill_id, point_id, ObjectId::new()] {
         let color = if id == polychoron_id {
@@ -2659,11 +2660,11 @@ fn algebra_variable_metadata_edits_capture_one_valid_undo_and_reject_invalid_ran
     document
         .try_set_variable("t".to_string(), 0.0)
         .expect("fixture variable inserts");
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
     let mut snapshot = crate::app::DeferredPanelSnapshot::new(undo_stack.len());
     let mut candidate = crate::algebra::variable_meta_for_display(&document, "t");
     candidate.min = -2.0;
@@ -2770,11 +2771,11 @@ fn object_panel_edit_uses_staged_replacement_and_rejection_preserves_history() {
         .expect("fixture inserts");
     let before = document.clone();
     let version_before = document.version;
-    let undo_stack: Vec<grafito_core::Document> = Vec::new();
-    let redo_stack = [ChangeSet {
+    let undo_stack: VecDeque<grafito_core::Document> = VecDeque::new();
+    let redo_stack = VecDeque::from([ChangeSet {
         before: grafito_core::Document::new(),
         after: grafito_core::Document::new(),
-    }];
+    }]);
 
     let error = crate::panels::apply_object_panel_edit(&mut document, id, true, |object| {
         let GeoObject::RegularPolychoron4D(polychoron) = object else {
@@ -3234,11 +3235,11 @@ fn mutating_command_submission_saves_undo_and_replaces_redo() {
     let mut after = before.clone();
     let mut input = "A = (8, 8)".to_string();
     let outcome = crate::commands::process_input(&mut after, &mut input);
-    let mut undo_stack = Vec::new();
-    let mut redo_stack = vec![grafito_core::ChangeSet {
+    let mut undo_stack = VecDeque::new();
+    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
         before: before.clone(),
         after: before.clone(),
-    }];
+    }]);
 
     assert!(!matches!(
         outcome,

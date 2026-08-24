@@ -67,7 +67,7 @@ pub fn request_agent_on_worker(
     JoinHandle<Result<AgentOutcome, String>>,
     Receiver<AgentEvent>,
 ) {
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(128);
     let handle = std::thread::spawn(move || {
         let completer = RemoteAgentCompleter::new(settings, api_key);
         let dispatcher = SafeGrafitoDispatcher;
@@ -80,7 +80,9 @@ pub fn request_agent_on_worker(
             &budget,
             &cancellation,
             |event| {
-                let _ = sender.send(event);
+                // Bounded channel (128) evita crecimiento ilimitado si la UI no drena;
+                // ante backpressure se abandona el envío (canal lleno o desconectado).
+                let _ = sender.try_send(event);
             },
         )
     });
@@ -102,7 +104,7 @@ pub fn request_agent_on_worker_with_ledger(
     JoinHandle<Result<AgentOutcome, String>>,
     Receiver<AgentEvent>,
 ) {
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(128);
     let handle = std::thread::spawn(move || {
         let completer = RemoteAgentCompleter::new(settings, api_key);
         let dispatcher = SafeGrafitoDispatcher;
@@ -116,7 +118,7 @@ pub fn request_agent_on_worker_with_ledger(
             ledger.as_ref(),
             &cancellation,
             |event| {
-                let _ = sender.send(event);
+                let _ = sender.try_send(event);
             },
         )
     });

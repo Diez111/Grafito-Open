@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_geometry::expr::eval_batch_2d;
 use std::collections::HashMap;
 

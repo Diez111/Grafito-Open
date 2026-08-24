@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el fill con alpha 0.5 es visible.
 
 use grafito_geometry::Color;

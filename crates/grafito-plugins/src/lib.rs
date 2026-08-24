@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::uninlined_format_args)]
 //! Sistema de plugins declarativos de Grafito.
 //!

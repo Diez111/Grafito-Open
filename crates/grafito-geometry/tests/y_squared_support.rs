@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test que el parser maneja y² y z².
 
 use grafito_geometry::expr::prepare_function_ast;

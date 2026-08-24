@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el view transform maneja correctamente screen_to_world
 //! para coordenadas (x, 0) y (0, y) en view no cuadrados.
 

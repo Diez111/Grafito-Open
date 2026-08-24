@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Tests de integración para el comando `ComplexMapping`.
 //!
 //! Verifica que se puede aplicar una expresión compleja (p.ej. `1/z`)

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el ComplexMapping con ImplicitCurve como target
 //! se renderiza correctamente.
 

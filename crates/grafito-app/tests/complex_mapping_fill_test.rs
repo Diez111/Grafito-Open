@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use std::collections::HashMap;
 
 use grafito_app::render_2d::{

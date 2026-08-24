@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el scanline con stride no pierde regiones delgadas.
 
 #[cfg(test)]

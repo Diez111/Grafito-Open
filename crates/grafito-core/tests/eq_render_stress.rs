@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Test de stress: simular el render de un ImplicitCurve con Eq
 //! en un view normal. Detecta crashes.
 

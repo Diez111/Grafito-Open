@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test que el stride=2 detecta correctamente el disco en view normal.
 
 use grafito_geometry::ast::Expr;

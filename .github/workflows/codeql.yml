@@ -36,10 +36,17 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@b0c4fd77f6c559021d78430ec4d0d169ae74a4eb  # v3

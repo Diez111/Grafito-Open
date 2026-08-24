@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{
     implicit_curve::{
         evaluate_implicit_curve, marching_squares_from_grid, MAX_IMPLICIT_GRID_SIZE,

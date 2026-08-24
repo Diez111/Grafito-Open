@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el outline de x² + y² = 1 se genera y renderiza
 //! correctamente con el cache key completo.
 

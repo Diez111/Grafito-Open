@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Tipos versionados y transportables para el asistente seguro de Grafito.
 //!
 //! Este crate no conoce red, almacenamiento ni el modelo de documento. Sus

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::{
     command_registry::{self, ArgumentKind, MutationClass, RiskLevel},
     commands::{parse_cas_command, process_input, CommandOutcome},

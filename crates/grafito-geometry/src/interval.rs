@@ -60,9 +60,15 @@ pub fn safe_sample<F: Fn(f64) -> f64>(
         return vec![];
     }
     let dx = (x_max - x_min) / (n - 1) as f64;
+    if !dx.is_finite() || dx == 0.0 || x_min + dx == x_min || x_max - dx == x_max {
+        return vec![];
+    }
     (0..n)
         .map(|i| {
             let x = x_min + i as f64 * dx;
+            if !x.is_finite() {
+                return (x, None);
+            }
             let y = f(x);
             if y.is_finite() && y.abs() < 1e50 {
                 (x, Some(y))

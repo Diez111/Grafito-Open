@@ -8,7 +8,6 @@ use egui::{Color32, ProgressBar, ScrollArea};
 use grafito_anim::{AnimDuration, AnimParams, ExportFormat, Resolution};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Default)]
 pub struct AnimPreviewState {
     pub template: String,
     pub concept: String,
@@ -17,6 +16,27 @@ pub struct AnimPreviewState {
     pub media_path: Option<String>,
     pub frames: Vec<egui::ColorImage>,
     pub source_turn: Option<usize>,
+    // Cache de texturas para evitar clone+load cada frame (27KB×6 leak).
+    cached_textures: Vec<egui::TextureHandle>,
+    cached_hash: u64,
+    cached_len: usize,
+}
+
+impl Default for AnimPreviewState {
+    fn default() -> Self {
+        Self {
+            template: String::new(),
+            concept: String::new(),
+            progress: 0.0,
+            status: String::new(),
+            media_path: None,
+            frames: Vec::new(),
+            source_turn: None,
+            cached_textures: Vec::new(),
+            cached_hash: 0,
+            cached_len: 0,
+        }
+    }
 }
 
 impl AnimPreviewState {
@@ -24,7 +44,73 @@ impl AnimPreviewState {
         self.progress > 0.0 && self.progress < 1.0
     }
     pub fn clear(&mut self) {
+        self.cached_textures.clear();
         *self = Self::default();
+    }
+
+    /// Limpia texturas explicitamente con context (libera GPU). Llamar desde UI con ctx.
+    pub fn clear_with_ctx(&mut self, ctx: &egui::Context) {
+        for (idx, _) in self.cached_textures.iter().enumerate() {
+            // TextureHandle Drop libera, pero forget_image asegura limpieza si el id fue reutilizado.
+            ctx.forget_image(&format!("anim_preview_{}", idx));
+        }
+        self.cached_textures.clear();
+        *self = Self::default();
+    }
+
+    fn frames_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.frames.len().hash(&mut hasher);
+        for f in self.frames.iter().take(6) {
+            f.size.hash(&mut hasher);
+            // Hash pixels: suficiente para detectar cambio; acotado a 6 frames × 27KB
+            for px in &f.pixels {
+                px.r().hash(&mut hasher);
+                px.g().hash(&mut hasher);
+                px.b().hash(&mut hasher);
+                px.a().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn ensure_textures(&mut self, ctx: &egui::Context) {
+        if self.frames.is_empty() {
+            if !self.cached_textures.is_empty() {
+                for (idx, _) in self.cached_textures.iter().enumerate() {
+                    ctx.forget_image(&format!("anim_preview_{}", idx));
+                }
+                self.cached_textures.clear();
+                self.cached_hash = 0;
+                self.cached_len = 0;
+            }
+            return;
+        }
+        let hash = self.frames_hash();
+        let len = self.frames.len().min(6);
+        if self.cached_textures.len() == len && self.cached_hash == hash && self.cached_len == len {
+            return;
+        }
+        // Libera anteriores
+        for (idx, _) in self.cached_textures.iter().enumerate() {
+            ctx.forget_image(&format!("anim_preview_{}", idx));
+        }
+        self.cached_textures.clear();
+        // Solo clona cuando cambia; evita clone 27KB×6 cada frame.
+        self.cached_textures = self
+            .frames
+            .iter()
+            .take(6)
+            .enumerate()
+            .map(|(idx, frame)| {
+                let tex_id = format!("anim_preview_{}", idx);
+                // frame.clone() solo aquí, cuando hash cambió.
+                ctx.load_texture(tex_id, frame.clone(), egui::TextureOptions::LINEAR)
+            })
+            .collect();
+        self.cached_hash = hash;
+        self.cached_len = len;
     }
 }
 
@@ -71,21 +157,26 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
             // TODO: copiar media_path a destino elegido por usuario (I/O en background)
         }
         if ui.button("Limpiar").clicked() {
-            state.clear();
+            state.clear_with_ctx(ui.ctx());
         }
     }
     if !state.frames.is_empty() {
+        state.ensure_textures(ui.ctx());
         ScrollArea::horizontal().max_height(84.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                for (idx, frame) in state.frames.iter().enumerate().take(6) {
-                    let tex_id = format!("anim_preview_{}", idx);
-                    let tex =
-                        ui.ctx()
-                            .load_texture(tex_id, frame.clone(), egui::TextureOptions::LINEAR);
+                for tex in state.cached_textures.iter() {
                     ui.image((tex.id(), egui::vec2(96.0, 72.0)));
                 }
             });
         });
+    } else {
+        // Asegura limpieza si frames se vació externamente
+        if !state.cached_textures.is_empty() {
+            for (idx, _) in state.cached_textures.iter().enumerate() {
+                ui.ctx().forget_image(&format!("anim_preview_{}", idx));
+            }
+            state.cached_textures.clear();
+        }
     }
     ui.separator();
     ui.small("Tip: pedí al asistente 'explica derivada con animación' y usá GenerateAnimation.");

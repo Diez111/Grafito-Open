@@ -1,6 +1,6 @@
 [package]
 name = "grafito-fuzz"
-version = "0.0.0"
+version.workspace = true
 publish = false
 edition = "2021"
 
@@ -10,6 +10,9 @@ cargo-fuzz = true
 # Keep the fuzz package independent of Grafito's workspace manifests.
 [workspace]
 members = ["."]
+
+[workspace.package]
+version = "1.2.33-beta"
 
 [dependencies]
 grafito-command = { path = "../crates/grafito-command" }
@@ -43,6 +46,20 @@ bench = false
 [[bin]]
 name = "command_atomicity"
 path = "fuzz_targets/command_atomicity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validation_limits"
+path = "fuzz_targets/validation_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spreadsheet_recompute"
+path = "fuzz_targets/spreadsheet_recompute.rs"
 test = false
 doc = false
 bench = false

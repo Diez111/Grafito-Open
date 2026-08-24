@@ -775,7 +775,9 @@ fn normalize_bracketed_function_calls(expr: &str) -> String {
 
     while offset < expr.len() {
         let rest = &expr[offset..];
-        let character = rest.chars().next().expect("offset must be in bounds");
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
         if character.is_ascii_alphabetic() {
             let end = rest
                 .char_indices()

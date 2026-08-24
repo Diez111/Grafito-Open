@@ -130,6 +130,35 @@ fn validate_instructions(instructions: &InstructionsSection) -> Result<(), Strin
     Ok(())
 }
 
+/// Valida que un archivo de instrucciones no escape del directorio del plugin.
+/// Uso en runtime: `plugin.dir.join(file).canonicalize()?.starts_with(canonical_plugin_root)`.
+/// Fail-closed: si canonicalize falla o el path no está bajo root, log warn y rechazar.
+pub fn validate_instruction_path(
+    plugin_dir: &std::path::Path,
+    file: &str,
+) -> Result<std::path::PathBuf, String> {
+    let canonical_root = std::fs::canonicalize(plugin_dir).map_err(|e| {
+        log::warn!("plugin dir canonicalize failed: {e}");
+        format!("plugin dir canonicalize failed: {e}")
+    })?;
+    let candidate = plugin_dir.join(file);
+    let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+        log::warn!("instruction file '{}' canonicalize failed: {e}", file);
+        format!("instruction file '{file}' canonicalize failed: {e}")
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        log::warn!(
+            "instruction file '{}' escapes plugin directory (path traversal)",
+            file
+        );
+        return Err(format!(
+            "instruction file '{}' escapes plugin directory",
+            file
+        ));
+    }
+    Ok(canonical)
+}
+
 fn validate_engine(engine: &EngineSection) -> Result<(), String> {
     if engine.transport != "stdio" {
         return Err("plugin engine transport must be stdio".into());

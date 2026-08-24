@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el command processor maneja correctamente los operadores
 //! <, >, <=, >= para ImplicitCurve con Unicode.
 

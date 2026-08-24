@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el scanline fill con stride es equivalente al de stride=1
 //! (modulo precisión sub-pixel del linear refinement).
 

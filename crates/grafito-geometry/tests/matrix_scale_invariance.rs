@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_geometry::matrices::{
     condition_number, norm_frobenius, null_space, rank, solve_linear_system, Matrix,
 };

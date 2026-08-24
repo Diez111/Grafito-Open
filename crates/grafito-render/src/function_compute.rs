@@ -288,6 +288,8 @@ impl FunctionComputePipeline {
                 log::error!("Function compute readback failed: {:?}", result.err());
             }
         });
+        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (actualmente acotado a 1 intento por frame via MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs)
+        log::trace!("Function compute sync readback (Wait) — bloqueante, 1 intento por frame");
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {

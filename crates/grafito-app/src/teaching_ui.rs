@@ -13,7 +13,6 @@ use grafito_whiteboard::WhiteboardDoc;
 use std::time::{Duration, Instant};
 
 /// Estado de la UI de enseñanza.
-#[derive(Default)]
 pub struct TeachingUiState {
     pub session: Option<TeachingSession>,
     pub whiteboard: WhiteboardSession,
@@ -25,6 +24,25 @@ pub struct TeachingUiState {
     pub anim_frames: Option<Vec<egui::ColorImage>>,
     /// Texturas cacheadas de `anim_frames` (creadas lazily con `ctx.load_texture`).
     pub anim_textures: Vec<egui::TextureHandle>,
+    cached_hash: u64,
+    cached_len: usize,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for TeachingUiState {
+    fn default() -> Self {
+        Self {
+            session: None,
+            whiteboard: WhiteboardSession::default(),
+            orchestrator: ManimOrchestrator::default(),
+            show_manim: false,
+            opened_at: None,
+            anim_frames: None,
+            anim_textures: Vec::new(),
+            cached_hash: 0,
+            cached_len: 0,
+        }
+    }
 }
 
 fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::WhiteboardElement> {
@@ -107,6 +125,100 @@ fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::Whiteboar
 }
 
 impl TeachingUiState {
+    fn anim_frames_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(frames) = &self.anim_frames else {
+            return 0;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        frames.len().hash(&mut hasher);
+        for frame in frames.iter().take(6) {
+            frame.size.hash(&mut hasher);
+            for pixel in &frame.pixels {
+                pixel.r().hash(&mut hasher);
+                pixel.g().hash(&mut hasher);
+                pixel.b().hash(&mut hasher);
+                pixel.a().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn ensure_textures(&mut self, ctx: &egui::Context) {
+        let Some(frames) = &self.anim_frames else {
+            if !self.anim_textures.is_empty() {
+                for idx in 0..self.anim_textures.len() {
+                    ctx.forget_image(&format!("teaching_anim_{idx}"));
+                }
+                self.anim_textures.clear();
+                self.cached_hash = 0;
+                self.cached_len = 0;
+            }
+            return;
+        };
+        if frames.is_empty() {
+            if !self.anim_textures.is_empty() {
+                for idx in 0..self.anim_textures.len() {
+                    ctx.forget_image(&format!("teaching_anim_{idx}"));
+                }
+                self.anim_textures.clear();
+                self.cached_hash = 0;
+                self.cached_len = 0;
+            }
+            return;
+        }
+        let hash = self.anim_frames_hash();
+        let len = frames.len();
+        if self.anim_textures.len() == len && self.cached_hash == hash && self.cached_len == len {
+            return;
+        }
+        for idx in 0..self.anim_textures.len() {
+            ctx.forget_image(&format!("teaching_anim_{idx}"));
+        }
+        self.anim_textures.clear();
+        self.anim_textures = frames
+            .iter()
+            .enumerate()
+            .map(|(idx, frame)| {
+                ctx.load_texture(
+                    format!("teaching_anim_{idx}"),
+                    frame.clone(),
+                    egui::TextureOptions::LINEAR,
+                )
+            })
+            .collect();
+        self.cached_hash = hash;
+        self.cached_len = len;
+    }
+
+    pub fn clear(&mut self) {
+        self.anim_textures.clear();
+        self.cached_hash = 0;
+        self.cached_len = 0;
+        self.anim_frames = None;
+    }
+
+    pub fn clear_with_ctx(&mut self, ctx: &egui::Context) {
+        for idx in 0..self.anim_textures.len() {
+            ctx.forget_image(&format!("teaching_anim_{idx}"));
+        }
+        self.anim_textures.clear();
+        self.cached_hash = 0;
+        self.cached_len = 0;
+        self.anim_frames = None;
+    }
+
+    fn clear_anim_textures_only(&mut self, ctx: Option<&egui::Context>) {
+        if let Some(ctx) = ctx {
+            for idx in 0..self.anim_textures.len() {
+                ctx.forget_image(&format!("teaching_anim_{idx}"));
+            }
+        }
+        self.anim_textures.clear();
+        self.cached_hash = 0;
+        self.cached_len = 0;
+    }
+
     pub fn start(&mut self, topic: &str) {
         let session = TeachingSession::for_topic(topic);
         // Inicializar pizarra con elementos vectoriales reales según hint
@@ -125,7 +237,7 @@ impl TeachingUiState {
         self.session = Some(session);
         self.opened_at = Some(Instant::now());
         self.anim_frames = None;
-        self.anim_textures.clear();
+        self.clear_anim_textures_only(None);
     }
     pub fn advance(&mut self) -> bool {
         if let Some(session) = &mut self.session {
@@ -142,7 +254,7 @@ impl TeachingUiState {
                     self.orchestrator.cancel();
                     let _ = self.orchestrator.start(&step.title, tmpl.clone());
                     self.anim_frames = None;
-                    self.anim_textures.clear();
+                    self.clear_anim_textures_only(None);
                 }
             }
             // Reinicia morph para el nuevo paso (burbuja entra de nuevo)
@@ -157,7 +269,15 @@ impl TeachingUiState {
         self.orchestrator.cancel();
         self.opened_at = None;
         self.anim_frames = None;
-        self.anim_textures.clear();
+        self.clear_anim_textures_only(None);
+    }
+
+    pub fn close_with_ctx(&mut self, ctx: &egui::Context) {
+        self.session = None;
+        self.orchestrator.cancel();
+        self.opened_at = None;
+        self.anim_frames = None;
+        self.clear_anim_textures_only(Some(ctx));
     }
     pub fn tick(&mut self, now: Instant) {
         if let Some(state) = self.orchestrator.tick(now) {
@@ -168,7 +288,7 @@ impl TeachingUiState {
                 let frames =
                     crate::anim_native::render_anim_for_concept(&template, &concept, 320, 180);
                 self.anim_frames = Some(frames);
-                self.anim_textures.clear();
+                self.clear_anim_textures_only(None);
             }
             let _ = state;
         }
@@ -188,30 +308,17 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
     if state.session.is_none() {
         return false;
     }
-    // Lazily crear texturas del fallback nativo (antes de snapshot para evitar borrow cruzado)
-    if let Some(frames) = &state.anim_frames {
-        if state.anim_textures.is_empty() && !frames.is_empty() {
-            // Clona frames para crear texturas con ctx (necesita &mut statetextures)
-            let cloned: Vec<egui::ColorImage> = frames.clone();
-            state.anim_textures = cloned
-                .into_iter()
-                .enumerate()
-                .map(|(i, img)| {
-                    ctx.load_texture(
-                        format!("teaching_anim_{i}"),
-                        img,
-                        egui::TextureOptions::LINEAR,
-                    )
-                })
-                .collect();
-        }
-    }
+    // Unifica patrón cached_hash + ensure_textures como en anim_ui.rs:61 — evita clone masivo y leak.
+    state.ensure_textures(ctx);
     // Snapshot inmutable para el closure (evita borrow cruzado &mut state.session + &state.orchestrator)
     let opened_at = state.opened_at;
-    let session_snapshot = state.session.clone().unwrap();
+    let Some(session_snapshot) = state.session.clone() else {
+        return false;
+    };
     let ledger = state.orchestrator.ledger.clone();
     let template = state.orchestrator.template.clone();
     let is_busy = state.orchestrator.is_busy();
+    // Evita clone en draw: sólo se clonan handles si hash cambió (ensure_textures). Aquí se snapshot sin clonar frames.
     let anim_textures: Vec<egui::TextureHandle> = state.anim_textures.clone();
     let progress = session_snapshot.progress();
     let is_last = session_snapshot.is_last();
@@ -240,10 +347,10 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                 .rounding(grafito_ui::tokens::RADIUS_LG)
                 .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
                 .shadow(egui::Shadow {
-                    offset: egui::vec2(0.0, 2.0),
-                    blur: 8.0,
+                    offset: egui::vec2(0.0, grafito_ui::tokens::SHADOW_WINDOW_OFFSET_Y),
+                    blur: grafito_ui::tokens::SHADOW_WINDOW_BLUR,
                     spread: 0.0,
-                    color: Color32::from_black_alpha(8),
+                    color: Color32::from_black_alpha(grafito_ui::tokens::SHADOW_ALPHA),
                 }),
         )
         .show(ctx, |ui| {
@@ -252,8 +359,10 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
             // Header Scandinavian — left-aligned, avatar pequeño + título, cierre con icono
             ui.horizontal(|ui| {
                 let cfg = grafito_profile::AvatarConfig::default();
-                let (avatar_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                let (avatar_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(grafito_ui::tokens::TYPE_XXL, grafito_ui::tokens::TYPE_XXL),
+                    egui::Sense::hover(),
+                );
                 if ui.is_rect_visible(avatar_rect) {
                     let painter = ui.painter_at(avatar_rect);
                     grafito_ui::avatar::draw_avatar(&painter, avatar_rect, &cfg, time, hover_pos);
@@ -281,8 +390,10 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
             });
             ui.add_space(grafito_ui::tokens::SPACE_SM);
             // Barra progreso — hairline 4px, sin animación extra
-            let (r, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
+            let (r, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), grafito_ui::tokens::SPACE_XS),
+                egui::Sense::hover(),
+            );
             ui.painter()
                 .rect_filled(r, 2.0, theme.separator.gamma_multiply(0.10));
             ui.painter().rect_filled(
@@ -294,7 +405,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
             // Contenido principal — editorial, left-aligned, sin burbuja morph
             if let Some(step) = current_step {
                 egui::Frame::none()
-                    .fill(Color32::WHITE)
+                    .fill(theme.panel_bg)
                     .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                     .rounding(grafito_ui::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
@@ -306,7 +417,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                 .size(grafito_ui::tokens::TYPE_MD)
                                 .color(theme.accent),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(grafito_ui::tokens::SPACE_XS);
                         ui.label(
                             egui::RichText::new(&step.explanation)
                                 .size(grafito_ui::tokens::TYPE_BASE)
@@ -329,7 +440,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                 });
                         }
                         if !step.whiteboard_hint.is_empty() {
-                            ui.add_space(4.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
                                 egui::RichText::new(format!("Pizarra: {}", step.whiteboard_hint))
                                     .size(grafito_ui::tokens::TYPE_XS)
@@ -361,9 +472,12 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                         .color(theme.text_secondary),
                                 );
                             });
-                            ui.add_space(4.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
                             let (wb_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), 120.0),
+                                egui::vec2(
+                                    ui.available_width(),
+                                    grafito_ui::tokens::SPACE_XXL * 3.0,
+                                ),
                                 egui::Sense::click_and_drag(),
                             );
                             // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
@@ -382,7 +496,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                     wb_rect.center(),
                                     egui::Align2::CENTER_CENTER,
                                     &step.whiteboard_hint,
-                                    egui::FontId::proportional(11.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                     theme.text_tertiary.gamma_multiply(0.85),
                                 );
                             }
@@ -411,7 +525,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                         Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
                     );
                     ui.ctx().request_repaint_after(Duration::from_millis(80));
-                    ui.add_space(4.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
                     ui.label(
                         egui::RichText::new(format!(
                             "Animación: {} — {} frames (fallback nativo)",
@@ -423,14 +537,23 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                         .weak(),
                     );
                 } else if is_busy {
-                    ui.add_space(4.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
                     ui.horizontal(|ui| {
                         let t = ui.input(|i| i.time);
                         let pulse = ((t * 3.0).sin() + 1.0) * 0.5;
                         let col = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 4.0, col);
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(
+                                grafito_ui::tokens::SPACE_SM + 2.0,
+                                grafito_ui::tokens::SPACE_SM + 2.0,
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().circle_filled(
+                            rect.center(),
+                            grafito_ui::tokens::SPACE_XS,
+                            col,
+                        );
                         ui.label(
                             egui::RichText::new("Generando animación con Manim…")
                                 .size(grafito_ui::tokens::TYPE_XS)
@@ -458,7 +581,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                 ui.label(
                                     egui::RichText::new(ledger)
                                         .monospace()
-                                        .size(10.0)
+                                        .size(grafito_ui::tokens::TYPE_XS - 1.0)
                                         .color(theme.text_secondary),
                                 );
                             });
@@ -487,7 +610,13 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                 .rounding(grafito_ui::tokens::RADIUS_MD);
                 // Tamaño igual para primaria, ocupa espacio proporcional
                 if ui
-                    .add_sized(egui::vec2(140.0, 36.0), btn)
+                    .add_sized(
+                        egui::vec2(
+                            grafito_ui::tokens::SPACE_XXL * 3.5,
+                            grafito_ui::tokens::SPACE_LG * 2.25,
+                        ),
+                        btn,
+                    )
                     .on_hover_text(if is_last {
                         "Cierra la enseñanza"
                     } else {
@@ -503,8 +632,10 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                 }
                 // Icono decorativo pequeño al lado (no duplica label, solo indica dirección)
                 let icon_color = theme.accent;
-                let (icon_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                let (icon_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(grafito_ui::tokens::ICON_SM, grafito_ui::tokens::ICON_SM),
+                    egui::Sense::hover(),
+                );
                 if ui.is_rect_visible(icon_rect) {
                     grafito_ui::icons::draw_icon(ui.painter(), icon_rect, primary_icon, icon_color);
                 }
@@ -515,17 +646,33 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.12)))
                     .rounding(grafito_ui::tokens::RADIUS_MD);
-                    if ui.add_sized(egui::vec2(96.0, 36.0), ghost).clicked() {
+                    if ui
+                        .add_sized(
+                            egui::vec2(
+                                grafito_ui::tokens::SPACE_XL * 4.0,
+                                grafito_ui::tokens::SPACE_LG * 2.25,
+                            ),
+                            ghost,
+                        )
+                        .clicked()
+                    {
                         should_close = true;
                     }
                 });
             });
         });
     if should_advance {
-        state.advance();
+        // Avance con ctx para forget_image correcto.
+        let cached_before = state.cached_len;
+        let ok = state.advance();
+        // advance limpió sin ctx; ahora olvidar los URIs previos que quedaron huérfanos.
+        for idx in 0..cached_before {
+            ctx.forget_image(&format!("teaching_anim_{idx}"));
+        }
+        let _ = ok;
     }
     if should_close {
-        state.close();
+        state.close_with_ctx(ctx);
         true
     } else {
         false

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{
     validation::validate_document, ComplexMappingObj, Document, FunctionCacheKey, FunctionObj,
     GeoObject, ImplicitCurveObj, ObjectId, OperationBatch, RelationOperator,

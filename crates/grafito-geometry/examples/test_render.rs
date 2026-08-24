@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 fn main() {
     let expr = "cos^(-1)(1-abs(x))-π";
     let min_x = -10.0;

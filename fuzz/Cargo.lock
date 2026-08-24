@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-assistant-types"
-version = "1.2.20-beta"
+version = "1.2.33-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-command"
-version = "1.2.20-beta"
+version = "1.2.33-beta"
 dependencies = [
  "geo",
  "glam",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-complex"
-version = "1.2.20-beta"
+version = "1.2.33-beta"
 dependencies = [
  "num-complex",
  "serde",
@@ -312,10 +312,11 @@ dependencies = [
 
 [[package]]
 name = "grafito-core"
-version = "1.2.20-beta"
+version = "1.2.33-beta"
 dependencies = [
  "grafito-complex",
  "grafito-geometry",
+ "libc",
  "log",
  "num-complex",
  "rayon",
@@ -329,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-fuzz"
-version = "0.0.0"
+version = "1.2.33-beta"
 dependencies = [
  "grafito-command",
  "grafito-complex",
@@ -341,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-geometry"
-version = "1.2.20-beta"
+version = "1.2.33-beta"
 dependencies = [
  "evalexpr",
  "geo",

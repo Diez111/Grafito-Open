@@ -9,8 +9,10 @@ rust-version.workspace = true
 description = "Núcleo agentico de Grafito: esquema de herramientas, enrutamiento de modelos y loop de agente acotado"
 
 [dependencies]
+log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [lints]
 workspace = true
+

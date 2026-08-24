@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el marching squares produce segmentos para casos comunes.
 
 use grafito_core::implicit_curve::evaluate_implicit_curve;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Tests críticos: reproduce los casos reportados por el usuario.
 //! Verifica que el cache del AST, el scanline y el outline
 //! funcionan correctamente para `x^2 + y^2 = 1`, `< 1`, `<= 1`.

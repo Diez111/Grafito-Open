@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Tests de edge case para el procesador de comandos de texto.
 //!
 //! Verifican que entradas degeneradas, inválidas o extremas no provoquen

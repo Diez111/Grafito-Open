@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::uninlined_format_args)]
 //! Pizarra de dibujo libre (inspirada en Excalidraw) como modelo puro y
 //! headless: trazos suavizados, formas, flechas, texto, borrado y selección.
@@ -229,7 +230,13 @@ impl WhiteboardDoc {
 }
 
 /// Densifica un trazo con interpolación Catmull-Rom para suavizar la pluma.
+/// Cotas defensivas: `subdivisions` se capa a 16 y trazos >4096 puntos se ignoran
+/// para evitar DoS por sobre-amplificación (4096*16 ≈ 65k puntos por trazo).
 pub fn smooth_stroke(points: &[(f64, f64)], subdivisions: usize) -> Vec<(f64, f64)> {
+    let subdivisions = subdivisions.min(16);
+    if points.len() > 4096 {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     if points.is_empty() {
         return out;

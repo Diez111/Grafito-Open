@@ -96,10 +96,11 @@ impl ConstraintGraph {
         let mut ids: Vec<usize> = self.constraints.keys().copied().collect();
         ids.sort_unstable();
         for id in &ids {
-            let constraint = self
-                .constraints
-                .get(id)
-                .expect("constraint id collected from its map");
+            let Some(constraint) = self.constraints.get(id) else {
+                log::warn!("constraint id {id} collected from map but missing");
+                debug_assert!(false, "constraint id {id} missing");
+                continue;
+            };
             for input in &constraint.inputs {
                 self.dependents.entry(*input).or_default().push(*id);
             }
@@ -111,17 +112,24 @@ impl ConstraintGraph {
         for ids in self.dependents.values_mut() {
             ids.sort_unstable();
         }
-        self.next_id = ids
-            .into_iter()
-            .max()
-            .map_or(0, |id| id.checked_add(1).expect("validated constraint id"));
+        self.next_id = ids.into_iter().max().map_or(0, |id| {
+            id.checked_add(1).unwrap_or_else(|| {
+                log::warn!("validated constraint id overflow for {id}");
+                debug_assert!(false, "constraint id overflow");
+                usize::MAX
+            })
+        });
         self.next_order = self
             .constraints
             .values()
             .map(|constraint| constraint.order)
             .max()
             .map_or(0, |order| {
-                order.checked_add(1).expect("validated constraint order")
+                order.checked_add(1).unwrap_or_else(|| {
+                    log::warn!("validated constraint order overflow for {order}");
+                    debug_assert!(false, "constraint order overflow");
+                    usize::MAX
+                })
             });
     }
 
@@ -139,17 +147,20 @@ impl ConstraintGraph {
 
         let mut ids: Vec<usize> = self.constraints.keys().copied().collect();
         ids.sort_unstable_by_key(|id| {
-            let constraint = self
-                .constraints
-                .get(id)
-                .expect("constraint id collected from its map");
+            let Some(constraint) = self.constraints.get(id) else {
+                log::warn!("constraint id {id} collected but missing during canonicalization");
+                debug_assert!(false, "constraint id {id} missing");
+                return (usize::MAX, *id);
+            };
             (constraint.order, *id)
         });
         for (order, id) in ids.into_iter().enumerate() {
-            self.constraints
-                .get_mut(&id)
-                .expect("constraint id collected from its map")
-                .order = order;
+            let Some(constraint) = self.constraints.get_mut(&id) else {
+                log::warn!("constraint id {id} missing during canonicalization write");
+                debug_assert!(false, "constraint id {id} missing");
+                continue;
+            };
+            constraint.order = order;
         }
     }
 
@@ -559,9 +570,12 @@ impl ConstraintGraph {
             }
             let next_ids: Vec<usize> = next_ids.into_iter().collect();
             for next_id in &next_ids {
-                *indegree
-                    .get_mut(next_id)
-                    .expect("reachable successor has indegree entry") += 1;
+                if let Some(entry) = indegree.get_mut(next_id) {
+                    *entry += 1;
+                } else {
+                    log::warn!("reachable successor {next_id} missing indegree entry");
+                    debug_assert!(false, "reachable successor {next_id} missing");
+                }
             }
             successors.insert(cons_id, next_ids);
         }
@@ -577,9 +591,11 @@ impl ConstraintGraph {
             order.push(cons_id);
             if let Some(next_ids) = successors.get(&cons_id) {
                 for &next_id in next_ids {
-                    let degree = indegree
-                        .get_mut(&next_id)
-                        .expect("reachable successor has indegree entry");
+                    let Some(degree) = indegree.get_mut(&next_id) else {
+                        log::warn!("reachable successor {next_id} missing indegree entry");
+                        debug_assert!(false, "reachable successor {next_id} missing");
+                        continue;
+                    };
                     *degree -= 1;
                     if *degree == 0 {
                         ready.insert(next_id);

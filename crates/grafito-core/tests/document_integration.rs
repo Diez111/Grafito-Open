@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::*;
 use grafito_geometry::{
     Color, Point2, RegularPolychoron, RegularPolytopeFamily, MAX_WORLD_COORDINATE,

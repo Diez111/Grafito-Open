@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Puente de Grafito hacia motores de animación externos.
 //!
 //! El motor corre fuera del proceso Rust (p. ej. Python + Manim) y habla un

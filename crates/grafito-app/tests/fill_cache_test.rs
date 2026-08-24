@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Tests de performance y correctitud para el caché del fill de curvas
 //! implícitas.
 //!

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{Document, GeoObject, ParametricCurve3DObj};
 use grafito_geometry::Camera3D;
 use grafito_render::Renderer;

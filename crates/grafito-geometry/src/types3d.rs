@@ -612,7 +612,11 @@ impl Camera3D {
         let projection = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.near, self.far);
         let view_projection = projection * view;
         let determinant = view_projection.determinant();
-        if !view_projection.is_finite() || !determinant.is_finite() || determinant.abs() <= 1.0e-12
+        // Usa tolerancia relativa a la dimensión en lugar de umbral absoluto 1e-12.
+        let det_eps = crate::matrices::dimension_relative_epsilon(4, 4);
+        if !view_projection.is_finite()
+            || !determinant.is_finite()
+            || determinant.abs() <= det_eps as f32
         {
             return None;
         }

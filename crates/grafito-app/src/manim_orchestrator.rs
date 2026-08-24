@@ -97,6 +97,8 @@ pub struct ManimOrchestrator {
     pub ledger: Option<String>,
     pub concept: String,
     pub template: String,
+    orchestrator_started: Option<Instant>,
+    steps_taken: usize,
 }
 
 impl Default for ManimOrchestrator {
@@ -108,6 +110,8 @@ impl Default for ManimOrchestrator {
             ledger: None,
             concept: String::new(),
             template: "universal".into(),
+            orchestrator_started: None,
+            steps_taken: 0,
         }
     }
 }
@@ -126,9 +130,10 @@ impl ManimOrchestrator {
         }
         self.concept = concept.into();
         self.template = template.into();
-        self.state = OrchestratorState::Planning {
-            started: Instant::now(),
-        };
+        let now = Instant::now();
+        self.state = OrchestratorState::Planning { started: now };
+        self.orchestrator_started = Some(now);
+        self.steps_taken = 0;
         self.activities.clear();
         self.push_activity(
             AgentRole::Planner,
@@ -149,19 +154,41 @@ impl ManimOrchestrator {
     /// Avanza un paso de la orquestación (llamar cada frame o con timer).
     /// En producción, cada paso delegaría a un worker thread; aquí simulamos
     /// la lógica pura y dejamos el I/O al `grafito-anim` Engine.
+    /// TODO: Renderer en thread::spawn con budget + cancel token
     pub fn tick(&mut self, now: Instant) -> Option<OrchestratorState> {
+        // Deadline absoluta del presupuesto total (Instant::now() + total_timeout)
+        if let Some(started) = self.orchestrator_started {
+            if now.duration_since(started) >= self.budget.total_timeout {
+                self.state = OrchestratorState::Failed {
+                    reason: "budget total_timeout excedido".into(),
+                };
+                self.update_ledger();
+                return Some(self.state.clone());
+            }
+            if self.steps_taken >= self.budget.max_steps {
+                self.state = OrchestratorState::Failed {
+                    reason: "budget max_steps excedido".into(),
+                };
+                self.update_ledger();
+                return Some(self.state.clone());
+            }
+        }
+
+        let step_timeout = self.budget.step_timeout;
         let next = match &self.state {
             OrchestratorState::Planning { started } => {
-                if now.duration_since(*started) >= Duration::from_millis(400) {
+                // Usa budget.step_timeout en lugar de Duration hardcoded 400ms
+                if now.duration_since(*started) >= step_timeout {
                     let plan = self.plan_for_concept();
                     self.push_activity(AgentRole::ScriptWriter, format!("Plan listo: {}", plan));
                     Some(OrchestratorState::Writing { plan, started: now })
                 } else {
+                    // step_timeout excedido se maneja arriba como transición, aquí solo avance por progreso
                     None
                 }
             }
             OrchestratorState::Writing { plan, started } => {
-                if now.duration_since(*started) >= Duration::from_millis(600) {
+                if now.duration_since(*started) >= step_timeout {
                     let script = self.script_for_plan(plan);
                     self.push_activity(
                         AgentRole::Renderer,
@@ -176,7 +203,8 @@ impl ManimOrchestrator {
                 }
             }
             OrchestratorState::Rendering { script, started } => {
-                if now.duration_since(*started) >= Duration::from_millis(900) {
+                if now.duration_since(*started) >= step_timeout {
+                    // TODO: Renderer en thread::spawn con budget + cancel token
                     // Aquí se integraría `grafito-anim::Engine::submit` con el worker Python
                     // que carga 3b1b/manim si está disponible, sino fallback nativo.
                     // Por ahora simulamos éxito y delegamos al renderer nativo si manim no está.
@@ -199,7 +227,7 @@ impl ManimOrchestrator {
                 }
             }
             OrchestratorState::Reviewing { frames, started } => {
-                if now.duration_since(*started) >= Duration::from_millis(300) {
+                if now.duration_since(*started) >= step_timeout {
                     // Reviewer valida
                     let ok = *frames >= 12;
                     if ok {
@@ -233,10 +261,18 @@ impl ManimOrchestrator {
             _ => None,
         };
         if let Some(state) = next {
+            self.steps_taken += 1;
             self.state = state.clone();
+            // Si llegamos a terminal, limpia deadline para próximo start
+            if self.state.is_terminal() {
+                self.orchestrator_started = None;
+            }
             self.update_ledger();
             Some(state)
         } else {
+            // Verifica step_timeout como deadline absoluta por estado (para log)
+            // Si el step lleva más de step_timeout sin progresar, el próximo tick lo avanzará;
+            // aquí solo esperamos.
             None
         }
     }
@@ -311,12 +347,34 @@ mod tests {
     #[test]
     fn orchestrator_starts_and_ticks() {
         let mut o = ManimOrchestrator::new("derivada de x²", "derivative-slope");
+        // Ajusta budget para que tick avance rápido en test (step_timeout 400ms)
+        o.budget.step_timeout = Duration::from_millis(400);
+        o.budget.total_timeout = Duration::from_secs(60);
         assert!(o.start("derivada de x²", "derivative-slope"));
         assert!(matches!(o.state, OrchestratorState::Planning { .. }));
-        // tick after planning timeout should advance
+        // tick after planning timeout should advance: usa deadline absoluta Instant::now + step_timeout
         let now = Instant::now() + Duration::from_millis(500);
         let _ = o.tick(now);
         assert!(matches!(o.state, OrchestratorState::Writing { .. }));
+    }
+
+    #[test]
+    fn orchestrator_respects_budget_total_timeout() {
+        let mut o = ManimOrchestrator::new("test", "universal");
+        o.budget.step_timeout = Duration::from_millis(200);
+        o.budget.total_timeout = Duration::from_millis(300);
+        assert!(o.start("test", "universal"));
+        let now = Instant::now() + Duration::from_millis(500);
+        let state = o.tick(now);
+        // total_timeout excedido debe fallar
+        assert!(matches!(
+            state,
+            Some(OrchestratorState::Failed { .. }) | None
+        ));
+        // Avanza más tiempo para asegurar total_timeout
+        let now2 = Instant::now() + Duration::from_millis(1000);
+        let _ = o.tick(now2);
+        assert!(matches!(o.state, OrchestratorState::Failed { .. }));
     }
     #[test]
     fn orchestrator_plan_for_concept() {

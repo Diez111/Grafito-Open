@@ -301,7 +301,10 @@ mod tests {
             _timeout: Duration,
             _cancellation: &Cancellation,
         ) -> Result<AgentChatResponse, String> {
-            let mut guard = self.responses.lock().unwrap();
+            let mut guard = self.responses.lock().unwrap_or_else(|p| {
+                log::warn!("lock poisoned");
+                p.into_inner()
+            });
             if guard.is_empty() {
                 return Err("scripted completer ran out of responses".into());
             }
@@ -447,7 +450,10 @@ mod tests {
                     .and_then(|message| message.get("content").and_then(Value::as_str))
                     .unwrap_or("")
                     .to_owned();
-                *self.captured.lock().unwrap() = Some(system);
+                *self.captured.lock().unwrap_or_else(|p| {
+                    log::warn!("lock poisoned");
+                    p.into_inner()
+                }) = Some(system);
                 Ok(AgentChatResponse::Text {
                     content: "respuesta".into(),
                     truncated: false,
@@ -469,7 +475,15 @@ mod tests {
         )
         .unwrap();
         assert!(outcome.verified);
-        let system = completer.captured.lock().unwrap().clone().unwrap();
+        let system = completer
+            .captured
+            .lock()
+            .unwrap_or_else(|p| {
+                log::warn!("lock poisoned");
+                p.into_inner()
+            })
+            .clone()
+            .unwrap();
         assert!(system.contains("Ledger de tarea:"));
         assert!(system.contains("Goal: analizar f"));
         assert!(system.contains("Next: evaluar g"));

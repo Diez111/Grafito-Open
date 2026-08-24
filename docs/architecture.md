@@ -1,4 +1,4 @@
-# docs/architecture.md — Grafito v1.2.21 (Auditoria 2026-08-20)
+# docs/architecture.md — Grafito v1.2.33 (Auditoria 2026-08-24)
 
 ## 1. Vision
 Grafito es pizarra geometrica con **Cerebro** (Rust puro) y **Piel** (egui/wgpu).
@@ -43,11 +43,12 @@ Idle -> Spawning -> AwaitingHello{deadline} -> AwaitingPong{deadline} -> Ready
 - Transiciones via &mut self con can_submit()==Ready, deadline absoluta, poll 200ms para cancel.
 - Validaciones: spawn NUL/workdir/bin path, line_cap 64KB OOM-safe, diagnostics cap 64 lineas, validate_media_path path_escape, Drop no-bloqueante (kill+try_wait).
 
-### 4.2 DocumentLifecycle (grafito-core, propuesto ValidatedDocument wrapper)
+### 4.2 DocumentLifecycle (grafito-core, ValidatedDocument wrapper — implementado)
 
 ```
 Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 ```
+- `ValidatedDocument` (`validation.rs:40`): wrapper fail-closed `try_new(doc)` que ejecuta `validate_document` antes de persistir o exponer snapshot al render. Migrar `HashMap` → `BTreeMap` en `Document` sigue como deuda migratoria; por ahora `semantic_document_baseline` garantiza orden.
 - MAX limits: MAX_OBJECT_COUNT 5000, MAX_EXPR_LENGTH 2000, MAX_TRANSFORM_DEPTH 64, MAX_DOCUMENT_SIZE 10M.
 - Hash determinista: sorted vars antes de hashear (object.rs:2605 fix), BTreeMap en serializacion (deuda migratoria).
 - Transformed try_new valida prepare_function_ast("z") y rechaza "0" singular.
@@ -97,7 +98,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 - **Tokens** (grafito-ui/src/tokens.rs): TYPE_XS..XXL (11..28, ratio 1.25), SPACE_XS..XXL (4..32, base 4), RADIUS_SM..LG, ICON_SM..XL — unica fuente de verdad.
 - **Assistant panel** (grafito-ui/src/assistant.rs): SidePanel 340..460 o TopBottomPanel bottom compacto (<780px), composer 116+44+32+20+112 con clamp 88..260, sin ScrollArea envolvente (fix overflow), wrapping, clip.
-- **App shell** (grafito-app/src/app.rs 4826L): eframe::App::update dispatch (820L god function, deuda P1), GrafitoApp ~75 campos (god object), MAX_UNDO 50 Vec<Document> (O(n) shift, deuda P2), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz.
+- **App shell** (grafito-app/src/app.rs 4826L): eframe::App::update dispatch (820L god function, deuda P1), GrafitoApp ~75 campos (god object), `MAX_UNDO` 50 + `MAX_UNDO_BYTES` 50 MiB con `VecDeque<Document/ChangeSet>` (`pop_front` O(1), `Vec` previo era O(n) shift — corregido), `controllers.rs` stubs `DocumentController/ViewController/AssistantController` con `VecDeque` (P1), ViewMode/Perspective/CanvasMode redundancia (deuda P1), repaint intervals 150ms settle, 33ms multidimensional 30Hz, 16ms whiteboard 60Hz.
 
 ## 8. Presupuestos y Limites
 
@@ -120,6 +121,9 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | AttachmentLimits max_bytes | 5M | assistant-types |
 | UI | ASSISTANT_PANEL width | 340..460 | assistant.rs |
 | App | MAX_UNDO | 50 | app.rs |
+| App | MAX_UNDO_BYTES | 50 MiB (VecDeque, pop_front O(1)) | app.rs |
+| App | undo_stack | VecDeque<Document> | app.rs + controllers.rs |
+| Core | ValidatedDocument | fail-closed wrapper try_new | validation.rs:40 |
 
 ## 9. Verificacion CI (8 jobs)
 

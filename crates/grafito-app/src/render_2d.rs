@@ -900,9 +900,9 @@ impl FillTextureCache {
 
 /// Máximo global para texturas RGBA8 de relleno. El límite de bytes impide que
 /// documentos grandes con regiones visibles simultáneamente retengan memoria
-/// GPU proporcional al número de objetos.
-pub const MAX_FILL_TEXTURE_CACHE_ENTRIES: usize = 16;
-pub const MAX_FILL_TEXTURE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+/// GPU proporcional al número de objetos. Reducido a 64 MB / 8 entradas para iGPU.
+pub const MAX_FILL_TEXTURE_CACHE_ENTRIES: usize = 8;
+pub const MAX_FILL_TEXTURE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 fn fill_texture_byte_size(canvas_size: (u32, u32)) -> usize {
     let pixels = usize::try_from(canvas_size.0).ok().and_then(|width| {
@@ -931,6 +931,7 @@ impl Default for FillTextureCacheStore {
     }
 }
 
+#[allow(dead_code)] // TODO P2: remover cuando FillTextureCacheStore se use en prod (actualmente usado en tests overlay_layer_tests)
 impl FillTextureCacheStore {
     fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
         Self {
@@ -980,15 +981,65 @@ impl FillTextureCacheStore {
         self.evict_to_budget();
     }
 
+    fn insert_with_ctx(
+        &mut self,
+        object_id: grafito_core::ObjectId,
+        mut entry: FillTextureCache,
+        ctx: &egui::Context,
+    ) {
+        if entry.byte_size > self.max_bytes || self.max_entries == 0 {
+            // Evita retener texturas que exceden el presupuesto de iGPU (64 MB / 8 entradas).
+            if let Some(texture) = entry.texture.take() {
+                ctx.forget_image(&format!("grafito_fill_{object_id}"));
+                drop(texture);
+            }
+            return;
+        }
+        self.remove_with_ctx(object_id, Some(ctx));
+        entry.last_used = self.next_access_epoch();
+        self.total_bytes = self.total_bytes.saturating_add(entry.byte_size);
+        self.entries.insert(object_id, entry);
+        self.evict_to_budget_with_ctx(Some(ctx));
+    }
+
     fn remove(&mut self, object_id: grafito_core::ObjectId) {
         if let Some(entry) = self.entries.remove(&object_id) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
         }
     }
 
+    fn remove_with_ctx(&mut self, object_id: grafito_core::ObjectId, ctx: Option<&egui::Context>) {
+        if let Some(entry) = self.entries.remove(&object_id) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+            if let (Some(ctx), Some(_)) = (ctx, entry.texture) {
+                // Libera la textura GPU asociada al LRU evicted. Necesario en iGPU con 64 MB.
+                ctx.forget_image(&format!("grafito_fill_{object_id}"));
+                ctx.forget_image(&format!("grafito_fill_complex_{object_id}"));
+                // Compatibilidad con URIs legacy fijas usadas antes de per-object URIs.
+                ctx.forget_image("implicit_fill");
+                ctx.forget_image("complex_mapping_fill");
+            }
+        }
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;
+    }
+
+    #[allow(dead_code)] // TODO P2: remover cuando clear_with_ctx se active en teardown GPU (usado en tests de presupuesto)
+    pub(crate) fn clear_with_ctx(&mut self, ctx: &egui::Context) {
+        for (id, entry) in self.entries.drain() {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+            if entry.texture.is_some() {
+                ctx.forget_image(&format!("grafito_fill_{id}"));
+                ctx.forget_image(&format!("grafito_fill_complex_{id}"));
+            }
+        }
+        self.entries.clear();
+        self.total_bytes = 0;
+        ctx.forget_image("implicit_fill");
+        ctx.forget_image("complex_mapping_fill");
     }
 
     fn retain_visible_fill_owners(&mut self, document: &grafito_core::Document) {
@@ -1003,7 +1054,39 @@ impl FillTextureCacheStore {
             .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
     }
 
+    #[allow(dead_code)] // TODO P2: remover cuando retain_visible_fill_owners_with_ctx se use en evicción LRU (usado en tests)
+    fn retain_visible_fill_owners_with_ctx(
+        &mut self,
+        document: &grafito_core::Document,
+        ctx: &egui::Context,
+    ) {
+        let mut evicted_ids = Vec::new();
+        self.entries.retain(|id, _| {
+            let keep = match document.get_object(*id) {
+                Some(GeoObject::ImplicitCurve(curve)) => curve.visible,
+                Some(GeoObject::ComplexMapping(mapping)) => mapping.visible,
+                _ => false,
+            };
+            if !keep {
+                evicted_ids.push(*id);
+            }
+            keep
+        });
+        for id in evicted_ids {
+            ctx.forget_image(&format!("grafito_fill_{id}"));
+            ctx.forget_image(&format!("grafito_fill_complex_{id}"));
+        }
+        self.total_bytes = self
+            .entries
+            .values()
+            .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
+    }
+
     fn evict_to_budget(&mut self) {
+        self.evict_to_budget_with_ctx(None);
+    }
+
+    fn evict_to_budget_with_ctx(&mut self, ctx: Option<&egui::Context>) {
         while self.entries.len() > self.max_entries || self.total_bytes > self.max_bytes {
             let Some(id) = self
                 .entries
@@ -1017,7 +1100,7 @@ impl FillTextureCacheStore {
             else {
                 break;
             };
-            self.remove(id);
+            self.remove_with_ctx(id, ctx);
         }
     }
 
@@ -2536,10 +2619,11 @@ impl GrafitoApp {
             size: [texture_w as usize, texture_h as usize],
             pixels: rows.into_iter().flatten().collect(),
         };
-        let texture =
-            painter
-                .ctx()
-                .load_texture("complex_mapping_fill", image, egui::TextureOptions::LINEAR);
+        let texture = painter.ctx().load_texture(
+            format!("grafito_fill_complex_{cm_id}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
 
         // 9) Almacenar en cache y blit.
         {
@@ -2547,7 +2631,7 @@ impl GrafitoApp {
                 log::warn!("Fill texture cache write lock poisoned; recovering");
                 poisoned.into_inner()
             });
-            cache.insert(
+            cache.insert_with_ctx(
                 cm_id,
                 FillTextureCache::new(
                     Some(texture.clone()),
@@ -2555,6 +2639,7 @@ impl GrafitoApp {
                     (texture_w, texture_h),
                     padded_bounds,
                 ),
+                painter.ctx(),
             );
         }
         let texture_id = texture.id();
@@ -2716,10 +2801,11 @@ impl GrafitoApp {
             size: [texture_w as usize, texture_h as usize],
             pixels: rows.into_iter().flatten().collect(),
         };
-        let texture =
-            painter
-                .ctx()
-                .load_texture("implicit_fill", image, egui::TextureOptions::LINEAR);
+        let texture = painter.ctx().load_texture(
+            format!("grafito_fill_{object_id}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
 
         // Almacenar en caché.
         {
@@ -2727,7 +2813,7 @@ impl GrafitoApp {
                 log::warn!("Fill texture cache write lock poisoned; recovering");
                 poisoned.into_inner()
             });
-            cache.insert(
+            cache.insert_with_ctx(
                 object_id,
                 FillTextureCache::new(
                     Some(texture.clone()),
@@ -2735,6 +2821,7 @@ impl GrafitoApp {
                     (texture_w, texture_h),
                     padded_bounds,
                 ),
+                painter.ctx(),
             );
         }
 

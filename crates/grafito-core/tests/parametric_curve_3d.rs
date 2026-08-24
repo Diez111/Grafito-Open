@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{
     deserialize_document,
     parametric_sampling::{evaluate_parametric_curve_3d, evaluate_surface_3d},

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 #![allow(clippy::uninlined_format_args)]
 //! Aplicación de escritorio Grafito — raíz de módulos.
 //!
@@ -8,17 +10,21 @@
 
 pub(crate) mod algebra;
 #[allow(dead_code)]
+// TODO P2: remover cuando anim_native se integre al pipeline activo (usado en tests de animación nativa)
 pub(crate) mod anim_native;
 #[allow(dead_code)]
+// TODO P2: remover cuando anim_ui cache de texturas se active en prod (usado en tests)
 pub(crate) mod anim_ui;
 pub(crate) mod app;
 pub(crate) mod assistant;
 pub(crate) mod assistant_credentials;
 pub(crate) mod canvas;
 pub(crate) mod commands;
+pub(crate) mod controllers;
 pub(crate) mod export;
 pub(crate) mod input;
 pub(crate) mod keyboard;
+pub(crate) mod lifecycle;
 pub(crate) mod manim_orchestrator;
 pub(crate) mod panels;
 pub mod render_2d;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Test end-to-end: el command processor + render del fill.
 
 use grafito_command::commands::process_input;

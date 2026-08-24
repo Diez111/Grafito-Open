@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Simula el scanline fill con stride (como en render_2d.rs) y
 //! verifica que el fill es correcto.
 

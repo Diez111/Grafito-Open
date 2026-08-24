@@ -47,12 +47,12 @@ impl DocumentAction {
     pub(crate) const fn prompt_message(self) -> &'static str {
         match self {
             Self::New => {
-                "Hay cambios sin guardar. Queres guardarlos antes de crear un documento nuevo?"
+                "Hay cambios sin guardar. ¿Querés guardarlos antes de crear un documento nuevo?"
             }
             Self::Open => {
-                "Hay cambios sin guardar. Queres guardarlos antes de abrir otro documento?"
+                "Hay cambios sin guardar. ¿Querés guardarlos antes de abrir otro documento?"
             }
-            Self::Exit => "Hay cambios sin guardar. Queres guardarlos antes de salir?",
+            Self::Exit => "Hay cambios sin guardar. ¿Querés guardarlos antes de salir?",
         }
     }
 }
@@ -242,12 +242,14 @@ impl DocumentLifecycle {
     }
 }
 
-fn semantic_document_baseline(document: &Document) -> Result<serde_json::Value, String> {
+pub(crate) fn semantic_document_baseline(document: &Document) -> Result<serde_json::Value, String> {
     let mut baseline = serde_json::to_value(document).map_err(|error| error.to_string())?;
     if let Some(view) = baseline
         .get_mut("view")
         .and_then(serde_json::Value::as_object_mut)
     {
+        // Canvas dimensions follow the native viewport and are not authored content.
+        // Se ignora para dirty-check y comparación semántica.
         view.remove("screen_size");
     }
     Ok(baseline)
@@ -269,8 +271,25 @@ pub(crate) fn write_document_to_path(document: &Document, path: &Path) -> Result
     }
 }
 
+/// Compara dos documentos ignorando `view.screen_size` (viewport transitorio).
+/// Usa `semantic_document_baseline` para que dirty-check y `documents_semantically_differ`
+/// compartan la misma definición de "cambio semántico".
 pub(crate) fn documents_semantically_differ(before: &Document, after: &Document) -> bool {
-    match (serde_json::to_value(before), serde_json::to_value(after)) {
+    // Fast path: versión y cantidad de objetos son O(1). Sólo cae a JSON si
+    // screen_size podría ser el único cambio (que ignoramos).
+    if std::ptr::eq(before, after) {
+        return false;
+    }
+    if before.version == after.version
+        && before.objects_iter().count() == after.objects_iter().count()
+        && before.view().screen_size == after.view().screen_size
+    {
+        return false;
+    }
+    match (
+        semantic_document_baseline(before),
+        semantic_document_baseline(after),
+    ) {
         (Ok(before), Ok(after)) => before != after,
         _ => false,
     }

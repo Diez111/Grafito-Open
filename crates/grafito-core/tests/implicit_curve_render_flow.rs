@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Test del flujo de render de un ImplicitCurve: pre-compute del
 //! outline, lectura del cache, y verificación de que los segmentos
 //! están en el lugar correcto.

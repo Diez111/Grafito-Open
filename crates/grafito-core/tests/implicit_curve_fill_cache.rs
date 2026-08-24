@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el cache del AST en ImplicitCurveObj no rompe el render
 //! cuando se llama repetidamente (simulando múltiples frames).
 

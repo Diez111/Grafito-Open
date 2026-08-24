@@ -398,6 +398,8 @@ impl ParametricComputePipeline {
                 log::error!("Parametric compute readback failed: {:?}", result.err());
             }
         });
+        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
+        log::trace!("Parametric compute sync readback (Wait) — bloqueante, 1 intento por frame");
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {

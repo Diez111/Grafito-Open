@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Grafito Pedagogy — Motor pedagógico puro (sin UI, sin red).
 //!
 //! Provee niveles, currículum (UTN AM1/AM2/Álgebra, secundaria), scaffold socrático,

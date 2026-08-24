@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_geometry::{
     ast::parse_ast,
     symbolic::{expand, limit_typed},

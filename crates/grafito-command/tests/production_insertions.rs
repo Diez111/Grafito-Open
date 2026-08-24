@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 const PRODUCTION_SOURCES: &[(&str, &str)] = &[
     ("commands.rs", include_str!("../src/commands.rs")),
     (

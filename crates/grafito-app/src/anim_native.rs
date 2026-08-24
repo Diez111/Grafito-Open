@@ -58,8 +58,7 @@ fn normalize_concept(concept: &str) -> String {
         return "matem\u{00e1}tica".to_string();
     }
     if s.len() > 120 {
-        s.truncate(120);
-        s.push_str("...");
+        s = s.chars().take(120).collect::<String>() + "...";
     }
     s
 }
@@ -146,16 +145,26 @@ fn draw_line(
     let mut err = dx + dy;
     loop {
         if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-            let i = (y as usize * w + x as usize) * 4;
-            // alpha blending simple: si color alpha <255, mezclar con fondo
-            if color[3] == 255 {
-                buf[i..i + 4].copy_from_slice(&color);
-            } else {
-                let a = color[3] as f64 / 255.0;
-                for k in 0..3 {
-                    buf[i + k] = (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
+            let ux = x as usize;
+            let uy = y as usize;
+            if let Some(i) = uy
+                .checked_mul(w)
+                .and_then(|v| v.checked_add(ux))
+                .and_then(|v| v.checked_mul(4))
+            {
+                if i + 3 < buf.len() {
+                    // alpha blending simple: si color alpha <255, mezclar con fondo
+                    if color[3] == 255 {
+                        buf[i..i + 4].copy_from_slice(&color);
+                    } else {
+                        let a = color[3] as f64 / 255.0;
+                        for k in 0..3 {
+                            buf[i + k] =
+                                (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
+                        }
+                        buf[i + 3] = 255;
+                    }
                 }
-                buf[i + 3] = 255;
             }
         }
         if x == b.0 as i64 && y == b.1 as i64 {
@@ -189,16 +198,25 @@ fn draw_filled_circle(
                 let x = cx as i64 + dx;
                 let y = cy as i64 + dy;
                 if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                    let i = (y as usize * w + x as usize) * 4;
-                    if color[3] == 255 {
-                        buf[i..i + 4].copy_from_slice(&color);
-                    } else {
-                        let a = color[3] as f64 / 255.0;
-                        for k in 0..3 {
-                            buf[i + k] =
-                                (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
-                        } // clippy ok
-                        buf[i + 3] = 255;
+                    let ux = x as usize;
+                    let uy = y as usize;
+                    if let Some(i) = uy
+                        .checked_mul(w)
+                        .and_then(|v| v.checked_add(ux))
+                        .and_then(|v| v.checked_mul(4))
+                    {
+                        if i + 3 < buf.len() {
+                            if color[3] == 255 {
+                                buf[i..i + 4].copy_from_slice(&color);
+                            } else {
+                                let a = color[3] as f64 / 255.0;
+                                for k in 0..3 {
+                                    buf[i + k] =
+                                        (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
+                                } // clippy ok
+                                buf[i + 3] = 255;
+                            }
+                        }
                     }
                 }
             }
@@ -221,15 +239,23 @@ fn draw_filled_rect(
     let y1 = (y0 + rh).min(h);
     for y in y0..y1 {
         for x in x0..x1 {
-            let i = (y * w + x) * 4;
-            if color[3] == 255 {
-                buf[i..i + 4].copy_from_slice(&color);
-            } else {
-                let a = color[3] as f64 / 255.0;
-                for k in 0..3 {
-                    buf[i + k] = (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
+            if let Some(i) = y
+                .checked_mul(w)
+                .and_then(|v| v.checked_add(x))
+                .and_then(|v| v.checked_mul(4))
+            {
+                if i + 3 >= buf.len() {
+                    continue;
                 }
-                buf[i + 3] = 255;
+                if color[3] == 255 {
+                    buf[i..i + 4].copy_from_slice(&color);
+                } else {
+                    let a = color[3] as f64 / 255.0;
+                    for k in 0..3 {
+                        buf[i + k] = (color[k] as f64 * a + buf[i + k] as f64 * (1.0 - a)) as u8;
+                    }
+                    buf[i + 3] = 255;
+                }
             }
         }
     }
@@ -308,11 +334,18 @@ fn fill_background(buf: &mut [u8], w: usize, h: usize, concept: &str, t: f64) {
             + BG_GRADIENT[2] as f64 * mix
             + accent[2] as f64 * 0.04 * (1.0 - v)) as u8;
         for x in 0..w {
-            let i = (y * w + x) * 4;
-            buf[i] = r;
-            buf[i + 1] = g;
-            buf[i + 2] = b;
-            buf[i + 3] = 255;
+            if let Some(i) = y
+                .checked_mul(w)
+                .and_then(|v| v.checked_add(x))
+                .and_then(|v| v.checked_mul(4))
+            {
+                if i + 3 < buf.len() {
+                    buf[i] = r;
+                    buf[i + 1] = g;
+                    buf[i + 2] = b;
+                    buf[i + 3] = 255;
+                }
+            }
         }
     }
     // vignette suave
@@ -325,10 +358,17 @@ fn fill_background(buf: &mut [u8], w: usize, h: usize, concept: &str, t: f64) {
             let dy = y as f64 - cy;
             let d = (dx * dx + dy * dy).sqrt() / maxd;
             let dark = d * d * 0.22;
-            let i = (y * w + x) * 4;
-            buf[i] = (buf[i] as f64 * (1.0 - dark)) as u8;
-            buf[i + 1] = (buf[i + 1] as f64 * (1.0 - dark)) as u8;
-            buf[i + 2] = (buf[i + 2] as f64 * (1.0 - dark)) as u8;
+            if let Some(i) = y
+                .checked_mul(w)
+                .and_then(|v| v.checked_add(x))
+                .and_then(|v| v.checked_mul(4))
+            {
+                if i + 3 < buf.len() {
+                    buf[i] = (buf[i] as f64 * (1.0 - dark)) as u8;
+                    buf[i + 1] = (buf[i + 1] as f64 * (1.0 - dark)) as u8;
+                    buf[i + 2] = (buf[i + 2] as f64 * (1.0 - dark)) as u8;
+                }
+            }
         }
     }
 }
@@ -339,22 +379,34 @@ fn draw_subtle_grid(buf: &mut [u8], w: usize, h: usize, t: f64) {
     let off = ((t * 18.0) as usize) % step;
     for x in (off..w).step_by(step) {
         for y in 0..h {
-            let i = (y * w + x) * 4;
-            // linea vertical punteada sutil
-            if y % 3 == 0 {
-                buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
-                buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
-                buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+            if let Some(i) = y
+                .checked_mul(w)
+                .and_then(|v| v.checked_add(x))
+                .and_then(|v| v.checked_mul(4))
+            {
+                // linea vertical punteada sutil
+                if y % 3 == 0 && i + 2 < buf.len() {
+                    buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
+                    buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
+                    buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+                }
             }
         }
     }
     for y in (off..h).step_by(step) {
         for x in 0..w {
             if x % 3 == 0 {
-                let i = (y * w + x) * 4;
-                buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
-                buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
-                buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+                if let Some(i) = y
+                    .checked_mul(w)
+                    .and_then(|v| v.checked_add(x))
+                    .and_then(|v| v.checked_mul(4))
+                {
+                    if i + 2 < buf.len() {
+                        buf[i] = ((buf[i] as u16 + GRID_COLOR[0] as u16) / 2) as u8;
+                        buf[i + 1] = ((buf[i + 1] as u16 + GRID_COLOR[1] as u16) / 2) as u8;
+                        buf[i + 2] = ((buf[i + 2] as u16 + GRID_COLOR[2] as u16) / 2) as u8;
+                    }
+                }
             }
         }
     }
@@ -371,8 +423,14 @@ fn ease_in_out(t: f64) -> f64 {
 // ── Plantillas existentes ────────────────────────────────────────────────
 
 pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let parabola: Vec<(f64, f64)> = (-60..=60)
         .map(|i| {
             let x = i as f64 / 20.0;
@@ -386,7 +444,11 @@ pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egu
         } else {
             frame as f64 / (NATIVE_ANIM_FRAME_COUNT - 1) as f64
         };
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, "derivada", t * 0.1);
         draw_subtle_grid(&mut buf, w, h, t);
         let axis = AXIS_COLOR;
@@ -438,12 +500,22 @@ pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egu
 }
 
 pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).clamp(0.0, 1.0);
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, "pitagoras", t * 0.08);
         draw_subtle_grid(&mut buf, w, h, t);
         let p1 = to_pixel(w, h, -1.0, -1.0);
@@ -485,8 +557,14 @@ pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::Colo
 }
 
 pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let curve: Vec<(f64, f64)> = (-60..=60)
         .map(|i| {
             let x = i as f64 / 20.0;
@@ -496,7 +574,11 @@ pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::Color
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, "integral", t * 0.08);
         draw_subtle_grid(&mut buf, w, h, t);
         let axis = AXIS_COLOR;
@@ -550,14 +632,24 @@ pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::Color
 }
 
 pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let f = |x: f64| x.sin();
     let taylor = |x: f64| x - x.powi(3) / 6.0;
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, "taylor", t * 0.08);
         draw_subtle_grid(&mut buf, w, h, t);
         let axis = AXIS_COLOR;
@@ -612,12 +704,22 @@ pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorIm
 }
 
 pub(crate) fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, "conformal", t * 0.08);
         draw_subtle_grid(&mut buf, w, h, t);
         let axis = AXIS_COLOR;
@@ -684,8 +786,14 @@ pub fn render_universal_youtube_frames(
     width: u32,
     height: u32,
 ) -> Vec<egui::ColorImage> {
-    let w = width.max(64) as usize;
-    let h = height.max(48) as usize;
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
     let concept_norm = normalize_concept(concept);
     let accent = accent_for_concept(&concept_norm);
     let hash = hash_concept(&concept_norm);
@@ -700,7 +808,11 @@ pub fn render_universal_youtube_frames(
             frame as f64 / (NATIVE_ANIM_FRAME_COUNT - 1) as f64
         };
         let t = ease_in_out(t_raw);
-        let mut buf = vec![0u8; w * h * 4];
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
         fill_background(&mut buf, w, h, &concept_norm, t * 0.12);
         draw_subtle_grid(&mut buf, w, h, t * 0.6);
         // ejes sutiles

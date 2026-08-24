@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use std::ops::Range;
 
 const FORBIDDEN_INSERTION_CALLS: &[&str] = &[

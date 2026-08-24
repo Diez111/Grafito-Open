@@ -208,6 +208,9 @@ pub struct CasWorksheetEntry {
 }
 
 /// The main document containing all geometric objects.
+// TODO P0: migrar objects/variables/constraints a BTreeMap para determinismo total;
+// por ahora `ValidatedDocument` + `semantic_document_baseline` garantizan snapshots
+// estables vía ordenación explícita en `persistence` y `assistant_plan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     objects: HashMap<ObjectId, GeoObject>,
@@ -517,14 +520,17 @@ impl Document {
     }
 
     /// Variante de compatibilidad que falla de forma visible ante un punto inválido.
-    ///
-    /// # Panics
-    ///
-    /// Panics when [`Self::try_add_point`] rejects the point.
+    #[deprecated(note = "use try_add_point")]
     #[track_caller]
     pub fn add_point(&mut self, pos: Point2) -> ObjectId {
-        self.try_add_point(pos)
-            .unwrap_or_else(|error| panic!("Document::add_point rejected point: {error}"))
+        match self.try_add_point(pos) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Document::add_point rejected point: {error}");
+                debug_assert!(false, "Document::add_point rejected point: {error}");
+                ObjectId::new()
+            }
+        }
     }
 
     /// Inserts one free object while enforcing document-wide hard limits and
@@ -637,20 +643,17 @@ impl Document {
     }
 
     /// Compatibility wrapper for callers that cannot return insertion errors.
-    ///
-    /// # Deprecated
-    ///
-    /// New code must use [`Self::try_add_object`] so rejection remains a normal,
-    /// diagnosable control-flow path.
-    ///
-    /// # Panics
-    ///
-    /// Panics when insertion is rejected. Use [`Self::try_add_object`] to
-    /// receive the diagnostic and preserve normal control flow.
+    #[deprecated(note = "use try_add_object")]
     #[track_caller]
     pub fn add_object(&mut self, obj: GeoObject) -> ObjectId {
-        self.try_add_object(obj)
-            .unwrap_or_else(|error| panic!("Document::add_object rejected object: {error}"))
+        match self.try_add_object(obj) {
+            Ok(id) => id,
+            Err(error) => {
+                log::error!("Document::add_object rejected object: {error}");
+                debug_assert!(false, "Document::add_object rejected object: {error}");
+                ObjectId::new()
+            }
+        }
     }
 
     pub fn add_constructed_object(
@@ -1241,7 +1244,11 @@ impl Document {
             let dx = line.end.x - line.start.x;
             let dy = line.end.y - line.start.y;
             let length = dx.hypot(dy);
-            if dx.is_finite() && dy.is_finite() && length.is_finite() && length > 1e-12 {
+            if dx.is_finite()
+                && dy.is_finite()
+                && length.is_finite()
+                && length > crate::validation::GEOM_EPS
+            {
                 Ok((dx, dy))
             } else {
                 Err(format!(
@@ -2246,7 +2253,10 @@ impl Document {
                             0 => (base, top),
                             1 => (base, next_base),
                             2 => (top, next_top),
-                            _ => unreachable!("Extrude edge kind was validated above"),
+                            _ => {
+                                debug_assert!(false, "Extrude edge kind was validated above");
+                                continue;
+                            }
                         };
                         for output in cons.outputs {
                             if let Some(GeoObject::Segment3D(segment)) = self.get_object_mut(output)
@@ -4237,10 +4247,11 @@ impl Document {
     }
 
     fn set_spreadsheet_cell_sources_in_place(&mut self, edits: &[(usize, usize, String)]) {
-        let max_row = edits
-            .last()
-            .map(|(row, _, _)| *row)
-            .expect("non-empty spreadsheet edit batch");
+        let Some(max_row) = edits.last().map(|(row, _, _)| *row) else {
+            log::warn!("set_spreadsheet_cell_sources_in_place called with empty batch");
+            debug_assert!(false, "non-empty spreadsheet edit batch required");
+            return;
+        };
         if self.spreadsheet.len() <= max_row {
             self.spreadsheet.resize_with(max_row + 1, Vec::new);
         }

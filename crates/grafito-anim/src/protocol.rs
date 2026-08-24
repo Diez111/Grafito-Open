@@ -248,12 +248,22 @@ impl AnimRequest {
                 reason: "al menos uno requerido".into(),
             });
         }
-        if self.template.len() > 64
-            || !self.template.chars().all(|c| {
-                c.is_ascii_alphanumeric() || c == '-' || c == '_' || c.is_ascii_whitespace()
-            })
+        if self.template.len() > 64 {
+            return Err(ProtocolError::InvalidField {
+                field: "template",
+                reason: "excede 64 chars".into(),
+            });
+        }
+        if !self.template.is_empty()
+            && !self
+                .template
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            // Permisivo para compatibilidad, sólo valida longitud
+            return Err(ProtocolError::InvalidField {
+                field: "template",
+                reason: "caracteres inválidos".into(),
+            });
         }
         for (k, v) in &self.params {
             if !v.is_finite() {
@@ -442,7 +452,7 @@ pub fn normalize_concept(concept: &str) -> String {
         return "matem\u{00e1}tica".to_string();
     }
     if s.len() > 500 {
-        s.truncate(500);
+        s = s.chars().take(500).collect();
     }
     s
 }

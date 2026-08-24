@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_complex::parse_complex;
 use num_complex::Complex64;
 use std::collections::HashMap;

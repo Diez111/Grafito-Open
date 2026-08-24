@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_assistant::harness;
 use grafito_assistant_types::{AssistantOperation, PrivacyMode, ProposedPlan};
 use grafito_command::assistant_context::document_context;

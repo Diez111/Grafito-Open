@@ -938,8 +938,8 @@ pub(crate) fn create_centered_four_d_tool_object(
     current_tool: &mut Tool,
     document: &mut Document,
     selected_object: &mut Option<ObjectId>,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut std::collections::VecDeque<Document>,
+    redo_stack: &mut std::collections::VecDeque<ChangeSet>,
 ) -> Result<Option<(ObjectId, &'static str)>, String> {
     let Some((object, action)) = centered_four_d_tool_default(*current_tool) else {
         return Ok(None);
@@ -2411,8 +2411,19 @@ impl GrafitoApp {
                         let dx = (xe - xs) / res as f64;
                         let dy = (ye - ys) / res as f64;
 
-                        // Evaluate all z values
-                        let mut pts = Vec::with_capacity((res + 1) * (res + 1));
+                        // Evaluate all z values — checked_mul + try_reserve para evitar OOM.
+                        let dim = match res.checked_add(1) {
+                            Some(dim) => dim,
+                            None => continue,
+                        };
+                        let capacity = match dim.checked_mul(dim) {
+                            Some(cap) => cap,
+                            None => continue,
+                        };
+                        let mut pts = Vec::new();
+                        if pts.try_reserve(capacity).is_err() {
+                            continue;
+                        }
                         for i in 0..=res {
                             for j in 0..=res {
                                 pts.push((xs + j as f64 * dx, ys + i as f64 * dy));
@@ -2568,15 +2579,26 @@ impl GrafitoApp {
                     }
                     // Original wireframe rendering
                     let stroke = Stroke::new(surf.width, to_color32(surf.color));
-                    let steps = 20;
+                    let steps: usize = 20;
                     let xs = surf.x_min;
                     let xe = surf.x_max;
                     let ys = surf.y_min;
                     let ye = surf.y_max;
                     let x_step = (xe - xs) / steps as f64;
                     let y_step = (ye - ys) / steps as f64;
-                    // Collect all (x, y) points for X-axis lines
-                    let mut pts_x = Vec::with_capacity((steps + 1) * (steps + 1));
+                    // Collect all (x, y) points for X-axis lines — checked + try_reserve
+                    let dim_x = match steps.checked_add(1) {
+                        Some(dim) => dim,
+                        None => continue,
+                    };
+                    let cap_x = match dim_x.checked_mul(dim_x) {
+                        Some(cap) => cap,
+                        None => continue,
+                    };
+                    let mut pts_x = Vec::new();
+                    if pts_x.try_reserve(cap_x).is_err() {
+                        continue;
+                    }
                     for i in 0..=steps {
                         let y = ys + i as f64 * y_step;
                         for j in 0..=steps {
@@ -2623,8 +2645,19 @@ impl GrafitoApp {
                         }
                     }
 
-                    // Collect all (x, y) points for Y-axis lines
-                    let mut pts_y = Vec::with_capacity((steps + 1) * (steps + 1));
+                    // Collect all (x, y) points for Y-axis lines — checked + try_reserve
+                    let dim_y = match steps.checked_add(1) {
+                        Some(dim) => dim,
+                        None => continue,
+                    };
+                    let cap_y = match dim_y.checked_mul(dim_y) {
+                        Some(cap) => cap,
+                        None => continue,
+                    };
+                    let mut pts_y = Vec::new();
+                    if pts_y.try_reserve(cap_y).is_err() {
+                        continue;
+                    }
                     for j in 0..=steps {
                         let x = xs + j as f64 * x_step;
                         for i in 0..=steps {

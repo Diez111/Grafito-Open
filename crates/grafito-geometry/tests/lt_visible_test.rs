@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el scanline con stride=2 produce segments visibles
 //! para `x^2 + y^2 < 1` con el view default de la app.
 

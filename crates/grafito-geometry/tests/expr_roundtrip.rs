@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_geometry::ast::{parse_ast, Expr};
 use grafito_geometry::expr::{evaluate, evaluate_cached, CompiledExpr};
 use grafito_geometry::symbolic;

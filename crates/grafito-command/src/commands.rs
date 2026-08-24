@@ -207,7 +207,9 @@ fn validate_command_input(input: &str) -> Result<(), String> {
                     ')' => '(',
                     ']' => '[',
                     '}' => '{',
-                    _ => unreachable!(),
+                    _ => {
+                        return Err("Command input contains unbalanced delimiters".into());
+                    }
                 };
                 if delimiters.pop() != Some(expected_open) {
                     return Err("Command input contains unbalanced delimiters".into());
@@ -245,7 +247,9 @@ fn split_script_commands(script: &str) -> Result<Vec<String>, String> {
                     ')' => '(',
                     ']' => '[',
                     '}' => '{',
-                    _ => unreachable!(),
+                    _ => {
+                        return Err("Script contains unbalanced delimiters".into());
+                    }
                 };
                 if delimiters.pop() != Some(expected_open) {
                     return Err("Script contains unbalanced delimiters".into());
@@ -508,9 +512,9 @@ fn parse_regular_polychoron_4d_command_args(
         REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT,
         variables,
     )?;
-    let rotation_angles = rotations
+    let rotation_angles: [f64; REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT] = rotations
         .try_into()
-        .expect("the exact 4D rotation count converts to a fixed array");
+        .unwrap_or([0.0; REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT]);
     Ok((scale, rotation_angles))
 }
 
@@ -535,8 +539,13 @@ fn parse_regular_polytope_nd_command_args(
             ))
         })?;
     let scale = parse_positive_regular_polytope_scale(command, args.get(1), variables)?;
-    let expected_rotation_count = RegularPolytopeNDObj::expected_rotation_angle_count(dimension)
-        .expect("a validated regular-polytope dimension has a rotation count");
+    let Some(expected_rotation_count) =
+        RegularPolytopeNDObj::expected_rotation_angle_count(dimension)
+    else {
+        return Err(CommandOutcome::Error(format!(
+            "{command}: dimensión no soportada para rotaciones"
+        )));
+    };
     let rotation_angles = parse_exact_regular_polytope_rotations(
         command,
         args.get(2),
@@ -2759,12 +2768,11 @@ fn process_input_in_place_with_budget(
                 // Plane3D[label1, label2, label3]  →  plano por 3 puntos
                 let pts = parse_three_point_labels(document, &cmd.args);
                 if let Some((p1, p2, p3)) = pts {
-                    let plane = Plane3DObj::from_three_points(p1, p2, p3);
-                    if plane.a * plane.a + plane.b * plane.b + plane.c * plane.c < 1e-18 {
+                    let Some(plane) = Plane3DObj::from_three_points(p1, p2, p3) else {
                         return CommandOutcome::Error(
                             "Plane3D: los tres puntos son colineales o repetidos".into(),
                         );
-                    }
+                    };
                     let obj = GeoObject::Plane3D(plane);
                     insert_command_object!(document, obj);
                     input_text.clear();
@@ -4399,7 +4407,12 @@ fn process_input_in_place_with_budget(
                     "TwentyFourCell4D" => RegularPolychoron::TwentyFourCell,
                     "OneTwentyCell4D" => RegularPolychoron::OneTwentyCell,
                     "SixHundredCell4D" => RegularPolychoron::SixHundredCell,
-                    _ => unreachable!("the enclosing match contains every named 4D polychoron"),
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "Polychoron desconocido: {}",
+                            cmd.command
+                        ))
+                    }
                 };
                 let (scale, rotation_angles) =
                     command_result!(parse_regular_polychoron_4d_command_args(
@@ -4419,7 +4432,12 @@ fn process_input_in_place_with_budget(
                     "SimplexND" => RegularPolytopeFamily::Simplex,
                     "HypercubeND" => RegularPolytopeFamily::Hypercube,
                     "CrossPolytopeND" => RegularPolytopeFamily::CrossPolytope,
-                    _ => unreachable!("the enclosing match contains every generic N-D family"),
+                    _ => {
+                        return CommandOutcome::Error(format!(
+                            "Familia politopo desconocida: {}",
+                            cmd.command
+                        ))
+                    }
                 };
                 let (dimension, scale, rotation_angles) =
                     command_result!(parse_regular_polytope_nd_command_args(
@@ -8325,8 +8343,12 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
 
     match (&a, &b) {
         (GeoObject::Plane3D(_), GeoObject::Plane3D(_)) => {
-            let p1 = as_geom_plane(&a).unwrap();
-            let p2 = as_geom_plane(&b).unwrap();
+            let Some(p1) = as_geom_plane(&a) else {
+                return CommandOutcome::Error("Intersection3D: plano degenerado".into());
+            };
+            let Some(p2) = as_geom_plane(&b) else {
+                return CommandOutcome::Error("Intersection3D: plano degenerado".into());
+            };
             match intersect_planes(p1, p2, eps) {
                 PlanePlaneIntersection::Line(line) => {
                     let id = insert_command_object!(
@@ -8360,13 +8382,21 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
         }
         (GeoObject::Line3D(_), GeoObject::Plane3D(_))
         | (GeoObject::Plane3D(_), GeoObject::Line3D(_)) => {
-            let line = as_geom_line(&a).or_else(|| as_geom_line(&b)).unwrap();
-            let plane = as_geom_plane(&a).or_else(|| as_geom_plane(&b)).unwrap();
+            let Some(line) = as_geom_line(&a).or_else(|| as_geom_line(&b)) else {
+                return CommandOutcome::Error("Intersection3D: recta degenerada".into());
+            };
+            let Some(plane) = as_geom_plane(&a).or_else(|| as_geom_plane(&b)) else {
+                return CommandOutcome::Error("Intersection3D: plano degenerado".into());
+            };
             intersect_line_plane_command(document, line, plane, eps)
         }
         (GeoObject::Line3D(_), GeoObject::Line3D(_)) => {
-            let l1 = as_geom_line(&a).unwrap();
-            let l2 = as_geom_line(&b).unwrap();
+            let Some(l1) = as_geom_line(&a) else {
+                return CommandOutcome::Error("Intersection3D: recta degenerada".into());
+            };
+            let Some(l2) = as_geom_line(&b) else {
+                return CommandOutcome::Error("Intersection3D: recta degenerada".into());
+            };
             match line_line_relation(l1, l2, eps) {
                 LineLineRelation::Intersecting(p) => {
                     add_point3d_message(document, p, "Intersection3D")
@@ -8410,18 +8440,20 @@ fn run_three_plane_intersection(
         };
         planes.push(plane);
     }
-    let a = Matrix::from_rows(vec![
+    let Some(a) = Matrix::from_rows(vec![
         vec![planes[0].a, planes[0].b, planes[0].c],
         vec![planes[1].a, planes[1].b, planes[1].c],
         vec![planes[2].a, planes[2].b, planes[2].c],
-    ])
-    .unwrap();
-    let b = Matrix::from_rows(vec![
+    ]) else {
+        return CommandOutcome::Error("Intersection3D: plano degenerado".into());
+    };
+    let Some(b) = Matrix::from_rows(vec![
         vec![-planes[0].d],
         vec![-planes[1].d],
         vec![-planes[2].d],
-    ])
-    .unwrap();
+    ]) else {
+        return CommandOutcome::Error("Intersection3D: plano degenerado".into());
+    };
     if let Some(sol) = solve_linear_system(&a, &b) {
         add_point3d_message(
             document,
@@ -8477,16 +8509,24 @@ fn run_projection_3d(
     let eps = 1e-9;
     match (&source, &target) {
         (GeoObject::Point3D(p), GeoObject::Plane3D(_)) => {
-            let plane = as_geom_plane(&target).unwrap();
+            let Some(plane) = as_geom_plane(&target) else {
+                return CommandOutcome::Error("Projection3D: plano degenerado".into());
+            };
             add_point3d_message(document, plane.project_point(p.position), "Projection3D")
         }
         (GeoObject::Point3D(p), GeoObject::Line3D(_)) => {
-            let line = as_geom_line(&target).unwrap();
+            let Some(line) = as_geom_line(&target) else {
+                return CommandOutcome::Error("Projection3D: recta degenerada".into());
+            };
             add_point3d_message(document, line.closest_point_to(p.position), "Projection3D")
         }
         (GeoObject::Line3D(_), GeoObject::Plane3D(_)) => {
-            let line = as_geom_line(&source).unwrap();
-            let plane = as_geom_plane(&target).unwrap();
+            let Some(line) = as_geom_line(&source) else {
+                return CommandOutcome::Error("Projection3D: recta degenerada".into());
+            };
+            let Some(plane) = as_geom_plane(&target) else {
+                return CommandOutcome::Error("Projection3D: plano degenerado".into());
+            };
             match project_line_onto_plane(line, plane, eps) {
                 LineProjectionOnPlane::Line(l) => add_line3d_message(document, l, "Projection3D"),
                 LineProjectionOnPlane::Point(p) => add_point3d_message(document, p, "Projection3D"),
@@ -10536,7 +10576,10 @@ fn run_riemann_sum_command(args: &[String], document: &Document) -> CommandOutco
             "left" | "izquierda" => a + i as f64 * dx,
             "right" | "derecha" => a + (i as f64 + 1.0) * dx,
             "midpoint" | "medio" => a + (i as f64 + 0.5) * dx,
-            _ => unreachable!(),
+            _ => {
+                // validated above; keep midpoint as safe default
+                a + (i as f64 + 0.5) * dx
+            }
         };
         let value = match eval_multivar_expr(&expr, &document.variables, &[(var.as_str(), x)]) {
             Ok(v) => v,
@@ -11104,6 +11147,7 @@ fn solve_linear_command(a: &Matrix, b: &Matrix) -> CommandOutcome {
     ))
 }
 
+#[allow(clippy::unwrap_used)]
 fn augment_matrix(a: &Matrix, b: &Matrix) -> Matrix {
     let mut rows = Vec::with_capacity(a.rows);
     for r in 0..a.rows {
@@ -11418,6 +11462,7 @@ fn p2_coefficients(expr: &str, var: &str, document: &Document) -> Result<Vec<f64
     Ok(vec![a, b, c])
 }
 
+#[allow(clippy::unwrap_used)]
 fn coefficient_columns_matrix(polys: &[P2Polynomial]) -> Matrix {
     let mut rows = vec![Vec::new(), Vec::new(), Vec::new()];
     for p in polys {
@@ -11701,6 +11746,7 @@ fn matrix_rows(m: &Matrix) -> Vec<Vec<f64>> {
         .collect()
 }
 
+#[allow(clippy::unwrap_used)]
 fn independent_row_indices(rows: &[Vec<f64>]) -> Vec<usize> {
     let mut selected = Vec::new();
     let mut current_rank = 0;
@@ -12689,6 +12735,7 @@ fn has_inconsistent_augmented_row(rref: &Matrix, vars: usize, eps: f64) -> bool 
         .any(|r| (0..vars).all(|c| rref.get(r, c).abs() <= eps) && rref.get(r, vars).abs() > eps)
 }
 
+#[allow(clippy::unwrap_used)]
 fn replace_matrix_column(a: &Matrix, col: usize, b: &Matrix) -> Matrix {
     Matrix::from_rows(
         (0..a.rows)

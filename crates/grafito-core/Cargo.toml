@@ -23,9 +23,13 @@ num-complex.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 geo.workspace = true
+proptest = "1"
 
 [[bench]]
 name = "solver_bench"

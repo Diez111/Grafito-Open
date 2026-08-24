@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
     implicit_curve::{MAX_IMPLICIT_GRID_SIZE, MAX_MARCHING_SQUARES_WORK_UNITS},

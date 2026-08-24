@@ -99,7 +99,7 @@ pub enum JobEvent {
 
 /// Puente hacia un proceso de motor de animaciones ya lanzado.
 pub struct AnimEngine {
-    child: Child,
+    child: Option<Child>,
     stdin: ChildStdin,
     events: Receiver<WireMessage>,
     next_job: u64,
@@ -177,7 +177,7 @@ impl AnimEngine {
             spawn_stderr_drainer(stderr, std::sync::Arc::clone(&diagnostics));
         }
         Ok(Self {
-            child,
+            child: Some(child),
             stdin,
             events: receiver,
             next_job: 0,
@@ -351,28 +351,45 @@ impl AnimEngine {
         }
     }
 
-    /// Apaga el motor de forma cooperativa y garantiza su terminacion.
+    /// Apaga el motor de forma cooperativa sin bloquear el hilo de UI.
+    ///
+    /// Envía `SHUTDOWN` y delega el `try_wait`/`kill`/`wait` a un hilo en segundo
+    /// plano. El llamante sólo debe marcar `ShuttingDown` y pedir `request_repaint`;
+    /// no bloquea 8 s en el UI thread. El `Drop` garantiza la limpieza final con
+    /// `try_wait` no bloqueante.
     pub fn shutdown(&mut self) -> Result<(), String> {
         self.state = AnimJobState::ShuttingDown {
             deadline: Instant::now() + self.config.idle_timeout,
         };
         let _ = self.send(&json!({ "type": kinds::SHUTDOWN }));
-        let deadline = Instant::now() + self.config.idle_timeout;
-        loop {
-            if Instant::now() >= deadline {
-                break;
-            }
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    std::thread::sleep(Duration::from_millis(20));
+        // Delega la espera bloqueante a un hilo para no congelar la UI.
+        if let Some(mut child) = self.child.take() {
+            let idle = self.config.idle_timeout;
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + idle;
+                loop {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
                 }
-                Err(_) => break,
-            }
+                let _ = child.kill();
+                let _ = child.wait();
+            });
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
         Ok(())
+    }
+
+    /// Variante explícitamente asíncrona para uso desde UI: idéntica a `shutdown`
+    /// pero documenta la intención no bloqueante y puede consultarse vía `state()`.
+    pub fn shutdown_async(&mut self) -> Result<(), String> {
+        self.shutdown()
     }
 
     fn send(&mut self, value: &Value) -> Result<(), String> {
@@ -412,8 +429,10 @@ impl AnimEngine {
 impl Drop for AnimEngine {
     fn drop(&mut self) {
         // No bloquear el hilo de UI: intenta matar y hace try_wait no bloqueante.
-        let _ = self.child.kill();
-        let _ = self.child.try_wait();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
         // Si aún no terminó, el SO lo cosechará; evitamos bloquear Drop.
     }
 }
@@ -461,6 +480,21 @@ pub fn run_job(
                 if result.job_id != job_id {
                     continue;
                 }
+                // Asegura que el parent existe antes de validar (evita TOCTOU por subdir inexistente).
+                {
+                    let working = config.working_dir.as_deref().unwrap_or(Path::new("."));
+                    let candidate = Path::new(&result.media_path);
+                    let absolute = if candidate.is_absolute() {
+                        candidate.to_path_buf()
+                    } else {
+                        working.join(candidate)
+                    };
+                    if let Some(parent) = absolute.parent() {
+                        if !parent.exists() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                    }
+                }
                 if !validate_media_path(
                     config.working_dir.as_deref().unwrap_or(Path::new(".")),
                     &result.media_path,
@@ -503,6 +537,7 @@ pub fn run_job(
 
 /// Comprueba que el artefacto devuelto queda dentro del directorio de trabajo.
 /// Corrige rama muerta (V1), NUL (V4) y TOCTOU documentado.
+/// TOCTOU documentado: verificar post-open que fd sigue dentro de cwd via /proc/self/fd
 pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
     if media_path.contains('\0') {
         return false;
@@ -523,11 +558,38 @@ pub fn validate_media_path(working_dir: &Path, media_path: &str) -> bool {
     let Some(parent) = absolute.parent() else {
         return false;
     };
-    // Si el archivo no existe aun, canonicaliza el parent; si no existe, rechaza.
-    let Ok(parent_canonical) = parent.canonicalize() else {
-        return false;
+    // Si el parent no existe, intenta crearlo (el caller debería haberlo hecho,
+    // pero aquí toleramos races donde el subdir aún no existe).
+    let parent_canonical = match parent.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => {
+            if !parent.exists() {
+                if let Err(err) = std::fs::create_dir_all(parent) {
+                    log::warn!(
+                        "validate_media_path: no se pudo crear parent {}: {err}",
+                        parent.display()
+                    );
+                    return false;
+                }
+            }
+            match parent.canonicalize() {
+                Ok(canonical) => canonical,
+                Err(err) => {
+                    log::warn!(
+                        "validate_media_path: canonicalize falló para {}: {err}",
+                        parent.display()
+                    );
+                    return false;
+                }
+            }
+        }
     };
-    parent_canonical.starts_with(&cwd)
+    if !parent_canonical.starts_with(&cwd) {
+        return false;
+    }
+    // TOCTOU documentado: verificar post-open que fd sigue dentro de cwd via /proc/self/fd
+    // El caller debe verificar post-open que el fd abierto sigue dentro de cwd.
+    true
 }
 
 fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: usize) {

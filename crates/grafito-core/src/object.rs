@@ -1124,15 +1124,18 @@ impl Plane3DObj {
     }
 
     /// Crea un plano a partir de tres puntos.
-    pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Self {
+    pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Option<Self> {
         let v1 = (p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
         let v2 = (p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
         // cross product v1 × v2
         let a = v1.1 * v2.2 - v1.2 * v2.1;
         let b = v1.2 * v2.0 - v1.0 * v2.2;
         let c = v1.0 * v2.1 - v1.1 * v2.0;
+        if a.hypot(b).hypot(c) <= crate::validation::GEOM_EPS {
+            return None;
+        }
         let d = -(a * p1.x + b * p1.y + c * p1.z);
-        Self::from_equation(a, b, c, d)
+        Some(Self::from_equation(a, b, c, d))
     }
 
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -3488,16 +3491,23 @@ impl TransformedObj {
             return Err("complex_expr cannot be empty".into());
         }
         // Validar que la expresión sea sintácticamente válida como función de z
-        if let Err(reason) = grafito_geometry::expr::prepare_function_ast(
+        // y detectar singularidades que colapsan todo a un punto.
+        let ast = grafito_geometry::expr::prepare_function_ast(
             expr,
             &std::collections::HashMap::new(),
             &["z"],
-        ) {
-            return Err(format!("complex_expr inválida: {reason}"));
-        }
-        // Rechazar transformaciones triviales que colapsan todo a un punto (singular)
-        let trimmed = expr.trim();
-        if trimmed == "0" || trimmed == "0.0" {
+        )
+        .map_err(|reason| format!("complex_expr inválida: {reason}"))?;
+        // Detecta 0*z, (z-z), sin(0)*z, constantes, etc. Evaluando en dos puntos.
+        let v0 = ast.eval_at("z", 0.0);
+        let v1 = ast.eval_at("z", 1.0);
+        if v0.is_finite() && v1.is_finite() {
+            let max_abs = v0.abs().max(v1.abs());
+            if max_abs < crate::validation::GEOM_EPS || (v1 - v0).abs() < 1e-12 {
+                return Err("complex_expr singular: colapsa el objeto".into());
+            }
+        } else if !v0.is_finite() && !v1.is_finite() {
+            // Ambas evaluaciones no finitas -> también singular para el muestreo.
             return Err("complex_expr singular: colapsa el objeto".into());
         }
         // Validar anidamiento: Document::validate ya limita MAX_TRANSFORM_DEPTH, aquí solo check básico

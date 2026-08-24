@@ -29,8 +29,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - name: Cache APT packages (mingw)
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: mingw-w64
+          version: 1.0
       - name: Install MinGW for the Windows MSRV check
         if: matrix.toolchain == '1.88'
         run: sudo apt-get install -y mingw-w64
@@ -58,6 +68,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -77,6 +92,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev libvulkan1 mesa-vulkan-drivers
+          version: 1.0
       - name: Install C toolchain, system deps, and Vulkan software driver
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev libvulkan1 mesa-vulkan-drivers
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -94,6 +114,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -110,6 +135,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -126,6 +156,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -147,6 +182,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -158,12 +198,18 @@ jobs:
 
   release-build:
     name: cargo build release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -194,6 +240,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
@@ -214,6 +265,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
@@ -234,13 +291,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: stable
+      - name: Cache supply-chain tools
+        id: cache-supply
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ${{ runner.temp }}/cargo-tools
+          key: supply-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-audit-0.22.2-deny-0.20.2
       - name: Install supply-chain tools
+        if: steps.cache-supply.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           tool_root="$RUNNER_TEMP/cargo-tools"
           cargo install --locked --root "$tool_root" cargo-audit --version 0.22.2
           cargo install --locked --root "$tool_root" cargo-deny --version 0.20.2
-          echo "$tool_root/bin" >> "$GITHUB_PATH"
+      - name: Add supply-chain tools to PATH
+        run: echo "$RUNNER_TEMP/cargo-tools/bin" >> "$GITHUB_PATH"
       - name: Test advisory exception policy
         run: python3 .github/scripts/test_verify_advisory_exceptions.py
       - name: Verify reviewed advisory exception boundary
@@ -258,11 +323,16 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages (shellcheck)
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: shellcheck
+          version: 1.0
       - name: Install workflow and shell linters
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@7f38b68c3b1ad3c2c6cc1fef6122a3391ff2f8c81 # v1.7.7
       - name: Lint GitHub Actions workflows
         run: "${RUNNER_TEMP}/bin/actionlint"
       - name: Parse and lint package scripts
@@ -289,12 +359,17 @@ jobs:
 
   package-debian:
     name: Debian package smoke and lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential desktop-file-utils dpkg-dev libgmp-dev libmpfr-dev libmpc-dev lintian m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install package build dependencies
         run: |
           sudo apt-get update

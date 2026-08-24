@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![allow(deprecated)]
 //! Procesador de comandos compartido de Grafito.
 //!
 //! Este crate es el único punto de entrada en Rust para los comandos de texto

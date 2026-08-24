@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el world x no depende del screen y (transformación ortogonal).
 
 use grafito_geometry::ViewTransform;

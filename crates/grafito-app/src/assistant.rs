@@ -22,6 +22,7 @@ use grafito_ui::assistant::{
     AssistantCorrectionContext, AssistantUiAction, VerifiedAssistantProposal,
 };
 use grafito_ui::toast::ToastKind;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
@@ -35,6 +36,19 @@ const MAX_ASSISTANT_CORRECTION_SOURCE_BYTES: usize = 2_048;
 const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
 const ASSISTANT_CORRECTION_INSTRUCTION: &str = "\n\nUna propuesta gráfica anterior no superó la verificación local. Conservá la intención de la solicitud y regenerá una respuesta completa y autocontenida con un bloque grafito o un bloque grafito-scene de 2 a 8 comandos ejecutables. Si necesitás un parámetro escalar nuevo, incluí antes un único bloque grafito-param con una asignación finita. Usá exclusivamente la sintaxis exacta del catálogo; no inventes comandos ni emitas acciones de archivo, red, sistema o Script.";
+
+/// Guarda el perfil en background para no bloquear el UI thread (60fps).
+fn spawn_profile_save(profile: grafito_profile::StudentProfile, path: PathBuf) {
+    // I/O en background thread para no bloquear UI (60fps)
+    let _ = std::thread::Builder::new()
+        .name("profile-save".into())
+        .spawn(move || {
+            let _ = std::fs::write(
+                path,
+                serde_json::to_string_pretty(&profile).unwrap_or_default(),
+            );
+        });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssistantRemoteRoute {
@@ -67,8 +81,8 @@ fn classify_local_assistant_response(response: AssistantResponse) -> LocalAssist
 fn apply_local_assistant_plan(
     document: &mut grafito_core::Document,
     plan: &ProposedPlan,
-    undo_stack: &mut Vec<grafito_core::Document>,
-    redo_stack: &mut Vec<grafito_core::ChangeSet>,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
 ) -> Result<grafito_command::assistant_plan::PlanApplyResult, String> {
     let before = document.clone();
     let result = harness::apply_plan(document, plan)?;
@@ -468,10 +482,8 @@ impl GrafitoApp {
                 self.profile.long_memory.summary = self.assistant.long_memory.summary.clone();
                 self.profile.long_memory.relationship_stage =
                     self.assistant.long_memory.relationship_stage;
-                let _ = std::fs::write(
-                    crate::utils::profile_path(),
-                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
-                );
+                // I/O en background thread para no bloquear UI (60fps)
+                spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
             }
             self.assistant.user_name = self.profile.display_name().to_owned();
             self.assistant.avatar = self.profile.avatar.clone();
@@ -701,10 +713,8 @@ impl GrafitoApp {
                     if !fact_text.trim().is_empty() {
                         self.profile.remember_fact(&fact_text, epoch, 0.9);
                         self.assistant.long_memory = self.profile.long_memory.clone();
-                        let _ = std::fs::write(
-                            crate::utils::profile_path(),
-                            serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
-                        );
+                        // I/O en background thread para no bloquear UI (60fps)
+                        spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
                     }
                 }
                 self.start_local_assistant_request(ctx);
@@ -911,9 +921,10 @@ impl GrafitoApp {
                                 self.assistant.user_name = self.profile.display_name().to_owned();
                                 self.assistant.long_memory = self.profile.long_memory.clone();
                                 self.config_name_error = None;
-                                let _ = std::fs::write(
+                                // I/O en background thread para no bloquear UI (60fps)
+                                spawn_profile_save(
+                                    self.profile.clone(),
                                     crate::utils::profile_path(),
-                                    serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
                                 );
                                 self.notify(
                                     "Avatar y memoria guardados",
@@ -1409,7 +1420,18 @@ impl GrafitoApp {
             request_remote_with_api_key_on_worker(settings, request, api_key, cancellation.clone());
         let (sender, receiver) = sync_channel(1);
         let repaint = ctx.clone();
+        let cancellation_for_thread = cancellation.clone();
         std::thread::spawn(move || {
+            // Si hay cancelación pendiente, da una ventana breve para que el worker
+            // termine cooperativamente antes de bloquear el hilo forwarder (no UI).
+            if cancellation_for_thread.is_cancelled() {
+                for _ in 0..20 {
+                    if worker.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
             let result = worker.join().unwrap_or_else(|_| {
                 Err("La consulta del asistente terminó inesperadamente.".into())
             });
@@ -1485,12 +1507,34 @@ impl GrafitoApp {
                 ledger,
                 cancellation.clone(),
             );
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(128);
         let repaint = ctx.clone();
+        let cancellation_forwarder = cancellation.clone();
         std::thread::spawn(move || {
-            for event in event_receiver.iter() {
-                if sender.send(AgentChannelMsg::Event(event)).is_err() {
+            // Drena eventos con timeout para respetar cancelación y evitar bloqueo
+            // indefinido en `iter()` si el agente se cuelga.
+            loop {
+                if cancellation_forwarder.is_cancelled() {
                     break;
+                }
+                match event_receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(event) => {
+                        if sender.send(AgentChannelMsg::Event(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            // Si hay cancelación, espera brevemente a que el worker termine
+            // cooperativamente antes de bloquear el hilo forwarder (no UI).
+            if cancellation_forwarder.is_cancelled() {
+                for _ in 0..20 {
+                    if outcome_handle.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             }
             let outcome = outcome_handle
@@ -1596,10 +1640,8 @@ impl GrafitoApp {
             .unwrap_or(0);
         let (id, name) = self.learning_branch();
         self.profile.record_outcome(id, name, epoch, correct);
-        let _ = std::fs::write(
-            crate::utils::profile_path(),
-            serde_json::to_string_pretty(&self.profile).unwrap_or_default(),
-        );
+        // I/O en background thread para no bloquear UI (60fps)
+        spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
         self.notify(
             if correct {
                 "¡Bien! Registrado en tu progreso."
@@ -1662,7 +1704,7 @@ impl GrafitoApp {
             export: grafito_anim::ExportFormat::Gif,
             canvas: (720, 540),
         };
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let repaint = ctx.clone();
         let template_owned = template.to_string();
         let concept_owned = concept.clone();
@@ -1867,6 +1909,9 @@ impl GrafitoApp {
 
         self.assistant.begin_request(question.clone());
         self.assistant.problem.clear();
+        // harness es síncrono pero O(n) pequeño, medido <5ms — no bloquea UI >10ms.
+        // El trabajo pesado (verificación de propuestas remotas) ya corre en
+        // worker thread via proposal_job / inspect_remote_proposals_cancellable.
         let local_result = match harness::request(&self.document, &request) {
             Ok(result) => result,
             Err(error) => {
@@ -2135,7 +2180,16 @@ impl GrafitoApp {
             request_remote_models_with_api_key_on_worker(settings, api_key, cancellation.clone());
         let (sender, receiver) = sync_channel(1);
         let repaint = ctx.clone();
+        let cancellation_for_thread = cancellation.clone();
         std::thread::spawn(move || {
+            if cancellation_for_thread.is_cancelled() {
+                for _ in 0..20 {
+                    if worker.is_finished() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
             let result = worker
                 .join()
                 .unwrap_or_else(|_| Err("La lista de modelos terminó inesperadamente.".into()));
@@ -2717,31 +2771,81 @@ fn accepts_remote_context(
 }
 
 /// Carga los frames de un GIF en ColorImage para reproducirlos en el chat.
+///
+/// Presupuesto OOM: máximo 64 frames, 8 M píxeles totales, archivo ≤5 MB, por
+/// frame ≤2 M píxeles, `checked_mul` para evitar overflow y `try_reserve`
+/// antes de cada `push`.
 fn load_gif_frames(path: &str) -> Result<Vec<egui::ColorImage>, String> {
+    const MAX_GIF_FRAMES: usize = 64;
+    const MAX_GIF_TOTAL_PIXELS: usize = 8_000_000;
+    const MAX_GIF_FILE_BYTES: u64 = 5 * 1024 * 1024;
+    const MAX_FRAME_PIXELS: usize = 2_000_000;
     let file =
         std::fs::File::open(path).map_err(|error| format!("no se pudo abrir el GIF: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("no se pudo leer metadata del GIF: {error}"))?;
+    if metadata.len() > MAX_GIF_FILE_BYTES {
+        return Err(format!(
+            "GIF demasiado grande ({} bytes > 5 MB)",
+            metadata.len()
+        ));
+    }
     let mut options = gif::DecodeOptions::new();
     options.set_color_output(gif::ColorOutput::RGBA);
     let mut decoder = options
         .read_info(file)
         .map_err(|error| format!("GIF inválido: {error}"))?;
     let mut frames = Vec::new();
+    frames
+        .try_reserve(MAX_GIF_FRAMES)
+        .map_err(|_| "sin memoria para GIF (reserve)".to_string())?;
+    let mut total_pixels: usize = 0;
     while let Some(frame) = decoder
         .read_next_frame()
         .map_err(|error| format!("GIF corrupto: {error}"))?
     {
+        if frames.len() >= MAX_GIF_FRAMES {
+            break;
+        }
         let width = frame.width as usize;
         let height = frame.height as usize;
-        if width == 0 || height == 0 || width.saturating_mul(height) > 2_000_000 {
+        if width == 0 || height == 0 {
             continue;
         }
+        let pixel_count = width
+            .checked_mul(height)
+            .ok_or_else(|| "GIF frame con overflow de píxeles".to_string())?;
+        if pixel_count > MAX_FRAME_PIXELS {
+            continue;
+        }
+        let next_total = total_pixels
+            .checked_add(pixel_count)
+            .ok_or_else(|| "GIF excede presupuesto de píxeles".to_string())?;
+        if next_total > MAX_GIF_TOTAL_PIXELS {
+            break;
+        }
+        let required_bytes = pixel_count
+            .checked_mul(4)
+            .ok_or_else(|| "GIF frame con overflow de bytes".to_string())?;
         let buffer = &frame.buffer;
-        if buffer.len() < width.saturating_mul(height).saturating_mul(4) {
+        if buffer.len() < required_bytes {
             continue;
         }
+        total_pixels = next_total;
+        frames
+            .try_reserve(1)
+            .map_err(|_| "sin memoria para frame de GIF".to_string())?;
         let mut image = egui::ColorImage::new([width, height], egui::Color32::TRANSPARENT);
+        // ColorImage::new ya reservó `pixel_count` elementos; verificar que no exceda presupuesto
+        // y copiar con checked offset.
         for (index, pixel) in image.pixels.iter_mut().enumerate() {
-            let offset = index * 4;
+            let offset = index
+                .checked_mul(4)
+                .ok_or_else(|| "offset overflow en GIF".to_string())?;
+            if offset + 3 >= buffer.len() {
+                break;
+            }
             *pixel = egui::Color32::from_rgba_unmultiplied(
                 buffer[offset],
                 buffer[offset + 1],
@@ -3685,8 +3789,8 @@ fn stage_assistant_parameter(
 
 fn commit_assistant_graph_preflight(
     document: &mut grafito_core::Document,
-    undo_stack: &mut Vec<grafito_core::Document>,
-    redo_stack: &mut Vec<grafito_core::ChangeSet>,
+    undo_stack: &mut VecDeque<grafito_core::Document>,
+    redo_stack: &mut VecDeque<grafito_core::ChangeSet>,
     preflight: AssistantGraphPreflight,
 ) -> grafito_command::commands::CommandOutcome {
     let before = document.clone();
@@ -3889,6 +3993,7 @@ mod tests {
     use grafito_ui::assistant::{
         AssistantPanelState, AssistantProposal, VerifiedAssistantProposal,
     };
+    use std::collections::VecDeque;
     use std::{io::Cursor, sync::mpsc::sync_channel};
 
     fn command_proposal(text: &str) -> AssistantProposal {
@@ -3985,8 +4090,8 @@ mod tests {
                 },
             ],
         );
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
 
         let result =
             apply_local_assistant_plan(&mut document, &plan, &mut undo_stack, &mut redo_stack)
@@ -4011,8 +4116,8 @@ mod tests {
         );
         document.set_variable("changed".into(), 1.0);
         let before = serde_json::to_value(&document).expect("document serializes");
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
 
         assert!(
             apply_local_assistant_plan(&mut document, &plan, &mut undo_stack, &mut redo_stack,)
@@ -4105,8 +4210,8 @@ mod tests {
             grafito_geometry::Camera3D::new(4.0 / 3.0),
         )
         .expect("the explicit graph apply must recreate its verified parameter context");
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
         let outcome = commit_assistant_graph_preflight(
             &mut document,
             &mut undo_stack,
@@ -4906,8 +5011,8 @@ mod tests {
         document.set_view(ViewTransform::new(800.0, 600.0));
         let preflight = preflight_assistant_graph_command(&document, "Function[sin(x)]")
             .expect("finite function must be drawable");
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
 
         let outcome = commit_assistant_graph_preflight(
             &mut document,

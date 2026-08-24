@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que process_input maneja correctamente la entrada Unicode
 //! que el usuario podría escribir (x², π, etc.).
 

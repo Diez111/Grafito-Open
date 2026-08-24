@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::commands::{insert_implicit_multiplication, process_input, CommandOutcome};
 use grafito_core::{Document, GeoObject};
 

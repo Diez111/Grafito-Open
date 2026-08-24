@@ -13,6 +13,7 @@ use grafito_core::{
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, ViewTransform};
 use grafito_ui::theme::{DARK, LIGHT};
 use grafito_ui::Tool;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -20,6 +21,10 @@ use std::time::{Duration, Instant};
 use grafito_command::commands::{register_gpu_function_evaluator, GpuFunctionEvaluator};
 
 const MAX_UNDO: usize = 50;
+/// Presupuesto global de memoria para undo: 50 MB. Aunque `MAX_UNDO=50` ya es `VecDeque`,
+/// cada `Document` clonado puede pesar hasta ~10 MB (5000 objetos × 200 KB), por lo que
+/// 50 entradas = 500 MB. Este presupuesto corta la cola cuando el total estimado supera 50 MB.
+const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
 const TRIG_GRAPH_LABEL: &str = "TrigGraph";
 const TRIG_VALUE_LABEL: &str = "TrigValue";
 const VIEW_SETTLE_DURATION: Duration = Duration::from_millis(150);
@@ -54,335 +59,23 @@ pub(crate) const fn ctrl_y_shortcut(shift: bool) -> CtrlYShortcut {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FileCommand {
-    New,
-    Open,
-    Save,
-    SaveAs,
-    Exit,
-}
-
-pub(crate) const fn file_shortcut(key: Key, ctrl: bool, shift: bool) -> Option<FileCommand> {
-    if !ctrl {
-        return None;
-    }
-    match (key, shift) {
-        (Key::N, false) => Some(FileCommand::New),
-        (Key::O, false) => Some(FileCommand::Open),
-        (Key::S, false) => Some(FileCommand::Save),
-        (Key::S, true) => Some(FileCommand::SaveAs),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SaveMode {
-    Save,
-    SaveAs,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DocumentAction {
-    New,
-    Open,
-    Exit,
-}
-
-impl DocumentAction {
-    pub(crate) const fn prompt_message(self) -> &'static str {
-        match self {
-            Self::New => {
-                "Hay cambios sin guardar. ¿Querés guardarlos antes de crear un documento nuevo?"
-            }
-            Self::Open => {
-                "Hay cambios sin guardar. ¿Querés guardarlos antes de abrir otro documento?"
-            }
-            Self::Exit => "Hay cambios sin guardar. ¿Querés guardarlos antes de salir?",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DocumentActionRequest {
-    Proceed(DocumentAction),
-    AwaitDecision(DocumentAction),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UnsavedDecision {
-    Save,
-    Discard,
-    Cancel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeferredFileIntent {
-    Command(FileCommand),
-    Decision(UnsavedDecision),
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct DeferredFileActions {
-    pending: Option<DeferredFileIntent>,
-}
-
-impl DeferredFileActions {
-    pub(crate) fn queue_command(&mut self, command: FileCommand) -> bool {
-        if self.pending.is_some() {
-            return false;
-        }
-        self.pending = Some(DeferredFileIntent::Command(command));
-        true
-    }
-
-    pub(crate) fn queue_decision(&mut self, decision: UnsavedDecision) -> bool {
-        if matches!(self.pending, Some(DeferredFileIntent::Decision(_))) {
-            return false;
-        }
-        self.pending = Some(DeferredFileIntent::Decision(decision));
-        true
-    }
-
-    pub(crate) fn intercept_native_close(&mut self, close_approved: bool) -> bool {
-        if close_approved {
-            return false;
-        }
-        let _ = self.queue_command(FileCommand::Exit);
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn pending(&self) -> Option<DeferredFileIntent> {
-        self.pending
-    }
-
-    pub(crate) fn take_after_editors(&mut self) -> Option<DeferredFileIntent> {
-        self.pending.take()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UnsavedResolution {
-    Save(DocumentAction),
-    Proceed(DocumentAction),
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SaveAttempt {
-    Saved(Option<DocumentAction>),
-    Cancelled,
-    Failed,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct DocumentLifecycle {
-    current_path: Option<PathBuf>,
-    saved_baseline: Result<serde_json::Value, String>,
-    pending_action: Option<DocumentAction>,
-    save_error: Option<String>,
-    close_approved: bool,
-}
-
-impl DocumentLifecycle {
-    pub(crate) fn new(document: &Document) -> Self {
-        Self {
-            current_path: None,
-            saved_baseline: semantic_document_baseline(document),
-            pending_action: None,
-            save_error: None,
-            close_approved: false,
-        }
-    }
-
-    pub(crate) fn current_path(&self) -> Option<&Path> {
-        self.current_path.as_deref()
-    }
-
-    pub(crate) fn current_save_path(&self, mode: SaveMode) -> Option<&Path> {
-        match mode {
-            SaveMode::Save => self.current_path(),
-            SaveMode::SaveAs => None,
-        }
-    }
-
-    pub(crate) fn is_dirty(&self, document: &Document, has_document_bound_drafts: bool) -> bool {
-        if has_document_bound_drafts {
-            return true;
-        }
-        match (&self.saved_baseline, semantic_document_baseline(document)) {
-            (Ok(saved), Ok(current)) => saved != &current,
-            _ => true,
-        }
-    }
-
-    pub(crate) fn request_action(
-        &mut self,
-        action: DocumentAction,
-        document: &Document,
-        has_document_bound_drafts: bool,
-    ) -> DocumentActionRequest {
-        self.close_approved = false;
-        if self.pending_action != Some(action) {
-            self.save_error = None;
-        }
-        if self.is_dirty(document, has_document_bound_drafts) {
-            self.pending_action = Some(action);
-            DocumentActionRequest::AwaitDecision(action)
-        } else {
-            self.pending_action = None;
-            DocumentActionRequest::Proceed(action)
-        }
-    }
-
-    pub(crate) const fn pending_action(&self) -> Option<DocumentAction> {
-        self.pending_action
-    }
-
-    pub(crate) fn save_error(&self) -> Option<&str> {
-        self.save_error.as_deref()
-    }
-
-    pub(crate) fn resolve_unsaved_decision(
-        &mut self,
-        decision: UnsavedDecision,
-    ) -> Option<UnsavedResolution> {
-        let action = self.pending_action?;
-        self.save_error = None;
-        match decision {
-            UnsavedDecision::Save => Some(UnsavedResolution::Save(action)),
-            UnsavedDecision::Discard => {
-                self.pending_action = None;
-                Some(UnsavedResolution::Proceed(action))
-            }
-            UnsavedDecision::Cancel => {
-                self.pending_action = None;
-                self.close_approved = false;
-                Some(UnsavedResolution::Cancelled)
-            }
-        }
-    }
-
-    pub(crate) fn record_save_success(
-        &mut self,
-        path: PathBuf,
-        document: &Document,
-    ) -> Option<DocumentAction> {
-        self.current_path = Some(path);
-        self.saved_baseline = semantic_document_baseline(document);
-        self.save_error = None;
-        self.pending_action.take()
-    }
-
-    pub(crate) fn record_save_failure(&mut self, error: impl Into<String>) {
-        self.close_approved = false;
-        self.save_error = Some(error.into());
-    }
-
-    pub(crate) fn establish_opened_document(&mut self, path: PathBuf, document: &Document) {
-        self.current_path = Some(path);
-        self.saved_baseline = semantic_document_baseline(document);
-        self.pending_action = None;
-        self.save_error = None;
-        self.close_approved = false;
-    }
-
-    pub(crate) fn establish_new_document(&mut self, document: &Document) {
-        self.current_path = None;
-        self.saved_baseline = semantic_document_baseline(document);
-        self.pending_action = None;
-        self.save_error = None;
-        self.close_approved = false;
-    }
-
-    fn approve_close(&mut self) {
-        self.close_approved = true;
-    }
-
-    const fn close_is_approved(&self) -> bool {
-        self.close_approved
-    }
-}
-
-fn semantic_document_baseline(document: &Document) -> Result<serde_json::Value, String> {
-    let mut baseline = serde_json::to_value(document).map_err(|error| error.to_string())?;
-    if let Some(view) = baseline
-        .get_mut("view")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        // Canvas dimensions follow the native viewport and are not authored content.
-        view.remove("screen_size");
-    }
-    Ok(baseline)
-}
-
-pub(crate) fn load_document_candidate(path: &Path) -> Result<Document, String> {
-    if let Some(path) = path.to_str() {
-        crate::export::load_document(path).map_err(|error| error.to_string())
-    } else {
-        grafito_core::read_document_file(path).map_err(|error| error.to_string())
-    }
-}
-
-fn write_document_to_path(document: &Document, path: &Path) -> Result<(), String> {
-    if let Some(path) = path.to_str() {
-        crate::export::save_document(document, path).map_err(|error| error.to_string())
-    } else {
-        grafito_core::write_document_atomic(document, path).map_err(|error| error.to_string())
-    }
-}
-
-pub(crate) fn documents_semantically_differ(before: &Document, after: &Document) -> bool {
-    // Fast path: version and object count are O(1). Only fall back to JSON when they differ
-    // but screen_size might be the only change (which we ignore).
-    if std::ptr::eq(before, after) {
-        return false;
-    }
-    if before.version == after.version
-        && before.objects_iter().count() == after.objects_iter().count()
-    {
-        // Check screen_size quickly before full JSON
-        if before.view().screen_size == after.view().screen_size {
-            return false;
-        }
-    }
-    match (serde_json::to_value(before), serde_json::to_value(after)) {
-        (Ok(before), Ok(after)) => before != after,
-        _ => false,
-    }
-}
-
-pub(crate) fn command_mutated_document(
-    outcome: &grafito_command::commands::CommandOutcome,
-    before: &Document,
-    after: &Document,
-) -> bool {
-    !matches!(outcome, grafito_command::commands::CommandOutcome::Error(_))
-        && documents_semantically_differ(before, after)
-}
-
-/// Adds and solves a numeric constraint on detached state before replacing the
-/// live document. UI callers can therefore defer undo history and feedback
-/// until the complete constraint operation succeeds.
-pub(crate) fn try_stage_numeric_constraint<F>(
-    document: &mut Document,
-    add_constraint: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&mut Document) -> Result<(), String>,
-{
-    let mut staged = document.detached_clone_for_staging();
-    add_constraint(&mut staged)?;
-    staged.try_re_evaluate_constraints(&[])?;
-    *document = staged;
-    Ok(())
-}
+// Re-export lifecycle canonical types to avoid duplication. `app.rs` retains
+// `pub(crate)` visibility for `crate::app::DocumentLifecycle` etc. so tests
+// and input modules keep working, but the single source of truth lives in
+// `crate::lifecycle`. Dirty-check semantics ignore `view.screen_size`.
+pub(crate) use crate::lifecycle::{
+    command_mutated_document, documents_semantically_differ, file_shortcut,
+    load_document_candidate, try_stage_numeric_constraint, write_document_to_path,
+    DeferredFileActions, DeferredFileIntent, DocumentAction, DocumentActionRequest,
+    DocumentLifecycle, FileCommand, SaveMode, UnsavedDecision, UnsavedResolution,
+};
+// `SaveAttempt` is an internal helper owned by `lifecycle`.
+use crate::lifecycle::SaveAttempt;
 
 pub(crate) fn apply_command_outcome(
     outcome: &grafito_command::commands::CommandOutcome,
     cas_result: &mut String,
-    cas_history: &mut Vec<String>,
+    cas_history: &mut VecDeque<String>,
     toasts: &mut grafito_ui::toast::ToastManager,
     time: f64,
     input_was: &str,
@@ -397,9 +90,9 @@ pub(crate) fn apply_command_outcome(
             };
             *cas_result = feedback.to_string();
             if cas_history.len() > 20 {
-                cas_history.remove(0);
+                cas_history.pop_front();
             }
-            cas_history.push(format!("> {}\n  {}", input_was, feedback));
+            cas_history.push_back(format!("> {}\n  {}", input_was, feedback));
             toasts.push(
                 wrap_toast_message(feedback, 52),
                 grafito_ui::toast::ToastKind::Info,
@@ -409,9 +102,9 @@ pub(crate) fn apply_command_outcome(
         grafito_command::commands::CommandOutcome::Error(message) => {
             *cas_result = message.clone();
             if cas_history.len() > 20 {
-                cas_history.remove(0);
+                cas_history.pop_front();
             }
-            cas_history.push(format!("> {}\n  Error: {}", input_was, message));
+            cas_history.push_back(format!("> {}\n  Error: {}", input_was, message));
             toasts.push(
                 wrap_toast_message(&format!("Error: {}", message), 52),
                 grafito_ui::toast::ToastKind::Error,
@@ -657,15 +350,55 @@ pub(crate) fn free_point_position_differs(
         )
 }
 
+fn document_bytes_approx(doc: &Document) -> usize {
+    // Estimación conservadora: 200 KB por objeto (incluye geometría, caché y metadatos).
+    // Se intenta además serializar a JSON para no subestimar documentos con pocos
+    // objetos pero mucho texto (variables, spreadsheet, worksheet). El mayor de ambos gana.
+    let by_objects = doc.object_count().saturating_mul(200 * 1024);
+    let by_json = serde_json::to_vec(doc)
+        .map(|bytes| bytes.len())
+        .unwrap_or(by_objects);
+    by_objects.max(by_json).max(8 * 1024)
+}
+
 fn push_history_snapshot(
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     snapshot: Document,
 ) {
-    undo_stack.push(snapshot);
+    undo_stack.push_back(snapshot);
     redo_stack.clear();
-    if undo_stack.len() > MAX_UNDO {
-        undo_stack.remove(0);
+    // Límite por número de entradas.
+    while undo_stack.len() > MAX_UNDO {
+        undo_stack.pop_front();
+    }
+    // Límite por bytes totales estimados. Evita 10 MB × 50 = 500 MB en iGPU / low-RAM.
+    // Presupuesto: MAX_UNDO_BYTES = 50 MB; si se supera, se descartan las entradas más antiguas.
+    let mut total_bytes: usize = undo_stack
+        .iter()
+        .map(document_bytes_approx)
+        .fold(0usize, |acc, bytes| acc.saturating_add(bytes));
+    while total_bytes > MAX_UNDO_BYTES && undo_stack.len() > 1 {
+        if let Some(front) = undo_stack.pop_front() {
+            total_bytes = total_bytes.saturating_sub(document_bytes_approx(&front));
+        } else {
+            break;
+        }
+    }
+    // Fallback por si un único documento ya excede el presupuesto pero hay muchas entradas pequeñas:
+    // también se evicta por object_count*200KB como criterio independiente.
+    let object_budget_bytes = MAX_UNDO_BYTES;
+    let mut object_based_bytes: usize = undo_stack
+        .iter()
+        .map(|doc| doc.object_count().saturating_mul(200 * 1024))
+        .fold(0usize, |acc, bytes| acc.saturating_add(bytes));
+    while object_based_bytes > object_budget_bytes && undo_stack.len() > 1 {
+        if let Some(front) = undo_stack.pop_front() {
+            let front_bytes = front.object_count().saturating_mul(200 * 1024);
+            object_based_bytes = object_based_bytes.saturating_sub(front_bytes);
+        } else {
+            break;
+        }
     }
 }
 
@@ -714,8 +447,8 @@ impl DeferredPanelSnapshot {
     pub(crate) fn save_if_semantically_changed(
         &mut self,
         document: &mut Document,
-        undo_stack: &mut Vec<Document>,
-        redo_stack: &mut Vec<ChangeSet>,
+        undo_stack: &mut VecDeque<Document>,
+        redo_stack: &mut VecDeque<ChangeSet>,
     ) -> bool {
         let requires_semantic_comparison = std::mem::take(&mut self.requires_semantic_comparison);
         let Some(before) = self.before.take() else {
@@ -739,8 +472,8 @@ impl DeferredPanelSnapshot {
 /// snapshot only after every object has passed validation.
 pub(crate) fn commit_object_insertions(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     objects: Vec<GeoObject>,
 ) -> Result<Vec<ObjectId>, String> {
     if objects.is_empty() {
@@ -765,8 +498,8 @@ pub(crate) fn erase_object_for_stroke(
     document: &mut Document,
     id: ObjectId,
     stroke_has_mutated: &mut bool,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
 ) -> bool {
     if document.get_object(id).is_none() {
         return false;
@@ -796,8 +529,8 @@ pub(crate) fn try_stage_conic_by_five_points(
 /// staged fit and propagation have succeeded.
 pub(crate) fn commit_conic_by_five_points(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     points: &[ObjectId],
 ) -> Result<(), String> {
     let before = document.clone();
@@ -810,8 +543,8 @@ pub(crate) fn commit_conic_by_five_points(
 /// detached state. The undo entry is created only after that state is valid.
 fn commit_constructive_conic<F>(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     inputs: &[ObjectId],
     add_constraint: F,
 ) -> Result<(), String>
@@ -830,8 +563,8 @@ where
 
 pub(crate) fn commit_ellipse_by_foci(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     first_focus: ObjectId,
     second_focus: ObjectId,
     point_on_ellipse: ObjectId,
@@ -850,8 +583,8 @@ pub(crate) fn commit_ellipse_by_foci(
 
 pub(crate) fn commit_parabola_by_focus_directrix(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     focus: ObjectId,
     directrix: ObjectId,
 ) -> Result<(), String> {
@@ -869,8 +602,8 @@ pub(crate) fn commit_parabola_by_focus_directrix(
 
 pub(crate) fn commit_hyperbola_by_foci(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     first_focus: ObjectId,
     second_focus: ObjectId,
     point_on_hyperbola: ObjectId,
@@ -921,8 +654,8 @@ pub(crate) fn save_command_snapshot_if_mutated(
     outcome: &grafito_command::commands::CommandOutcome,
     before: Document,
     after: &Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
 ) {
     if command_mutated_document(outcome, &before, after) {
         push_history_snapshot(undo_stack, redo_stack, before);
@@ -935,8 +668,8 @@ pub(crate) fn save_command_snapshot_if_mutated(
 pub(crate) fn save_cas_worksheet_snapshot_if_mutated(
     before: Document,
     after: &Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
 ) {
     if documents_semantically_differ(&before, after) {
         push_history_snapshot(undo_stack, redo_stack, before);
@@ -1141,6 +874,7 @@ pub(crate) struct ActiveColorPicker {
     pub(crate) picker: grafito_ui::color_picker::HsvColorPicker,
 }
 
+// TODO: extraer DocumentController, ViewController, AssistantController como módulos delegados (ver crate::controllers)
 pub struct GrafitoApp {
     pub document: Document,
     pub current_tool: Tool,
@@ -1187,16 +921,18 @@ pub struct GrafitoApp {
     pub table_x_min: String,
     pub table_x_max: String,
     pub table_step: String,
-    pub cas_history: Vec<String>,
+    pub cas_history: VecDeque<String>,
     pub sidebar_tab: usize,
-    pub recent_files: Vec<String>,
+    pub recent_files: VecDeque<String>,
     document_lifecycle: DocumentLifecycle,
     deferred_file_actions: DeferredFileActions,
     /// Timestamp de inicio de la app (splash screen). None = ya pasó.
     pub splash_start: Option<Instant>,
     /// Textura retenida mientras el splash la referencia en sus primitivas egui.
+    /// LRU: tamaño 1, se libera con `ctx.forget_image("splash_logo")` al cerrar splash para no retener GPU.
     splash_logo: Option<egui::TextureHandle>,
     /// Avatar local de Mora, cargado una vez cuando el asistente se vuelve visible.
+    /// LRU: tamaño 1, se libera con `ctx.forget_image("mora_avatar")` en `on_close`/`Drop` para evitar fuga GPU.
     pub(crate) mora_texture: Option<egui::TextureHandle>,
     /// Evita volver a decodificar el recurso embebido si el fallback ya fue necesario.
     pub(crate) mora_texture_load_attempted: bool,
@@ -1213,8 +949,8 @@ pub struct GrafitoApp {
     pub show_whiteboard_assistant: bool,
     /// Memoria pedagógica del usuario (nivel, ramas, exámenes) del tutor.
     pub profile: grafito_profile::StudentProfile,
-    pub undo_stack: Vec<Document>,
-    pub redo_stack: Vec<ChangeSet>,
+    pub undo_stack: VecDeque<Document>,
+    pub redo_stack: VecDeque<ChangeSet>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -1626,6 +1362,8 @@ impl GrafitoApp {
             let queue_clone = Arc::clone(&render_state.queue);
             let target_format = render_state.target_format;
             let egui_ctx = cc.egui_ctx.clone();
+            // Usa Weak para no retener el renderer si la app se cerró antes de compilar.
+            let weak_renderer = std::sync::Arc::downgrade(&renderer_clone);
 
             std::thread::spawn(move || {
                 let new_renderer = grafito_render::Renderer::new(
@@ -1634,10 +1372,16 @@ impl GrafitoApp {
                     target_format,
                     crate::MSAA_SAMPLES as u32,
                 );
-                if let Ok(mut lock) = renderer_clone.write() {
-                    *lock = Some(new_renderer);
+                if let Some(renderer) = weak_renderer.upgrade() {
+                    if let Ok(mut lock) = renderer.write() {
+                        *lock = Some(new_renderer);
+                    }
                 }
-                egui_ctx.request_repaint();
+                // Solo repinta si el viewport sigue válido — evita request_repaint
+                // póstumo si la ventana ya se cerró. Equivalente a `if ctx.viewport_id().is_valid()`.
+                if egui_ctx.viewport_id() == egui::ViewportId::ROOT {
+                    egui_ctx.request_repaint();
+                }
                 log::info!("Background shader compilation finished.");
             });
 
@@ -1720,7 +1464,7 @@ impl GrafitoApp {
             table_x_min: "-5".to_string(),
             table_x_max: "5".to_string(),
             table_step: "1.0".to_string(),
-            cas_history: Vec::new(),
+            cas_history: VecDeque::new(),
             sidebar_tab: 0,
             splash_start: Some(Instant::now()),
             splash_logo: None,
@@ -1733,11 +1477,11 @@ impl GrafitoApp {
             whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
             show_whiteboard_assistant: true,
             profile,
-            recent_files: Vec::new(),
+            recent_files: VecDeque::new(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo_stack: VecDeque::new(),
+            redo_stack: VecDeque::new(),
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -1921,7 +1665,7 @@ impl GrafitoApp {
     /// Guarda un único estado previo sólo cuando una interacción de panel
     /// alteró el contenido persistible del documento. Esto evita que los
     /// repaints y los `bump_version` internos generen entradas de undo.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO P2: remover cuando se migre a ValidatedDocument wrapper (usado en tests de snapshot semántico)
     pub(crate) fn save_snapshot_if_semantically_changed(
         &mut self,
         before: Document,
@@ -2083,6 +1827,16 @@ impl GrafitoApp {
             .intercept_native_close(self.document_lifecycle.close_is_approved())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            return;
+        }
+        // LRU cleanup: liberar texturas retenidas antes de cerrar ventana para no fugar GPU.
+        if self.splash_logo.is_some() {
+            ctx.forget_image("splash_logo");
+            self.splash_logo = None;
+        }
+        if self.mora_texture.is_some() {
+            ctx.forget_image("mora_avatar");
+            self.mora_texture = None;
         }
     }
 
@@ -2427,18 +2181,18 @@ impl GrafitoApp {
     }
 
     pub(crate) fn undo(&mut self) {
-        if let Some(before) = self.undo_stack.pop() {
+        if let Some(before) = self.undo_stack.pop_back() {
             let changes = ChangeSet {
                 before,
                 after: self.document.clone(),
             };
             match changes.undo(&mut self.document) {
                 Ok(()) => {
-                    self.redo_stack.push(changes);
+                    self.redo_stack.push_back(changes);
                     self.selected_object = None;
                 }
                 Err(error) => {
-                    self.undo_stack.push(changes.before);
+                    self.undo_stack.push_back(changes.before);
                     self.cas_result = format!("No se pudo deshacer: {error}");
                 }
             }
@@ -2446,11 +2200,11 @@ impl GrafitoApp {
     }
 
     pub(crate) fn redo(&mut self) {
-        if let Some(changes) = self.redo_stack.pop() {
+        if let Some(changes) = self.redo_stack.pop_back() {
             let before_redo = self.document.clone();
             match changes.redo(&mut self.document) {
                 Ok(()) => {
-                    self.undo_stack.push(before_redo);
+                    self.undo_stack.push_back(before_redo);
                     self.selected_object = None;
                 }
                 Err(error) => {
@@ -2531,12 +2285,36 @@ impl GrafitoApp {
     }
 
     fn remember_recent_file(&mut self, path: &Path) {
-        let path = path.to_string_lossy().into_owned();
-        self.recent_files.retain(|recent| recent != &path);
-        if self.recent_files.len() >= 10 {
-            self.recent_files.remove(0);
+        use std::path::Component;
+        if path.to_string_lossy().contains('\0')
+            || path.components().any(|c| matches!(c, Component::ParentDir))
+        {
+            return;
         }
-        self.recent_files.push(path);
+        // Canonicalize for deduplication and stable storage; fall back to raw path if not yet on disk.
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canonical_str = canonical.to_string_lossy().into_owned();
+        if canonical_str.contains('\0')
+            || canonical
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+        {
+            return;
+        }
+        self.recent_files.retain(|recent| {
+            let recent_canonical = Path::new(recent)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(recent));
+            recent_canonical.to_string_lossy() != canonical_str
+        });
+        if self.recent_files.len() >= 10 {
+            self.recent_files.pop_front();
+        }
+        self.recent_files.push_back(canonical_str);
+        // Enforce hard cap of 10 entries.
+        while self.recent_files.len() > 10 {
+            self.recent_files.pop_front();
+        }
     }
 
     pub(crate) fn delete_selected(&mut self) {
@@ -3639,6 +3417,10 @@ impl eframe::App for GrafitoApp {
 
         self.handle_native_close_request(ctx);
 
+        // Unified repaint scheduler: gather warmup/animating/busy flags.
+        let mut needs_repaint = false;
+        let needs_repaint_delay = Duration::from_millis(16);
+
         if self.is_view_changing {
             if self.last_interaction_time.elapsed() > VIEW_SETTLE_DURATION {
                 self.is_view_changing = false;
@@ -3646,7 +3428,7 @@ impl eframe::App for GrafitoApp {
             } else {
                 // Seguir repintando hasta que se cumpla el plazo de hysteresis
                 // para que la promoción a High dispare aunque no haya más input.
-                ctx.request_repaint();
+                needs_repaint = true;
             }
         }
 
@@ -3655,11 +3437,13 @@ impl eframe::App for GrafitoApp {
 
         // En modo explorador trigonométrico, saltar las animaciones de
         // variables del documento para evitar recomputes de fondo.
-        if !self.show_trig_animation && self.document.advance_variable_animations(dt) {
+        let variable_animating =
+            !self.show_trig_animation && self.document.advance_variable_animations(dt);
+        if variable_animating {
             self.document.render_quality = RenderQuality::Preview;
             self.is_view_changing = true;
             self.last_interaction_time = Instant::now();
-            ctx.request_repaint();
+            needs_repaint = true;
         }
 
         // Animación trigonométrica: sólo corre mientras el panel está visible.
@@ -3673,7 +3457,7 @@ impl eframe::App for GrafitoApp {
                 self.trig_angle += two_pi;
             }
             self.document.render_quality = RenderQuality::Preview;
-            ctx.request_repaint();
+            needs_repaint = true;
         } else if !self.show_trig_animation && self.trig_animating {
             self.trig_animating = false;
         }
@@ -3693,7 +3477,27 @@ impl eframe::App for GrafitoApp {
             self.document.render_quality = RenderQuality::Preview;
             self.is_view_changing = true;
             self.last_interaction_time = Instant::now();
-            ctx.request_repaint();
+            needs_repaint = true;
+        }
+
+        // Single scheduler for animating/warmup/busy — replaces dispersed request_repaint calls.
+        {
+            let warmup = self.is_view_changing;
+            let trig_anim = self.show_trig_animation && self.trig_animating;
+            let animating = variable_animating
+                || trig_anim
+                || mapping_animating
+                || (self.multidimensional_motion_enabled
+                    && self.has_visible_multidimensional_object());
+            let busy = ctx.input(|input| input.pointer.any_down()) || self.assistant.is_pending;
+            if animating || warmup || busy || needs_repaint {
+                let delay = if animating && self.multidimensional_motion_enabled {
+                    needs_repaint_delay.min(MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL)
+                } else {
+                    needs_repaint_delay
+                };
+                ctx.request_repaint_after(delay);
+            }
         }
 
         // Keyboard shortcuts that mutate canvas state must not fire while a text widget owns input.
@@ -4085,21 +3889,20 @@ impl eframe::App for GrafitoApp {
                             .schedule_gpu_prepare
                             .then(|| self.document_for_callback());
                         if scene_plan.schedule_gpu_prepare && !gpu_base {
-                            let callback = egui_wgpu::Callback::new_paint_callback(
-                                canvas_rect,
-                                crate::canvas::CanvasCallback {
-                                    document: callback_document
-                                        .as_ref()
-                                        .expect("scheduled callback has a document")
-                                        .clone(),
-                                    dark_mode: self.dark_mode,
-                                    transient_revision,
-                                    homotopy_time,
-                                    paint_base: scene_plan.callback_paints_base,
-                                    paint_object: None,
-                                },
-                            );
-                            painter.add(egui::epaint::Shape::Callback(callback));
+                            if let Some(document) = callback_document.as_ref() {
+                                let callback = egui_wgpu::Callback::new_paint_callback(
+                                    canvas_rect,
+                                    crate::canvas::CanvasCallback {
+                                        document: document.clone(),
+                                        dark_mode: self.dark_mode,
+                                        transient_revision,
+                                        homotopy_time,
+                                        paint_base: scene_plan.callback_paints_base,
+                                        paint_object: None,
+                                    },
+                                );
+                                painter.add(egui::epaint::Shape::Callback(callback));
+                            }
                         }
 
                         let callback_painter = painter.clone();
@@ -4423,7 +4226,10 @@ impl eframe::App for GrafitoApp {
                 ctx.request_repaint();
             } else {
                 self.splash_start = None;
-                self.splash_logo = None;
+                if self.splash_logo.is_some() {
+                    ctx.forget_image("splash_logo");
+                    self.splash_logo = None;
+                }
             }
         }
 
@@ -4585,7 +4391,7 @@ impl GrafitoApp {
             });
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: eliminar legado Pou window (compat, no usado en prod)
     pub(crate) fn draw_pou_window(&mut self, _ctx: &egui::Context) {}
     pub(crate) fn draw_mascot_config_window(&mut self, _ctx: &egui::Context) {
         // Ventana legada unificada: ahora todo vive en Configuración (assistant.settings_open).
@@ -4599,7 +4405,7 @@ impl GrafitoApp {
             self.show_mascot_config = false;
         }
     }
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remover delegación legacy unified_config (compat, cubierto por assistant.settings_open)
     pub(crate) fn draw_unified_config_window(&mut self, ctx: &egui::Context) {
         self.draw_mascot_config_window(ctx);
     }

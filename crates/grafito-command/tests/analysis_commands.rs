@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::commands::{process_input, CommandOutcome};
 use grafito_core::{
     Document, GeoObject, ImplicitCurveObj, LineKind, LineObj, ParametricCurve2DObj, PolarCurveObj,

@@ -6,7 +6,7 @@ use egui::Color32;
 use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
-use grafito_ui::tokens::RADIUS_MD;
+use grafito_ui::tokens::{RADIUS_MD, TYPE_SM};
 
 pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 = egui::Vec2::new(28.0, 24.0);
 
@@ -347,7 +347,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                         let lbl_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(txt)
-                                    .size(13.0)
+                                    .size(TYPE_SM + 1.0) // TYPE_SM (12) +1 = original 13
                                     .color(theme.text_primary),
                             )
                             .sense(egui::Sense::click())
@@ -392,6 +392,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     egui::SidePanel::left("algebra_panel").show_separator_line(false)
     .default_width(220.0)
     .min_width(160.0)
+    .max_width((ctx.available_rect().width()*0.45).max(200.0))
     .resizable(true)
     .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
     .show(ctx, |ui| {
@@ -693,7 +694,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         format!("{}: {}", obj_label, obj_name)
                                     };
                                     let lbl_resp = ui.add(egui::Label::new(
-                                        egui::RichText::new(txt).size(13.0).color(txt_col)).sense(egui::Sense::click()).truncate());
+                                        egui::RichText::new(txt).size(TYPE_SM + 1.0).color(txt_col)).sense(egui::Sense::click()).truncate()); // TYPE_SM (12) +1 = original 13
                                     if lbl_resp.clicked() { row_clicked = true; }
                                     if lbl_resp.double_clicked() && !obj_expr.is_empty() && (obj_name == "Function" || obj_name == "Point") {
                                         app.input_text = format!("{}={}", obj_label, obj_expr);

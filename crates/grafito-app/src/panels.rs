@@ -9,7 +9,10 @@ use grafito_core::{
 use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
-use grafito_ui::tokens::{RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, TYPE_BASE, TYPE_SM};
+use grafito_ui::tokens::{
+    RADIUS_LG, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_MD, TYPE_SM, TYPE_XS,
+};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -24,7 +27,7 @@ pub(crate) struct LocalXYTable {
     pub ys: Vec<f64>,
 }
 
-#[allow(dead_code)] // Panel de estadística sin entrada en la UI (TODO: reactivar).
+#[allow(dead_code)] // TODO P2: Panel de estadística sin entrada en la UI (reactivar).
 pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -54,7 +57,7 @@ pub(crate) fn parse_statistics_input(input: &str) -> Result<Vec<f64>, String> {
 /// deliberately carries no file path, timestamps, or other source metadata.
 pub(crate) fn parse_local_xy_table(input: &str, delimiter: u8) -> Result<LocalXYTable, String> {
     let delimiter = char::from(delimiter);
-    let mut rows = input
+    let rows = input
         .lines()
         .enumerate()
         .filter_map(|(index, line)| (!line.trim().is_empty()).then_some((index + 1, line)))
@@ -67,7 +70,10 @@ pub(crate) fn parse_local_xy_table(input: &str, delimiter: u8) -> Result<LocalXY
         return Err("El archivo no contiene filas de datos".to_string());
     }
 
-    let first = rows.remove(0);
+    let mut rows: VecDeque<_> = rows.into();
+    let Some(first) = rows.pop_front() else {
+        return Err("El archivo no contiene filas de datos".to_string());
+    };
     if first.len() != 2 {
         return Err("Cada fila debe tener exactamente dos columnas".to_string());
     }
@@ -173,6 +179,9 @@ fn parse_local_xy_values(row: &[String]) -> Result<(f64, f64), String> {
 }
 
 fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
+    // TODO: mover a background thread con std::thread::spawn + ctx.request_repaint()
+    // para no bloquear UI en archivos cercanos a 2MB. Lectura limitada a
+    // MAX_LOCAL_DATA_IMPORT_BYTES (2MB) via take() y sin unwrap/panic.
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("No se pudo inspeccionar el archivo: {error}"))?;
     if !metadata.file_type().is_file() {
@@ -189,6 +198,7 @@ fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
     {
         return Err("La fuente seleccionada debe ser un archivo regular".to_string());
     }
+    // I/O limitado a 2MB para no bloquear UI; budgeting verificado via AttachmentLimits
     file.take(MAX_LOCAL_DATA_IMPORT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("No se pudo leer el archivo: {error}"))?;
@@ -228,8 +238,8 @@ fn open_local_data_file(path: &Path) -> Result<File, String> {
 
 fn commit_local_xy_table(
     document: &mut Document,
-    undo_stack: &mut Vec<Document>,
-    redo_stack: &mut Vec<ChangeSet>,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
     table: LocalXYTable,
 ) -> Result<ObjectId, String> {
     let data_table = DataTableObj::new(
@@ -253,6 +263,8 @@ fn commit_local_xy_table(
 }
 
 fn import_local_xy_table(app: &mut GrafitoApp) {
+    // TODO: mover a background thread (std::thread::spawn + canal + poll con ctx.request_repaint())
+    // ideal para UI 60fps; por ahora lectura limitada a 2MB sin panic.
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Datos CSV o TSV", &["csv", "tsv", "txt"])
         .pick_file()
@@ -303,6 +315,7 @@ mod local_data_import_tests {
         MAX_LOCAL_DATA_IMPORT_BYTES,
     };
     use grafito_core::{Document, GeoObject};
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_IMPORT_TEST_FILE: AtomicU64 = AtomicU64::new(0);
@@ -353,8 +366,8 @@ mod local_data_import_tests {
         assert!(parse_local_xy_table(&too_many_rows, b',').is_err());
 
         let mut document = Document::new();
-        let mut undo_stack = Vec::new();
-        let mut redo_stack = Vec::new();
+        let mut undo_stack = VecDeque::new();
+        let mut redo_stack = VecDeque::new();
         let data_id = commit_local_xy_table(
             &mut document,
             &mut undo_stack,
@@ -381,7 +394,7 @@ mod local_data_import_tests {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Panel de estadística sin entrada en la UI.
+#[allow(dead_code)] // TODO P2: Panel de estadística sin entrada en la UI.
 pub(crate) struct StatisticsSummary {
     pub sum: Option<f64>,
     pub mean: f64,
@@ -396,7 +409,7 @@ pub(crate) struct StatisticsSummary {
     pub iqr: f64,
 }
 
-#[allow(dead_code)] // Solo usado por el panel de estadística (sin UI activa).
+#[allow(dead_code)] // TODO P2: Solo usado por el panel de estadística (sin UI activa).
 fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     if fraction <= 0.0 || a == b {
         return a;
@@ -414,7 +427,7 @@ fn stable_interpolate(a: f64, b: f64, fraction: f64) -> f64 {
     }
 }
 
-#[allow(dead_code)] // Solo usado por el panel de estadística (sin UI activa).
+#[allow(dead_code)] // TODO P2: Solo usado por el panel de estadística (sin UI activa).
 pub(crate) fn statistics_summary(data: &[f64]) -> Result<StatisticsSummary, String> {
     if data.is_empty() {
         return Err("Estadística: se requiere al menos un dato".to_string());
@@ -561,7 +574,13 @@ fn color_picker_swatch(ui: &mut egui::Ui, color: Color, label: &str) -> egui::Re
         (color.b * 255.0).clamp(0.0, 255.0) as u8,
         (color.a * 255.0).clamp(0.0, 255.0) as u8,
     );
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(
+            grafito_ui::tokens::ICON_XL - 4.0,
+            grafito_ui::tokens::ICON_LG,
+        ),
+        egui::Sense::click(),
+    );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let border = if response.hovered() {
         theme.accent
@@ -597,7 +616,12 @@ fn panel_theme_local(
 fn draw_right_drawer_header(ui: &mut egui::Ui, app: &mut GrafitoApp, title: &str, accent: Color32) {
     let theme = current_theme(ui.ctx());
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).color(accent).size(14.0).strong());
+        ui.label(
+            egui::RichText::new(title)
+                .color(accent)
+                .size(TYPE_MD)
+                .strong(),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if action_icon_button(
                 ui,
@@ -627,7 +651,7 @@ fn draw_inspector_identity(ui: &mut egui::Ui, object_name: &str, label: &str, vi
                     .size(TYPE_SM)
                     .strong(),
             );
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(object_name)
@@ -710,7 +734,7 @@ fn draw_inspector_empty_state(ui: &mut egui::Ui) {
                                 .size(TYPE_BASE)
                                 .strong(),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(SPACE_XS);
                         ui.label(
                             egui::RichText::new(
                                 "Seleccioná un objeto del canvas para ajustar su geometría, apariencia y controles avanzados.",
@@ -888,14 +912,14 @@ fn draw_object_cards_where(
     predicate: impl Fn(&GeoObject) -> bool,
 ) {
     let theme = current_theme(ui.ctx());
-    ui.add_space(10.0);
+    ui.add_space(SPACE_SM + 2.0);
     ui.label(
         egui::RichText::new(title)
             .color(theme.text_secondary)
-            .size(12.0)
+            .size(TYPE_SM)
             .strong(),
     );
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
 
     let ids: Vec<ObjectId> = app
         .document
@@ -907,7 +931,7 @@ fn draw_object_cards_where(
         ui.label(
             egui::RichText::new(empty_text)
                 .color(theme.text_tertiary)
-                .size(11.0),
+                .size(TYPE_XS),
         );
         return;
     }
@@ -928,13 +952,13 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // ── CAS PANEL (tab 1) ──
     egui::SidePanel::left("cas_panel").show_separator_line(false)
-        .default_width(260.0).min_width(180.0).resizable(true)
+        .default_width(260.0).min_width(180.0).max_width((ctx.available_rect().width()*0.45).max(200.0)).resizable(true)
         .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
-                ui.label(egui::RichText::new("Cálculo Simbólico (CAS)").color(accent).strong().size(16.0));
+                ui.add_space(SPACE_SM);
+                ui.label(egui::RichText::new("Cálculo Simbólico (CAS)").color(accent).strong().size(TYPE_MD));
                 if !app.document.cas_worksheet().is_empty()
                     && ui
                         .small_button("Limpiar")
@@ -944,7 +968,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     app.clear_cas_worksheet(ui.ctx().input(|input| input.time));
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             ui.separator();
 
             egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, 4.0)).show(ui, |ui| {
@@ -987,7 +1011,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical().max_height(ui.available_height() - 8.0).show(ui, |ui| {
                 egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
                     if app.document.cas_worksheet().is_empty() {
-                        ui.label(egui::RichText::new("Escribe comandos CAS...\n\nEj: Derivative[x^2, x]\nEj: Integral[sin(x), x]\nEj: Solve[x^2-4, x]\nEj: Limit[sin(x)/x, x, 0]").size(12.0).color(txt_dim));
+                        ui.label(egui::RichText::new("Escribe comandos CAS...\n\nEj: Derivative[x^2, x]\nEj: Integral[sin(x), x]\nEj: Solve[x^2-4, x]\nEj: Limit[sin(x)/x, x, 0]").size(TYPE_SM).color(txt_dim));
                     } else {
                         for (i, entry) in app.document.cas_worksheet().iter().enumerate() {
                             let output_color = match entry.status {
@@ -1001,7 +1025,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(egui::RichText::new(format!("{}", i+1)).color(accent).strong());
-                                        ui.add_space(4.0);
+                                        ui.add_space(SPACE_XS);
                                         ui.label(
                                             egui::RichText::new(format!("> {}", entry.input))
                                                 .size(13.0)
@@ -1033,6 +1057,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .show_separator_line(false)
         .default_width(220.0)
         .min_width(160.0)
+        .max_width((ctx.available_rect().width() * 0.45).max(200.0))
         .resizable(true)
         .frame(
             egui::Frame::none()
@@ -1040,27 +1065,27 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(SPACE_SM);
                 ui.label(
                     egui::RichText::new("Vista")
                         .color(accent)
                         .strong()
-                        .size(16.0),
+                        .size(TYPE_MD),
                 );
             });
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             ui.separator();
 
             egui::Frame::none().inner_margin(8.0).show(ui, |ui| {
                 ui.label(
                     egui::RichText::new("General")
                         .color(txt_dim)
-                        .size(11.0)
+                        .size(TYPE_XS)
                         .strong(),
                 );
-                ui.add_space(4.0);
+                ui.add_space(SPACE_XS);
                 ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
                 ui.checkbox(&mut app.dark_mode, "Modo oscuro")
                     .changed()
@@ -1077,7 +1102,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 if app.current_view == crate::ViewMode::D3
                     && app.has_visible_multidimensional_object()
                 {
-                    ui.add_space(12.0);
+                    ui.add_space(SPACE_MD);
                     draw_multidimensional_motion_card(
                         ui,
                         app,
@@ -1112,25 +1137,25 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 // (Geometría 2D / Geometría 3D). No duplicar aquí, era fuente de
                 // estado Frankenstein (canvas 3D + toolbar 2D).
 
-                ui.add_space(12.0);
+                ui.add_space(SPACE_MD);
                 ui.label(
                     egui::RichText::new("Ejes")
                         .color(txt_dim)
-                        .size(11.0)
+                        .size(TYPE_XS)
                         .strong(),
                 );
-                ui.add_space(4.0);
+                ui.add_space(SPACE_XS);
                 ui.checkbox(&mut app.document.view_mut().x_log, "Eje X logarítmico");
                 ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y logarítmico");
 
-                ui.add_space(12.0);
+                ui.add_space(SPACE_MD);
                 ui.label(
                     egui::RichText::new("Exportación")
                         .color(txt_dim)
-                        .size(11.0)
+                        .size(TYPE_XS)
                         .strong(),
                 );
-                ui.add_space(4.0);
+                ui.add_space(SPACE_XS);
                 if ui.button("Exportar SVG").clicked() {
                     app.export_with_dialog(crate::export::ExportFormat::Svg);
                 }
@@ -1159,7 +1184,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(if app.perspective == crate::Perspective::Complex {
@@ -1168,7 +1193,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 "Explorador Trigonométrico"
                             })
                                 .color(accent)
-                                .size(14.0)
+                                .size(TYPE_MD)
                                 .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1187,7 +1212,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         ui.label(
                             egui::RichText::new("z(t) = cos(t) + i sin(t) = e^(it)")
                                 .color(hdr_col)
-                                .size(12.0)
+                                .size(TYPE_SM)
                                 .strong(),
                         );
                         ui.label(
@@ -1197,13 +1222,13 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                             .color(txt_dim)
                             .size(10.5),
                         );
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_SM);
                     }
 
                     ui.label(
                         egui::RichText::new("Función activa")
                             .color(hdr_col)
-                            .size(12.0),
+                            .size(TYPE_SM),
                     );
                     ui.horizontal_wrapped(|ui| {
                         for (idx, spec) in crate::app::TRIG_FUNCTIONS.iter().enumerate() {
@@ -1236,7 +1261,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         {
                             app.trig_animating = !app.trig_animating;
                         }
-                        ui.label(egui::RichText::new("Velocidad").color(txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("Velocidad").color(txt_dim).size(TYPE_XS));
                         let speed_changed = ui
                             .add(
                                 egui::Slider::new(&mut app.trig_speed, -6.0..=6.0)
@@ -1250,7 +1275,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                     });
 
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new("Vista").color(txt_dim).size(11.0));
+                        ui.label(egui::RichText::new("Vista").color(txt_dim).size(TYPE_XS));
                         if ui
                             .selectable_label(
                                 app.trig_view_mode == crate::app::TrigViewMode::Didactic,
@@ -1277,7 +1302,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
 
                     let angle_changed = ui
                         .horizontal(|ui| {
-                            ui.label(egui::RichText::new("Ángulo").color(txt_dim).size(11.0));
+                            ui.label(egui::RichText::new("Ángulo").color(txt_dim).size(TYPE_XS));
                             ui.add(
                                 egui::Slider::new(
                                     &mut app.trig_angle,
@@ -1308,14 +1333,14 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         .rounding(egui::Rounding::same(8.0))
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(value_text).color(accent).size(12.0).strong());
+                            ui.label(egui::RichText::new(value_text).color(accent).size(TYPE_SM).strong());
                             ui.label(
                                 egui::RichText::new(format!(
                                     "Punto: (cos θ, sin θ) = ({:.3}, {:.3})",
                                     cos_t, sin_t
                                 ))
                                 .color(hdr_col)
-                                .size(11.0),
+                                .size(TYPE_XS),
                             );
                             ui.label(
                                 egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
@@ -1336,7 +1361,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                         );
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     if ui.button("Centrar vista en la gráfica").clicked() {
                         app.document.set_view(grafito_geometry::ViewTransform::default());
                         app.document.bump_version();
@@ -1392,7 +1417,7 @@ pub(crate) fn draw_empty_panel(_app: &mut GrafitoApp, ctx: &egui::Context) {
 // ══════════════════════════════════════════════════════════════════════════
 
 /// Panel izquierdo de Estadística. Permite ingresar datos y ver resumen.
-#[allow(dead_code)] // Panel sin entrada en la UI desde que se quitó la pestaña «Datos».
+#[allow(dead_code)] // TODO P2: Panel sin entrada en la UI desde que se quitó la pestaña «Datos».
 pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let (_is_dark, accent, alg_fill, _sep_col, txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
 
@@ -1411,14 +1436,14 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .id_salt("stats_panel_content")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     ui.label(
                         egui::RichText::new("Estadística")
                             .color(accent)
                             .size(15.0)
                             .strong(),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
 
                     draw_object_cards_where(
                         ui,
@@ -1436,7 +1461,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             )
                         },
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
 
                     // ── Datos: TextEdit vinculado al buffer persistente ──
                     // El buffer sólo se parsea al perder foco o al apretar "Aplicar"
@@ -1446,14 +1471,14 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Datos (uno por línea o coma):")
                             .color(hdr_col)
-                            .size(12.0),
+                            .size(TYPE_SM),
                     );
                     let te_resp = ui.add_sized(
                         [ui.available_width(), 80.0],
                         egui::TextEdit::multiline(&mut app.statistics_input_buf).desired_rows(3),
                     );
 
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
                     ui.horizontal(|ui| {
                         let apply_clicked = ui.button("Aplicar").clicked();
                         let lost_focus =
@@ -1482,11 +1507,11 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         ui.label(
                             egui::RichText::new(error)
                                 .color(current_theme(ctx).danger)
-                                .size(11.0),
+                                .size(TYPE_XS),
                         );
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     if app.statistics_data.is_empty() {
                         // Empty-state
                         ui.label(
@@ -1497,7 +1522,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                          Ejemplo: 1, 2, 3, 5, 4, 6",
                             )
                             .color(txt_dim)
-                            .size(11.0),
+                            .size(TYPE_XS),
                         );
                     } else {
                         let data = &app.statistics_data;
@@ -1507,7 +1532,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 ui.label(
                                     egui::RichText::new(error)
                                         .color(current_theme(ctx).danger)
-                                        .size(11.0),
+                                        .size(TYPE_XS),
                                 );
                                 return;
                             }
@@ -1516,19 +1541,22 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         ui.label(
                             egui::RichText::new("Resumen")
                                 .color(hdr_col)
-                                .size(12.0)
+                                .size(TYPE_SM)
                                 .strong(),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(SPACE_XS);
                         egui::Grid::new("stats_grid")
                             .num_columns(2)
                             .striped(true)
                             .spacing([10.0, 4.0])
                             .show(ui, |ui| {
                                 let mut row = |k: &str, v: String| {
-                                    ui.label(egui::RichText::new(k).color(txt_dim).size(12.0));
+                                    ui.label(egui::RichText::new(k).color(txt_dim).size(TYPE_SM));
                                     ui.label(
-                                        egui::RichText::new(v).color(txt_col).size(12.0).strong(),
+                                        egui::RichText::new(v)
+                                            .color(txt_col)
+                                            .size(TYPE_SM)
+                                            .strong(),
                                     );
                                     ui.end_row();
                                 };
@@ -1551,11 +1579,11 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 row("IQR", format_statistic(summary.iqr));
                             });
 
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_SM);
                         ui.label(
                             egui::RichText::new("Histograma")
                                 .color(hdr_col)
-                                .size(12.0)
+                                .size(TYPE_SM)
                                 .strong(),
                         );
                         ui.add_space(2.0);
@@ -1646,14 +1674,14 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.label(
                 egui::RichText::new("Números Complejos")
                     .color(accent)
                     .size(15.0)
                     .strong(),
             );
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
 
             // ── Barra de entrada in-panel (igual que Álgebra) ──
             egui::Frame::none()
@@ -1683,13 +1711,13 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     });
                 });
             ui.add(egui::Separator::default().spacing(0.0));
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
 
             // ── Símbolo base ──
             ui.label(
                 egui::RichText::new("Símbolo base")
                     .color(hdr_col)
-                    .size(12.0),
+                    .size(TYPE_SM),
             );
             let mut sym = app.document.complex_base_symbol.clone();
             let resp = ui.add(
@@ -1705,7 +1733,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
             }
 
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             let content_height = ui.available_height();
             egui::ScrollArea::vertical()
                 .id_salt("complex_panel_content")
@@ -1715,10 +1743,10 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Objetos")
                             .color(hdr_col)
-                            .size(12.0)
+                            .size(TYPE_SM)
                             .strong(),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
                     let ids: Vec<ObjectId> =
                         app.document.objects_iter().map(|(id, _)| *id).collect();
                     let mut any_object = false;
@@ -1754,15 +1782,15 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 "Sin objetos.\nProbá: x^2 + y^2 < 1\no: DomainColoring[1/z, -2, 2, -2, 2, 160]",
                             )
                             .color(txt_dim)
-                            .size(11.0),
+                            .size(TYPE_XS),
                         );
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     ui.label(
                         egui::RichText::new("Comandos rápidos")
                             .color(hdr_col)
-                            .size(12.0)
+                            .size(TYPE_SM)
                             .strong(),
                     );
                     ui.add_space(2.0);
@@ -1789,7 +1817,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             egui::Button::new(
                                 egui::RichText::new(*label)
                                     .monospace()
-                                    .size(11.0)
+                                    .size(TYPE_XS)
                                     .color(txt_col),
                             )
                             .frame(false),
@@ -1825,14 +1853,14 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.label(
                 egui::RichText::new("Dinámica y Atractores")
                     .color(accent)
                     .size(15.0)
                     .strong(),
             );
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
 
             draw_object_cards_where(
                 ui,
@@ -1849,7 +1877,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     )
                 },
             );
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
 
             let ids: Vec<_> = app.document.objects_iter().map(|(id, _)| *id).collect();
             let mut attractor_id = None;
@@ -1861,7 +1889,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             }
 
             if let Some(id) = attractor_id {
-                ui.label(egui::RichText::new("Attractor activo").color(hdr_col).size(12.0).strong());
+                ui.label(egui::RichText::new("Attractor activo").color(hdr_col).size(TYPE_SM).strong());
                 if let Some(GeoObject::Attractor3D(a)) = app.document.get_object(id) {
                     let sigma = a.params.first().copied().unwrap_or(0.0);
                     let rho = a.params.get(1).copied().unwrap_or(0.0);
@@ -1878,7 +1906,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         "Sin attractor activo.\nCreá uno con:\n  Attractor[σ, ρ, β]\n(Lorenz por defecto)",
                     )
                     .color(txt_dim)
-                    .size(11.0),
+                    .size(TYPE_XS),
                 );
                 ui.add_space(6.0);
                 if ui
@@ -1891,8 +1919,8 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             }
 
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("Comandos").color(hdr_col).size(12.0).strong());
-            ui.label(egui::RichText::new("- Lorenz: Attractor[sigma, rho, beta]").color(txt_dim).size(11.0).monospace());
+            ui.label(egui::RichText::new("Comandos").color(hdr_col).size(TYPE_SM).strong());
+            ui.label(egui::RichText::new("- Lorenz: Attractor[sigma, rho, beta]").color(txt_dim).size(TYPE_XS).monospace());
             let _ = txt_col;
         });
 }
@@ -1954,7 +1982,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 GeoObject::Cube3D(c) => {
                     ui.label(egui::RichText::new("Cubo 3D").color(label_col).strong());
                     ui.label(egui::RichText::new(format!("Etiqueta: {}", c.label)).color(txt_col));
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
                     ui.label(egui::RichText::new("Centro").color(txt_dim));
                     ui.horizontal(|ui| {
                         changed |= ui
@@ -1986,7 +2014,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 GeoObject::Sphere3D(s) => {
                     ui.label(egui::RichText::new("Esfera 3D").color(label_col).strong());
                     ui.label(egui::RichText::new(format!("Etiqueta: {}", s.label)).color(txt_col));
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
                     ui.label(egui::RichText::new("Centro").color(txt_dim));
                     ui.horizontal(|ui| {
                         changed |= ui
@@ -2018,7 +2046,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                 GeoObject::Point3D(p) => {
                     ui.label(egui::RichText::new("Punto 3D").color(label_col).strong());
                     ui.label(egui::RichText::new(format!("Etiqueta: {}", p.label)).color(txt_col));
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
                     ui.horizontal(|ui| {
                         changed |= ui
                             .add(
@@ -2167,7 +2195,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                 "El relleno se omite en Vista previa y durante el movimiento.",
                             )
                             .color(txt_dim)
-                            .size(11.0),
+                            .size(TYPE_XS),
                         );
                         });
 
@@ -2326,7 +2354,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                                 "Los politopos N-D genéricos se muestran solo como aristas; el relleno se omite en Vista previa y durante el movimiento.",
                             )
                             .color(txt_dim)
-                            .size(11.0),
+                            .size(TYPE_XS),
                         );
                         });
 
@@ -2391,7 +2419,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                     ui.label(
                         egui::RichText::new("Propiedades dedicadas en panel de Álgebra.")
                             .color(txt_dim)
-                            .size(11.0),
+                            .size(TYPE_XS),
                     );
                 }
                     }
@@ -2405,7 +2433,7 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             ui.label(
                                 egui::RichText::new(&message)
                                     .color(current_theme(ui.ctx()).danger)
-                                    .size(11.0),
+                                    .size(TYPE_XS),
                             );
                             app.cas_result = message.clone();
                             app.notify(message, grafito_ui::toast::ToastKind::Error);
@@ -2474,7 +2502,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             draw_right_drawer_header(ui, app, "Coloración de dominio", accent);
             ui.add_space(6.0);
 
@@ -2494,12 +2522,12 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                         "Sin coloración de dominio. Creá una con:\n  DomainColoring[1/z, -2, 2, -2, 2, 160]\nFase y módulo de f(z).",
                     )
                     .color(txt_dim)
-                    .size(11.0),
+                    .size(TYPE_XS),
                 );
             } else {
                 ui.label(egui::RichText::new("Coloración por fase habilitada").color(hdr_col).strong());
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Tono = arg(f(z)).").color(txt_dim).size(11.0));
+                ui.add_space(SPACE_XS);
+                ui.label(egui::RichText::new("Tono = arg(f(z)).").color(txt_dim).size(TYPE_XS));
 
                 ui.add_space(6.0);
                 ui.collapsing("Guia de Interpretacion", |ui| {
@@ -2510,11 +2538,11 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                         .inner_margin(egui::Margin::same(8.0))
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("Colores y Magnitud:").strong().color(hdr_col).size(11.0));
+                                ui.label(egui::RichText::new("Colores y Magnitud:").strong().color(hdr_col).size(TYPE_XS));
                                 ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(10.5));
 
                                 ui.add_space(6.0);
-                                ui.label(egui::RichText::new("Derivabilidad y Wirtinger:").strong().color(hdr_col).size(11.0));
+                                ui.label(egui::RichText::new("Derivabilidad y Wirtinger:").strong().color(hdr_col).size(TYPE_XS));
                                 ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(10.5));
                             });
                         });
@@ -2524,8 +2552,8 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
             // Selector de modo de coloreado de dominio
             if let Some(id) = grid_id {
                 if let Some(GeoObject::ComplexGrid(cg)) = app.document.get_object(id) {
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Modo de coloración").color(hdr_col).size(12.0).strong());
+                    ui.add_space(SPACE_SM);
+                    ui.label(egui::RichText::new("Modo de coloración").color(hdr_col).size(TYPE_SM).strong());
                     let mut mode = cg.domain_coloring_mode;
                     egui::ComboBox::from_id_salt("dc_mode_combo")
                         .selected_text(match mode {
@@ -2547,7 +2575,7 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
             }
 
             ui.add_space(10.0);
-            ui.label(egui::RichText::new("Símbolo base").color(hdr_col).size(12.0).strong());
+            ui.label(egui::RichText::new("Símbolo base").color(hdr_col).size(TYPE_SM).strong());
             let mut sym = app.document.complex_base_symbol.clone();
             let r = ui.add(
                 egui::TextEdit::singleline(&mut sym)
@@ -2575,13 +2603,13 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                 if let Some(GeoObject::ComplexMapping(cm)) = app.document.get_object(id) {
                     ui.add_space(14.0);
                     ui.separator();
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                     ui.label(
                         egui::RichText::new("Animación de Mapeo Conforme")
                             .color(accent)
                             .strong(),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(SPACE_XS);
 
                     let mut anim = cm.animate_homotopy;
                     ui.checkbox(&mut anim, "Animar deformación (homotopía)");
@@ -2611,7 +2639,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             draw_right_drawer_header(ui, app, "Parámetros dinámicos", accent);
             ui.add_space(6.0);
 
@@ -2629,7 +2657,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                         "Sin attractor activo. Creá uno con:\n  Attractor[10, 28, 8/3]",
                     )
                     .color(txt_dim)
-                    .size(11.0),
+                    .size(TYPE_XS),
                 );
                 return;
             };
@@ -2648,10 +2676,10 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
             ui.label(
                 egui::RichText::new("Lorenz sigma, rho, beta")
                     .color(hdr_col)
-                    .size(12.0)
+                    .size(TYPE_SM)
                     .strong(),
             );
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             changed |= ui
                 .add(
                     egui::Slider::new(&mut sigma, 0.1..=30.0)
@@ -2673,11 +2701,11 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                         .trailing_fill(true),
                 )
                 .changed();
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             ui.label(
                 egui::RichText::new("Integración")
                     .color(hdr_col)
-                    .size(12.0)
+                    .size(TYPE_SM)
                     .strong(),
             );
             changed |= ui
@@ -2695,11 +2723,11 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                         .integer(),
                 )
                 .changed();
-            ui.add_space(4.0);
+            ui.add_space(SPACE_XS);
             ui.label(
                 egui::RichText::new("El canvas se regenera cada cambio.")
                     .color(txt_dim)
-                    .size(11.0),
+                    .size(TYPE_XS),
             );
 
             match apply_object_panel_edit_with_previous(
@@ -2725,7 +2753,7 @@ pub(crate) fn draw_right_parameters_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     ui.label(
                         egui::RichText::new(&message)
                             .color(current_theme(ui.ctx()).danger)
-                            .size(11.0),
+                            .size(TYPE_XS),
                     );
                     app.cas_result = message.clone();
                     app.notify(message, grafito_ui::toast::ToastKind::Error);
@@ -2784,11 +2812,11 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                         })
                         .collect();
                     if !fits.is_empty() {
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_SM);
                         ui.label(
                             egui::RichText::new("Diagnósticos locales")
                                 .color(theme.text_secondary)
-                                .size(12.0)
+                                .size(TYPE_SM)
                                 .strong(),
                         );
                         for (label, fit) in fits {
@@ -2805,7 +2833,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                                     fit.diagnostics.r_squared
                                 ))
                                 .color(theme.text_primary)
-                                .size(11.0),
+                                .size(TYPE_XS),
                             );
                             ui.collapsing(
                                 format!("Residuales ({})", fit.diagnostics.residuals.len()),
@@ -2821,7 +2849,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                                                 residual
                                             ))
                                             .color(theme.text_tertiary)
-                                            .size(11.0),
+                                            .size(TYPE_XS),
                                         );
                                     }
                                     if fit.diagnostics.residuals.len() > shown {
@@ -2839,7 +2867,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     ui.label(
                         egui::RichText::new("Crear análisis")
                             .color(theme.text_secondary)
-                            .size(12.0)
+                            .size(TYPE_SM)
                             .strong(),
                     );
                     ui.label(
@@ -2847,7 +2875,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                             "Importá un CSV/TSV de dos columnas o creá una tabla local desde dos listas. La ruta nunca se guarda.",
                         )
                         .color(theme.text_tertiary)
-                        .size(11.0),
+                        .size(TYPE_XS),
                     );
                     ui.add_space(6.0);
 
@@ -2882,11 +2910,11 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                         }
                     });
                     if let Some(table_label) = selected_table_label {
-                        ui.add_space(8.0);
+                        ui.add_space(SPACE_SM);
                         ui.label(
                             egui::RichText::new(format!("Ajustar tabla '{table_label}'"))
                                 .color(theme.text_secondary)
-                                .size(12.0)
+                                .size(TYPE_SM)
                                 .strong(),
                         );
                         for (label, template) in [
@@ -2909,7 +2937,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                                 "Seleccioná una tabla local para elegir un modelo de ajuste.",
                             )
                             .color(theme.text_tertiary)
-                            .size(11.0),
+                            .size(TYPE_XS),
                         );
                     }
                 });
@@ -2981,9 +3009,9 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                ui.add_space(8.0);
+                ui.add_space(SPACE_SM);
                 draw_right_drawer_header(ui, app, "Protocolo de Construcción", accent);
             });
             ui.add_space(2.0);
@@ -3036,7 +3064,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                             egui::RichText::new(
                                 "Sin pasos de construcción.\nCrea objetos o restricciones para verlos aquí.",
                             )
-                            .size(12.0)
+                            .size(TYPE_SM)
                             .color(txt_dim),
                         );
                     } else {
@@ -3077,7 +3105,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                                     egui::RichText::new(&action)
                                                         .color(txt_col)
                                                         .strong()
-                                                        .size(12.0),
+                                                        .size(TYPE_SM),
                                                 );
                                                 if disabled {
                                                     ui.label(
@@ -3092,7 +3120,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                                     "{} -> {}",
                                                     inputs_str, output_str
                                                 ))
-                                                .size(11.0)
+                                                .size(TYPE_XS)
                                                 .color(txt_dim),
                                             );
                                         });
@@ -3107,9 +3135,9 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
 }
 
 // Perspectiva Mascota eliminada — avatar personalizable vive en Configuración
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: picks legacy tras migración a Configuración unificada (mantener para compat, usado en tests legacy)
 pub(crate) fn draw_mascota_panel(_app: &mut GrafitoApp, _ctx: &egui::Context) {}
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: picks legacy tras migración a Configuración unificada (mantener para compat, usado en tests legacy)
 pub(crate) fn draw_right_mascota_panel(_app: &mut GrafitoApp, _ctx: &egui::Context) {}
 
 #[cfg(test)]

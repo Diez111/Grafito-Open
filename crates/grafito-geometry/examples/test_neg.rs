@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use evalexpr::*;
 fn main() {
     let mut ctx = HashMapContext::new();

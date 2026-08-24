@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el parser maneja todas las expresiones que el usuario
 //! podría usar con ImplicitCurve.
 

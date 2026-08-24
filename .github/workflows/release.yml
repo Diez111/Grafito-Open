@@ -104,9 +104,20 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      - name: Cache APT packages
+        if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install C toolchain and dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+        with:
+          shared-key: "release-${{ matrix.target }}"
+          cache-all-crates: true
 
       - name: Run workspace tests
         run: cargo test --workspace --locked
@@ -181,7 +192,7 @@ jobs:
           "$binary" --help
 
       - name: Upload artifact
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
@@ -189,7 +200,7 @@ jobs:
 
       - name: Upload direct Windows executable
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: grafito-windows-x64-exe
           path: grafito-windows-x64.exe
@@ -206,6 +217,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.5.0
+        with:
+          packages: build-essential desktop-file-utils dpkg-dev libgmp-dev libmpfr-dev libmpc-dev lintian m4 pkg-config libdbus-1-dev
+          version: 1.0
       - name: Install package build dependencies
         run: |
           sudo apt-get update
@@ -230,7 +246,7 @@ jobs:
           dpkg-deb -f "${packages[0]}" Depends
 
       - name: Upload direct Debian package
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: grafito-debian
           path: packaging/build/*.deb
@@ -261,7 +277,7 @@ jobs:
           upload-release-assets: false
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: grafito-sbom
           path: grafito.spdx.json
@@ -281,7 +297,7 @@ jobs:
           persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           path: artifacts
 

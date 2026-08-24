@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use grafito_geometry::statistics::{
     chi_squared_cdf, chi_squared_pdf, fit_xy, negative_binomial_cdf, negative_binomial_pmf,
     student_t_cdf, student_t_quantile, FitKind,

@@ -12,3 +12,4 @@ description = "Modelo puro de pizarra de dibujo libre (estilo Excalidraw) para G
 
 [lints]
 workspace = true
+

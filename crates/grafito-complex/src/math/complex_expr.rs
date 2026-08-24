@@ -474,9 +474,17 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
             }
             if matches!(chars.peek(), Some('e') | Some('E')) {
-                num_str.push(chars.next().unwrap());
+                if let Some(ch) = chars.next() {
+                    num_str.push(ch);
+                } else {
+                    return Err("Invalid number".into());
+                }
                 if matches!(chars.peek(), Some('+') | Some('-')) {
-                    num_str.push(chars.next().unwrap());
+                    if let Some(sign) = chars.next() {
+                        num_str.push(sign);
+                    } else {
+                        return Err("Invalid number".into());
+                    }
                 }
                 let mut has_exp_digit = false;
                 while let Some(&c) = chars.peek() {

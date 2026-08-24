@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![allow(deprecated)]
 //! Grafito Core — Modelo de documento, objetos geométricos y restricciones.
 //!
 //! Este crate define el modelo central de Grafito: el [`Document`], los 32 tipos

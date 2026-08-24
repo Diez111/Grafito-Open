@@ -5,8 +5,8 @@ use crate::{
     icons::{action_icon_button, Icon},
     theme::current_theme,
     tokens::{
-        RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM,
-        TYPE_XS,
+        RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD,
+        TYPE_SM, TYPE_XS,
     },
 };
 use grafito_assistant_types::{
@@ -97,13 +97,13 @@ const ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT: f32 = 112.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT: f32 = 30.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_MESSAGE_HEIGHT: f32 = 20.0;
 const ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT: f32 = 20.0;
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: remover cuando se use header dedicado en panel compacto (reservado para layout 780px)
 const ASSISTANT_HEADER_HEIGHT: f32 = 40.0;
 const ASSISTANT_REVEAL_BASE_SECONDS: f64 = 0.28;
 const ASSISTANT_REVEAL_PER_BLOCK_SECONDS: f64 = 0.18;
 const ASSISTANT_REVEAL_MAX_SECONDS: f64 = 1.5;
 const MAX_FOCUSED_CONTEXT_PREVIEW_CHARS: usize = 160;
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remover MORA_NAME legacy (ahora avatar blob, usado en tests de prompt)
 const MORA_NAME: &str = "Mili";
 const MORA_ACCESSIBLE_LABEL: &str = "Mili, asistente matemático";
 // Fusión recomendada: **DeepSeek Flash** para TODO razonamiento lógico
@@ -1872,7 +1872,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
             );
             ui.label(
                 egui::RichText::new(accent_name)
-                    .size(10.0)
+                    .size(TYPE_XS - 1.0) // TYPE_XS (11) -1 = 10 for accent micro label
                     .color(theme.text_tertiary),
             );
         });
@@ -1882,7 +1882,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
                 state.avatar.shape.label(),
                 state.avatar.eye_style.label(),
             ))
-            .size(10.0)
+            .size(TYPE_XS - 1.0) // TYPE_XS (11) -1 = 10 for avatar meta label
             .color(theme.text_tertiary)
             .weak(),
         );
@@ -1892,7 +1892,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
             } else {
                 "seguimiento fijo"
             })
-            .size(9.0)
+            .size(TYPE_2XS)
             .color(theme.text_tertiary)
             .italics()
             .weak(),
@@ -1900,7 +1900,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         ui.add_space(crate::tokens::SPACE_SM);
         ui.label(
             egui::RichText::new("Mové el puntero sobre el avatar")
-                .size(9.0)
+                .size(TYPE_2XS)
                 .color(theme.text_tertiary)
                 .weak(),
         );
@@ -2378,7 +2378,7 @@ fn draw_personality_settings_contents(
 }
 
 /// Alto útil de la ventana (máximo para el scroll del panel de configuración).
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar ui_viewport_height en ventana config scroll acotado (usado en tests de viewport)
 fn ui_viewport_height(ctx: &egui::Context) -> f32 {
     (ctx.screen_rect().height() * 0.8).min(560.0)
 }
@@ -2635,7 +2635,7 @@ fn draw_assistant_settings_contents(
 }
 
 /// Mini-gráfico de evolución de dominio (0..=1) de la rama más trabajada.
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar sparkline en tutor card (reservado para telemetría dominio)
 fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::theme::Theme) {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
@@ -2665,7 +2665,7 @@ fn draw_domain_sparkline(ui: &mut egui::Ui, samples: &[f32], theme: &crate::them
 
 /// Tarjeta de progreso del tutor (memoria del usuario) con la siguiente
 /// recomendación y feedback ✓/✗ de la última explicación.
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar draw_tutor_card en panel asistente (actualmente render alternativo)
 fn draw_tutor_card(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
@@ -3660,7 +3660,7 @@ fn draw_assistant_composer(
     action
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar ConversationTurnAppearance tipado en render editorial (reservado)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConversationTurnAppearance {
     fill: egui::Color32,
@@ -3678,7 +3678,7 @@ struct AssistantProposalRenderState<'a> {
     correction_available: bool,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar conversation_turn_appearance en refactor editorial (reservado)
 fn conversation_turn_appearance(
     theme: &crate::theme::Theme,
     is_user: bool,
@@ -5291,7 +5291,7 @@ fn provider_label(provider: ProviderProfile) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: activar suggestion_prompts en estado vacío (usado en tests de prompt vacío)
 fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     if has_focus {
         [

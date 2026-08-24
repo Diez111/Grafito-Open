@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_FACTS: usize = 50;
 const MAX_FACT_LEN: usize = 120;
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO P2: remover MAX_PREF_LEN cuando Preferences se persista con límite (reservado para UI)
 const MAX_PREF_LEN: usize = 80;
 
 /// Hecho episódico recordado (qué dijo/hizo el usuario).

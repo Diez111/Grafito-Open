@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integración del loop de agente contra un endpoint OpenAI-compatible simulado.
 
 use grafito_agent::loop_engine::{AgentBudget, Cancellation};

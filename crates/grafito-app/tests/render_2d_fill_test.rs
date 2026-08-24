@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el render de un ImplicitCurve con Eq dibuja el outline.
 
 #[cfg(test)]

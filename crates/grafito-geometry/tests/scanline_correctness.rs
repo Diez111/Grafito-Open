@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Tests de correctness para el algoritmo de scanline fill.
 //! Verifica que las regiones se rellenan correctamente.
 

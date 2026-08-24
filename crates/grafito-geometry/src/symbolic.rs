@@ -336,7 +336,13 @@ pub fn integrate_definite_typed(expr: &str, var: &str, a: f64, b: f64) -> MathRe
         MathResult::NotConverged(error) => return MathResult::NotConverged(error),
         MathResult::Unsupported(error) => return MathResult::Unsupported(error),
         MathResult::ResourceLimit(error) => return MathResult::ResourceLimit(error),
-        MathResult::Exact(_) => unreachable!("numeric integration is never exact"),
+        MathResult::Exact(value) => {
+            debug_assert!(false, "numeric integration is never exact");
+            return MathResult::Approximate {
+                value,
+                error_estimate: 0.0,
+            };
+        }
     };
     if let Some(prim) = integrate_expr(&ast, var).or_else(|| ast.integrate(var)) {
         let prim = simplify_expr(&prim);
@@ -479,16 +485,16 @@ fn has_potential_interval_domain_error(ast: &Expr, var: &str, a: f64, b: f64) ->
     use Expr::*;
     match ast {
         Div(numerator, denominator) => {
-            interval_bounds(denominator, var, a, b).is_some_and(|(lo, hi)| lo <= 0.0 && hi >= 0.0)
+            interval_bounds(denominator, var, a, b).is_none_or(|(lo, hi)| lo <= 0.0 && hi >= 0.0)
                 || has_potential_interval_domain_error(numerator, var, a, b)
                 || has_potential_interval_domain_error(denominator, var, a, b)
         }
         Ln(argument) | Log(argument) => {
-            interval_bounds(argument, var, a, b).is_some_and(|(lo, _)| lo <= 0.0)
+            interval_bounds(argument, var, a, b).is_none_or(|(lo, _)| lo <= 0.0)
                 || has_potential_interval_domain_error(argument, var, a, b)
         }
         Sqrt(argument) => {
-            interval_bounds(argument, var, a, b).is_some_and(|(lo, _)| lo < 0.0)
+            interval_bounds(argument, var, a, b).is_none_or(|(lo, _)| lo < 0.0)
                 || has_potential_interval_domain_error(argument, var, a, b)
         }
         Neg(argument) | Sin(argument) | Cos(argument) | Tan(argument) | Asin(argument)
@@ -569,6 +575,29 @@ fn interval_bounds(ast: &Expr, var: &str, a: f64, b: f64) -> Option<(f64, f64)> 
             Some((
                 products.iter().copied().fold(f64::INFINITY, f64::min),
                 products.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ))
+        }
+        Div(numerator, denominator) => {
+            let (num_lo, num_hi) = interval_bounds(numerator, var, a, b)?;
+            let (den_lo, den_hi) = interval_bounds(denominator, var, a, b)?;
+            if den_lo <= 0.0 && den_hi >= 0.0 {
+                // Denominator interval crosses zero → guaranteed pole inside [a,b].
+                // Return an infinite interval to ensure has_potential treats it as domain error
+                // and to propagate unboundedness to enclosing expressions (e.g. Ln(Div)).
+                return Some((f64::NEG_INFINITY, f64::INFINITY));
+            }
+            let candidates = [
+                num_lo / den_lo,
+                num_lo / den_hi,
+                num_hi / den_lo,
+                num_hi / den_hi,
+            ];
+            if candidates.iter().any(|v| !v.is_finite()) {
+                return Some((f64::NEG_INFINITY, f64::INFINITY));
+            }
+            Some((
+                candidates.iter().copied().fold(f64::INFINITY, f64::min),
+                candidates.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             ))
         }
         Pow(base, exponent) => {
@@ -1464,8 +1493,12 @@ fn numeric_integrate(
                 (MathResult::ResourceLimit(error), _) | (_, MathResult::ResourceLimit(error)) => {
                     MathResult::ResourceLimit(error)
                 }
-                (MathResult::Exact(_), _) | (_, MathResult::Exact(_)) => {
-                    unreachable!("numeric integration is never exact")
+                (MathResult::Exact(value), _) | (_, MathResult::Exact(value)) => {
+                    debug_assert!(false, "numeric integration is never exact");
+                    MathResult::Approximate {
+                        value,
+                        error_estimate: 0.0,
+                    }
                 }
             }
         }
@@ -2250,7 +2283,10 @@ fn expanded_terms_into_expr(
 
     fn build_balanced(terms: &mut [Option<ExpandedTerm>], invert: bool) -> Expr {
         if terms.len() == 1 {
-            let term = terms[0].take().expect("validated expansion term");
+            let Some(term) = terms[0].take() else {
+                debug_assert!(false, "validated expansion term missing");
+                return Expr::Const(0.0);
+            };
             return if term.negative != invert {
                 Expr::Neg(Box::new(term.expression))
             } else {
@@ -2259,11 +2295,11 @@ fn expanded_terms_into_expr(
         }
 
         let middle = terms.len() / 2;
-        let right_is_negative = terms[middle]
-            .as_ref()
-            .expect("validated expansion term")
-            .negative
-            != invert;
+        let Some(middle_term) = terms[middle].as_ref() else {
+            debug_assert!(false, "validated expansion term missing");
+            return Expr::Const(0.0);
+        };
+        let right_is_negative = middle_term.negative != invert;
         let (left_terms, right_terms) = terms.split_at_mut(middle);
         let left = build_balanced(left_terms, invert);
         if right_is_negative {

@@ -13,3 +13,4 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+

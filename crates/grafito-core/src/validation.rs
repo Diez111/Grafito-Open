@@ -34,6 +34,30 @@ pub const MAX_CONTOUR_LEVELS: usize = 16;
 pub const MAX_CONTOUR_WORK_UNITS: usize = 8 * 1024 * 1024;
 const MAX_IMPLICIT_GRID_CELLS: usize = 1024 * 1024;
 const MAX_OBJECT_PARAMETERS: usize = 64;
+/// Épsilon geométrico para pruebas de degeneración (longitud, altura, dirección).
+pub const GEOM_EPS: f64 = 1e-12;
+
+/// Wrapper fail-closed que garantiza que el `Document` interno pasó `validate_document`.
+///
+/// Uso: `ValidatedDocument::try_new(doc)?` antes de persistir o de exponer un
+/// snapshot al render. Migrar `HashMap` → `BTreeMap` en `Document` es la
+/// siguiente fase para determinismo total; por ahora el wrapper evita que un
+/// documento a medio mutar escape de `detached_clone` → `commit`.
+#[derive(Debug, Clone)]
+pub struct ValidatedDocument(pub crate::Document);
+
+impl ValidatedDocument {
+    pub fn try_new(doc: crate::Document) -> Result<Self, String> {
+        validate_document(&doc)?;
+        Ok(Self(doc))
+    }
+    pub fn inner(&self) -> &crate::Document {
+        &self.0
+    }
+    pub fn into_inner(self) -> crate::Document {
+        self.0
+    }
+}
 
 /// Validate the raw JSON before deserializing into a `Document`.
 fn validate_text_nesting(json: &str) -> Result<(), String> {
@@ -462,6 +486,39 @@ fn validate_geo_object(doc: &Document, obj: &GeoObject, depth: usize) -> Result<
             }
             validate_positive_f32(o.width, "Polygon.width")?;
             validate_optional_color(o.fill_color, "Polygon.fill_color")?;
+            // Validación de colinealidad/degeneración vía shoelace.
+            if o.vertices.len() >= 3 {
+                let n = o.vertices.len();
+                let mut area2 = 0.0;
+                let mut perim = 0.0;
+                for i in 0..n {
+                    let p1 = o.vertices[i];
+                    let p2 = o.vertices[(i + 1) % n];
+                    area2 += p1.x * p2.y - p2.x * p1.y;
+                    perim += (p2.x - p1.x).hypot(p2.y - p1.y);
+                }
+                if !area2.is_finite() || !perim.is_finite() {
+                    return Err("Polygon vertices must be finite".to_string());
+                }
+                if area2.abs() <= GEOM_EPS * perim * perim {
+                    return Err("Polygon is degenerate or colinear".to_string());
+                }
+                // Chequeo adicional: todos los cross de triples consecutivos < GEOM_EPS
+                let mut all_small = true;
+                for i in 0..n {
+                    let a = o.vertices[i];
+                    let b = o.vertices[(i + 1) % n];
+                    let c = o.vertices[(i + 2) % n];
+                    let cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+                    if cross.abs() >= GEOM_EPS {
+                        all_small = false;
+                        break;
+                    }
+                }
+                if all_small {
+                    return Err("Polygon is degenerate or colinear".to_string());
+                }
+            }
         }
         GeoObject::Pencil(o) => {
             if o.points.len() > MAX_PENCIL_POINTS {
@@ -1090,6 +1147,12 @@ fn validate_string(value: &str, field: &str) -> Result<(), String> {
             value.len(),
             MAX_STRING_LENGTH
         ));
+    }
+    if value.contains('\0') {
+        return Err(format!("{field} must not contain NUL"));
+    }
+    if value.contains('\u{FEFF}') {
+        return Err(format!("{field} must not contain BOM"));
     }
     Ok(())
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_command::commands::{
     find_object_by_label, process_cas_worksheet_cell, process_input, CommandOutcome,
 };

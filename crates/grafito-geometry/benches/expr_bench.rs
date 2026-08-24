@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use grafito_geometry::expr::{evaluate, CompiledExpr};
 use std::collections::HashMap;

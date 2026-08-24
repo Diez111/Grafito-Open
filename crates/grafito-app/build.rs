@@ -39,14 +39,21 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    let icon_path =
-        Path::new(&env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo")).join("grafito.ico");
+    let Some(out_dir) = env::var_os("OUT_DIR") else {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "OUT_DIR not set"));
+    };
+    let icon_path = Path::new(&out_dir).join("grafito.ico");
     write_png_icon(&icon_source, &icon_path)?;
 
     let icon_path = icon_path
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 icon path"))?;
-    let package_version = env::var("CARGO_PKG_VERSION").expect("Cargo package version is set");
+    let Ok(package_version) = env::var("CARGO_PKG_VERSION") else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "CARGO_PKG_VERSION not set",
+        ));
+    };
     let mut resource = winresource::WindowsResource::new();
     resource
         .set_icon(icon_path)
@@ -88,8 +95,20 @@ fn write_png_icon(source: &Path, destination: &Path) -> io::Result<()> {
         ));
     }
 
-    let width = u32::from_be_bytes(png[16..20].try_into().expect("validated PNG header"));
-    let height = u32::from_be_bytes(png[20..24].try_into().expect("validated PNG header"));
+    let Some(width_bytes): Option<[u8; 4]> = png[16..20].try_into().ok() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "validated PNG header missing width",
+        ));
+    };
+    let width = u32::from_be_bytes(width_bytes);
+    let Some(height_bytes): Option<[u8; 4]> = png[20..24].try_into().ok() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "validated PNG header missing height",
+        ));
+    };
+    let height = u32::from_be_bytes(height_bytes);
     if width != 256 || height != 256 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

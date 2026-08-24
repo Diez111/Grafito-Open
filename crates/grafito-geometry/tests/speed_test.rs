@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod speed_tests {
     use grafito_geometry::expr::prepare_function_ast;

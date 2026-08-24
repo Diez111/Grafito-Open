@@ -24,10 +24,14 @@ impl Plane3D {
     }
 
     /// Crea un plano a partir de tres puntos no colineales.
-    pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Self {
+    pub fn from_three_points(p1: Point3D, p2: Point3D, p3: Point3D) -> Option<Self> {
         let v1 = (p2.x - p1.x, p2.y - p1.y, p2.z - p1.z);
         let v2 = (p3.x - p1.x, p3.y - p1.y, p3.z - p1.z);
-        Self::from_point_and_normal_f64(p1, cross3(v1, v2))
+        let n = cross3(v1, v2);
+        if n.0.hypot(n.1).hypot(n.2) <= 1e-12 {
+            return None;
+        }
+        Some(Self::from_point_and_normal_f64(p1, n))
     }
 
     /// Crea un plano a partir de un punto y un vector normal.
@@ -454,7 +458,7 @@ mod tests {
         let p1 = Point3D::new(0.0, 0.0, 0.0);
         let p2 = Point3D::new(1.0, 0.0, 0.0);
         let p3 = Point3D::new(0.0, 1.0, 0.0);
-        let plane = Plane3D::from_three_points(p1, p2, p3);
+        let plane = Plane3D::from_three_points(p1, p2, p3).expect("non-colinear");
         // Normal debe ser (0, 0, ±1) y d = 0
         assert!((plane.a).abs() < 1e-10);
         assert!((plane.b).abs() < 1e-10);
@@ -468,7 +472,8 @@ mod tests {
             Point3D::new(0.0, 0.0, 0.0),
             Point3D::new(1.0e20, 0.0, 0.0),
             Point3D::new(0.0, 1.0e20, 0.0),
-        );
+        )
+        .expect("non-colinear");
         assert!(plane.a.is_finite() && plane.b.is_finite() && plane.c.is_finite());
         assert!(plane.distance_to_point(Point3D::new(1.0e20, 0.0, 0.0)) < 1e-9);
     }

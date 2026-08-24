@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use glam::Vec3;
 use grafito_geometry::{curve_3d_segment_is_continuous, Aabb3D, Camera3D, Point3D};
 

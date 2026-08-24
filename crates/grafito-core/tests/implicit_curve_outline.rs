@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Verifica que el outline de un ImplicitCurve se genera correctamente.
 
 use grafito_core::implicit_curve::evaluate_implicit_curve;

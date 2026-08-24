@@ -5,7 +5,9 @@
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
-use grafito_ui::tokens::RADIUS_MD;
+use grafito_ui::tokens::{
+    RADIUS_MD, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACE_MD, SPACE_SM, SPACE_XS,
+};
 use grafito_whiteboard::{
     arrow_tip, smooth_stroke, WhiteboardDoc, WhiteboardElement, WhiteboardInteraction,
     WhiteboardTool,
@@ -124,7 +126,7 @@ impl WhiteboardSession {
             WhiteboardTool::Select => {
                 if let Some((a, b)) = self.marquee {
                     let center = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-                    let _ = self.doc.select_at(center, 8.0 / self.zoom);
+                    let _ = self.doc.select_at(center, SPACE_SM as f64 / self.zoom);
                 }
                 self.marquee = None;
             }
@@ -146,7 +148,8 @@ impl WhiteboardSession {
     }
 
     fn erase_trace(&mut self, path: Vec<(f64, f64)>) {
-        let tolerance = 6.0 / self.zoom;
+        // Tolerancia ligada a tokens: SPACE_SM/2 ≈ 4 + ajuste para grosor trazo
+        let tolerance = (SPACE_SM as f64 - 2.0) / self.zoom;
         for point in path {
             let mut before = self.doc.len();
             while self.doc.erase_at(point, tolerance).is_some() {
@@ -339,84 +342,90 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     egui::Frame::none()
         .fill(theme.panel_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-        .rounding(egui::Rounding::same(12.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .rounding(egui::Rounding::same(RADIUS_MD))
+        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
         .shadow(egui::epaint::Shadow {
-            offset: vec2(0.0, 2.0),
-            blur: 8.0,
+            offset: vec2(0.0, SHADOW_WINDOW_OFFSET_Y),
+            blur: SHADOW_WINDOW_BLUR,
             spread: 0.0,
-            color: Color32::from_black_alpha(8),
+            color: Color32::from_black_alpha(grafito_ui::tokens::SHADOW_ALPHA),
         })
         .show(ui, |ui| {
             let session = &app.whiteboard;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(
-                    egui::RichText::new("Pizarra")
-                        .color(theme.accent)
-                        .size(13.0)
-                        .strong(),
-                );
-                ui.separator();
-                for (icon, tool, tip) in [
-                    (Icon::Move, WhiteboardTool::Select, "Seleccionar"),
-                    (Icon::Pencil, WhiteboardTool::Pencil, "Lápiz libre"),
-                    (Icon::Shapes, WhiteboardTool::Rectangle, "Rectángulo"),
-                    (Icon::Ellipse, WhiteboardTool::Ellipse, "Elipse"),
-                    (Icon::ArrowRight, WhiteboardTool::Arrow, "Flecha"),
-                    (Icon::Notebook, WhiteboardTool::Text, "Texto"),
-                    (Icon::Eraser, WhiteboardTool::Eraser, "Borrador"),
-                ] {
-                    let selected = session.tool == tool;
-                    if action_icon_button(
-                        ui,
-                        icon,
-                        if selected {
-                            theme.accent
-                        } else {
-                            theme.text_secondary
-                        },
-                        tip,
-                    )
-                    .clicked()
-                    {
-                        selected_tool = Some(tool);
-                    }
-                }
-                ui.separator();
-                if action_icon_button(
-                    ui,
-                    Icon::Settings,
-                    if app.show_whiteboard_assistant {
-                        theme.accent
-                    } else {
-                        theme.text_secondary
-                    },
-                    "Asistente (mostrar/ocultar)",
-                )
-                .clicked()
-                {
-                    toggle_assistant = true;
-                }
-                if action_icon_button(
-                    ui,
-                    Icon::Search,
-                    theme.accent,
-                    "Entender este dibujo con IA",
-                )
-                .clicked()
-                {
-                    ask_ai = true;
-                }
-                if action_icon_button(ui, Icon::Delete, theme.text_secondary, "Limpiar").clicked() {
-                    clear = true;
-                }
-                if action_icon_button(ui, Icon::Close, theme.text_secondary, "Cerrar (Esc)")
-                    .clicked()
-                {
-                    close = true;
-                }
-            });
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_XS;
+                        ui.label(
+                            egui::RichText::new("Pizarra")
+                                .color(theme.accent)
+                                .size(grafito_ui::tokens::TYPE_SM)
+                                .strong(),
+                        );
+                        ui.separator();
+                        for (icon, tool, tip) in [
+                            (Icon::Move, WhiteboardTool::Select, "Seleccionar"),
+                            (Icon::Pencil, WhiteboardTool::Pencil, "Lápiz libre"),
+                            (Icon::Shapes, WhiteboardTool::Rectangle, "Rectángulo"),
+                            (Icon::Ellipse, WhiteboardTool::Ellipse, "Elipse"),
+                            (Icon::ArrowRight, WhiteboardTool::Arrow, "Flecha"),
+                            (Icon::Notebook, WhiteboardTool::Text, "Texto"),
+                            (Icon::Eraser, WhiteboardTool::Eraser, "Borrador"),
+                        ] {
+                            let selected = session.tool == tool;
+                            if action_icon_button(
+                                ui,
+                                icon,
+                                if selected {
+                                    theme.accent
+                                } else {
+                                    theme.text_secondary
+                                },
+                                tip,
+                            )
+                            .clicked()
+                            {
+                                selected_tool = Some(tool);
+                            }
+                        }
+                        ui.separator();
+                        if action_icon_button(
+                            ui,
+                            Icon::Settings,
+                            if app.show_whiteboard_assistant {
+                                theme.accent
+                            } else {
+                                theme.text_secondary
+                            },
+                            "Asistente (mostrar/ocultar)",
+                        )
+                        .clicked()
+                        {
+                            toggle_assistant = true;
+                        }
+                        if action_icon_button(
+                            ui,
+                            Icon::Search,
+                            theme.accent,
+                            "Entender este dibujo con IA",
+                        )
+                        .clicked()
+                        {
+                            ask_ai = true;
+                        }
+                        if action_icon_button(ui, Icon::Delete, theme.text_secondary, "Limpiar")
+                            .clicked()
+                        {
+                            clear = true;
+                        }
+                        if action_icon_button(ui, Icon::Close, theme.text_secondary, "Cerrar (Esc)")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
         });
     if let Some(tool) = selected_tool {
         app.whiteboard.set_tool(tool);
@@ -472,7 +481,10 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
         .show(ctx, |ui| {
             let rect = ui.max_rect();
             egui::Area::new(egui::Id::new("whiteboard_toolbar"))
-                .anchor(egui::Align2::CENTER_TOP, vec2(0.0, 14.0))
+                .anchor(
+                    egui::Align2::CENTER_TOP,
+                    vec2(0.0, grafito_ui::tokens::TYPE_BASE - 1.0),
+                )
                 .order(egui::Order::Foreground)
                 .interactable(true)
                 .show(ctx, |ui| {

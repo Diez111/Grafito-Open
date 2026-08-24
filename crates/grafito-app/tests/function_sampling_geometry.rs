@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{Document, FunctionObj, GeoObject};
 use grafito_geometry::ViewTransform;
 use grafito_render::Renderer;

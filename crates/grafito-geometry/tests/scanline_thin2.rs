@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Verifica que el scanline con stride no pierde franjas muy delgadas
 //! (< 2*stride world units de ancho).
 

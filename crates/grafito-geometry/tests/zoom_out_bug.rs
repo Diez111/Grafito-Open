@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Test que reproduce el bug crítico del stride: cuando el usuario
 //! hace zoom in a un disco, el stride=8 salta el disco entero.
 

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Corpus semilla de referencia del solver local del asistente (Fase A).
 //!
 //! Cada caso es un (problema, estado esperado, fragmento esperado). Versionar

@@ -84,14 +84,82 @@ impl PluginRegistry {
                 continue;
             };
             let mut block = String::new();
+            // Canonicalizar root una vez por plugin para check de path traversal.
+            let canonical_root =
+                fs::canonicalize(&plugin.dir).unwrap_or_else(|_| plugin.dir.clone());
             for file in &section.files {
                 let path = plugin.dir.join(file);
-                if let Ok(bytes) = fs::read(&path) {
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        block.push_str(&text);
-                        block.push('\n');
+                // Fail-closed: canonicalize y verifica que permanece dentro del dir del plugin.
+                let canonical = match fs::canonicalize(&path) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        log::warn!(
+                            "plugin '{}' instruction file '{}' no existe o no canonicalizable",
+                            plugin.manifest.plugin.id,
+                            file
+                        );
+                        continue;
                     }
+                };
+                if !canonical.starts_with(&canonical_root) {
+                    log::warn!(
+                        "plugin '{}' instruction file '{}' escapa del directorio (path traversal)",
+                        plugin.manifest.plugin.id,
+                        file
+                    );
+                    continue;
                 }
+                // Presupuesto OOM: OpenOptions + take(budget+1) + try_reserve + reject >10k
+                let fh = match std::fs::OpenOptions::new().read(true).open(&canonical) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                // Límite por archivo: 10_001 bytes (budget+1) para detectar exceso sin OOM.
+                const PER_FILE_LIMIT: u64 = 10_001;
+                let mut limited = fh.take(PER_FILE_LIMIT);
+                let mut bytes = Vec::new();
+                if bytes.try_reserve(10_001).is_err() {
+                    log::warn!(
+                        "plugin '{}' instruction file '{}' no pudo reservar memoria",
+                        plugin.manifest.plugin.id,
+                        file
+                    );
+                    continue;
+                }
+                use std::io::Read as _;
+                if limited.read_to_end(&mut bytes).is_err() {
+                    continue;
+                }
+                if bytes.len() > 10_000 {
+                    log::warn!(
+                        "plugin '{}' instruction file '{}' excede 10k ({} bytes)",
+                        plugin.manifest.plugin.id,
+                        file,
+                        bytes.len()
+                    );
+                    continue;
+                }
+                let text = match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => continue,
+                };
+                if text.len() > 10_000 {
+                    log::warn!(
+                        "plugin '{}' instruction file '{}' texto excede 10k",
+                        plugin.manifest.plugin.id,
+                        file
+                    );
+                    continue;
+                }
+                if block.try_reserve(text.len().saturating_add(1)).is_err() {
+                    log::warn!(
+                        "plugin '{}' instruction block sin memoria",
+                        plugin.manifest.plugin.id
+                    );
+                    continue;
+                }
+                block.push_str(&text);
+                block.push('\n');
             }
             if block.chars().count() > section.budget_bytes {
                 block = block

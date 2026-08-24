@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 use grafito_core::{function_sampling, FunctionObj};
 use std::collections::HashMap;
 

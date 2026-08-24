@@ -24,6 +24,7 @@ const CLAMP_FORCE_INVALID_OPERAND: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)] // TODO P2: variantes Nop/Pi/E/Log2/Exp2 reservadas para bytecode extendido (usadas en shaders/fuzz)
 pub(crate) enum Op {
     Nop = 0,
     PushConst = 1,
@@ -752,6 +753,8 @@ impl ImplicitComputePipeline {
                 log::error!("Implicit compute readback failed: {:?}", result.err());
             }
         });
+        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
+        log::trace!("Implicit compute sync readback (Wait) — bloqueante, 1 intento por frame");
         device.poll(wgpu::Maintain::Wait);
 
         if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {

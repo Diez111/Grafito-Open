@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Resolución local y transporte remoto explícitamente opt-in del asistente.
 //!
 //! La resolución local es determinista. El transporte remoto sólo construye y

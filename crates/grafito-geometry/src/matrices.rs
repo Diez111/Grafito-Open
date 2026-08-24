@@ -15,7 +15,7 @@ fn matrix_len(rows: usize, cols: usize) -> Option<usize> {
         .filter(|&elements| elements <= MAX_MATRIX_ELEMENTS)
 }
 
-fn dimension_relative_epsilon(rows: usize, cols: usize) -> f64 {
+pub(crate) fn dimension_relative_epsilon(rows: usize, cols: usize) -> f64 {
     f64::EPSILON * rows.max(cols).max(1) as f64
 }
 
@@ -229,20 +229,12 @@ impl Matrix {
             return Some(0.0);
         };
         if n == 1 {
+            // 1×1 falls back to LU-equivalent con tolerancia; si el único elemento
+            // es menor que pivot_tolerance se considera singular.
+            if self.data[0].abs() <= pivot_tolerance {
+                return Some(0.0);
+            }
             return Some(self.data[0]);
-        }
-        if n == 2 {
-            return Some(self.get(0, 0) * self.get(1, 1) - self.get(0, 1) * self.get(1, 0));
-        }
-        if n == 3 {
-            return Some(
-                self.get(0, 0)
-                    * (self.get(1, 1) * self.get(2, 2) - self.get(1, 2) * self.get(2, 1))
-                    - self.get(0, 1)
-                        * (self.get(1, 0) * self.get(2, 2) - self.get(1, 2) * self.get(2, 0))
-                    + self.get(0, 2)
-                        * (self.get(1, 0) * self.get(2, 1) - self.get(1, 1) * self.get(2, 0)),
-            );
         }
         let mut lu = self.clone();
         let mut sign = 1.0;

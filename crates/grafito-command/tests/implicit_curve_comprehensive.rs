@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(deprecated)]
 //! Tests de extremo a extremo: crear un ImplicitCurveObj a través
 //! del command processor y verificar que el cache se llena.
 

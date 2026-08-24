@@ -332,6 +332,8 @@ const GPU_3D_MAX_ATTRACTOR_STEPS: usize = 16_000;
 const GPU_2D_CURVE_STEPS: usize = 4_000;
 // All current compute APIs synchronously map their readback buffers. Limit a
 // callback to one such attempt until the pipelines can share an async batch.
+// Verificado: `take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)` en prepare() 2D y 3D
+// garantiza 1 Wait bloqueante como máximo por frame (TODO P1: mover a spawn_blocking).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Selects only visible 2D GPU cache evaluations that fit the same per-frame
