@@ -139,8 +139,9 @@ impl Default for WhiteboardSession {
             zoom: 1.0,
             active_text: None,
             marquee: None,
-            // Color claro para canvas oscuro (Scandinavian: ink sobre near-black)
-            pen_color: Color32::from_rgb(240, 241, 244),
+            // Color por defecto con contraste en ambos temas; paleta permite cambiar.
+            // Se ajusta automáticamente en draw() si el contraste con canvas_bg es bajo.
+            pen_color: Color32::from_rgb(26, 26, 26),
             pen_width: 2.0,
             show_palette: false,
         }
@@ -373,15 +374,41 @@ impl WhiteboardSession {
         }
     }
 
+    fn effective_pen_color(&self, theme: &grafito_ui::theme::Theme) -> Color32 {
+        // Si el usuario eligió un color claro sobre canvas claro (o oscuro sobre oscuro),
+        // usa text_primary que siempre contrasta. Solo para el default histórico claro.
+        let is_light_canvas = theme.canvas_bg.r() > 200;
+        let pen_is_light =
+            self.pen_color.r() > 200 && self.pen_color.g() > 200 && self.pen_color.b() > 200;
+        let pen_is_dark =
+            self.pen_color.r() < 60 && self.pen_color.g() < 60 && self.pen_color.b() < 60;
+        if is_light_canvas && pen_is_light {
+            return theme.text_primary;
+        }
+        if !is_light_canvas && pen_is_dark {
+            return Color32::from_rgb(240, 241, 244);
+        }
+        // Compatibilidad: el default histórico era claro (240,241,244) que es invisible en modo claro
+        if is_light_canvas && self.pen_color == Color32::from_rgb(240, 241, 244) {
+            return Color32::from_rgb(26, 26, 26);
+        }
+        self.pen_color
+    }
+
     pub fn draw(&self, ui: &mut egui::Ui, rect: Rect) {
         if rect.width() <= 0.0 || rect.height() <= 0.0 || !rect.min.x.is_finite() {
             return;
         }
         let theme = current_theme(ui.ctx());
         let painter = ui.painter();
-        // Fondo con ligera diferencia para profesionalismo (canvas_bg ya es near-black)
         painter.rect_filled(rect, 0.0, theme.canvas_bg);
-        let grid_col = theme.separator.gamma_multiply(0.10);
+        // Grid con contraste adaptativo: más opaco en modo claro sobre #FAFAF9
+        let is_light = theme.canvas_bg.r() > 200;
+        let grid_col = if is_light {
+            theme.separator.gamma_multiply(0.35)
+        } else {
+            theme.separator.gamma_multiply(0.10)
+        };
         if grid_col.a() > 0 {
             draw_grid(painter, rect, self.pan, self.zoom, grid_col);
         }
@@ -394,11 +421,11 @@ impl WhiteboardSession {
             }
             draw_element(painter, element, rect, self, theme);
         }
-        // Trazo en vivo del lápiz: vivo, con color y grosor actuales
+        // Trazo en vivo del lápiz: vivo, con color y grosor actuales (con contraste adaptativo)
         if self.tool == WhiteboardTool::Pencil && !self.pencil_points.is_empty() {
             let stroke = Stroke::new(
                 self.pen_width.clamp(1.0, 8.0) * self.zoom as f32,
-                self.pen_color,
+                self.effective_pen_color(theme),
             );
             for pair in self.pencil_points.windows(2) {
                 if !pair[0].0.is_finite() || !pair[1].0.is_finite() {
@@ -416,7 +443,7 @@ impl WhiteboardSession {
                     painter.circle_filled(
                         p,
                         (self.pen_width * 0.75).clamp(1.0, 6.0) * self.zoom as f32,
-                        self.pen_color,
+                        self.effective_pen_color(theme),
                     );
                 }
             }
@@ -532,7 +559,18 @@ fn draw_element(
             width,
             color,
         } => {
-            let col = Color32::from_rgb(color.0, color.1, color.2);
+            let raw = Color32::from_rgb(color.0, color.1, color.2);
+            // Adaptación para contraste: si el trazo almacenado es claro sobre canvas claro (o oscuro sobre oscuro), usa text_primary
+            let is_light_canvas = theme.canvas_bg.r() > 200;
+            let col_is_light = raw.r() > 200 && raw.g() > 200 && raw.b() > 200;
+            let col_is_dark = raw.r() < 60 && raw.g() < 60 && raw.b() < 60;
+            let col = if is_light_canvas && col_is_light {
+                theme.text_primary
+            } else if !is_light_canvas && col_is_dark {
+                Color32::from_rgb(240, 241, 244)
+            } else {
+                raw
+            };
             for pair in points.windows(2) {
                 if !pair[0].0.is_finite() || !pair[1].0.is_finite() {
                     continue;
