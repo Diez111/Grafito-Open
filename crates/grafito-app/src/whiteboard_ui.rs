@@ -614,11 +614,12 @@ fn draw_toolbar_contents(
     let tool = app.whiteboard.tool;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
-        // Solo 3 herramientas + cerrar — mega simple, no desborda
+        // 4 herramientas + cerrar — burbuja compacta centrada
         for (icon, t, tip) in [
             (Icon::Move, WhiteboardTool::Select, "Mover"),
             (Icon::Pencil, WhiteboardTool::Pencil, "Escribir"),
             (Icon::ArrowRight, WhiteboardTool::Arrow, "Línea"),
+            (Icon::Eraser, WhiteboardTool::Eraser, "Borrar"),
         ] {
             let selected = tool == t;
             if action_icon_button(
@@ -719,22 +720,30 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
         app.whiteboard_book.save_current_from_session(&cur);
     }
 
-    // ── Toolbar — TopBottomPanel compacto, centrado, sin desborde ──
-    // Usa TopBottomPanel para reservar altura real y no solapar el lienzo.
-    // Solo 4 herramientas, sin scroll, con ancho ajustado al contenido.
+    // ── Toolbar burbuja centrada — Area flotante pill, compacta ──
+    // Centrada como burbuja aparte, no barra larga. Solo 4 herramientas + borrar.
     {
         let mut selected_tool: Option<WhiteboardTool> = None;
         let mut close = false;
-        egui::TopBottomPanel::top("whiteboard_toolbar_top")
-            .frame(
-                egui::Frame::none()
-                    .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
-                    .inner_margin(egui::Margin::symmetric(SPACE_XS, 4.0)),
-            )
+        let avail = ctx.available_rect();
+        let screen = ctx.screen_rect();
+        let center_offset_x = avail.center().x - screen.center().x;
+        egui::Area::new(egui::Id::new("whiteboard_toolbar"))
+            .anchor(egui::Align2::CENTER_TOP, vec2(center_offset_x, 8.0))
+            .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.horizontal(|ui| {
+                egui::Frame::none()
+                    .fill(theme.panel_bg.gamma_multiply(0.96))
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::symmetric(SPACE_XS, 4.0))
+                    .shadow(egui::Shadow {
+                        offset: vec2(0.0, 1.0),
+                        blur: 4.0,
+                        spread: 0.0,
+                        color: Color32::from_black_alpha(4),
+                    })
+                    .show(ui, |ui| {
                         let mut dummy_clear = false;
                         let mut dummy_ask = false;
                         let mut dummy_toggle_a = false;
@@ -750,7 +759,6 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                             &mut dummy_toggle_p,
                         );
                     });
-                });
             });
         if let Some(t) = selected_tool {
             app.whiteboard.set_tool(t);
