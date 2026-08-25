@@ -60,6 +60,83 @@ pub(crate) fn draw_assistant_reopen_control(
     Some(response)
 }
 
+fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
+    let theme = current_theme(ui.ctx());
+    let desired_size = egui::vec2(44.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let response = response
+        .on_hover_text(if is_dark {
+            "Cambiar a tema claro"
+        } else {
+            "Cambiar a tema oscuro"
+        })
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let bg = if response.hovered() {
+            theme.button_hover
+        } else {
+            theme.separator.gamma_multiply(0.18)
+        };
+        // Fondo pill
+        ui.painter().rect_filled(rect, RADIUS_MD, bg);
+        ui.painter().rect_stroke(
+            rect,
+            RADIUS_MD,
+            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.20)),
+        );
+        // Iconos sol/luna
+        let sun_pos = egui::pos2(rect.min.x + 8.0, rect.center().y);
+        let moon_pos = egui::pos2(rect.max.x - 8.0, rect.center().y);
+        // Sol siempre a la izquierda, luna a la derecha
+        draw_icon(
+            ui.painter(),
+            egui::Rect::from_center_size(sun_pos, egui::vec2(12.0, 12.0)),
+            Icon::Sun,
+            if !is_dark {
+                theme.accent
+            } else {
+                theme.text_tertiary.gamma_multiply(0.60)
+            },
+        );
+        draw_icon(
+            ui.painter(),
+            egui::Rect::from_center_size(moon_pos, egui::vec2(12.0, 12.0)),
+            Icon::Moon,
+            if is_dark {
+                theme.accent
+            } else {
+                theme.text_tertiary.gamma_multiply(0.60)
+            },
+        );
+        // Perilla deslizante
+        let knob_x = if is_dark {
+            rect.max.x - 10.0
+        } else {
+            rect.min.x + 10.0
+        };
+        let knob_center = egui::pos2(knob_x, rect.center().y);
+        let knob_radius = 9.0;
+        // Sombra suave
+        ui.painter().circle_filled(
+            knob_center + egui::vec2(0.0, 1.0),
+            knob_radius,
+            Color32::from_black_alpha(20),
+        );
+        ui.painter()
+            .circle_filled(knob_center, knob_radius, Color32::WHITE);
+        ui.painter().circle_stroke(
+            knob_center,
+            knob_radius,
+            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.15)),
+        );
+        // Animación suave del toggle (opcional, usa animate_bool)
+        let _ = ui
+            .ctx()
+            .animate_bool(egui::Id::new("theme_toggle_anim"), is_dark);
+    }
+    response.clicked()
+}
+
 fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Archivo", |ui| {
         if ui.button("Nuevo (Ctrl+N)").clicked() {
@@ -363,62 +440,21 @@ pub(crate) fn draw_top_bar(
                     {
                         app.right_drawer_open = !app.right_drawer_open;
                     }
-                    // Whiteboard solo en wide, para no desbordar en 1120
-                    if !compact_top_chrome
-                        && action_icon_button(
-                            ui,
-                            Icon::Whiteboard,
-                            if app.whiteboard_open {
-                                accent
-                            } else {
-                                grafito_ui::theme::current_theme(ui.ctx()).text_secondary
-                            },
-                            "Pizarra libre (dibujo tipo Excalidraw)",
-                        )
-                        .clicked()
+                    if action_icon_button(
+                        ui,
+                        Icon::Whiteboard,
+                        if app.whiteboard_open {
+                            accent
+                        } else {
+                            grafito_ui::theme::current_theme(ui.ctx()).text_secondary
+                        },
+                        "Pizarra libre (dibujo tipo Excalidraw)",
+                    )
+                    .clicked()
                     {
                         app.whiteboard_open = !app.whiteboard_open;
                     }
-                    // Toggle tema Sun/Moon — Scandinavian calm, visible con fondo (panel/button_bg + borde separator)
-                    {
-                        let theme_toggle_bg = theme.button_bg;
-                        let theme_toggle_hover = theme.button_hover;
-                        let is_dark = app.dark_mode;
-                        let toggle_icon = if is_dark { Icon::Sun } else { Icon::Moon };
-                        let toggle_tip = if is_dark {
-                            "Activar tema claro"
-                        } else {
-                            "Activar tema oscuro"
-                        };
-                        let (rect, response) =
-                            ui.allocate_exact_size(egui::vec2(26.0, 24.0), egui::Sense::click());
-                        let response = response.on_hover_text(toggle_tip);
-                        let bg = if response.hovered() {
-                            theme_toggle_hover
-                        } else {
-                            theme_toggle_bg
-                        };
-                        if ui.is_rect_visible(rect) {
-                            ui.painter().rect_filled(rect, RADIUS_MD, bg);
-                            ui.painter().rect_stroke(
-                                rect,
-                                RADIUS_MD,
-                                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
-                            );
-                            draw_icon(ui.painter(), rect.shrink(3.0), toggle_icon, accent);
-                        }
-                        response.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, toggle_tip)
-                        });
-                        if response.clicked() {
-                            app.dark_mode = !app.dark_mode;
-                            if app.dark_mode {
-                                DARK.apply(ui.ctx());
-                            } else {
-                                LIGHT.apply(ui.ctx());
-                            }
-                        }
-                    }
+                    // Tema ahora en el sidebar izquierdo como toggle pill aparte
                     // Configuración — ventana única (Asistente + Perfil + preview persistente)
                     {
                         let is_open = app.assistant.settings_open;
@@ -594,6 +630,21 @@ pub(crate) fn draw_top_bar(
                             ui.add_space(8.0);
                         });
                     });
+                // ── Toggle tema pill aparte — sun/moon deslizante ──
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if draw_theme_toggle_switch(ui, app.dark_mode) {
+                        app.dark_mode = !app.dark_mode;
+                        if app.dark_mode {
+                            DARK.apply(ui.ctx());
+                        } else {
+                            LIGHT.apply(ui.ctx());
+                        }
+                    }
+                });
+                ui.add_space(8.0);
             });
     }
 }
