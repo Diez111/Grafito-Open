@@ -62,7 +62,7 @@ pub(crate) fn draw_assistant_reopen_control(
 
 fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
     let theme = current_theme(ui.ctx());
-    let desired_size = egui::vec2(44.0, 24.0);
+    let desired_size = egui::vec2(36.0, 20.0);
     let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
     let response = response
         .on_hover_text(if is_dark {
@@ -75,22 +75,22 @@ fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
         let bg = if response.hovered() {
             theme.button_hover
         } else {
-            theme.separator.gamma_multiply(0.18)
+            theme.separator.gamma_multiply(0.14)
         };
-        // Fondo pill
-        ui.painter().rect_filled(rect, RADIUS_MD, bg);
+        // Fondo pill sutil — más pequeño y refinado para encajar en la barra superior
+        ui.painter().rect_filled(rect, 10.0, bg);
         ui.painter().rect_stroke(
             rect,
-            RADIUS_MD,
-            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.20)),
+            10.0,
+            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.16)),
         );
         // Iconos sol/luna
-        let sun_pos = egui::pos2(rect.min.x + 8.0, rect.center().y);
-        let moon_pos = egui::pos2(rect.max.x - 8.0, rect.center().y);
+        let sun_pos = egui::pos2(rect.min.x + 6.5, rect.center().y);
+        let moon_pos = egui::pos2(rect.max.x - 6.5, rect.center().y);
         // Sol siempre a la izquierda, luna a la derecha
         draw_icon(
             ui.painter(),
-            egui::Rect::from_center_size(sun_pos, egui::vec2(12.0, 12.0)),
+            egui::Rect::from_center_size(sun_pos, egui::vec2(10.0, 10.0)),
             Icon::Sun,
             if !is_dark {
                 theme.accent
@@ -100,7 +100,7 @@ fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
         );
         draw_icon(
             ui.painter(),
-            egui::Rect::from_center_size(moon_pos, egui::vec2(12.0, 12.0)),
+            egui::Rect::from_center_size(moon_pos, egui::vec2(10.0, 10.0)),
             Icon::Moon,
             if is_dark {
                 theme.accent
@@ -110,12 +110,12 @@ fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
         );
         // Perilla deslizante
         let knob_x = if is_dark {
-            rect.max.x - 10.0
+            rect.max.x - 8.5
         } else {
-            rect.min.x + 10.0
+            rect.min.x + 8.5
         };
         let knob_center = egui::pos2(knob_x, rect.center().y);
-        let knob_radius = 9.0;
+        let knob_radius = 7.0;
         // Sombra suave
         ui.painter().circle_filled(
             knob_center + egui::vec2(0.0, 1.0),
@@ -454,7 +454,17 @@ pub(crate) fn draw_top_bar(
                     {
                         app.whiteboard_open = !app.whiteboard_open;
                     }
-                    // Tema ahora en el sidebar izquierdo como toggle pill aparte
+                    // Toggle tema pill compacto — integrado a la izquierda de Configuración
+                    {
+                        if draw_theme_toggle_switch(ui, app.dark_mode) {
+                            app.dark_mode = !app.dark_mode;
+                            if app.dark_mode {
+                                DARK.apply(ui.ctx());
+                            } else {
+                                LIGHT.apply(ui.ctx());
+                            }
+                        }
+                    }
                     // Configuración — ventana única (Asistente + Perfil + preview persistente)
                     {
                         let is_open = app.assistant.settings_open;
@@ -633,27 +643,6 @@ pub(crate) fn draw_top_bar(
                 ui.add_space(8.0);
             });
     }
-    // ── Toggle tema pill aparte — siempre visible, abajo a la izquierda ──
-    egui::Area::new(egui::Id::new("theme_toggle_sidebar_area"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(theme.panel_bg.gamma_multiply(0.96))
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
-                .rounding(8.0)
-                .inner_margin(egui::Margin::same(4.0))
-                .show(ui, |ui| {
-                    if draw_theme_toggle_switch(ui, app.dark_mode) {
-                        app.dark_mode = !app.dark_mode;
-                        if app.dark_mode {
-                            DARK.apply(ui.ctx());
-                        } else {
-                            LIGHT.apply(ui.ctx());
-                        }
-                    }
-                });
-        });
 }
 
 /// Renders the shared Geometry 3D utility contents and returns a close request.
