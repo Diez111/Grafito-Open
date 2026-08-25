@@ -25,19 +25,26 @@ impl TextBuffer {
     }
 
     pub fn insert(&mut self, character: char) {
-        if character == '\n' {
-            self.content.insert(self.caret, character);
-            self.caret += 1;
-            return;
-        }
-        self.content.insert(self.caret, character);
+        let byte_index = self
+            .content
+            .chars()
+            .take(self.caret)
+            .map(char::len_utf8)
+            .sum::<usize>();
+        self.content.insert(byte_index, character);
         self.caret += 1;
     }
 
     pub fn backspace(&mut self) {
         if self.caret > 0 {
             self.caret -= 1;
-            self.content.remove(self.caret);
+            let byte_index = self
+                .content
+                .chars()
+                .take(self.caret)
+                .map(char::len_utf8)
+                .sum::<usize>();
+            self.content.remove(byte_index);
         }
     }
 

@@ -945,7 +945,13 @@ pub struct GrafitoApp {
     /// Overlay de pizarra nativa (estilo macOS).
     pub whiteboard_open: bool,
     pub whiteboard: crate::whiteboard_ui::WhiteboardSession,
+    /// Libro de hojas de la pizarra (tipo Notepad — múltiples pizarras una por una).
+    pub whiteboard_book: crate::whiteboard_ui::WhiteboardBook,
+    /// Drawer izquierdo de hojas anclado (si false, auto-hide al borde izquierdo).
+    #[allow(dead_code)]
+    pub whiteboard_left_pinned: bool,
     /// Asistente visible (y ocultable) dentro de la pizarra.
+    #[allow(dead_code)]
     pub show_whiteboard_assistant: bool,
     /// Memoria pedagógica del usuario (nivel, ramas, exámenes) del tutor.
     pub profile: grafito_profile::StudentProfile,
@@ -1475,6 +1481,8 @@ impl GrafitoApp {
             assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
             whiteboard_open: false,
             whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
+            whiteboard_book: crate::whiteboard_ui::WhiteboardBook::default(),
+            whiteboard_left_pinned: false,
             show_whiteboard_assistant: true,
             profile,
             recent_files: VecDeque::new(),

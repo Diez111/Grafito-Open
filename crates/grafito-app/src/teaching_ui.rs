@@ -402,28 +402,70 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                 theme.accent,
             );
             ui.add_space(grafito_ui::tokens::SPACE_SM);
-            // Contenido principal — editorial, left-aligned, sin burbuja morph
-            if let Some(step) = current_step {
-                egui::Frame::none()
-                    .fill(theme.panel_bg)
-                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-                    .rounding(grafito_ui::tokens::RADIUS_LG)
-                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.label(
-                            egui::RichText::new(&step.title)
-                                .strong()
-                                .size(grafito_ui::tokens::TYPE_MD)
-                                .color(theme.accent),
-                        );
-                        ui.add_space(grafito_ui::tokens::SPACE_XS);
-                        ui.label(
-                            egui::RichText::new(&step.explanation)
-                                .size(grafito_ui::tokens::TYPE_BASE)
-                                .color(theme.text_primary),
-                        );
-                        if let Some(expr) = &step.math_expr {
+            // Contenido principal — dentro de ScrollArea con max_height para no crear "altura enorme al pedo"
+            // cuando la explicación es larga o la animación es alta. El footer (controles) queda fijo.
+            let max_scroll_h = (ctx.screen_rect().height() * 0.55).clamp(220.0, 420.0);
+            egui::ScrollArea::vertical()
+                .id_salt("teaching_scroll")
+                .max_height(max_scroll_h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Some(step) = current_step.clone() {
+                        egui::Frame::none()
+                            .fill(theme.panel_bg)
+                            .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                            .rounding(grafito_ui::tokens::RADIUS_LG)
+                            .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.label(
+                                    egui::RichText::new(&step.title)
+                                        .strong()
+                                        .size(grafito_ui::tokens::TYPE_MD)
+                                        .color(theme.accent),
+                                );
+                                ui.add_space(grafito_ui::tokens::SPACE_XS);
+                                ui.label(
+                                    egui::RichText::new(&step.explanation)
+                                        .size(grafito_ui::tokens::TYPE_BASE)
+                                        .color(theme.text_primary),
+                                );
+                                if let Some(expr) = &step.math_expr {
+                                    ui.add_space(grafito_ui::tokens::SPACE_SM);
+                                    egui::Frame::none()
+                                        .fill(theme.input_bg)
+                                        .stroke(Stroke::new(
+                                            1.0,
+                                            theme.separator.gamma_multiply(0.10),
+                                        ))
+                                        .rounding(grafito_ui::tokens::RADIUS_MD)
+                                        .inner_margin(egui::Margin::same(
+                                            grafito_ui::tokens::SPACE_SM,
+                                        ))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(expr)
+                                                    .monospace()
+                                                    .size(grafito_ui::tokens::TYPE_SM)
+                                                    .color(theme.text_primary),
+                                            );
+                                        });
+                                }
+                                if !step.whiteboard_hint.is_empty() {
+                                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Pizarra: {}",
+                                            step.whiteboard_hint
+                                        ))
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_tertiary)
+                                        .weak(),
+                                    );
+                                }
+                            });
+                        // Pizarra vectorial real — altura responsive clamp 96..160, no fija 120 enorme
+                        if !step.whiteboard_hint.is_empty() || !state.whiteboard.doc.is_empty() {
                             ui.add_space(grafito_ui::tokens::SPACE_SM);
                             egui::Frame::none()
                                 .fill(theme.input_bg)
@@ -431,163 +473,148 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                 .rounding(grafito_ui::tokens::RADIUS_MD)
                                 .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
                                 .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(expr)
-                                            .monospace()
-                                            .size(grafito_ui::tokens::TYPE_SM)
-                                            .color(theme.text_primary),
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Pizarra")
+                                                .size(grafito_ui::tokens::TYPE_XS)
+                                                .color(theme.text_tertiary)
+                                                .strong(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "· {}",
+                                                step.whiteboard_hint
+                                            ))
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .color(theme.text_secondary),
+                                        );
+                                    });
+                                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                                    // Altura responsive: 120 ideal pero clamp a 96..160 y a 30% del alto disponible
+                                    let wb_h = (grafito_ui::tokens::SPACE_XXL * 3.0)
+                                        .clamp(96.0, 160.0)
+                                        .min((ui.available_height() * 0.35).max(96.0));
+                                    let (wb_rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), wb_h),
+                                        egui::Sense::click_and_drag(),
                                     );
+                                    // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
+                                    state.whiteboard.draw(ui, wb_rect);
+                                    // Permitir dibujar encima (pencil) dentro del overlay
+                                    state.whiteboard.handle_canvas_input(wb_rect, ui);
+                                    if ui.is_rect_visible(wb_rect) {
+                                        // Borde sutil por encima del draw para definición
+                                        ui.painter().rect_stroke(
+                                            wb_rect,
+                                            grafito_ui::tokens::RADIUS_MD,
+                                            Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
+                                        );
+                                        // Hint centrado sobre grilla
+                                        ui.painter().text(
+                                            wb_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            &step.whiteboard_hint,
+                                            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                                            theme.text_tertiary.gamma_multiply(0.85),
+                                        );
+                                    }
                                 });
                         }
-                        if !step.whiteboard_hint.is_empty() {
+                        // Animación nativa fallback (si completó)
+                        if !anim_textures.is_empty() {
+                            ui.add_space(grafito_ui::tokens::SPACE_SM);
+                            let time = ui.input(|i| i.time);
+                            let idx = ((time * 12.0) as usize) % anim_textures.len();
+                            let tex = &anim_textures[idx];
+                            let max_w = ui.available_width().max(80.0);
+                            // Clampear altura para no generar "altura enorme al pedo" con texturas retrato
+                            let max_h = 200.0_f32.min(ui.available_height().max(80.0) * 0.6);
+                            let size = tex.size_vec2();
+                            let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
+                            let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
+                            let scale = scale_w.min(scale_h);
+                            let display = egui::vec2(size.x * scale, size.y * scale).ceil();
+                            let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                            ui.painter().rect_stroke(
+                                rect,
+                                grafito_ui::tokens::RADIUS_MD,
+                                Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+                            );
+                            ui.ctx().request_repaint_after(Duration::from_millis(80));
                             ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
-                                egui::RichText::new(format!("Pizarra: {}", step.whiteboard_hint))
-                                    .size(grafito_ui::tokens::TYPE_XS)
-                                    .color(theme.text_tertiary)
-                                    .weak(),
-                            );
-                        }
-                    });
-                // Pizarra vectorial real — usa WhiteboardSession con elementos según hint
-                if !step.whiteboard_hint.is_empty() || !state.whiteboard.doc.is_empty() {
-                    ui.add_space(grafito_ui::tokens::SPACE_SM);
-                    egui::Frame::none()
-                        .fill(theme.input_bg)
-                        .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-                        .rounding(grafito_ui::tokens::RADIUS_MD)
-                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Pizarra")
-                                        .size(grafito_ui::tokens::TYPE_XS)
-                                        .color(theme.text_tertiary)
-                                        .strong(),
-                                );
-                                ui.label(
-                                    egui::RichText::new(format!("· {}", step.whiteboard_hint))
-                                        .size(grafito_ui::tokens::TYPE_XS)
-                                        .color(theme.text_secondary),
-                                );
-                            });
-                            ui.add_space(grafito_ui::tokens::SPACE_XS);
-                            let (wb_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(
-                                    ui.available_width(),
-                                    grafito_ui::tokens::SPACE_XXL * 3.0,
-                                ),
-                                egui::Sense::click_and_drag(),
-                            );
-                            // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
-                            state.whiteboard.draw(ui, wb_rect);
-                            // Permitir dibujar encima (pencil) dentro del overlay
-                            state.whiteboard.handle_canvas_input(wb_rect, ui);
-                            if ui.is_rect_visible(wb_rect) {
-                                // Borde sutil por encima del draw para definición
-                                ui.painter().rect_stroke(
-                                    wb_rect,
-                                    grafito_ui::tokens::RADIUS_MD,
-                                    Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
-                                );
-                                // Hint centrado sobre grilla
-                                ui.painter().text(
-                                    wb_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    &step.whiteboard_hint,
-                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
-                                    theme.text_tertiary.gamma_multiply(0.85),
-                                );
-                            }
-                        });
-                }
-                // Animación nativa fallback (si completó)
-                if !anim_textures.is_empty() {
-                    ui.add_space(grafito_ui::tokens::SPACE_SM);
-                    let time = ui.input(|i| i.time);
-                    let idx = ((time * 12.0) as usize) % anim_textures.len();
-                    let tex = &anim_textures[idx];
-                    let max_w = ui.available_width().max(80.0);
-                    let size = tex.size_vec2();
-                    let scale = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
-                    let display = egui::vec2(size.x * scale, size.y * scale).ceil();
-                    let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
-                    ui.painter().image(
-                        tex.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                    ui.painter().rect_stroke(
-                        rect,
-                        grafito_ui::tokens::RADIUS_MD,
-                        Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
-                    );
-                    ui.ctx().request_repaint_after(Duration::from_millis(80));
-                    ui.add_space(grafito_ui::tokens::SPACE_XS);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Animación: {} — {} frames (fallback nativo)",
-                            template,
-                            anim_textures.len()
-                        ))
-                        .size(grafito_ui::tokens::TYPE_XS)
-                        .color(theme.text_tertiary)
-                        .weak(),
-                    );
-                } else if is_busy {
-                    ui.add_space(grafito_ui::tokens::SPACE_XS);
-                    ui.horizontal(|ui| {
-                        let t = ui.input(|i| i.time);
-                        let pulse = ((t * 3.0).sin() + 1.0) * 0.5;
-                        let col = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(
-                                grafito_ui::tokens::SPACE_SM + 2.0,
-                                grafito_ui::tokens::SPACE_SM + 2.0,
-                            ),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().circle_filled(
-                            rect.center(),
-                            grafito_ui::tokens::SPACE_XS,
-                            col,
-                        );
-                        ui.label(
-                            egui::RichText::new("Generando animación con Manim…")
+                                egui::RichText::new(format!(
+                                    "Animación: {} — {} frames (fallback nativo)",
+                                    template,
+                                    anim_textures.len()
+                                ))
                                 .size(grafito_ui::tokens::TYPE_XS)
-                                .color(theme.text_secondary),
-                        );
-                    });
-                    ui.ctx().request_repaint_after(Duration::from_millis(48));
-                }
-                // Ledger colapsable — no ocupa altura si no se necesita
-                if let Some(ledger) = &ledger {
-                    ui.add_space(grafito_ui::tokens::SPACE_XS);
-                    egui::CollapsingHeader::new(
-                        egui::RichText::new("Detalle de generación")
-                            .size(grafito_ui::tokens::TYPE_XS)
-                            .color(theme.text_tertiary),
-                    )
-                    .id_salt("teaching_ledger")
-                    .show(ui, |ui| {
-                        egui::Frame::none()
-                            .fill(theme.input_bg)
-                            .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
-                            .rounding(grafito_ui::tokens::RADIUS_MD)
-                            .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
-                            .show(ui, |ui| {
+                                .color(theme.text_tertiary)
+                                .weak(),
+                            );
+                        } else if is_busy {
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
+                            ui.horizontal(|ui| {
+                                let t = ui.input(|i| i.time);
+                                let pulse = ((t * 3.0).sin() + 1.0) * 0.5;
+                                let col = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(
+                                        grafito_ui::tokens::SPACE_SM + 2.0,
+                                        grafito_ui::tokens::SPACE_SM + 2.0,
+                                    ),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    rect.center(),
+                                    grafito_ui::tokens::SPACE_XS,
+                                    col,
+                                );
                                 ui.label(
-                                    egui::RichText::new(ledger)
-                                        .monospace()
-                                        .size(grafito_ui::tokens::TYPE_XS - 1.0)
+                                    egui::RichText::new("Generando animación con Manim…")
+                                        .size(grafito_ui::tokens::TYPE_XS)
                                         .color(theme.text_secondary),
                                 );
                             });
-                    });
-                }
-            }
+                            ui.ctx().request_repaint_after(Duration::from_millis(48));
+                        }
+                        // Ledger colapsable — no ocupa altura si no se necesita
+                        if let Some(ledger) = &ledger {
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new("Detalle de generación")
+                                    .size(grafito_ui::tokens::TYPE_XS)
+                                    .color(theme.text_tertiary),
+                            )
+                            .id_salt("teaching_ledger")
+                            .show(ui, |ui| {
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+                                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(ledger)
+                                                .monospace()
+                                                .size(grafito_ui::tokens::TYPE_XS - 1.0)
+                                                .color(theme.text_secondary),
+                                        );
+                                    });
+                            });
+                        }
+                    }
+                });
             ui.add_space(grafito_ui::tokens::SPACE_MD);
             // Controles profesionales — primaria llena ancho, secundaria ghost, iconografía limpia
             ui.horizontal(|ui| {

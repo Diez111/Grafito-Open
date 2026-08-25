@@ -3641,16 +3641,21 @@ fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantP
                 let texture = &textures[index];
                 let size = texture.size_vec2();
                 let max_w = ui.available_width().max(80.0);
-                let scale = (max_w / size.x.max(1.0)).clamp(0.25, 1.5);
+                // Evita altura enorme al pedo con retratos o texturas gigantes:
+                // clampear tanto ancho como alto, sin upscale >1.0 y con max_h 280.
+                let max_h = 280.0_f32.min(ui.available_height().max(80.0));
+                let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
+                let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
+                let scale = scale_w.min(scale_h);
                 let display = egui::vec2(size.x * scale, size.y * scale).ceil();
-                let rect = egui::Rect::from_min_size(ui.cursor().min, display);
+                // Usar allocate_exact_size para que ScrollArea mida correcto, no cursor hack
+                let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
                 ui.painter().image(
                     texture.id(),
                     rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                ui.advance_cursor_after_rect(rect);
             });
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(40));

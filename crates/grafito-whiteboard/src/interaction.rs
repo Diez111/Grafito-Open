@@ -84,6 +84,10 @@ pub fn make_element(
     from: (f64, f64),
     to: (f64, f64),
 ) -> Option<WhiteboardElement> {
+    // Guard contra coordenadas no finitas (evita crash al tocar “Pizarra” con drag NaN)
+    if !from.0.is_finite() || !from.1.is_finite() || !to.0.is_finite() || !to.1.is_finite() {
+        return None;
+    }
     let min_drag = 1e-6;
     if (from.0 - to.0).abs() < min_drag && (from.1 - to.1).abs() < min_drag {
         return None;

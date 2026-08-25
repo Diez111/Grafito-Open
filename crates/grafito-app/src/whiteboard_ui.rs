@@ -1,17 +1,116 @@
 //! Pizarra nativa en overlay (estilo macOS): lienzo a pantalla completa con
-//! toolbar flotante redondeada y herramientas de dibujo libres sobre
+//! toolbar flotante redondeada (pill) y herramientas de dibujo libres sobre
 //! `grafito_whiteboard`. No toca `Document`/`GeoObject`.
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
-use grafito_ui::tokens::{
-    RADIUS_MD, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACE_MD, SPACE_SM, SPACE_XS,
-};
+use grafito_ui::tokens::{RADIUS_MD, RADIUS_PILL, SPACE_MD, SPACE_SM, SPACE_XS};
 use grafito_whiteboard::{
     arrow_tip, smooth_stroke, WhiteboardDoc, WhiteboardElement, WhiteboardInteraction,
     WhiteboardTool,
 };
+
+/// Página individual de la pizarra (una “hoja” tipo Notepad).
+#[derive(Clone)]
+pub struct WhiteboardPage {
+    pub title: String,
+    pub doc: WhiteboardDoc,
+    pub pan: (f64, f64),
+    pub zoom: f64,
+}
+
+impl WhiteboardPage {
+    fn new(id: usize) -> Self {
+        Self {
+            title: format!("Hoja {}", id),
+            doc: WhiteboardDoc::new(),
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+        }
+    }
+}
+
+/// Libro de pizarras — colección de hojas con índice actual.
+#[derive(Clone)]
+pub struct WhiteboardBook {
+    pub pages: Vec<WhiteboardPage>,
+    pub current: usize,
+    next_id: usize,
+}
+
+impl Default for WhiteboardBook {
+    fn default() -> Self {
+        Self {
+            pages: vec![WhiteboardPage::new(1)],
+            current: 0,
+            next_id: 2,
+        }
+    }
+}
+
+impl WhiteboardBook {
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn current(&self) -> Option<&WhiteboardPage> {
+        self.pages.get(self.current)
+    }
+
+    pub fn current_mut(&mut self) -> Option<&mut WhiteboardPage> {
+        self.pages.get_mut(self.current)
+    }
+
+    pub fn create_page(&mut self) -> usize {
+        let page = WhiteboardPage::new(self.next_id);
+        self.next_id += 1;
+        self.pages.push(page);
+        self.pages.len() - 1
+    }
+
+    pub fn switch_to(&mut self, index: usize) -> bool {
+        if index < self.pages.len() {
+            self.current = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove(&mut self, index: usize) -> bool {
+        if self.pages.len() <= 1 || index >= self.pages.len() {
+            return false;
+        }
+        self.pages.remove(index);
+        if self.current >= self.pages.len() {
+            self.current = self.pages.len() - 1;
+        } else if index < self.current {
+            self.current -= 1;
+        }
+        true
+    }
+
+    pub fn save_current_from_session(&mut self, session: &WhiteboardSession) {
+        if let Some(page) = self.current_mut() {
+            page.doc = session.doc.clone();
+            page.pan = session.pan;
+            page.zoom = session.zoom;
+        }
+    }
+
+    pub fn load_to_session(&self, session: &mut WhiteboardSession) {
+        if let Some(page) = self.current() {
+            session.doc = page.doc.clone();
+            session.pan = page.pan;
+            session.zoom = page.zoom;
+            session.active_text = None;
+            session.interaction = WhiteboardInteraction::Idle;
+            session.pencil_points.clear();
+            session.marquee = None;
+        }
+    }
+}
 
 /// Sesión de pizarra activa (overlay) — con color y grosor del lápiz.
 #[derive(Clone)]
@@ -208,28 +307,69 @@ impl WhiteboardSession {
         let tolerance = (SPACE_SM as f64 - 2.0) / self.zoom;
         for point in path {
             let mut before = self.doc.len();
-            while self.doc.erase_at(point, tolerance).is_some() {
+            while let Some(erased) = self.doc.erase_at(point, tolerance) {
+                // Si borramos el texto activo, invalidar índice (evita crash al seguir escribiendo)
+                if let Some(active) = self.active_text {
+                    if erased == active {
+                        self.active_text = None;
+                    } else if erased < active {
+                        self.active_text = Some(active.saturating_sub(1));
+                    }
+                    if self.active_text.is_some_and(|i| i >= self.doc.len()) {
+                        self.active_text = None;
+                    }
+                }
                 if self.doc.len() == before {
                     break;
                 }
                 before = self.doc.len();
             }
         }
+        self.validate_active_text();
+        if self.doc.is_empty() {
+            self.active_text = None;
+        }
     }
 
     pub fn type_char(&mut self, character: char) {
-        if let Some(index) = self.active_text {
-            if let Some(WhiteboardElement::Text { text, .. }) = self.doc.element_mut(index) {
-                text.push(character);
+        let Some(index) = self.active_text else {
+            return;
+        };
+        if index >= self.doc.len() {
+            self.active_text = None;
+            return;
+        }
+        if let Some(WhiteboardElement::Text { text, .. }) = self.doc.element_mut(index) {
+            // Guard contra control chars que crashean layout (excepto \n)
+            if character.is_control() && character != '\n' {
+                return;
             }
+            text.push(character);
+        } else {
+            self.active_text = None;
         }
     }
 
     pub fn backspace_text(&mut self) {
-        if let Some(index) = self.active_text {
-            if let Some(WhiteboardElement::Text { text, .. }) = self.doc.element_mut(index) {
-                text.pop();
-            }
+        let Some(index) = self.active_text else {
+            return;
+        };
+        if index >= self.doc.len() {
+            self.active_text = None;
+            return;
+        }
+        if let Some(WhiteboardElement::Text { text, .. }) = self.doc.element_mut(index) {
+            text.pop();
+        } else {
+            self.active_text = None;
+        }
+    }
+
+    /// Invalida active_text si apunta fuera de rango (tras borrado/clear).
+    #[allow(dead_code)]
+    fn validate_active_text(&mut self) {
+        if self.active_text.is_some_and(|i| i >= self.doc.len()) {
+            self.active_text = None;
         }
     }
 
@@ -302,7 +442,11 @@ impl WhiteboardSession {
     }
 
     pub fn handle_canvas_input(&mut self, rect: Rect, ui: &egui::Ui) {
-        if ui.ctx().input(|input| input.pointer.any_down()) {
+        // Repintar a 60Hz si hay cualquier pointer/touch activo (tableta, mouse, touch)
+        if ui
+            .ctx()
+            .input(|i| i.pointer.any_down() || i.multi_touch().is_some())
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(16));
         }
@@ -311,23 +455,35 @@ impl WhiteboardSession {
             egui::Id::new("whiteboard_canvas"),
             Sense::click_and_drag(),
         );
-        let zoom_delta = ui.input(|input| input.zoom_delta());
-        let pointer = response.interact_pointer_pos();
+        let zoom_delta = ui.input(|i| i.zoom_delta());
+        let pointer = ui.input(|i| i.pointer.clone());
+        let current_pos = response
+            .interact_pointer_pos()
+            .or(response.hover_pos())
+            .or(pointer.latest_pos());
         if zoom_delta != 1.0 {
-            if let Some(pos) = pointer {
+            if let Some(pos) = current_pos {
                 self.zoom_at(zoom_delta as f64, pos, rect);
             }
         }
         if response.dragged_by(egui::PointerButton::Middle) {
-            return; // el pan medio se deja al manejador egui del canvas principal
+            return; // pan medio reservado para el canvas principal
         }
-        if let Some(world) = pointer.map(|pos| self.world_from_screen(pos, rect)) {
-            let primary = response.dragged_by(egui::PointerButton::Primary);
-            if response.drag_started_by(egui::PointerButton::Primary) || response.clicked() {
+        // Compatibilidad tableta: cualquier botón de dibujo + fallback Touch
+        let any_draw_button = pointer.button_down(egui::PointerButton::Primary)
+            || pointer.button_down(egui::PointerButton::Secondary)
+            || pointer.button_down(egui::PointerButton::Middle)
+            || pointer.any_down();
+        if let Some(world) = current_pos.map(|pos| self.world_from_screen(pos, rect)) {
+            let is_idle = matches!(self.interaction, WhiteboardInteraction::Idle);
+            let stylus_pressed =
+                any_draw_button && is_idle && current_pos.is_some_and(|p| rect.contains(p));
+            let drag_any = response.dragged();
+            if stylus_pressed || response.drag_started() || response.clicked() {
                 self.handle_pointer(world, true, false);
-            } else if response.drag_stopped() {
+            } else if response.drag_stopped() || (!any_draw_button && !is_idle) {
                 self.handle_pointer(world, false, true);
-            } else if primary {
+            } else if drag_any || any_draw_button {
                 self.handle_pointer(world, false, false);
             }
         }
@@ -441,6 +597,53 @@ fn draw_element(
     }
 }
 
+/// Contenido interno de la toolbar mega simple (mover, escribir, linea, cerrar).
+/// Sin desbordes: solo 4 botones, sin separadores extra ni scroll.
+#[allow(clippy::too_many_arguments)]
+fn draw_toolbar_contents(
+    ui: &mut egui::Ui,
+    app: &mut crate::GrafitoApp,
+    selected_tool: &mut Option<WhiteboardTool>,
+    _clear: &mut bool,
+    close: &mut bool,
+    _ask_ai: &mut bool,
+    _toggle_assistant: &mut bool,
+    _toggle_palette: &mut bool,
+) {
+    let theme = current_theme(ui.ctx());
+    let tool = app.whiteboard.tool;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        // Solo 3 herramientas + cerrar — mega simple, no desborda
+        for (icon, t, tip) in [
+            (Icon::Move, WhiteboardTool::Select, "Mover"),
+            (Icon::Pencil, WhiteboardTool::Pencil, "Escribir"),
+            (Icon::ArrowRight, WhiteboardTool::Arrow, "Línea"),
+        ] {
+            let selected = tool == t;
+            if action_icon_button(
+                ui,
+                icon,
+                if selected {
+                    theme.accent
+                } else {
+                    theme.text_secondary
+                },
+                tip,
+            )
+            .clicked()
+            {
+                *selected_tool = Some(t);
+            }
+        }
+        ui.separator();
+        if action_icon_button(ui, Icon::Close, theme.text_secondary, "Cerrar (Esc)").clicked() {
+            *close = true;
+        }
+    });
+}
+
+#[allow(dead_code)]
 fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let theme = current_theme(ui.ctx());
     let mut selected_tool: Option<WhiteboardTool> = None;
@@ -449,141 +652,37 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     let mut ask_ai = false;
     let mut toggle_assistant = false;
     let mut toggle_palette = false;
-    // Capturar estado necesario sin prestar &app.whiteboard largo
-    let tool = app.whiteboard.tool;
-    let pen_color = app.whiteboard.pen_color;
-    let pen_width = app.whiteboard.pen_width;
-    let palette_open = app.whiteboard.show_palette;
-    egui::Frame::none()
-        .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-        .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_LG))
-        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
-        .shadow(egui::epaint::Shadow {
-            offset: vec2(0.0, SHADOW_WINDOW_OFFSET_Y),
-            blur: SHADOW_WINDOW_BLUR,
-            spread: 0.0,
-            color: Color32::from_black_alpha(grafito_ui::tokens::SHADOW_ALPHA),
-        })
-        .show(ui, |ui| {
-            egui::ScrollArea::horizontal()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = SPACE_XS;
-                        ui.label(
-                            egui::RichText::new("Pizarra")
-                                .color(theme.accent)
-                                .size(grafito_ui::tokens::TYPE_SM)
-                                .strong(),
-                        );
-                        ui.separator();
-                        for (icon, t, tip) in [
-                            (Icon::Move, WhiteboardTool::Select, "Seleccionar"),
-                            (Icon::Pencil, WhiteboardTool::Pencil, "Lápiz libre"),
-                            (Icon::Shapes, WhiteboardTool::Rectangle, "Rectángulo"),
-                            (Icon::Ellipse, WhiteboardTool::Ellipse, "Elipse"),
-                            (Icon::ArrowRight, WhiteboardTool::Arrow, "Flecha"),
-                            (Icon::Notebook, WhiteboardTool::Text, "Texto"),
-                            (Icon::Eraser, WhiteboardTool::Eraser, "Borrador"),
-                        ] {
-                            let selected = tool == t;
-                            if action_icon_button(
-                                ui,
-                                icon,
-                                if selected {
-                                    theme.accent
-                                } else {
-                                    theme.text_secondary
-                                },
-                                tip,
-                            )
-                            .clicked()
-                            {
-                                selected_tool = Some(t);
-                            }
-                        }
-                        // ——— Color y grosor (solo para herramientas con trazo) ———
-                        let supports_color = matches!(
-                            tool,
-                            WhiteboardTool::Pencil
-                                | WhiteboardTool::Rectangle
-                                | WhiteboardTool::Ellipse
-                                | WhiteboardTool::Arrow
-                                | WhiteboardTool::Text
-                        );
-                        if supports_color {
-                            ui.separator();
-                            // Swatch circular con borde que indica apertura
-                            let (swatch_rect, swatch_resp) =
-                                ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-                            if ui.is_rect_visible(swatch_rect) {
-                                let painter = ui.painter();
-                                painter.circle_filled(swatch_rect.center(), 9.0, pen_color);
-                                painter.circle_stroke(
-                                    swatch_rect.center(),
-                                    9.0,
-                                    Stroke::new(
-                                        1.5,
-                                        if palette_open {
-                                            theme.accent
-                                        } else {
-                                            theme.separator.gamma_multiply(0.30)
-                                        },
-                                    ),
-                                );
-                                // Anillo interior que sugiere grosor
-                                painter.circle_stroke(
-                                    swatch_rect.center(),
-                                    (pen_width * 1.1).clamp(2.0, 7.0),
-                                    Stroke::new(1.0, Color32::from_black_alpha(25)),
-                                );
-                            }
-                            if swatch_resp
-                                .on_hover_text("Color y grosor del trazo")
-                                .clicked()
-                            {
-                                toggle_palette = true;
-                            }
-                        }
-                        ui.separator();
-                        if action_icon_button(
+
+    // Barra pill flotante centrada — no ocupa todo el ancho (mac style)
+    ui.vertical_centered(|ui| {
+        egui::Frame::none()
+            .fill(theme.panel_bg.gamma_multiply(0.99))
+            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.12)))
+            .rounding(egui::Rounding::same(RADIUS_PILL))
+            .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+            .shadow(egui::epaint::Shadow {
+                offset: vec2(0.0, 4.0),
+                blur: 20.0,
+                spread: 0.0,
+                color: Color32::from_black_alpha(28),
+            })
+            .show(ui, |ui| {
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([true, false])
+                    .show(ui, |ui| {
+                        draw_toolbar_contents(
                             ui,
-                            Icon::Settings,
-                            if app.show_whiteboard_assistant {
-                                theme.accent
-                            } else {
-                                theme.text_secondary
-                            },
-                            "Asistente (mostrar/ocultar)",
-                        )
-                        .clicked()
-                        {
-                            toggle_assistant = true;
-                        }
-                        if action_icon_button(
-                            ui,
-                            Icon::Search,
-                            theme.accent,
-                            "Entender este dibujo con IA",
-                        )
-                        .clicked()
-                        {
-                            ask_ai = true;
-                        }
-                        if action_icon_button(ui, Icon::Delete, theme.text_secondary, "Limpiar")
-                            .clicked()
-                        {
-                            clear = true;
-                        }
-                        if action_icon_button(ui, Icon::Close, theme.text_secondary, "Cerrar (Esc)")
-                            .clicked()
-                        {
-                            close = true;
-                        }
+                            app,
+                            &mut selected_tool,
+                            &mut clear,
+                            &mut close,
+                            &mut ask_ai,
+                            &mut toggle_assistant,
+                            &mut toggle_palette,
+                        );
                     });
-                });
-        });
+            });
+    });
     if let Some(t) = selected_tool {
         app.whiteboard.set_tool(t);
     }
@@ -615,242 +714,215 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
 pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     app.sync_assistant_for_frame(ctx);
-    if app.show_whiteboard_assistant {
-        let visuals = grafito_ui::assistant::AssistantVisuals {
-            mora_texture: app.mora_texture.as_ref().map(egui::TextureHandle::id),
-        };
-        let action = grafito_ui::assistant::draw_assistant_panel(
-            ctx,
-            &mut app.assistant,
-            0.0,
-            visuals,
-            &mut app.assistant_blocks_cache,
-        );
-        if let Some(action) = action {
-            app.handle_assistant_action(ctx, action);
+    {
+        let cur = app.whiteboard.clone();
+        app.whiteboard_book.save_current_from_session(&cur);
+    }
+
+    // ── Toolbar — TopBottomPanel compacto, centrado, sin desborde ──
+    // Usa TopBottomPanel para reservar altura real y no solapar el lienzo.
+    // Solo 4 herramientas, sin scroll, con ancho ajustado al contenido.
+    {
+        let mut selected_tool: Option<WhiteboardTool> = None;
+        let mut close = false;
+        egui::TopBottomPanel::top("whiteboard_toolbar_top")
+            .frame(
+                egui::Frame::none()
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+                    .inner_margin(egui::Margin::symmetric(SPACE_XS, 4.0)),
+            )
+            .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    ui.horizontal(|ui| {
+                        let mut dummy_clear = false;
+                        let mut dummy_ask = false;
+                        let mut dummy_toggle_a = false;
+                        let mut dummy_toggle_p = false;
+                        draw_toolbar_contents(
+                            ui,
+                            app,
+                            &mut selected_tool,
+                            &mut dummy_clear,
+                            &mut close,
+                            &mut dummy_ask,
+                            &mut dummy_toggle_a,
+                            &mut dummy_toggle_p,
+                        );
+                    });
+                });
+            });
+        if let Some(t) = selected_tool {
+            app.whiteboard.set_tool(t);
+        }
+        if close {
+            app.whiteboard_open = false;
         }
     }
-    let mut keep_open = app.whiteboard_open;
-    egui::Window::new("Pizarra")
-        .id(egui::Id::new("whiteboard_window"))
-        .collapsible(false)
-        .resizable(true)
-        .min_size(vec2(420.0, 320.0))
-        .max_size(vec2(720.0, 560.0))
-        .default_size(vec2(560.0, 380.0))
-        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
-                .rounding(grafito_ui::tokens::RADIUS_LG)
-                .shadow(egui::Shadow {
-                    offset: vec2(0.0, 4.0),
-                    blur: 16.0,
-                    spread: 0.0,
-                    color: Color32::from_black_alpha(20),
-                }),
-        )
-        .open(&mut keep_open)
-        .show(ctx, |ui| {
-            ui.vertical(|ui| {
-                draw_toolbar(ui, app);
-                let anim = ui.ctx().animate_bool(
-                    egui::Id::new("whiteboard_palette"),
-                    app.whiteboard.show_palette,
-                );
-                if anim > 0.01 {
-                    let bg = theme.panel_bg.gamma_multiply(anim * 0.98 + 0.02);
-                    let stroke_a = 0.10 * anim;
-                    egui::Frame::none()
-                        .fill(bg)
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            theme.separator.gamma_multiply(stroke_a),
-                        ))
-                        .rounding(grafito_ui::tokens::RADIUS_MD)
-                        .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
-                        .show(ui, |ui| {
-                            ui.scope(|ui| {
-                                ui.style_mut().visuals.override_text_color =
-                                    Some(theme.text_primary.gamma_multiply(anim));
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Color")
-                                            .size(grafito_ui::tokens::TYPE_XS)
-                                            .color(theme.text_secondary.gamma_multiply(anim))
-                                            .strong(),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let (r, _) = ui.allocate_exact_size(
-                                                vec2(20.0, 20.0),
-                                                Sense::hover(),
-                                            );
-                                            ui.painter().circle_filled(
-                                                r.center(),
-                                                10.0,
-                                                app.whiteboard.pen_color.gamma_multiply(anim),
-                                            );
-                                            ui.painter().circle_stroke(
-                                                r.center(),
-                                                10.0,
-                                                Stroke::new(
-                                                    1.0,
-                                                    theme.separator.gamma_multiply(0.25 * anim),
-                                                ),
-                                            );
-                                        },
-                                    );
-                                });
-                                ui.add_space(SPACE_XS);
-                                const PALETTE: &[[u8; 3]] = &[
-                                    [250, 250, 249],
-                                    [212, 212, 216],
-                                    [107, 122, 111],
-                                    [100, 116, 139],
-                                    [168, 123, 110],
-                                    [91, 125, 177],
-                                    [196, 91, 91],
-                                    [209, 183, 91],
-                                ];
-                                let mut picked: Option<Color32> = None;
-                                egui::Grid::new("whiteboard_palette_grid")
-                                    .num_columns(4)
-                                    .spacing(vec2(8.0, 8.0))
+    // ── Palette flotante (Area) — mega simple: solo si herramienta es Escribir (Pencil) ──
+    let is_pencil = app.whiteboard.tool == WhiteboardTool::Pencil;
+    // Palette compacta y centrada — solo se achica al contenido, no ocupa 560 por defecto
+    let palette_anim = ctx.animate_bool(egui::Id::new("whiteboard_palette"), is_pencil);
+    if palette_anim > 0.01 {
+        let avail = ctx.available_rect();
+        let screen = ctx.screen_rect();
+        let center_offset_x = avail.center().x - screen.center().x;
+        egui::Area::new(egui::Id::new("whiteboard_palette_area"))
+            .anchor(egui::Align2::CENTER_BOTTOM, vec2(center_offset_x, -12.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(theme.panel_bg.gamma_multiply(0.96 * palette_anim + 0.04))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        theme.separator.gamma_multiply(0.10 * palette_anim),
+                    ))
+                    .rounding(RADIUS_MD)
+                    .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
+                    .shadow(egui::Shadow {
+                        offset: vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: Color32::from_black_alpha((8.0 * palette_anim) as u8),
+                    })
+                    .show(ui, |ui| {
+                        ui.scope(|ui| {
+                            ui.style_mut().visuals.override_text_color =
+                                Some(theme.text_primary.gamma_multiply(palette_anim));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                egui::ScrollArea::horizontal()
+                                    .auto_shrink([true, false])
+                                    .scroll_bar_visibility(
+                                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                                    )
                                     .show(ui, |ui| {
-                                        for (idx, rgb) in PALETTE.iter().enumerate() {
-                                            let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-                                                .gamma_multiply(anim);
-                                            let is_sel = app.whiteboard.pen_color == col;
-                                            let (rect, resp) = ui.allocate_exact_size(
-                                                vec2(28.0, 28.0),
-                                                Sense::click(),
-                                            );
-                                            if ui.is_rect_visible(rect) {
-                                                let painter = ui.painter();
-                                                painter.circle_filled(rect.center(), 13.0, col);
-                                                painter.circle_stroke(
-                                                    rect.center(),
-                                                    13.0,
-                                                    Stroke::new(
-                                                        if is_sel { 2.0 } else { 1.0 },
-                                                        if is_sel {
-                                                            theme.accent.gamma_multiply(anim)
-                                                        } else {
-                                                            theme
-                                                                .separator
-                                                                .gamma_multiply(0.25 * anim)
-                                                        },
-                                                    ),
+                                        ui.horizontal(|ui| {
+                                            const PALETTE: &[[u8; 3]] = &[
+                                                [250, 250, 249],
+                                                [212, 212, 216],
+                                                [107, 122, 111],
+                                                [100, 116, 139],
+                                                [168, 123, 110],
+                                                [91, 125, 177],
+                                                [196, 91, 91],
+                                                [209, 183, 91],
+                                            ];
+                                            let mut picked: Option<Color32> = None;
+                                            for rgb in PALETTE.iter() {
+                                                let col = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                                                let is_sel = app.whiteboard.pen_color == col;
+                                                let (rect, resp) = ui.allocate_exact_size(
+                                                    vec2(24.0, 24.0),
+                                                    Sense::click(),
                                                 );
-                                                if is_sel {
-                                                    painter.circle_filled(
+                                                if ui.is_rect_visible(rect) {
+                                                    ui.painter().circle_filled(
                                                         rect.center(),
-                                                        3.0,
-                                                        theme.accent.gamma_multiply(anim),
+                                                        11.0,
+                                                        col,
                                                     );
+                                                    ui.painter().circle_stroke(
+                                                        rect.center(),
+                                                        11.0,
+                                                        Stroke::new(
+                                                            if is_sel { 2.0 } else { 1.0 },
+                                                            if is_sel {
+                                                                theme
+                                                                    .accent
+                                                                    .gamma_multiply(palette_anim)
+                                                            } else {
+                                                                theme.separator.gamma_multiply(
+                                                                    0.20 * palette_anim,
+                                                                )
+                                                            },
+                                                        ),
+                                                    );
+                                                    if is_sel {
+                                                        ui.painter().circle_stroke(
+                                                            rect.center(),
+                                                            (app.whiteboard.pen_width * 1.1)
+                                                                .clamp(2.0, 7.0),
+                                                            Stroke::new(
+                                                                1.0,
+                                                                Color32::from_black_alpha(25),
+                                                            ),
+                                                        );
+                                                    }
+                                                }
+                                                if resp
+                                                    .on_hover_text(format!(
+                                                        "#{:02X}{:02X}{:02X}",
+                                                        rgb[0], rgb[1], rgb[2]
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    picked = Some(col);
                                                 }
                                             }
-                                            if resp
-                                                .on_hover_text(format!(
-                                                    "#{:02X}{:02X}{:02X}",
-                                                    rgb[0], rgb[1], rgb[2]
-                                                ))
-                                                .clicked()
-                                            {
-                                                picked =
-                                                    Some(Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+                                            if let Some(col) = picked {
+                                                app.whiteboard.pen_color = col;
                                             }
-                                            if idx % 4 == 3 {
-                                                ui.end_row();
-                                            }
-                                        }
+                                        });
                                     });
-                                if let Some(col) = picked {
-                                    app.whiteboard.pen_color = col;
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new("Grosor")
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_secondary.gamma_multiply(palette_anim))
+                                        .strong(),
+                                );
+                                let mut w = app.whiteboard.pen_width;
+                                let resp = ui.add(
+                                    egui::Slider::new(&mut w, 1.0..=8.0)
+                                        .show_value(false)
+                                        .trailing_fill(true),
+                                );
+                                if resp.changed() {
+                                    app.whiteboard.pen_width = w.clamp(1.0, 8.0);
                                 }
-                                ui.add_space(SPACE_SM);
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Grosor")
-                                            .size(grafito_ui::tokens::TYPE_XS)
-                                            .color(theme.text_secondary.gamma_multiply(anim)),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let txt = format!("{:.1}", app.whiteboard.pen_width);
-                                            egui::Frame::none()
-                                                .fill(theme.input_bg.gamma_multiply(anim))
-                                                .rounding(grafito_ui::tokens::RADIUS_PILL)
-                                                .inner_margin(egui::Margin::symmetric(8.0, 2.0))
-                                                .show(ui, |ui| {
-                                                    ui.label(
-                                                        egui::RichText::new(txt)
-                                                            .size(grafito_ui::tokens::TYPE_XS)
-                                                            .strong()
-                                                            .color(
-                                                                theme
-                                                                    .text_primary
-                                                                    .gamma_multiply(anim),
-                                                            ),
-                                                    );
-                                                });
-                                            let mut w = app.whiteboard.pen_width;
-                                            let resp = ui.add(
-                                                egui::Slider::new(&mut w, 1.0..=6.0)
-                                                    .show_value(false)
-                                                    .trailing_fill(true),
-                                            );
-                                            if resp.changed() {
-                                                app.whiteboard.pen_width = w.clamp(1.0, 6.0);
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.add_space(SPACE_XS);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Toca un color para aplicar — se guarda al instante",
-                                        )
-                                        .size(10.0)
-                                        .color(theme.text_tertiary.gamma_multiply(0.85 * anim))
-                                        .weak()
-                                        .italics(),
-                                    );
-                                });
+                                let (pr, _) =
+                                    ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                                ui.painter().circle_stroke(
+                                    pr.center(),
+                                    (app.whiteboard.pen_width * 1.1).clamp(2.0, 7.0),
+                                    Stroke::new(1.2, app.whiteboard.pen_color),
+                                );
+                                ui.painter().circle_filled(
+                                    pr.center(),
+                                    1.5,
+                                    theme.separator.gamma_multiply(0.25),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{:.1}", app.whiteboard.pen_width))
+                                        .size(grafito_ui::tokens::TYPE_XS)
+                                        .color(theme.text_primary.gamma_multiply(palette_anim)),
+                                );
                             });
                         });
-                    ui.add_space(SPACE_SM);
-                }
-                // Canvas compacto — altura fija 260 para elegancia, sin desborde
-                let canvas_h = 260.0;
-                let (canvas_rect, _) = ui.allocate_exact_size(
-                    vec2(ui.available_width(), canvas_h),
-                    Sense::click_and_drag(),
-                );
-                // Fondo sutil para diferenciar del panel
-                ui.painter().rect_filled(
-                    canvas_rect,
-                    grafito_ui::tokens::RADIUS_MD,
-                    theme.canvas_bg.gamma_multiply(0.96),
-                );
-                ui.painter().rect_stroke(
-                    canvas_rect,
-                    grafito_ui::tokens::RADIUS_MD,
-                    Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
-                );
-                app.whiteboard.handle_canvas_input(canvas_rect, ui);
-                app.whiteboard.draw(ui, canvas_rect);
+                    });
             });
-        });
-    if !keep_open {
-        app.whiteboard.show_palette = false;
-        app.whiteboard_open = false;
     }
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none().fill(theme.canvas_bg))
+        .show(ctx, |ui| {
+            let available = ui.available_rect_before_wrap();
+            if available.width() < 10.0 || available.height() < 10.0 {
+                return;
+            }
+            // Canvas ocupa TODO lo disponible (SidePanels ya recortaron el ancho,
+            // Top/Bottom son Areas flotantes así que no recortan el alto).
+            let canvas_rect = available.shrink(8.0);
+            eprintln!("[WB-MEGA] avail={:?} canvas={:?}", available, canvas_rect);
+            ui.painter().rect_stroke(
+                canvas_rect,
+                RADIUS_MD,
+                Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
+            );
+            app.whiteboard.handle_canvas_input(canvas_rect, ui);
+            app.whiteboard.draw(ui, canvas_rect);
+        });
+
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         if app.whiteboard.show_palette {
             app.whiteboard.show_palette = false;
