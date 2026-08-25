@@ -630,11 +630,20 @@ pub(crate) fn draw_top_bar(
                             ui.add_space(8.0);
                         });
                     });
-                // ── Toggle tema pill aparte — sun/moon deslizante ──
                 ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
+            });
+    }
+    // ── Toggle tema pill aparte — siempre visible, abajo a la izquierda ──
+    egui::Area::new(egui::Id::new("theme_toggle_sidebar_area"))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(theme.panel_bg.gamma_multiply(0.96))
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
+                .rounding(8.0)
+                .inner_margin(egui::Margin::same(4.0))
+                .show(ui, |ui| {
                     if draw_theme_toggle_switch(ui, app.dark_mode) {
                         app.dark_mode = !app.dark_mode;
                         if app.dark_mode {
@@ -644,9 +653,7 @@ pub(crate) fn draw_top_bar(
                         }
                     }
                 });
-                ui.add_space(8.0);
-            });
-    }
+        });
 }
 
 /// Renders the shared Geometry 3D utility contents and returns a close request.
