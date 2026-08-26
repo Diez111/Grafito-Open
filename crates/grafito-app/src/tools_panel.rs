@@ -99,22 +99,135 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     );
                 }
 
-                // ── CÍRCULOS Y CÓNICAS ──
+                // ── CÓNICAS Y COMPÁS ──
+                // Calm: descarga Cónicas, añade construcciones de compás.
                 if !is_3d {
                     draw_tool_group(
                         ui,
                         app,
-                        "Circunferencias y Cónicas",
+                        "Cónicas y Compás",
                         &[
-                            (Tool::Circle, "Circunferencia", "Centro y punto"),
-                            (Tool::EllipseByFoci, "Elipse", "Dos focos y punto"),
+                            (Tool::Circle, "Circunferencia", "Centro y punto — Circle[centro, radio]"),
+                            (
+                                Tool::EllipseByFoci,
+                                "Elipse",
+                                "Dos focos y punto — EllipseByFoci[F1,F2,P]",
+                            ),
                             (
                                 Tool::ParabolaByFocusDirectrix,
                                 "Parábola",
-                                "Foco y directriz",
+                                "Foco y directriz — ParabolaByFocusDirectrix[F,d]",
                             ),
-                            (Tool::HyperbolaByFoci, "Hipérbola", "Dos focos y punto"),
-                            (Tool::ConicByFivePoints, "Cónica 5 ptos", "Por 5 puntos"),
+                            (
+                                Tool::HyperbolaByFoci,
+                                "Hipérbola",
+                                "Dos focos y punto — HyperbolaByFoci[F1,F2,P]",
+                            ),
+                            (
+                                Tool::ConicByFivePoints,
+                                "Cónica 5 ptos",
+                                "Por 5 puntos — ConicByFivePoints[A,B,C,D,E]",
+                            ),
+                            (
+                                Tool::Circle,
+                                "Incírculo",
+                                "Incircle[A,B,C] — círculo inscrito en triángulo",
+                            ),
+                            (
+                                Tool::Circle,
+                                "Circuncírculo",
+                                "Circumcircle[A,B,C] — círculo circunscrito",
+                            ),
+                            (
+                                Tool::Circle,
+                                "Compás",
+                                "Compasses[centro, punto] — traza círculo con compás",
+                            ),
+                        ],
+                    );
+                }
+
+                // ── CURVAS ESPECIALES ──
+                // Nuevo grupo calm 2 cols que aligera Líneas/Cónicas.
+                if !is_3d {
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Curvas especiales",
+                        &[
+                            (
+                                Tool::Circle,
+                                "Arco",
+                                "Arc[centro, radio, inicio, fin] o Arc[P1,P2,P3]",
+                            ),
+                            (
+                                Tool::Circle,
+                                "Sector",
+                                "Sector[centro, radio, ángulo] — relleno circular",
+                            ),
+                            (
+                                Tool::Circle,
+                                "Semicírculo",
+                                "Semicircle[centro, radio] o [P1,P2,P3]",
+                            ),
+                            (
+                                Tool::ParametricCurve2D,
+                                "Bezier",
+                                "BezierCurve[P1,P2,...] — 2..64 puntos de control",
+                            ),
+                            (
+                                Tool::PolarCurve,
+                                "Spline",
+                                "Spline[P1,P2,...] — Catmull-Rom 2..64 puntos",
+                            ),
+                        ],
+                    );
+                }
+
+                // ── TRANSFORMACIONES ──
+                // Shear/Stretch/Reflect no tienen Tool dedicado: se mapean a Select con tooltip.
+                if !is_3d {
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Transformaciones",
+                        &[
+                            (
+                                Tool::Select,
+                                "Reflect (espejo)",
+                                "Reflect[obj, eje] o Reflect[obj, círculo] — inversión circular",
+                            ),
+                            (
+                                Tool::Select,
+                                "Cizalla (Shear)",
+                                "Shear[obj, ángulo, eje] — x' = x + k·y, k=tan(ángulo)",
+                            ),
+                            (
+                                Tool::Select,
+                                "Estira (Stretch)",
+                                "Stretch[obj, factor, eje] — estiramiento afín",
+                            ),
+                        ],
+                    );
+                }
+
+                // ── TEXTO ──
+                if !is_3d {
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Texto",
+                        &[
+                            (
+                                Tool::Select,
+                                "FractionText",
+                                "FractionText[valor] — 0.5 → \"1/2\" — vía comando",
+                            ),
+                            (
+                                Tool::Select,
+                                "SurdText",
+                                "SurdText[valor] — 1.414 → \"√2\" — vía comando",
+                            ),
                         ],
                     );
                 }
@@ -128,6 +241,29 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         &[
                             (Tool::Sphere3D, "Esfera", "Centro y punto en borde"),
                             (Tool::Cube3D, "Cubo", "Centro y radio (aprox)"),
+                        ],
+                    );
+                    // Sólidos avanzados — solo en 3D (progressive disclosure).
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Sólidos avanzados",
+                        &[
+                            (
+                                Tool::Cube3D,
+                                "Prisma",
+                                "Prism[polígono, altura] o [polígono, dx,dy,dz]",
+                            ),
+                            (
+                                Tool::Sphere3D,
+                                "Cuádrica",
+                                "Quadric[a,b,c,d,e,f,g,h,i,j] — a·x²+…+j=0",
+                            ),
+                            (
+                                Tool::Plane3D,
+                                "Intersección 3D",
+                                "Intersection3D[a,b] — plano/plano, recta/plano, etc.",
+                            ),
                         ],
                     );
                     draw_tool_group(
@@ -156,10 +292,14 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app,
                         "Análisis",
                         &[
-                            (Tool::Root, "Raíces", "Cortes con el eje X"),
-                            (Tool::Extremum, "Extremos", "Puntos máximos y mínimos"),
-                            (Tool::Intersect, "Intersección", "Intersección de 2 objetos"),
-                            (Tool::Function, "Función Libre", "Crear f(x) libre"),
+                            (Tool::Root, "Raíces", "Cortes con el eje X — Root[f]"),
+                            (Tool::Extremum, "Extremos", "Puntos máximos y mínimos — Extremum[f]"),
+                            (
+                                Tool::Intersect,
+                                "Intersección",
+                                "Intersección de 2 objetos — Intersect[a,b]",
+                            ),
+                            (Tool::Function, "Función Libre", "Crear f(x) libre — Function[expr]"),
                         ],
                     );
                 }
@@ -171,12 +311,53 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         app,
                         "Operaciones Booleanas",
                         &[
-                            (Tool::PolygonUnion, "Unión", "Unión de polígonos"),
-                            (Tool::PolygonIntersection, "Intersección", "Intersección"),
-                            (Tool::PolygonDifference, "Diferencia", "A menos B"),
-                            (Tool::PolygonXor, "XOR", "Diferencia simétrica"),
+                            (Tool::PolygonUnion, "Unión", "Unión de polígonos — PolygonUnion[A,B]"),
+                            (
+                                Tool::PolygonIntersection,
+                                "Intersección",
+                                "Intersección — PolygonIntersection[A,B]",
+                            ),
+                            (
+                                Tool::PolygonDifference,
+                                "Diferencia",
+                                "A menos B — PolygonDifference[A,B]",
+                            ),
+                            (Tool::PolygonXor, "XOR", "Diferencia simétrica — PolygonXor[A,B]"),
                         ],
                     );
+                }
+
+                // ── DISCRETA Y LISTAS ──
+                // Progressive disclosure: solo en 2D, vía comando (Financiera/CAS/Probabilidad en paleta).
+                if !is_3d {
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Discreta y Listas",
+                        &[
+                            (
+                                Tool::Select,
+                                "ConvexHull",
+                                "ConvexHull[puntos] — envolvente convexa",
+                            ),
+                            (Tool::Select, "Voronoi", "Voronoi[puntos] — diagrama aproximado"),
+                            (
+                                Tool::Select,
+                                "Sequence",
+                                "Sequence[expr, var, inicio, fin] — genera lista",
+                            ),
+                            (Tool::Select, "Sort", "Sort[lista] — ordena lista numérica"),
+                        ],
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Financiera · CAS · Probabilidad vía paleta (Ctrl+K): Rate[], Derivative[], Normal[]…",
+                        )
+                        .size(11.0)
+                        .color(theme.text_tertiary)
+                        .italics(),
+                    );
+                    ui.add_space(8.0);
                 }
             });
         });
