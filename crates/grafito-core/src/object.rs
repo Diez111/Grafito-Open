@@ -26,6 +26,10 @@ pub enum GeoObject {
     Ellipse(EllipseObj),
     Parabola(ParabolaObj),
     Hyperbola(HyperbolaObj),
+    Arc(ArcObj),
+    Sector(SectorObj),
+    BezierCurve(BezierCurveObj),
+    Spline(SplineObj),
     // 3D
     Point3D(Point3DObj),
     Segment3D(Segment3DObj),
@@ -40,6 +44,8 @@ pub enum GeoObject {
     Torus3D(Torus3DObj),
     MoebiusStrip(MoebiusStripObj),
     Surface3D(Surface3DObj),
+    Prism3D(Prism3DObj),
+    Quadric3D(Quadric3DObj),
 
     // AM2/AM3 Advanced
     ParametricCurve2D(ParametricCurve2DObj),
@@ -89,6 +95,10 @@ impl GeoObject {
             | GeoObject::Ellipse(_)
             | GeoObject::Parabola(_)
             | GeoObject::Hyperbola(_)
+            | GeoObject::Arc(_)
+            | GeoObject::Sector(_)
+            | GeoObject::BezierCurve(_)
+            | GeoObject::Spline(_)
             | GeoObject::ParametricCurve2D(_)
             | GeoObject::PolarCurve(_)
             | GeoObject::ImplicitCurve(_)
@@ -116,6 +126,8 @@ impl GeoObject {
             | GeoObject::Torus3D(_)
             | GeoObject::MoebiusStrip(_)
             | GeoObject::Surface3D(_)
+            | GeoObject::Prism3D(_)
+            | GeoObject::Quadric3D(_)
             | GeoObject::ParametricCurve3D(_)
             | GeoObject::Attractor3D(_)
             | GeoObject::RegularPolychoron4D(_)
@@ -141,6 +153,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.id,
             GeoObject::Parabola(o) => o.id,
             GeoObject::Hyperbola(o) => o.id,
+            GeoObject::Arc(o) => o.id,
+            GeoObject::Sector(o) => o.id,
+            GeoObject::BezierCurve(o) => o.id,
+            GeoObject::Spline(o) => o.id,
             GeoObject::Point3D(o) => o.id,
             GeoObject::Segment3D(o) => o.id,
             GeoObject::Plane3D(o) => o.id,
@@ -154,6 +170,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => o.id,
             GeoObject::MoebiusStrip(o) => o.id,
             GeoObject::Surface3D(o) => o.id,
+            GeoObject::Prism3D(o) => o.id,
+            GeoObject::Quadric3D(o) => o.id,
             GeoObject::ParametricCurve2D(o) => o.id,
             GeoObject::ParametricCurve3D(o) => o.id,
             GeoObject::PolarCurve(o) => o.id,
@@ -190,6 +208,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => &o.label,
             GeoObject::Parabola(o) => &o.label,
             GeoObject::Hyperbola(o) => &o.label,
+            GeoObject::Arc(o) => &o.label,
+            GeoObject::Sector(o) => &o.label,
+            GeoObject::BezierCurve(o) => &o.label,
+            GeoObject::Spline(o) => &o.label,
             GeoObject::Point3D(o) => &o.label,
             GeoObject::Segment3D(o) => &o.label,
             GeoObject::Plane3D(o) => &o.label,
@@ -203,6 +225,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => &o.label,
             GeoObject::MoebiusStrip(o) => &o.label,
             GeoObject::Surface3D(o) => &o.label,
+            GeoObject::Prism3D(o) => &o.label,
+            GeoObject::Quadric3D(o) => &o.label,
             GeoObject::ParametricCurve2D(o) => &o.label,
             GeoObject::ParametricCurve3D(o) => &o.label,
             GeoObject::PolarCurve(o) => &o.label,
@@ -239,6 +263,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.label = label,
             GeoObject::Parabola(o) => o.label = label,
             GeoObject::Hyperbola(o) => o.label = label,
+            GeoObject::Arc(o) => o.label = label,
+            GeoObject::Sector(o) => o.label = label,
+            GeoObject::BezierCurve(o) => o.label = label,
+            GeoObject::Spline(o) => o.label = label,
             GeoObject::Point3D(o) => o.label = label,
             GeoObject::Segment3D(o) => o.label = label,
             GeoObject::Plane3D(o) => o.label = label,
@@ -251,7 +279,9 @@ impl GeoObject {
             GeoObject::Cylinder3D(o) => o.label = label,
             GeoObject::Torus3D(o) => o.label = label.clone(),
             GeoObject::MoebiusStrip(o) => o.label = label.clone(),
-            GeoObject::Surface3D(o) => o.label = label,
+            GeoObject::Surface3D(o) => o.label = label.clone(),
+            GeoObject::Prism3D(o) => o.label = label.clone(),
+            GeoObject::Quadric3D(o) => o.label = label.clone(),
             GeoObject::ParametricCurve2D(o) => o.label = label,
             GeoObject::ParametricCurve3D(o) => o.label = label,
             GeoObject::PolarCurve(o) => o.label = label,
@@ -289,6 +319,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.color,
             GeoObject::Parabola(o) => o.color,
             GeoObject::Hyperbola(o) => o.color,
+            GeoObject::Arc(o) => o.color,
+            GeoObject::Sector(o) => o.color,
+            GeoObject::BezierCurve(o) => o.color,
+            GeoObject::Spline(o) => o.color,
             GeoObject::Point3D(o) => o.color,
             GeoObject::Segment3D(o) => o.color,
             GeoObject::Plane3D(o) => o.color,
@@ -302,6 +336,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => o.color,
             GeoObject::MoebiusStrip(o) => o.color,
             GeoObject::Surface3D(o) => o.color,
+            GeoObject::Prism3D(o) => o.color,
+            GeoObject::Quadric3D(o) => o.color,
             GeoObject::ParametricCurve2D(o) => o.color,
             GeoObject::ParametricCurve3D(o) => o.color,
             GeoObject::PolarCurve(o) => o.color,
@@ -338,6 +374,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.color = color,
             GeoObject::Parabola(o) => o.color = color,
             GeoObject::Hyperbola(o) => o.color = color,
+            GeoObject::Arc(o) => o.color = color,
+            GeoObject::Sector(o) => o.color = color,
+            GeoObject::BezierCurve(o) => o.color = color,
+            GeoObject::Spline(o) => o.color = color,
             GeoObject::Point3D(o) => o.color = color,
             GeoObject::Segment3D(o) => o.color = color,
             GeoObject::Plane3D(o) => o.color = color,
@@ -351,6 +391,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => o.color = color,
             GeoObject::MoebiusStrip(o) => o.color = color,
             GeoObject::Surface3D(o) => o.color = color,
+            GeoObject::Prism3D(o) => o.color = color,
+            GeoObject::Quadric3D(o) => o.color = color,
             GeoObject::ParametricCurve2D(o) => o.color = color,
             GeoObject::ParametricCurve3D(o) => o.color = color,
             GeoObject::PolarCurve(o) => o.color = color,
@@ -387,6 +429,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.visible,
             GeoObject::Parabola(o) => o.visible,
             GeoObject::Hyperbola(o) => o.visible,
+            GeoObject::Arc(o) => o.visible,
+            GeoObject::Sector(o) => o.visible,
+            GeoObject::BezierCurve(o) => o.visible,
+            GeoObject::Spline(o) => o.visible,
             GeoObject::Point3D(o) => o.visible,
             GeoObject::Segment3D(o) => o.visible,
             GeoObject::Plane3D(o) => o.visible,
@@ -400,6 +446,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => o.visible,
             GeoObject::MoebiusStrip(o) => o.visible,
             GeoObject::Surface3D(o) => o.visible,
+            GeoObject::Prism3D(o) => o.visible,
+            GeoObject::Quadric3D(o) => o.visible,
             GeoObject::ParametricCurve2D(o) => o.visible,
             GeoObject::ParametricCurve3D(o) => o.visible,
             GeoObject::PolarCurve(o) => o.visible,
@@ -438,6 +486,10 @@ impl GeoObject {
             GeoObject::Ellipse(o) => o.visible = visible,
             GeoObject::Parabola(o) => o.visible = visible,
             GeoObject::Hyperbola(o) => o.visible = visible,
+            GeoObject::Arc(o) => o.visible = visible,
+            GeoObject::Sector(o) => o.visible = visible,
+            GeoObject::BezierCurve(o) => o.visible = visible,
+            GeoObject::Spline(o) => o.visible = visible,
             GeoObject::Point3D(o) => o.visible = visible,
             GeoObject::Segment3D(o) => o.visible = visible,
             GeoObject::Plane3D(o) => o.visible = visible,
@@ -451,6 +503,8 @@ impl GeoObject {
             GeoObject::Torus3D(o) => o.visible = visible,
             GeoObject::MoebiusStrip(o) => o.visible = visible,
             GeoObject::Surface3D(o) => o.visible = visible,
+            GeoObject::Prism3D(o) => o.visible = visible,
+            GeoObject::Quadric3D(o) => o.visible = visible,
             GeoObject::ParametricCurve2D(o) => o.visible = visible,
             GeoObject::ParametricCurve3D(o) => o.visible = visible,
             GeoObject::PolarCurve(o) => o.visible = visible,
@@ -586,6 +640,10 @@ impl GeoObject {
             GeoObject::Ellipse(_) => "Ellipse",
             GeoObject::Parabola(_) => "Parabola",
             GeoObject::Hyperbola(_) => "Hyperbola",
+            GeoObject::Arc(_) => "Arc",
+            GeoObject::Sector(_) => "Sector",
+            GeoObject::BezierCurve(_) => "BezierCurve",
+            GeoObject::Spline(_) => "Spline",
             GeoObject::Point3D(_) => "Point3D",
             GeoObject::Segment3D(_) => "Segment3D",
             GeoObject::Plane3D(_) => "Plane3D",
@@ -599,6 +657,8 @@ impl GeoObject {
             GeoObject::Torus3D(_) => "Torus3D",
             GeoObject::MoebiusStrip(_) => "MoebiusStrip",
             GeoObject::Surface3D(_) => "Surface3D",
+            GeoObject::Prism3D(_) => "Prism3D",
+            GeoObject::Quadric3D(_) => "Quadric3D",
             GeoObject::ParametricCurve2D(_) => "ParametricCurve2D",
             GeoObject::ParametricCurve3D(_) => "ParametricCurve3D",
             GeoObject::PolarCurve(_) => "PolarCurve",
@@ -1447,6 +1507,118 @@ impl MoebiusStripObj {
     }
 }
 
+// ── Prism y Quadric (P1.4) ──
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Prism3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    /// Vértices de la base en 3D (al menos 3).
+    pub base_vertices: Vec<Point3D>,
+    /// Vector de extrusión.
+    pub direction: Point3D,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+    pub fill_color: Option<Color>,
+}
+
+impl Prism3DObj {
+    /// Crea un prisma a partir de vértices base y vector dirección.
+    pub fn new(base_vertices: Vec<Point3D>, direction: Point3D) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            base_vertices,
+            direction,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.15)),
+        }
+    }
+
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+
+    /// Vértices de la tapa superior (base + dirección).
+    pub fn top_vertices(&self) -> Vec<Point3D> {
+        self.base_vertices
+            .iter()
+            .map(|p| {
+                Point3D::new(
+                    p.x + self.direction.x,
+                    p.y + self.direction.y,
+                    p.z + self.direction.z,
+                )
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quadric3DObj {
+    pub id: ObjectId,
+    pub label: String,
+    /// Coeficientes de `a*x^2 + b*y^2 + c*z^2 + d*xy + e*yz + f*zx + g*x + h*y + i*z + j = 0`.
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+    pub g: f64,
+    pub h: f64,
+    pub i: f64,
+    pub j: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl Quadric3DObj {
+    /// Crea una cuádrica general a partir de 10 coeficientes.
+    pub fn from_coeffs(coeffs: [f64; 10]) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            a: coeffs[0],
+            b: coeffs[1],
+            c: coeffs[2],
+            d: coeffs[3],
+            e: coeffs[4],
+            f: coeffs[5],
+            g: coeffs[6],
+            h: coeffs[7],
+            i: coeffs[8],
+            j: coeffs[9],
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 1.5,
+        }
+    }
+
+    pub fn with_label(mut self, l: impl Into<String>) -> Self {
+        self.label = l.into();
+        self
+    }
+
+    /// Evalúa la cuádrica en un punto 3D.
+    pub fn eval_at(&self, p: Point3D) -> f64 {
+        self.a * p.x * p.x
+            + self.b * p.y * p.y
+            + self.c * p.z * p.z
+            + self.d * p.x * p.y
+            + self.e * p.y * p.z
+            + self.f * p.z * p.x
+            + self.g * p.x
+            + self.h * p.y
+            + self.i * p.z
+            + self.j
+    }
+}
+
 // ── 3D Parametric Surface ──
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Surface3DObj {
@@ -1780,6 +1952,357 @@ impl HyperbolaObj {
         self.label = l.into();
         self
     }
+}
+
+// Objetos P1.1: arcos, sectores, bezier y spline 2D.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArcObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub center: Point2,
+    pub radius: f64,
+    /// Ángulo inicial en radianes.
+    pub start_angle: f64,
+    /// Ángulo final en radianes.
+    pub end_angle: f64,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl ArcObj {
+    pub fn new(center: Point2, radius: f64, start_angle: f64, end_angle: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            center,
+            radius,
+            start_angle,
+            end_angle,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 2.0,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Crea un arco por tres puntos no colineales; el arco va de p1 a p3 pasando por p2.
+    pub fn from_three_points(p1: Point2, p2: Point2, p3: Point2) -> Option<Self> {
+        let center = circumcenter(p1, p2, p3)?;
+        let radius = center.distance(&p1);
+        if !radius.is_finite() || radius <= 1e-12 {
+            return None;
+        }
+        let a1 = (p1.y - center.y).atan2(p1.x - center.x);
+        let a2 = (p2.y - center.y).atan2(p2.x - center.x);
+        let a3 = (p3.y - center.y).atan2(p3.x - center.x);
+        // Determina dirección: si p2 está entre p1 y p3 en sentido antihorario, conserva orden; si no, invierte.
+        let ccw = is_angle_between_ccw(a1, a3, a2);
+        let (start_angle, end_angle) = if ccw { (a1, a3) } else { (a3, a1) };
+        // Ajusta end para que el barrido sea el menor que contiene a2.
+        let mut end = end_angle;
+        let mut start = start_angle;
+        // Normaliza para que el arco contenga a2.
+        if ccw {
+            if !is_angle_between_ccw(start, end, a2) {
+                // Si no contiene, invierte dirección.
+                std::mem::swap(&mut start, &mut end);
+            }
+        } else if !is_angle_between_ccw(end, start, a2) {
+            std::mem::swap(&mut start, &mut end);
+        }
+        Some(Self::new(center, radius, start, end))
+    }
+
+    /// Longitud del arco.
+    pub fn length(&self) -> f64 {
+        let delta = (self.end_angle - self.start_angle).abs();
+        // Normaliza delta al intervalo [0, 2π] eligiendo el menor recorrido que contiene el arco dibujado.
+        // Para arcos > π el usuario espera el recorrido directo, no el complementario.
+        let mut d = delta % (2.0 * std::f64::consts::PI);
+        if d > std::f64::consts::PI && delta <= std::f64::consts::PI {
+            d = 2.0 * std::f64::consts::PI - d;
+        }
+        self.radius * d
+    }
+
+    /// Muestrea el arco en `steps` segmentos (steps+1 puntos).
+    pub fn sample_points(&self, steps: usize) -> Vec<Point2> {
+        let steps = steps.clamp(1, 256);
+        let mut pts = Vec::with_capacity(steps + 1);
+        let delta = self.end_angle - self.start_angle;
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let ang = self.start_angle + delta * t;
+            pts.push(Point2::new(
+                self.center.x + self.radius * ang.cos(),
+                self.center.y + self.radius * ang.sin(),
+            ));
+        }
+        pts
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectorObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub center: Point2,
+    pub radius: f64,
+    pub start_angle: f64,
+    pub end_angle: f64,
+    pub color: Color,
+    pub fill_color: Option<Color>,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl SectorObj {
+    pub fn new(center: Point2, radius: f64, start_angle: f64, end_angle: f64) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            center,
+            radius,
+            start_angle,
+            end_angle,
+            color: Color::DEFAULT_STROKE,
+            visible: true,
+            width: 2.0,
+            fill_color: Some(Color::new(0.2, 0.5, 0.9, 0.25)),
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    pub fn area(&self) -> f64 {
+        let delta = (self.end_angle - self.start_angle).abs() % (2.0 * std::f64::consts::PI);
+        0.5 * self.radius * self.radius * delta
+    }
+
+    /// Vértices del sector como polígono cerrado (centro + arco).
+    pub fn polygon_vertices(&self, steps: usize) -> Vec<Point2> {
+        let steps = steps.clamp(8, 256);
+        let mut verts = Vec::with_capacity(steps + 2);
+        verts.push(self.center);
+        let delta = self.end_angle - self.start_angle;
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let ang = self.start_angle + delta * t;
+            verts.push(Point2::new(
+                self.center.x + self.radius * ang.cos(),
+                self.center.y + self.radius * ang.sin(),
+            ));
+        }
+        verts
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BezierCurveObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub control_points: Vec<Point2>,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl BezierCurveObj {
+    pub fn new(control_points: Vec<Point2>) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            control_points,
+            color: Color::BLUE,
+            visible: true,
+            width: 2.0,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Evalúa la curva de Bézier en t ∈ [0,1] usando De Casteljau.
+    pub fn point_at(&self, t: f64) -> Option<Point2> {
+        bezier_point(&self.control_points, t)
+    }
+
+    pub fn sample_points(&self, steps: usize) -> Vec<Point2> {
+        let steps = steps.clamp(1, 512);
+        let mut pts = Vec::with_capacity(steps + 1);
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            if let Some(p) = self.point_at(t) {
+                pts.push(p);
+            }
+        }
+        pts
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplineObj {
+    pub id: ObjectId,
+    pub label: String,
+    pub points: Vec<Point2>,
+    #[serde(default)]
+    pub closed: bool,
+    pub color: Color,
+    pub visible: bool,
+    pub width: f32,
+}
+
+impl SplineObj {
+    pub fn new(points: Vec<Point2>) -> Self {
+        Self {
+            id: ObjectId::new(),
+            label: String::new(),
+            points,
+            closed: false,
+            color: Color::new(0.2, 0.7, 0.3, 1.0),
+            visible: true,
+            width: 2.0,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Muestrea spline Catmull-Rom; `steps_per_segment` controla densidad.
+    pub fn sample_points(&self, steps_per_segment: usize) -> Vec<Point2> {
+        catmull_rom_sample(&self.points, self.closed, steps_per_segment)
+    }
+}
+
+// Helpers geométricos compartidos por Arc/Spline/Bezier.
+
+fn circumcenter(a: Point2, b: Point2, c: Point2) -> Option<Point2> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 || !d.is_finite() {
+        return None;
+    }
+    let a2 = a.x * a.x + a.y * a.y;
+    let b2 = b.x * b.x + b.y * b.y;
+    let c2 = c.x * c.x + c.y * c.y;
+    let ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d;
+    let uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d;
+    if ux.is_finite() && uy.is_finite() {
+        Some(Point2::new(ux, uy))
+    } else {
+        None
+    }
+}
+
+fn is_angle_between_ccw(start: f64, end: f64, mid: f64) -> bool {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let norm = |a: f64| ((a % two_pi) + two_pi) % two_pi;
+    let s = norm(start);
+    let e = norm(end);
+    let m = norm(mid);
+    if s <= e {
+        s <= m && m <= e
+    } else {
+        m >= s || m <= e
+    }
+}
+
+fn bezier_point(control: &[Point2], t: f64) -> Option<Point2> {
+    if control.is_empty() || !t.is_finite() {
+        return None;
+    }
+    if control.len() == 1 {
+        return Some(control[0]);
+    }
+    let mut tmp: Vec<Point2> = control.to_vec();
+    let n = tmp.len();
+    for r in 1..n {
+        for i in 0..n - r {
+            let x = (1.0 - t) * tmp[i].x + t * tmp[i + 1].x;
+            let y = (1.0 - t) * tmp[i].y + t * tmp[i + 1].y;
+            tmp[i] = Point2::new(x, y);
+        }
+    }
+    let p = tmp[0];
+    if p.x.is_finite() && p.y.is_finite() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+fn catmull_rom_sample(points: &[Point2], closed: bool, steps_per_segment: usize) -> Vec<Point2> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    if points.len() == 2 {
+        return points.to_vec();
+    }
+    let steps = steps_per_segment.clamp(4, 64);
+    let mut out = Vec::new();
+    let n = points.len();
+    let seg_count = if closed { n } else { n - 1 };
+    for i in 0..seg_count {
+        let (p0, p1, p2, p3) = if closed {
+            (
+                points[(i + n - 1) % n],
+                points[i],
+                points[(i + 1) % n],
+                points[(i + 2) % n],
+            )
+        } else {
+            let p0 = if i == 0 { points[0] } else { points[i - 1] };
+            let p1 = points[i];
+            let p2 = points[i + 1];
+            let p3 = if i + 2 < n {
+                points[i + 2]
+            } else {
+                points[n - 1]
+            };
+            (p0, p1, p2, p3)
+        };
+        for s in 0..steps {
+            let t = s as f64 / steps as f64;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let x = 0.5
+                * ((2.0 * p1.x)
+                    + (-p0.x + p2.x) * t
+                    + (2.0 * p0.x - 5.0 * p1.x + 4.0 * p2.x - p3.x) * t2
+                    + (-p0.x + 3.0 * p1.x - 3.0 * p2.x + p3.x) * t3);
+            let y = 0.5
+                * ((2.0 * p1.y)
+                    + (-p0.y + p2.y) * t
+                    + (2.0 * p0.y - 5.0 * p1.y + 4.0 * p2.y - p3.y) * t2
+                    + (-p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y) * t3);
+            if x.is_finite() && y.is_finite() {
+                // Evita duplicar el punto inicial de cada segmento salvo el primero.
+                if !(i > 0 && s == 0) {
+                    out.push(Point2::new(x, y));
+                }
+            }
+        }
+    }
+    // Añade el punto final exacto para curvas abiertas.
+    if !closed {
+        if let Some(last) = points.last().copied() {
+            out.push(last);
+        }
+    } else if let Some(first) = out.first().copied() {
+        out.push(first);
+    }
+    out
 }
 
 // --------------------------------------------------------
@@ -3510,6 +4033,9 @@ impl TransformedObj {
             // Ambas evaluaciones no finitas -> también singular para el muestreo.
             return Err("complex_expr singular: colapsa el objeto".into());
         }
+        // Validación Jacobiana no trivial: compila como expresión compleja y
+        // evalúa det(J) en muestreo. Si |det|<GEOM_EPS o no finito -> singular.
+        crate::validation::validate_transformed_jacobian(expr)?;
         // Validar anidamiento: Document::validate ya limita MAX_TRANSFORM_DEPTH, aquí solo check básico
         Ok(Self {
             inner: Box::new(inner),

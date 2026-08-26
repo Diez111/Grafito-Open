@@ -66,7 +66,17 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Translate[punto, (dx, dy)]`: Traslada un objeto. Mutacion: transforma objetos. Riesgo: medio.
 - `Rotate[punto, centro, angulo]`: Rota un objeto. Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Rotate[punto, angulo]`.
 - `Dilate[punto, factor, centro]`: Aplica una homotecia. Mutacion: transforma objetos. Riesgo: medio.
-- `Reflect[obj, punto_a, punto_b]`: Refleja un objeto respecto a un eje. Mutacion: transforma objetos. Riesgo: medio.
+- `Reflect[obj, punto_a, punto_b]`: Refleja un objeto respecto a un eje (linea) o a un circulo (inversion). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Reflect[obj, circulo]`. Alias: `mirror`.
+- `Shear[objeto, angulo, eje]`: Aplica cizallamiento afin: x' = x + k*y con k = tan(angulo). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Shear[objeto, angulo]`. Alias: `cizalla`, `trasquilacion`.
+- `Stretch[objeto, factor, eje]`: Aplica estiramiento afin: x' = factor*x (o y' = factor*y segun eje). Mutacion: transforma objetos. Riesgo: medio. Formas alternativas: `Stretch[objeto, factor]`. Alias: `estirar`, `estiramiento`.
+## Crear
+
+- `FractionText[valor]`: Crea texto con valor fraccionario: FractionText[0.5] -> "1/2". Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `FractionText[valor, punto]`. Alias: `fraccion`, `fraction`.
+- `SurdText[valor]`: Crea texto con surd: SurdText[1.414] -> "√2". Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `SurdText[valor, punto]`. Alias: `surd`, `raiztexto`.
+## Estadistica
+
+- `FillColumn[col, valor]`: Rellena una columna de la hoja: stub minimo que no falla. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `FillColumn[col, inicio, fin, valor]`. Alias: `fill_column`, `fillcol`.
+- `CellRange[a1, b2]`: Rango de celdas: stub minimo que no falla. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CellRange[rango]`. Alias: `cell_range`, `rango`.
 ## Restricciones
 
 - `Distance[A, B, valor]`: Impone una distancia entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `dist`.
@@ -98,6 +108,11 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Integral[expr]`: Calcula una integral simbolica o definida. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Integral[expr, variable]`, `Integral[expr, a, b]`, `Integral[expr, variable, a, b]`. Alias: `integrar`, `int`.
 - `Solve[expr, variable, minimo, maximo]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Alias: `nsolve`, `resolver`.
 - `Limit[expr, variable, punto]`: Estima un limite bilateral finito. Mutacion: solo consulta. Riesgo: medio. Alias: `limite`, `lim`.
+- `LimitAbove[expr, variable, punto]`: Estima un límite lateral por la derecha (x→a⁺). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_superior`, `limite_derecho`, `limitabove`.
+- `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`, `limitbelow`.
+- `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`, `parametricderivative`.
+- `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`, `asymptote`.
+- `GroebnerDegRevLex[polinomios]`: Base de Groebner (stub: no implementado, use Eliminate). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`, `groebnerDegRevLex`.
 - `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
@@ -207,6 +222,22 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `ComplexSurface[expr, xmin, xmax, ymin, ymax, resolution]`: Grafica el modulo de una funcion compleja como superficie 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `complexsurface`, `complex_surface`, `csurface`.
 - `Extrude[polygon_label, height]`: Extruye un poligono a un solido. Mutacion: crea objetos. Riesgo: alto.
 - `VectorField3D[u, v, w]`: Crea un campo vectorial 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `vectorfield`.
+- `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prism`, `prisma`.
+- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `net`, `desarrollo`, `desplegado`, `unwrap`.
+- `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `quadric`, `cuadrica`, `cuádrica`.
+- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersection3d`, `intersect3d`, `interseccion3d`, `intersección3d`.
+## Crear
+
+- `Arc[centro, radio, inicio, fin]`: Crea un arco por centro/radio/ángulos o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Arc[P1, P2, P3]`. Alias: `arc`, `arco`.
+- `Sector[centro, radio, angulo]`: Crea un sector circular con relleno. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Sector[centro, radio, inicio, fin]`. Alias: `sector`.
+- `Semicircle[centro, radio]`: Crea un semicírculo por centro/radio o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Semicircle[P1, P2, P3]`. Alias: `semicircle`, `semicirculo`.
+- `BezierCurve[P1, P2, ...]`: Crea una curva de Bézier por 2..64 puntos de control. Mutacion: crea objetos. Riesgo: medio. Alias: `bezier`, `bezier_curve`.
+- `Spline[P1, P2, ...]`: Crea una spline Catmull-Rom por 2..64 puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `spline`.
+## Construir
+
+- `Compasses[centro, punto]`: Traza un círculo con compás: centro y punto o radio. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Compasses[centro, radio]`. Alias: `compass`, `compas`.
+- `Incircle[A, B, C]`: Crea el incírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `incircle`, `incirculo`.
+- `Circumcircle[A, B, C]`: Crea el circuncírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `circumcircle`, `circuncirculo`.
 ## Valores validos
 
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.

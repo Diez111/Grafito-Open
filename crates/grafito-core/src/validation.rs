@@ -7,6 +7,9 @@ use grafito_geometry::{
 };
 use serde_json::Value;
 
+// Validación Jacobiana para Transformed usa aritmética compleja y ValidatedMatrix.
+// No se toca UI; solo validación fail-closed en core.
+
 pub const MAX_DOCUMENT_SIZE_BYTES: usize = 10_000_000;
 pub const MAX_JSON_DEPTH: usize = 64;
 /// Maximum number of array/object separators accepted before JSON materialization.
@@ -455,6 +458,9 @@ fn validate_geo_object(doc: &Document, obj: &GeoObject, depth: usize) -> Result<
         if let Some(compiled) = &o.compiled_expr {
             validate_expr(compiled)?;
         }
+        // Valida el Jacobiano de la transformación compleja: det(J) no trivial.
+        // Usa muestreo numérico en 4 puntos y wrapper ValidatedMatrix para fail-closed.
+        validate_transformed_jacobian(&o.complex_expr)?;
         return validate_geo_object(doc, &o.inner, depth + 1);
     }
 
@@ -600,6 +606,53 @@ fn validate_geo_object(doc: &Document, obj: &GeoObject, depth: usize) -> Result<
             validate_finite(o.angle, "Hyperbola.angle")?;
             validate_positive_f32(o.width, "Hyperbola.width")?;
         }
+        GeoObject::Arc(o) => {
+            validate_point2(o.center, "Arc.center")?;
+            validate_positive(o.radius, "Arc.radius")?;
+            validate_finite(o.start_angle, "Arc.start_angle")?;
+            validate_finite(o.end_angle, "Arc.end_angle")?;
+            validate_positive_f32(o.width, "Arc.width")?;
+        }
+        GeoObject::Sector(o) => {
+            validate_point2(o.center, "Sector.center")?;
+            validate_positive(o.radius, "Sector.radius")?;
+            validate_finite(o.start_angle, "Sector.start_angle")?;
+            validate_finite(o.end_angle, "Sector.end_angle")?;
+            validate_positive_f32(o.width, "Sector.width")?;
+            validate_optional_color(o.fill_color, "Sector.fill_color")?;
+        }
+        GeoObject::BezierCurve(o) => {
+            if o.control_points.len() < 2 {
+                return Err("BezierCurve requiere al menos 2 puntos de control".to_string());
+            }
+            if o.control_points.len() > MAX_POLYGON_VERTICES {
+                return Err(format!(
+                    "BezierCurve puntos {} excede máximo {}",
+                    o.control_points.len(),
+                    MAX_POLYGON_VERTICES
+                ));
+            }
+            for (idx, pt) in o.control_points.iter().enumerate() {
+                validate_point2(*pt, &format!("BezierCurve.control_points[{idx}]"))?;
+            }
+            validate_positive_f32(o.width, "BezierCurve.width")?;
+        }
+        GeoObject::Spline(o) => {
+            if o.points.len() < 2 {
+                return Err("Spline requiere al menos 2 puntos".to_string());
+            }
+            if o.points.len() > MAX_POLYGON_VERTICES {
+                return Err(format!(
+                    "Spline puntos {} excede máximo {}",
+                    o.points.len(),
+                    MAX_POLYGON_VERTICES
+                ));
+            }
+            for (idx, pt) in o.points.iter().enumerate() {
+                validate_point2(*pt, &format!("Spline.points[{idx}]"))?;
+            }
+            validate_positive_f32(o.width, "Spline.width")?;
+        }
         GeoObject::Point3D(o) => {
             validate_point3(o.position, "Point3D.position")?;
             validate_positive_f32(o.size, "Point3D.size")?;
@@ -697,6 +750,64 @@ fn validate_geo_object(doc: &Document, obj: &GeoObject, depth: usize) -> Result<
             validate_positive(o.radius, "MoebiusStrip.radius")?;
             validate_positive(o.width_r, "MoebiusStrip.width_r")?;
             validate_positive_f32(o.width, "MoebiusStrip.width")?;
+        }
+        GeoObject::Prism3D(o) => {
+            if o.base_vertices.len() < 3 {
+                return Err("Prism3D requiere al menos 3 vértices base".to_string());
+            }
+            if o.base_vertices.len() > MAX_POLYGON_VERTICES {
+                return Err(format!(
+                    "Prism3D vertices {} excede máximo {}",
+                    o.base_vertices.len(),
+                    MAX_POLYGON_VERTICES
+                ));
+            }
+            for (idx, pt) in o.base_vertices.iter().enumerate() {
+                validate_point3(*pt, &format!("Prism3D.base_vertices[{idx}]"))?;
+            }
+            validate_point3(o.direction, "Prism3D.direction")?;
+            let len = o.direction.x.hypot(o.direction.y).hypot(o.direction.z);
+            if !len.is_finite() || len <= GEOM_EPS {
+                return Err("Prism3D.direction debe ser un vector no nulo y finito".to_string());
+            }
+            validate_positive_f32(o.width, "Prism3D.width")?;
+            validate_optional_color(o.fill_color, "Prism3D.fill_color")?;
+            // Valida que los vértices no excedan la cota global de coordenadas.
+            for (idx, pt) in o.base_vertices.iter().enumerate() {
+                if pt.x.abs() > grafito_geometry::MAX_WORLD_COORDINATE
+                    || pt.y.abs() > grafito_geometry::MAX_WORLD_COORDINATE
+                    || pt.z.abs() > grafito_geometry::MAX_WORLD_COORDINATE
+                {
+                    return Err(format!(
+                        "Prism3D.base_vertices[{idx}] excede la cota renderizable"
+                    ));
+                }
+            }
+        }
+        GeoObject::Quadric3D(o) => {
+            for (value, field) in [
+                (o.a, "Quadric3D.a"),
+                (o.b, "Quadric3D.b"),
+                (o.c, "Quadric3D.c"),
+                (o.d, "Quadric3D.d"),
+                (o.e, "Quadric3D.e"),
+                (o.f, "Quadric3D.f"),
+                (o.g, "Quadric3D.g"),
+                (o.h, "Quadric3D.h"),
+                (o.i, "Quadric3D.i"),
+                (o.j, "Quadric3D.j"),
+            ] {
+                validate_finite(value, field)?;
+            }
+            // Al menos un coeficiente cuadrático debe ser no nulo para ser cuádrica no degenerada.
+            let quad_norm = o.a.abs() + o.b.abs() + o.c.abs() + o.d.abs() + o.e.abs() + o.f.abs();
+            if quad_norm <= GEOM_EPS {
+                return Err(
+                    "Quadric3D: al menos un coeficiente cuadrático (a,b,c,d,e,f) debe ser no nulo"
+                        .to_string(),
+                );
+            }
+            validate_positive_f32(o.width, "Quadric3D.width")?;
         }
         GeoObject::ParametricCurve2D(o) => {
             validate_expr(&o.expr_x)?;
@@ -1299,4 +1410,135 @@ fn validate_expr(expr: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Valida que el Jacobiano de `complex_expr` no sea singular en muestreo.
+///
+/// Compila la expresión compleja y evalúa `det(J)` numéricamente en 4 puntos
+/// alejados del origen. Si `|det| < 1e-12` o no finito en algún punto,
+/// retorna `Err("Transformed Jacobian singular")`. Usa `ValidatedMatrix`
+/// como wrapper fail-closed para la matriz Jacobiana 2×2.
+pub(crate) fn validate_transformed_jacobian(expr: &str) -> Result<(), String> {
+    const SINGULAR_MSG: &str = "Transformed Jacobian singular";
+    // Compila la expresión compleja; si falla, propagamos error de sintaxis.
+    let ast = grafito_complex::complex_expr::parse(expr)
+        .map_err(|reason| format!("complex_expr inválida: {reason}"))?;
+
+    // Puntos de muestreo deterministas, alejados del origen para no penalizar
+    // ceros aislados (p. ej. `z^2` en 0) pero detectando colapsos globales.
+    let samples = [
+        num_complex::Complex64::new(1.0, 0.0),
+        num_complex::Complex64::new(0.0, 1.0),
+        num_complex::Complex64::new(1.0, 1.0),
+        num_complex::Complex64::new(0.7, -0.3),
+    ];
+    const H: f64 = 1e-6;
+    let mut any_success = false;
+
+    for z0 in samples {
+        // Evalúa f(z) en vecindad para derivadas centradas.
+        let eval = |z: num_complex::Complex64| -> Option<num_complex::Complex64> {
+            let mut env = std::collections::HashMap::new();
+            env.insert("z".to_string(), z);
+            // `ast.eval` ya maneja constantes pi/e/i; variables del documento no se
+            // consideran en validación estática (se asume vacío).
+            match ast.eval(&env) {
+                Ok(value) if value.re.is_finite() && value.im.is_finite() => Some(value),
+                _ => None,
+            }
+        };
+
+        let f_px = eval(z0 + num_complex::Complex64::new(H, 0.0));
+        let f_mx = eval(z0 - num_complex::Complex64::new(H, 0.0));
+        let f_py = eval(z0 + num_complex::Complex64::new(0.0, H));
+        let f_my = eval(z0 - num_complex::Complex64::new(0.0, H));
+
+        let (Some(f_px), Some(f_mx), Some(f_py), Some(f_my)) = (f_px, f_mx, f_py, f_my) else {
+            // Si no se puede evaluar en este punto (polo cercano), probamos siguiente.
+            continue;
+        };
+
+        let df_dx = (f_px - f_mx) * (0.5 / H);
+        let df_dy = (f_py - f_my) * (0.5 / H);
+
+        let u_x = df_dx.re;
+        let v_x = df_dx.im;
+        let u_y = df_dy.re;
+        let v_y = df_dy.im;
+
+        if !u_x.is_finite() || !v_x.is_finite() || !u_y.is_finite() || !v_y.is_finite() {
+            return Err(SINGULAR_MSG.to_string());
+        }
+
+        let det = u_x * v_y - u_y * v_x;
+        if !det.is_finite() || det.abs() <= GEOM_EPS {
+            return Err(SINGULAR_MSG.to_string());
+        }
+
+        // Validación adicional vía ValidatedMatrix (fail-closed).
+        let matrix =
+            grafito_geometry::matrices::Matrix::from_rows(vec![vec![u_x, u_y], vec![v_x, v_y]])
+                .ok_or_else(|| SINGULAR_MSG.to_string())?;
+        if grafito_geometry::matrices::ValidatedMatrix::try_new(matrix).is_err() {
+            return Err(SINGULAR_MSG.to_string());
+        }
+
+        any_success = true;
+    }
+
+    if !any_success {
+        // Ningún punto evaluable -> no se puede garantizar invertibilidad.
+        return Err(SINGULAR_MSG.to_string());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_transformed_jacobian {
+    use super::*;
+
+    #[test]
+    fn jacobian_rejects_constant_and_collapsed_expressions() {
+        // Constante colapsa el objeto: det=0 en todo punto.
+        assert!(validate_transformed_jacobian("0").is_err());
+        assert!(validate_transformed_jacobian("1").is_err());
+        assert!(validate_transformed_jacobian("z*0").is_err());
+        // Expresión no holomorfa que colapsa dimensión (v=0).
+        assert!(validate_transformed_jacobian("z*conj(z)").is_err());
+        let err = validate_transformed_jacobian("0").unwrap_err();
+        assert!(
+            err.contains("Transformed Jacobian singular"),
+            "mensaje esperado 'Transformed Jacobian singular', obtuvo {err}"
+        );
+    }
+
+    #[test]
+    fn jacobian_accepts_regular_transforms() {
+        // Transformaciones regulares con det !=0 en muestreo.
+        assert!(validate_transformed_jacobian("z").is_ok());
+        assert!(validate_transformed_jacobian("z+2").is_ok());
+        assert!(validate_transformed_jacobian("2*z").is_ok());
+        assert!(validate_transformed_jacobian("z^2").is_ok()); // singular solo en 0, muestreo lo evita
+        assert!(validate_transformed_jacobian("exp(z)").is_ok());
+    }
+
+    #[test]
+    fn validated_matrix_rejects_singular_jacobian() {
+        // Wrapper ValidatedMatrix debe rechazar matriz Jacobiana singular 2x2.
+        let singular =
+            grafito_geometry::matrices::Matrix::from_rows(vec![vec![0.0, 0.0], vec![0.0, 0.0]])
+                .unwrap();
+        assert!(
+            grafito_geometry::matrices::ValidatedMatrix::try_new(singular).is_err(),
+            "matriz nula debe ser singular"
+        );
+        let regular =
+            grafito_geometry::matrices::Matrix::from_rows(vec![vec![1.0, 0.0], vec![0.0, 1.0]])
+                .unwrap();
+        assert!(
+            grafito_geometry::matrices::ValidatedMatrix::try_new(regular).is_ok(),
+            "identidad no debe ser singular"
+        );
+    }
 }

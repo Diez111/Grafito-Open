@@ -79,7 +79,11 @@ impl ExportFormat {
             | ExportObjectKind::BoxPlot
             | ExportObjectKind::RegressionLine
             | ExportObjectKind::PhasePortrait => ExportSupport::Supported,
-            ExportObjectKind::Point3D
+            ExportObjectKind::Arc
+            | ExportObjectKind::Sector
+            | ExportObjectKind::BezierCurve
+            | ExportObjectKind::Spline
+            | ExportObjectKind::Point3D
             | ExportObjectKind::Segment3D
             | ExportObjectKind::Plane3D
             | ExportObjectKind::Line3D
@@ -103,7 +107,9 @@ impl ExportFormat {
             | ExportObjectKind::HyperSurface4D
             | ExportObjectKind::VectorField3D
             | ExportObjectKind::DataTable
-            | ExportObjectKind::Transformed => ExportSupport::Unsupported,
+            | ExportObjectKind::Transformed
+            | ExportObjectKind::Prism3D
+            | ExportObjectKind::Quadric3D => ExportSupport::Unsupported,
         }
     }
 }
@@ -127,6 +133,10 @@ pub(crate) enum ExportObjectKind {
     Ellipse,
     Parabola,
     Hyperbola,
+    Arc,
+    Sector,
+    BezierCurve,
+    Spline,
     Point3D,
     Segment3D,
     Plane3D,
@@ -161,11 +171,13 @@ pub(crate) enum ExportObjectKind {
     DataTable,
     PhasePortrait,
     Transformed,
+    Prism3D,
+    Quadric3D,
 }
 
 impl ExportObjectKind {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 44] = [
+    pub(crate) const ALL: [Self; 50] = [
         Self::Point,
         Self::Line,
         Self::Circle,
@@ -176,6 +188,10 @@ impl ExportObjectKind {
         Self::Ellipse,
         Self::Parabola,
         Self::Hyperbola,
+        Self::Arc,
+        Self::Sector,
+        Self::BezierCurve,
+        Self::Spline,
         Self::Point3D,
         Self::Segment3D,
         Self::Plane3D,
@@ -210,6 +226,8 @@ impl ExportObjectKind {
         Self::DataTable,
         Self::PhasePortrait,
         Self::Transformed,
+        Self::Prism3D,
+        Self::Quadric3D,
     ];
 
     pub(crate) const fn as_str(self) -> &'static str {
@@ -224,6 +242,10 @@ impl ExportObjectKind {
             Self::Ellipse => "Ellipse",
             Self::Parabola => "Parabola",
             Self::Hyperbola => "Hyperbola",
+            Self::Arc => "Arc",
+            Self::Sector => "Sector",
+            Self::BezierCurve => "BezierCurve",
+            Self::Spline => "Spline",
             Self::Point3D => "Point3D",
             Self::Segment3D => "Segment3D",
             Self::Plane3D => "Plane3D",
@@ -258,6 +280,8 @@ impl ExportObjectKind {
             Self::DataTable => "DataTable",
             Self::PhasePortrait => "PhasePortrait",
             Self::Transformed => "Transformed",
+            Self::Prism3D => "Prism3D",
+            Self::Quadric3D => "Quadric3D",
         }
     }
 
@@ -273,6 +297,10 @@ impl ExportObjectKind {
             GeoObject::Ellipse(_) => Self::Ellipse,
             GeoObject::Parabola(_) => Self::Parabola,
             GeoObject::Hyperbola(_) => Self::Hyperbola,
+            GeoObject::Arc(_) => Self::Arc,
+            GeoObject::Sector(_) => Self::Sector,
+            GeoObject::BezierCurve(_) => Self::BezierCurve,
+            GeoObject::Spline(_) => Self::Spline,
             GeoObject::Point3D(_) => Self::Point3D,
             GeoObject::Segment3D(_) => Self::Segment3D,
             GeoObject::Plane3D(_) => Self::Plane3D,
@@ -307,6 +335,8 @@ impl ExportObjectKind {
             GeoObject::DataTable(_) => Self::DataTable,
             GeoObject::PhasePortrait(_) => Self::PhasePortrait,
             GeoObject::Transformed(_) => Self::Transformed,
+            GeoObject::Prism3D(_) => Self::Prism3D,
+            GeoObject::Quadric3D(_) => Self::Quadric3D,
             _ => return None,
         })
     }

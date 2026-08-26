@@ -148,6 +148,7 @@ impl CommandSpec {
     pub fn accepts_argument_count(&self, count: usize) -> bool {
         match self.id {
             "geometry.polygon" => return count >= 3,
+            "geometry.bezier-curve" | "geometry.spline" => return count >= 2,
             "graph.piecewise" => return count >= 3,
             "graph.contour" => return count >= 6,
             "graph.phase-portrait" => return count >= 2,
@@ -709,15 +710,106 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "transform.reflect",
         "Reflect",
-        [],
+        ["mirror"],
         "Transformar",
-        "Refleja un objeto respecto a un eje.",
+        "Refleja un objeto respecto a un eje (linea) o a un circulo (inversion).",
         TransformsObject,
         Medium,
         true,
         "Reflect",
         [
-            signature!("Reflect[obj, punto_a, punto_b]"; "obj": Object required, "punto_a": Point required, "punto_b": Point required)
+            signature!("Reflect[obj, punto_a, punto_b]"; "obj": Object required, "punto_a": Point required, "punto_b": Point required),
+            signature!("Reflect[obj, circulo]"; "obj": Object required, "circulo": Object required)
+        ]
+    ),
+    command!(
+        "transform.shear",
+        "Shear",
+        ["cizalla", "trasquilacion"],
+        "Transformar",
+        "Aplica cizallamiento afin: x' = x + k*y con k = tan(angulo).",
+        TransformsObject,
+        Medium,
+        false,
+        "Shear",
+        [
+            signature!("Shear[objeto, angulo, eje]"; "objeto": Object required, "angulo": Number required, "eje": Expression optional),
+            signature!("Shear[objeto, angulo]"; "objeto": Object required, "angulo": Number required)
+        ]
+    ),
+    command!(
+        "transform.stretch",
+        "Stretch",
+        ["estirar", "estiramiento"],
+        "Transformar",
+        "Aplica estiramiento afin: x' = factor*x (o y' = factor*y segun eje).",
+        TransformsObject,
+        Medium,
+        false,
+        "Stretch",
+        [
+            signature!("Stretch[objeto, factor, eje]"; "objeto": Object required, "factor": Number required, "eje": Expression optional),
+            signature!("Stretch[objeto, factor]"; "objeto": Object required, "factor": Number required)
+        ]
+    ),
+    command!(
+        "text.fraction",
+        "FractionText",
+        ["fraccion", "fraction"],
+        "Crear",
+        "Crea texto con valor fraccionario: FractionText[0.5] -> \"1/2\".",
+        CreatesObject,
+        Low,
+        false,
+        "FractionText",
+        [
+            signature!("FractionText[valor]"; "valor": Number required),
+            signature!("FractionText[valor, punto]"; "valor": Number required, "punto": Point optional)
+        ]
+    ),
+    command!(
+        "text.surd",
+        "SurdText",
+        ["surd", "raiztexto"],
+        "Crear",
+        "Crea texto con surd: SurdText[1.414] -> \"√2\".",
+        CreatesObject,
+        Low,
+        false,
+        "SurdText",
+        [
+            signature!("SurdText[valor]"; "valor": Number required),
+            signature!("SurdText[valor, punto]"; "valor": Number required, "punto": Point optional)
+        ]
+    ),
+    command!(
+        "spreadsheet.fill-column",
+        "FillColumn",
+        ["fill_column", "fillcol"],
+        "Estadistica",
+        "Rellena una columna de la hoja: stub minimo que no falla.",
+        CreatesObject,
+        Low,
+        false,
+        "FillColumn",
+        [
+            signature!("FillColumn[col, valor]"; "col": Expression required, "valor": Expression optional),
+            signature!("FillColumn[col, inicio, fin, valor]"; "col": Expression required, "inicio": Integer optional, "fin": Integer optional, "valor": Expression optional)
+        ]
+    ),
+    command!(
+        "spreadsheet.cell-range",
+        "CellRange",
+        ["cell_range", "rango"],
+        "Estadistica",
+        "Rango de celdas: stub minimo que no falla.",
+        ReadOnly,
+        Low,
+        false,
+        "CellRange",
+        [
+            signature!("CellRange[a1, b2]"; "a1": Expression required, "b2": Expression optional),
+            signature!("CellRange[rango]"; "rango": Expression required)
         ]
     ),
     // Restricciones, conicas y booleanas documentadas
@@ -1007,6 +1099,89 @@ const COMMANDS: &[CommandSpec] = &[
         "Limit",
         [
             signature!("Limit[expr, variable, punto]"; "expr": Expression required, "variable": Variable required, "punto": Number required)
+        ]
+    ),
+    command!(
+        "cas.limit-above",
+        "LimitAbove",
+        ["limite_superior", "limite_derecho", "limitabove"],
+        "CAS",
+        "Estima un límite lateral por la derecha (x→a⁺).",
+        ReadOnly,
+        Medium,
+        true,
+        "LimitAbove",
+        [
+            signature!("LimitAbove[expr, variable, punto]"; "expr": Expression required, "variable": Variable required, "punto": Number required)
+        ]
+    ),
+    command!(
+        "cas.limit-below",
+        "LimitBelow",
+        ["limite_inferior", "limite_izquierdo", "limitbelow"],
+        "CAS",
+        "Estima un límite lateral por la izquierda (x→a⁻).",
+        ReadOnly,
+        Medium,
+        true,
+        "LimitBelow",
+        [
+            signature!("LimitBelow[expr, variable, punto]"; "expr": Expression required, "variable": Variable required, "punto": Number required)
+        ]
+    ),
+    command!(
+        "cas.parametric-derivative",
+        "ParametricDerivative",
+        [
+            "derivada_parametrica",
+            "derivadaParametrica",
+            "parametricderivative"
+        ],
+        "CAS",
+        "Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente.",
+        ReadOnly,
+        Low,
+        true,
+        "ParametricDerivative",
+        [
+            signature!("ParametricDerivative[x(t), y(t), variable]"; "x(t)": Expression required, "y(t)": Expression required, "variable": Variable required),
+            signature!("ParametricDerivative[x(t), y(t)]"; "x(t)": Expression required, "y(t)": Expression required)
+        ]
+    ),
+    command!(
+        "cas.asymptote",
+        "Asymptote",
+        ["asintota", "asíntota", "asymptote"],
+        "CAS",
+        "Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x.",
+        ReadOnly,
+        Medium,
+        true,
+        "Asymptote",
+        [
+            signature!("Asymptote[expr]"; "expr": Expression required),
+            signature!("Asymptote[expr, variable]"; "expr": Expression required, "variable": Variable required)
+        ]
+    ),
+    command!(
+        "cas.groebner-degrevlex",
+        "GroebnerDegRevLex",
+        [
+            "groebner",
+            "groebnerbasis",
+            "groebnerlex",
+            "groebner_basis",
+            "groebnerDegRevLex"
+        ],
+        "CAS",
+        "Base de Groebner (stub: no implementado, use Eliminate).",
+        ReadOnly,
+        Low,
+        true,
+        "GroebnerDegRevLex",
+        [
+            signature!("GroebnerDegRevLex[polinomios]"; "polinomios": Expression required),
+            signature!("GroebnerDegRevLex[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList optional)
         ]
     ),
     command!(
@@ -2152,6 +2327,181 @@ const COMMANDS: &[CommandSpec] = &[
         "VectorField3D",
         [
             signature!("VectorField3D[u, v, w]"; "u": Expression required, "v": Expression required, "w": Expression required)
+        ]
+    ),
+    command!(
+        "geometry.prism-3d",
+        "Prism",
+        ["prism", "prisma"],
+        "3D",
+        "Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz).",
+        CreatesObject,
+        Medium,
+        true,
+        "Prism",
+        [
+            signature!("Prism[poligono, altura]"; "poligono": ObjectLabel required, "altura": Number required),
+            signature!("Prism[poligono, dx, dy, dz]"; "poligono": ObjectLabel required, "dx": Number required, "dy": Number required, "dz": Number required)
+        ]
+    ),
+    command!(
+        "geometry.net-3d",
+        "Net",
+        ["net", "desarrollo", "desplegado", "unwrap"],
+        "3D",
+        "Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad).",
+        ReadOnly,
+        Low,
+        true,
+        "Net",
+        [
+            signature!("Net[poliedro]"; "poliedro": ObjectLabel required),
+            signature!("Net[poliedro, escala]"; "poliedro": ObjectLabel required, "escala": Number optional)
+        ]
+    ),
+    command!(
+        "geometry.quadric-3d",
+        "Quadric",
+        ["quadric", "cuadrica", "cuádrica"],
+        "3D",
+        "Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0.",
+        CreatesObject,
+        Medium,
+        true,
+        "Quadric",
+        [
+            signature!("Quadric[a, b, c, d, e, f, g, h, i, j]"; "a": Number required, "b": Number required, "c": Number required, "d": Number required, "e": Number required, "f": Number required, "g": Number required, "h": Number required, "i": Number required, "j": Number required)
+        ]
+    ),
+    command!(
+        "geometry.intersection-3d",
+        "Intersection3D",
+        ["intersection3d", "intersect3d", "interseccion3d", "intersección3d"],
+        "3D",
+        "Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub).",
+        CreatesObject,
+        Medium,
+        true,
+        "Intersection3D",
+        [
+            signature!("Intersection3D[a, b]"; "a": ObjectLabel required, "b": ObjectLabel required),
+            signature!("Intersection3D[a, b, c]"; "a": ObjectLabel required, "b": ObjectLabel required, "c": ObjectLabel required)
+        ]
+    ),
+    command!(
+        "geometry.arc",
+        "Arc",
+        ["arc", "arco"],
+        "Crear",
+        "Crea un arco por centro/radio/ángulos o por tres puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "Arc",
+        [
+            signature!("Arc[centro, radio, inicio, fin]"; "centro": Point required, "radio": Number required, "inicio": Number required, "fin": Number required),
+            signature!("Arc[P1, P2, P3]"; "P1": Point required, "P2": Point required, "P3": Point required)
+        ]
+    ),
+    command!(
+        "geometry.sector",
+        "Sector",
+        ["sector"],
+        "Crear",
+        "Crea un sector circular con relleno.",
+        CreatesObject,
+        Low,
+        true,
+        "Sector",
+        [
+            signature!("Sector[centro, radio, angulo]"; "centro": Point required, "radio": Number required, "angulo": Number required),
+            signature!("Sector[centro, radio, inicio, fin]"; "centro": Point required, "radio": Number required, "inicio": Number required, "fin": Number required)
+        ]
+    ),
+    command!(
+        "geometry.semicircle",
+        "Semicircle",
+        ["semicircle", "semicirculo"],
+        "Crear",
+        "Crea un semicírculo por centro/radio o por tres puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "Semicircle",
+        [
+            signature!("Semicircle[centro, radio]"; "centro": Point required, "radio": Number required),
+            signature!("Semicircle[P1, P2, P3]"; "P1": Point required, "P2": Point required, "P3": Point required)
+        ]
+    ),
+    command!(
+        "geometry.bezier-curve",
+        "BezierCurve",
+        ["bezier", "bezier_curve"],
+        "Crear",
+        "Crea una curva de Bézier por 2..64 puntos de control.",
+        CreatesObject,
+        Medium,
+        true,
+        "BezierCurve",
+        [
+            signature!("BezierCurve[P1, P2, ...]"; "P1": Point required, "P2": Point required)
+        ]
+    ),
+    command!(
+        "geometry.spline",
+        "Spline",
+        ["spline"],
+        "Crear",
+        "Crea una spline Catmull-Rom por 2..64 puntos.",
+        CreatesObject,
+        Medium,
+        true,
+        "Spline",
+        [
+            signature!("Spline[P1, P2, ...]"; "P1": Point required, "P2": Point required)
+        ]
+    ),
+    command!(
+        "geometry.compasses",
+        "Compasses",
+        ["compass", "compas"],
+        "Construir",
+        "Traza un círculo con compás: centro y punto o radio.",
+        CreatesObject,
+        Low,
+        true,
+        "Compasses",
+        [
+            signature!("Compasses[centro, punto]"; "centro": Point required, "punto": Point required),
+            signature!("Compasses[centro, radio]"; "centro": Point required, "radio": Number required)
+        ]
+    ),
+    command!(
+        "geometry.incircle",
+        "Incircle",
+        ["incircle", "incirculo"],
+        "Construir",
+        "Crea el incírculo de un triángulo ABC.",
+        CreatesObject,
+        Medium,
+        true,
+        "Incircle",
+        [
+            signature!("Incircle[A, B, C]"; "A": Point required, "B": Point required, "C": Point required)
+        ]
+    ),
+    command!(
+        "geometry.circumcircle",
+        "Circumcircle",
+        ["circumcircle", "circuncirculo"],
+        "Construir",
+        "Crea el circuncírculo de un triángulo ABC.",
+        CreatesObject,
+        Medium,
+        true,
+        "Circumcircle",
+        [
+            signature!("Circumcircle[A, B, C]"; "A": Point required, "B": Point required, "C": Point required)
         ]
     ),
 ];

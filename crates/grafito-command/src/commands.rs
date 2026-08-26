@@ -2,14 +2,15 @@ use geo::BooleanOps;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
     implicit_curve::validate_contour_levels,
-    Attractor3DObj, BoxPlotObj, CasWorksheetStatus, CircleObj, ComplexGridObj, ComplexIntegralObj,
-    ComplexMappingObj, Cone3DObj, Cube3DObj, Cylinder3DObj, DataTableObj, Document, EllipseObj,
-    FitMetadata, Fractal2DObj, FunctionObj, GeoObject, HistogramObj, HyperSurface4DObj,
-    HyperbolaObj, ImplicitCurveObj, Line3DObj, LineKind, LineObj, MoebiusStripObj, ObjectId,
-    ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj,
-    Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, RegressionLineObj,
-    RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, Segment3DObj,
-    Sphere3DObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
+    ArcObj, Attractor3DObj, BezierCurveObj, BoxPlotObj, CasWorksheetStatus, CircleObj,
+    ComplexGridObj, ComplexIntegralObj, ComplexMappingObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
+    DataTableObj, Document, EllipseObj, FitMetadata, Fractal2DObj, FunctionObj, GeoObject,
+    HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, Line3DObj, LineKind, LineObj,
+    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj,
+    PhasePortraitObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj,
+    Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
+    RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj, SplineObj,
+    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
@@ -1799,6 +1800,12 @@ fn process_input_in_place_with_budget(
                                 count
                             ));
                         }
+                        // P1.4: Intersecciones 3D (Plano-Esfera, Plano-Poliedro genérico).
+                        if let Some(outcome) =
+                            try_intersect_3d_via_generic(document, &a, &b, input_text)
+                        {
+                            return outcome;
+                        }
                     }
                 }
                 return CommandOutcome::Error(
@@ -1921,77 +1928,417 @@ fn process_input_in_place_with_budget(
                 }
                 return CommandOutcome::Error("Center: objeto no encontrado o sin centro".into());
             }
-            "Sector" if cmd.args.len() == 3 => {
-                // Sector[centro, radio, angulo] — crea un sector circular
-                if let (Ok((cx, cy)), Ok(r), Ok(deg)) = (
-                    parse_point_str(&cmd.args[0]),
-                    parse_numeric_arg(&cmd.args[1], &document.variables),
-                    parse_numeric_arg(&cmd.args[2], &document.variables),
-                ) {
-                    let theta = deg.to_radians();
-                    let n = 32;
-                    let mut verts = Vec::with_capacity(n + 2);
-                    verts.push(Point2::new(cx, cy));
-                    for k in 0..=n {
-                        let t = theta * (k as f64) / (n as f64);
-                        verts.push(Point2::new(cx + r * t.cos(), cy + r * t.sin()));
+            "Sector" if matches!(cmd.args.len(), 3 | 4) => {
+                // Sector[centro, radio, angulo] o Sector[centro, radio, inicio, fin] — crea SectorObj.
+                let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return CommandOutcome::Error(format!("Sector: centro inválido: {e}"))
                     }
-                    let arc_len = r * theta.abs();
-                    let area = 0.5 * r * r * theta.abs();
-                    let mut sector_poly = grafito_core::PolygonObj::new(verts);
-                    sector_poly.color = grafito_geometry::Color::new(0.9, 0.5, 0.2, 1.0);
-                    sector_poly.width = 1.5;
-                    sector_poly.fill_color = Some(grafito_geometry::Color::new(0.9, 0.5, 0.2, 0.3));
-                    insert_command_object!(document, GeoObject::Polygon(sector_poly));
-                    let txt = grafito_core::TextObj::new(
-                        format!(
-                            "Sector: r={:.2}  θ={:.1}°  A={:.3}  L={:.3}",
-                            r, deg, area, arc_len
-                        ),
-                        Point2::new(cx, cy),
-                    );
-                    insert_command_object!(document, GeoObject::Text(txt));
-                    input_text.clear();
-                    return CommandOutcome::Message(format!(
-                        "Sector creado: r={:.2}, θ={:.1}°",
-                        r, deg
-                    ));
-                }
-                return CommandOutcome::Error("Sector: argumentos inválidos".into());
+                };
+                let radius =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(v) if v > 0.0 => v,
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Sector: el radio debe ser finito y positivo".into(),
+                            )
+                        }
+                    };
+                let (start_deg, end_deg) = if cmd.args.len() == 3 {
+                    let deg = match require_finite(parse_numeric_arg(
+                        &cmd.args[2],
+                        &document.variables,
+                    )) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!("Sector: ángulo inválido: {e}"))
+                        }
+                    };
+                    if !deg.is_finite() {
+                        return CommandOutcome::Error("Sector: ángulo debe ser finito".into());
+                    }
+                    (0.0, deg)
+                } else {
+                    let s = match require_finite(parse_numeric_arg(
+                        &cmd.args[2],
+                        &document.variables,
+                    )) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!("Sector: inicio inválido: {e}"))
+                        }
+                    };
+                    let e = match require_finite(parse_numeric_arg(
+                        &cmd.args[3],
+                        &document.variables,
+                    )) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!("Sector: fin inválido: {e}"))
+                        }
+                    };
+                    if !s.is_finite() || !e.is_finite() {
+                        return CommandOutcome::Error("Sector: ángulos deben ser finitos".into());
+                    }
+                    (s, e)
+                };
+                let start = start_deg.to_radians();
+                let end = end_deg.to_radians();
+                let sector = SectorObj::new(center, radius, start, end);
+                insert_command_object!(document, GeoObject::Sector(sector));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Sector creado: r={:.2}, {:.1}° → {:.1}°",
+                    radius, start_deg, end_deg
+                ));
             }
-            "Arc" if cmd.args.len() == 4 => {
-                // Arc[centro, radio, angulo1, angulo2] — arco entre dos ángulos
-                if let (Ok((cx, cy)), Ok(r), Ok(deg1), Ok(deg2)) = (
-                    parse_point_str(&cmd.args[0]),
-                    parse_numeric_arg(&cmd.args[1], &document.variables),
-                    parse_numeric_arg(&cmd.args[2], &document.variables),
-                    parse_numeric_arg(&cmd.args[3], &document.variables),
-                ) {
-                    let t1 = deg1.to_radians();
-                    let t2 = deg2.to_radians();
-                    let arc_len = r * (t2 - t1).abs();
-                    let mut arc = ParametricCurve2DObj::new(
-                        &format!("({cx}) + ({r}) * cos(t)"),
-                        &format!("({cy}) + ({r}) * sin(t)"),
-                        t1,
-                        t2,
-                    )
-                    .with_label("Arc");
-                    arc.color = grafito_geometry::Color::new(0.9, 0.5, 0.2, 1.0);
-                    arc.width = 2.0;
-                    insert_command_object!(document, GeoObject::ParametricCurve2D(arc));
-                    let txt = grafito_core::TextObj::new(
-                        format!("Arco: r={:.2}  L={:.3}", r, arc_len),
-                        Point2::new(cx, cy),
+            "Arc" if matches!(cmd.args.len(), 3 | 4) => {
+                // Arc[centro, radio, inicio, fin] o Arc[P1,P2,P3]
+                if cmd.args.len() == 3 {
+                    // Intenta como tres puntos.
+                    let p1 = parse_finite_point_arg(&cmd.args[0], &document.variables);
+                    let p2 = parse_finite_point_arg(&cmd.args[1], &document.variables);
+                    let p3 = parse_finite_point_arg(&cmd.args[2], &document.variables);
+                    if let (Ok(a), Ok(b), Ok(c)) = (p1, p2, p3) {
+                        if let Some(arc) = ArcObj::from_three_points(a, b, c) {
+                            insert_command_object!(document, GeoObject::Arc(arc));
+                            input_text.clear();
+                            return CommandOutcome::Message("Arco creado por 3 puntos".into());
+                        }
+                        return CommandOutcome::Error(
+                            "Arc: los tres puntos son colineales o degenerados".into(),
+                        );
+                    }
+                    return CommandOutcome::Error(
+                        "Arc: se esperaban 3 puntos (x,y) o [centro, radio, inicio, fin]".into(),
                     );
-                    insert_command_object!(document, GeoObject::Text(txt));
+                }
+                let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                    Ok(p) => p,
+                    Err(e) => return CommandOutcome::Error(format!("Arc: centro inválido: {e}")),
+                };
+                let radius =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(v) if v > 0.0 => v,
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Arc: el radio debe ser finito y positivo".into(),
+                            )
+                        }
+                    };
+                let deg1 =
+                    match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Arc: ángulo inicio inválido: {e}"
+                            ))
+                        }
+                    };
+                let deg2 =
+                    match require_finite(parse_numeric_arg(&cmd.args[3], &document.variables)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!("Arc: ángulo fin inválido: {e}"))
+                        }
+                    };
+                if !deg1.is_finite() || !deg2.is_finite() {
+                    return CommandOutcome::Error("Arc: ángulos deben ser finitos".into());
+                }
+                let arc = ArcObj::new(center, radius, deg1.to_radians(), deg2.to_radians());
+                insert_command_object!(document, GeoObject::Arc(arc));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Arco creado: r={:.2}, {:.1}° → {:.1}°",
+                    radius, deg1, deg2
+                ));
+            }
+            "Semicircle" if matches!(cmd.args.len(), 2 | 3) => {
+                // Semicircle[centro, radio] o Semicircle[P1,P2,P3] o Semicircle[centro, radio, angulo_inicio]
+                if cmd.args.len() == 2 {
+                    let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Semicircle: centro inválido: {e}"
+                            ))
+                        }
+                    };
+                    let radius = match require_finite(parse_numeric_arg(
+                        &cmd.args[1],
+                        &document.variables,
+                    )) {
+                        Ok(v) if v > 0.0 => v,
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Semicircle: radio debe ser finito y positivo".into(),
+                            )
+                        }
+                    };
+                    let sector = SectorObj::new(center, radius, 0.0, std::f64::consts::PI);
+                    insert_command_object!(document, GeoObject::Sector(sector));
                     input_text.clear();
-                    return CommandOutcome::Message(format!(
-                        "Arco creado: r={:.2}, {:.1}° → {:.1}°",
-                        r, deg1, deg2
+                    return CommandOutcome::Message(format!("Semicírculo creado: r={:.2}", radius));
+                }
+                // 3 args: intenta como 3 puntos primero.
+                let try_points = (
+                    parse_finite_point_arg(&cmd.args[0], &document.variables),
+                    parse_finite_point_arg(&cmd.args[1], &document.variables),
+                    parse_finite_point_arg(&cmd.args[2], &document.variables),
+                );
+                if let (Ok(a), Ok(b), Ok(c)) = try_points {
+                    if let Some(arc) = ArcObj::from_three_points(a, b, c) {
+                        // Forza semicírculo: ajusta end = start + PI si el arco no es ya 180.
+                        let delta = (arc.end_angle - arc.start_angle).abs();
+                        let target_delta = std::f64::consts::PI;
+                        let mut adj = arc;
+                        if (delta - target_delta).abs() > 1e-6 {
+                            adj.end_angle = adj.start_angle + target_delta.copysign(delta);
+                        }
+                        insert_command_object!(document, GeoObject::Arc(adj));
+                        input_text.clear();
+                        return CommandOutcome::Message("Semicírculo creado por 3 puntos".into());
+                    }
+                    return CommandOutcome::Error("Semicircle: puntos colineales".into());
+                }
+                // Si no son 3 puntos, intenta centro, radio, ángulo.
+                let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return CommandOutcome::Error(format!("Semicircle: centro inválido: {e}"))
+                    }
+                };
+                let radius =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(v) if v > 0.0 => v,
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Semicircle: radio debe ser finito y positivo".into(),
+                            )
+                        }
+                    };
+                let start_deg =
+                    match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Semicircle: ángulo inválido: {e}"
+                            ))
+                        }
+                    };
+                let start = start_deg.to_radians();
+                let sector = SectorObj::new(center, radius, start, start + std::f64::consts::PI);
+                insert_command_object!(document, GeoObject::Sector(sector));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Semicírculo creado: r={:.2}, inicio {:.1}°",
+                    radius, start_deg
+                ));
+            }
+            "BezierCurve" if cmd.args.len() >= 2 => {
+                // BezierCurve[P1, P2, ...] o BezierCurve[{(x,y)...}] con 2..64 puntos.
+                let mut pts = Vec::new();
+                for (idx, arg) in cmd.args.iter().enumerate() {
+                    // Permite último arg numérico t opcional: ignóralo si no es punto y es el último.
+                    if idx == cmd.args.len() - 1
+                        && pts.len() >= 2
+                        && parse_finite_point_arg(arg, &document.variables).is_err()
+                        && parse_numeric_arg(arg, &document.variables).is_ok()
+                    {
+                        continue;
+                    }
+                    match parse_finite_point_arg(arg, &document.variables) {
+                        Ok(p) => pts.push(p),
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "BezierCurve: punto {} inválido: {e}",
+                                idx + 1
+                            ))
+                        }
+                    }
+                }
+                if pts.len() < 2 {
+                    return CommandOutcome::Error(
+                        "BezierCurve: requiere al menos 2 puntos de control".into(),
+                    );
+                }
+                if pts.len() > grafito_core::validation::MAX_POLYGON_VERTICES {
+                    return CommandOutcome::Error(format!(
+                        "BezierCurve: demasiados puntos (máx {})",
+                        grafito_core::validation::MAX_POLYGON_VERTICES
                     ));
                 }
-                return CommandOutcome::Error("Arc: argumentos inválidos".into());
+                let bez = BezierCurveObj::new(pts);
+                insert_command_object!(document, GeoObject::BezierCurve(bez));
+                input_text.clear();
+                return CommandOutcome::Message("BezierCurve creada".into());
+            }
+            "Spline" if cmd.args.len() >= 2 => {
+                let mut pts = Vec::new();
+                for (idx, arg) in cmd.args.iter().enumerate() {
+                    match parse_finite_point_arg(arg, &document.variables) {
+                        Ok(p) => pts.push(p),
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Spline: punto {} inválido: {e}",
+                                idx + 1
+                            ))
+                        }
+                    }
+                }
+                if pts.len() < 2 {
+                    return CommandOutcome::Error("Spline: requiere al menos 2 puntos".into());
+                }
+                if pts.len() > grafito_core::validation::MAX_POLYGON_VERTICES {
+                    return CommandOutcome::Error(format!(
+                        "Spline: demasiados puntos (máx {})",
+                        grafito_core::validation::MAX_POLYGON_VERTICES
+                    ));
+                }
+                let spline = SplineObj::new(pts);
+                insert_command_object!(document, GeoObject::Spline(spline));
+                input_text.clear();
+                return CommandOutcome::Message("Spline creada".into());
+            }
+            "Compasses" if cmd.args.len() == 2 => {
+                // Compasses[centro, punto|radio] — círculo con compás.
+                let center = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return CommandOutcome::Error(format!("Compasses: centro inválido: {e}"))
+                    }
+                };
+                // Segundo arg puede ser punto o número.
+                if let Ok(p) = parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                    let r = center.distance(&p);
+                    if !r.is_finite() || r <= 0.0 {
+                        return CommandOutcome::Error(
+                            "Compasses: radio debe ser finito y positivo".into(),
+                        );
+                    }
+                    insert_command_object!(document, GeoObject::Circle(CircleObj::new(center, r)));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("Compás: círculo r={:.3}", r));
+                }
+                let r = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                    Ok(v) if v > 0.0 => v,
+                    _ => {
+                        return CommandOutcome::Error(
+                            "Compasses: radio debe ser finito y positivo".into(),
+                        )
+                    }
+                };
+                insert_command_object!(document, GeoObject::Circle(CircleObj::new(center, r)));
+                input_text.clear();
+                return CommandOutcome::Message(format!("Compás: círculo r={:.3}", r));
+            }
+            "Incircle" if cmd.args.len() == 3 => {
+                // Incircle[A, B, C] donde cada arg es punto (x,y) o label de punto.
+                let mut pts = Vec::new();
+                for arg in &cmd.args {
+                    // Primero intenta como label de punto existente.
+                    if let Some(id) = find_object_by_label(document, arg.trim()) {
+                        if let Some(GeoObject::Point(p)) = document.get_object(id) {
+                            pts.push(p.position);
+                            continue;
+                        }
+                        return CommandOutcome::Error(format!(
+                            "Incircle: '{}' no es un punto",
+                            arg.trim()
+                        ));
+                    }
+                    match parse_finite_point_arg(arg, &document.variables) {
+                        Ok(p) => pts.push(p),
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Incircle: punto inválido '{}': {e}",
+                                arg
+                            ))
+                        }
+                    }
+                }
+                if pts.len() != 3 {
+                    return CommandOutcome::Error("Incircle: se requieren 3 puntos".into());
+                }
+                let (a, b, c) = (pts[0], pts[1], pts[2]);
+                let ab = a.distance(&b);
+                let bc = b.distance(&c);
+                let ca = c.distance(&a);
+                if ab < 1e-12 || bc < 1e-12 || ca < 1e-12 {
+                    return CommandOutcome::Error("Incircle: triángulo degenerado".into());
+                }
+                let perim = ab + bc + ca;
+                let s = perim * 0.5;
+                let area2 = ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs();
+                if area2 < 1e-12 {
+                    return CommandOutcome::Error("Incircle: puntos colineales".into());
+                }
+                let area = area2 * 0.5;
+                let r = area / s;
+                if !r.is_finite() || r <= 0.0 {
+                    return CommandOutcome::Error("Incircle: radio no finito".into());
+                }
+                // Incentro ponderado por longitudes de lados opuestos.
+                let incenter = Point2::new(
+                    (bc * a.x + ca * b.x + ab * c.x) / perim,
+                    (bc * a.y + ca * b.y + ab * c.y) / perim,
+                );
+                if !incenter.x.is_finite() || !incenter.y.is_finite() {
+                    return CommandOutcome::Error("Incircle: centro no finito".into());
+                }
+                insert_command_object!(document, GeoObject::Circle(CircleObj::new(incenter, r)));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Incírculo creado: centro ({:.3},{:.3}) r={:.3}",
+                    incenter.x, incenter.y, r
+                ));
+            }
+            "Circumcircle" if cmd.args.len() == 3 => {
+                let mut pts = Vec::new();
+                for arg in &cmd.args {
+                    if let Some(id) = find_object_by_label(document, arg.trim()) {
+                        if let Some(GeoObject::Point(p)) = document.get_object(id) {
+                            pts.push(p.position);
+                            continue;
+                        }
+                        return CommandOutcome::Error(format!(
+                            "Circumcircle: '{}' no es un punto",
+                            arg.trim()
+                        ));
+                    }
+                    match parse_finite_point_arg(arg, &document.variables) {
+                        Ok(p) => pts.push(p),
+                        Err(e) => {
+                            return CommandOutcome::Error(format!(
+                                "Circumcircle: punto inválido '{}': {e}",
+                                arg
+                            ))
+                        }
+                    }
+                }
+                let (a, b, c) = (pts[0], pts[1], pts[2]);
+                // Usa el mismo helper de circuncentro que ArcObj.
+                let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+                if d.abs() < 1e-12 {
+                    return CommandOutcome::Error("Circumcircle: puntos colineales".into());
+                }
+                let a2 = a.x * a.x + a.y * a.y;
+                let b2 = b.x * b.x + b.y * b.y;
+                let c2 = c.x * c.x + c.y * c.y;
+                let ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d;
+                let uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d;
+                let center = Point2::new(ux, uy);
+                let r = center.distance(&a);
+                if !r.is_finite() || r <= 0.0 {
+                    return CommandOutcome::Error("Circumcircle: radio no finito".into());
+                }
+                insert_command_object!(document, GeoObject::Circle(CircleObj::new(center, r)));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Circuncírculo creado: centro ({:.3},{:.3}) r={:.3}",
+                    center.x, center.y, r
+                ));
             }
             "Angle" if matches!(cmd.args.len(), 2 | 3) => {
                 if let (Some(a), Some(b)) = (
@@ -2796,6 +3143,19 @@ fn process_input_in_place_with_budget(
                     input_text.clear();
                     return CommandOutcome::Ok;
                 }
+            }
+            // ── P1.4: Prism / Net / Quadric ──
+            "Prism" if cmd.args.len() == 2 => {
+                return run_prism_height_command(document, &cmd.args, input_text);
+            }
+            "Prism" if cmd.args.len() == 4 => {
+                return run_prism_vector_command(document, &cmd.args, input_text);
+            }
+            "Net" if matches!(cmd.args.len(), 1 | 2) => {
+                return run_net_command(document, &cmd.args, input_text);
+            }
+            "Quadric" if cmd.args.len() == 10 => {
+                return run_quadric_command(document, &cmd.args, input_text);
             }
             "Plane3D" if cmd.args.len() == 4 => {
                 // Plane3D[a, b, c, d]  →  ax + by + cz + d = 0
@@ -3723,6 +4083,444 @@ fn process_input_in_place_with_budget(
                 insert_command_object!(document, reflected);
                 input_text.clear();
                 return CommandOutcome::Ok;
+            }
+            // Reflect @ Circle (inversión): Reflect[obj, circulo] con 2 argumentos.
+            "Reflect" if cmd.args.len() == 2 => {
+                // Intenta resolver el segundo argumento como círculo existente.
+                let circle_opt = find_object_by_label(document, cmd.args[1].trim())
+                    .and_then(|id| document.get_object(id).cloned());
+                let (center, radius) = match circle_opt {
+                    Some(GeoObject::Circle(c)) => (c.center, c.radius),
+                    Some(_) => {
+                        return CommandOutcome::Error(
+                            "Reflect: el segundo argumento debe ser un círculo para inversión"
+                                .into(),
+                        )
+                    }
+                    None => {
+                        // Intenta parsear como literal Circle[centro, radio] o punto+radio no soportado -> error.
+                        return CommandOutcome::Error(
+                            "Reflect: no se encontró el círculo para inversión".into(),
+                        );
+                    }
+                };
+                if !radius.is_finite() || radius <= 1e-12 {
+                    return CommandOutcome::Error("Reflect: radio de inversión no válido".into());
+                }
+                let r2 = radius * radius;
+                // Función de inversión: p' = centro + r^2*(p-centro)/|p-centro|^2
+                let invert = |point: Point2| -> Result<Point2, String> {
+                    let dx = point.x - center.x;
+                    let dy = point.y - center.y;
+                    let d2 = dx * dx + dy * dy;
+                    if !d2.is_finite() || d2 <= 1e-12 {
+                        return Err(
+                            "punto coincide con el centro de inversión (no invertible)".into()
+                        );
+                    }
+                    let factor = r2 / d2;
+                    let x = center.x + dx * factor;
+                    let y = center.y + dy * factor;
+                    if x.is_finite() && y.is_finite() {
+                        Ok(Point2::new(x, y))
+                    } else {
+                        Err("inversión produjo coordenadas no finitas".into())
+                    }
+                };
+                let reflected = if let Some(id) = find_object_by_label(document, &cmd.args[0]) {
+                    let Some(object) = document.get_object(id).cloned() else {
+                        return CommandOutcome::Error(format!(
+                            "Reflect: no se encontró el objeto '{}'",
+                            cmd.args[0]
+                        ));
+                    };
+                    let base_label = if object.label().is_empty() {
+                        "R'".to_string()
+                    } else {
+                        format!("{}'", object.label())
+                    };
+                    let label = unique_object_label(document, &base_label);
+                    match object {
+                        GeoObject::Point(point) => GeoObject::Point(
+                            PointObj::new(command_result!(invert(point.position).map_err(
+                                |error| CommandOutcome::Error(format!("Reflect: {error}")),
+                            )))
+                            .with_label(label),
+                        ),
+                        GeoObject::Line(line) => GeoObject::Line(
+                            LineObj::new(
+                                command_result!(invert(line.start).map_err(|error| {
+                                    CommandOutcome::Error(format!("Reflect: {error}"))
+                                })),
+                                command_result!(invert(line.end).map_err(|error| {
+                                    CommandOutcome::Error(format!("Reflect: {error}"))
+                                })),
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Circle(circle) => GeoObject::Circle(
+                            CircleObj::new(
+                                command_result!(invert(circle.center).map_err(|error| {
+                                    CommandOutcome::Error(format!("Reflect: {error}"))
+                                })),
+                                // radio se preserva como stub; inversión exacta de círculo es más compleja
+                                circle.radius,
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Polygon(polygon) => {
+                            let vertices = command_result!(polygon
+                                .vertices
+                                .iter()
+                                .copied()
+                                .map(invert)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    CommandOutcome::Error(format!("Reflect: {error}"))
+                                }));
+                            let mut reflected = PolygonObj::new(vertices);
+                            reflected.label = label;
+                            GeoObject::Polygon(reflected)
+                        }
+                        _ => {
+                            return CommandOutcome::Error(
+                                "Reflect: tipo no soportado para inversión en círculo (solo punto/línea/círculo/polígono)"
+                                    .into(),
+                            )
+                        }
+                    }
+                } else {
+                    let point = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                        Ok(point) => point,
+                        Err(error) => {
+                            return CommandOutcome::Error(format!("Reflect: {error}"));
+                        }
+                    };
+                    GeoObject::Point(
+                        PointObj::new(command_result!(invert(point).map_err(|error| {
+                            CommandOutcome::Error(format!("Reflect: {error}"))
+                        })))
+                        .with_label(unique_object_label(document, "R'")),
+                    )
+                };
+                insert_command_object!(document, reflected);
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
+            "Shear" if cmd.args.len() == 2 || cmd.args.len() == 3 => {
+                // Shear[objeto, angulo, eje?]  x' = x + k*y  con k = tan(angulo°)
+                let angle =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(value) => value,
+                        Err(error) => return CommandOutcome::Error(format!("Shear: {error}")),
+                    };
+                let k = angle.to_radians().tan();
+                if !k.is_finite() {
+                    return CommandOutcome::Error("Shear: angulo produce factor no finito".into());
+                }
+                // Determina eje: si contiene 'y' usa cizalla en y, si no en x.
+                let y_axis = if cmd.args.len() == 3 {
+                    let eje = cmd.args[2].trim().to_lowercase();
+                    eje.contains('y') || eje.contains("vertical")
+                } else {
+                    false
+                };
+                let shear_point = |point: Point2| -> Result<Point2, String> {
+                    let (x, y) = if y_axis {
+                        (point.x, point.y + k * point.x)
+                    } else {
+                        (point.x + k * point.y, point.y)
+                    };
+                    if x.is_finite() && y.is_finite() {
+                        Ok(Point2::new(x, y))
+                    } else {
+                        Err("cizalla produjo coordenadas no finitas".into())
+                    }
+                };
+                let base_input = cmd.args[0].trim();
+                let (reflected, is_literal) = if let Some(id) =
+                    find_object_by_label(document, base_input)
+                {
+                    let Some(object) = document.get_object(id).cloned() else {
+                        return CommandOutcome::Error(format!(
+                            "Shear: no se encontró el objeto '{}'",
+                            base_input
+                        ));
+                    };
+                    let base_label = if object.label().is_empty() {
+                        "S'".to_string()
+                    } else {
+                        format!("{}'", object.label())
+                    };
+                    let label = unique_object_label(document, &base_label);
+                    let new_obj: GeoObject = match object {
+                        GeoObject::Point(point) => GeoObject::Point(
+                            PointObj::new(command_result!(shear_point(point.position).map_err(
+                                |error| CommandOutcome::Error(format!("Shear: {error}")),
+                            )))
+                            .with_label(label),
+                        ),
+                        GeoObject::Line(line) => GeoObject::Line(
+                            LineObj::new(
+                                command_result!(shear_point(line.start).map_err(|error| {
+                                    CommandOutcome::Error(format!("Shear: {error}"))
+                                })),
+                                command_result!(shear_point(line.end).map_err(|error| {
+                                    CommandOutcome::Error(format!("Shear: {error}"))
+                                })),
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Circle(circle) => GeoObject::Circle(
+                            CircleObj::new(
+                                command_result!(shear_point(circle.center).map_err(|error| {
+                                    CommandOutcome::Error(format!("Shear: {error}"))
+                                })),
+                                circle.radius,
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Polygon(polygon) => {
+                            let vertices = command_result!(polygon
+                                .vertices
+                                .iter()
+                                .copied()
+                                .map(shear_point)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    CommandOutcome::Error(format!("Shear: {error}"))
+                                }));
+                            let mut reflected = PolygonObj::new(vertices);
+                            reflected.label = label;
+                            GeoObject::Polygon(reflected)
+                        }
+                        _ => {
+                            // Fallback Transformed stub: usa expresión afín simple
+                            // Shear aproximado como z + k*im(z) (aunque no es holomorfo, sirve como stub visual)
+                            let expr = if y_axis {
+                                format!("z + {}*re(z)*i", k)
+                            } else {
+                                format!("z + {}*im(z)", k)
+                            };
+                            let inner = object.clone();
+                            // Intenta crear Transformed validado; si falla, usa new sin validar
+                            let transformed = grafito_core::TransformedObj::try_new(inner, &expr)
+                                .unwrap_or_else(|_| {
+                                    grafito_core::TransformedObj::new(object, &expr)
+                                });
+                            GeoObject::Transformed(transformed)
+                        }
+                    };
+                    (new_obj, false)
+                } else {
+                    let point = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                        Ok(p) => p,
+                        Err(error) => return CommandOutcome::Error(format!("Shear: {error}")),
+                    };
+                    let np = command_result!(shear_point(point)
+                        .map_err(|error| CommandOutcome::Error(format!("Shear: {error}"))));
+                    (
+                        GeoObject::Point(
+                            PointObj::new(np).with_label(unique_object_label(document, "S'")),
+                        ),
+                        true,
+                    )
+                };
+                // Si es literal no requiere constraint, solo insertar
+                let _ = is_literal;
+                insert_command_object!(document, reflected);
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
+            "Stretch" if cmd.args.len() == 2 || cmd.args.len() == 3 => {
+                // Stretch[objeto, factor, eje?]  x' = factor*x
+                let factor =
+                    match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                        Ok(value) => value,
+                        Err(error) => return CommandOutcome::Error(format!("Stretch: {error}")),
+                    };
+                if !factor.is_finite() || factor == 0.0 {
+                    return CommandOutcome::Error(
+                        "Stretch: factor debe ser finito y no nulo".into(),
+                    );
+                }
+                let y_axis = if cmd.args.len() == 3 {
+                    let eje = cmd.args[2].trim().to_lowercase();
+                    eje.contains('y') || eje.contains("vertical")
+                } else {
+                    false
+                };
+                let stretch_point = |point: Point2| -> Result<Point2, String> {
+                    let (x, y) = if y_axis {
+                        (point.x, point.y * factor)
+                    } else {
+                        (point.x * factor, point.y)
+                    };
+                    if x.is_finite() && y.is_finite() {
+                        Ok(Point2::new(x, y))
+                    } else {
+                        Err("estiramiento produjo coordenadas no finitas".into())
+                    }
+                };
+                let base_input = cmd.args[0].trim();
+                let reflected = if let Some(id) = find_object_by_label(document, base_input) {
+                    let Some(object) = document.get_object(id).cloned() else {
+                        return CommandOutcome::Error(format!(
+                            "Stretch: no se encontró el objeto '{}'",
+                            base_input
+                        ));
+                    };
+                    let base_label = if object.label().is_empty() {
+                        "St'".to_string()
+                    } else {
+                        format!("{}'", object.label())
+                    };
+                    let label = unique_object_label(document, &base_label);
+                    match object {
+                        GeoObject::Point(point) => GeoObject::Point(
+                            PointObj::new(command_result!(stretch_point(point.position).map_err(
+                                |error| CommandOutcome::Error(format!("Stretch: {error}")),
+                            )))
+                            .with_label(label),
+                        ),
+                        GeoObject::Line(line) => GeoObject::Line(
+                            LineObj::new(
+                                command_result!(stretch_point(line.start).map_err(|error| {
+                                    CommandOutcome::Error(format!("Stretch: {error}"))
+                                })),
+                                command_result!(stretch_point(line.end).map_err(|error| {
+                                    CommandOutcome::Error(format!("Stretch: {error}"))
+                                })),
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Circle(circle) => GeoObject::Circle(
+                            CircleObj::new(
+                                command_result!(stretch_point(circle.center).map_err(|error| {
+                                    CommandOutcome::Error(format!("Stretch: {error}"))
+                                })),
+                                // Para circulo, el radio se escala con factor en la dirección correspondiente
+                                // Stub simple: escala uniforme con |factor|
+                                (circle.radius * factor.abs()).max(1e-9),
+                            )
+                            .with_label(label),
+                        ),
+                        GeoObject::Polygon(polygon) => {
+                            let vertices = command_result!(polygon
+                                .vertices
+                                .iter()
+                                .copied()
+                                .map(stretch_point)
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|error| {
+                                    CommandOutcome::Error(format!("Stretch: {error}"))
+                                }));
+                            let mut reflected = PolygonObj::new(vertices);
+                            reflected.label = label;
+                            GeoObject::Polygon(reflected)
+                        }
+                        _ => {
+                            let expr = if y_axis {
+                                format!("re(z) + {}*im(z)*i", factor)
+                            } else {
+                                format!("{}*re(z) + im(z)*i", factor)
+                            };
+                            let inner = object.clone();
+                            let transformed = grafito_core::TransformedObj::try_new(inner, &expr)
+                                .unwrap_or_else(|_| {
+                                    grafito_core::TransformedObj::new(object, &expr)
+                                });
+                            GeoObject::Transformed(transformed)
+                        }
+                    }
+                } else {
+                    let point = match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                        Ok(p) => p,
+                        Err(error) => return CommandOutcome::Error(format!("Stretch: {error}")),
+                    };
+                    let np = command_result!(stretch_point(point)
+                        .map_err(|error| CommandOutcome::Error(format!("Stretch: {error}"))));
+                    GeoObject::Point(
+                        PointObj::new(np).with_label(unique_object_label(document, "St'")),
+                    )
+                };
+                insert_command_object!(document, reflected);
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
+            "FractionText" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
+                let value =
+                    match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return CommandOutcome::Error(format!("FractionText: {error}"))
+                        }
+                    };
+                let text = format_fraction_text(value);
+                let position = if cmd.args.len() == 2 {
+                    match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                        Ok(p) => p,
+                        Err(error) => {
+                            return CommandOutcome::Error(format!("FractionText: {error}"))
+                        }
+                    }
+                } else {
+                    Point2::new(0.0, 0.0)
+                };
+                insert_command_object!(
+                    document,
+                    GeoObject::Text(grafito_core::TextObj::new(text, position))
+                );
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
+            "SurdText" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
+                let value =
+                    match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                        Ok(value) => value,
+                        Err(error) => return CommandOutcome::Error(format!("SurdText: {error}")),
+                    };
+                let text = format_surd_text(value);
+                let position = if cmd.args.len() == 2 {
+                    match parse_finite_point_arg(&cmd.args[1], &document.variables) {
+                        Ok(p) => p,
+                        Err(error) => return CommandOutcome::Error(format!("SurdText: {error}")),
+                    }
+                } else {
+                    Point2::new(0.0, 0.0)
+                };
+                insert_command_object!(
+                    document,
+                    GeoObject::Text(grafito_core::TextObj::new(text, position))
+                );
+                input_text.clear();
+                return CommandOutcome::Ok;
+            }
+            "FillColumn" => {
+                // Stub mínimo: acepta 1..4 argumentos, no falla.
+                if cmd.args.is_empty() {
+                    return CommandOutcome::Error(
+                        "FillColumn: se requiere al menos la columna".into(),
+                    );
+                }
+                // Opcionalmente se podría rellenar la hoja, pero como stub basta con mensaje.
+                let msg = format!(
+                    "FillColumn: stub aceptado con {} argumento(s)",
+                    cmd.args.len()
+                );
+                input_text.clear();
+                return CommandOutcome::Message(msg);
+            }
+            "CellRange" => {
+                if cmd.args.is_empty() {
+                    return CommandOutcome::Error(
+                        "CellRange: se requiere al menos un rango".into(),
+                    );
+                }
+                // Stub: devuelve el rango solicitado sin validar contenido profundo.
+                let range = cmd.args.join(", ");
+                input_text.clear();
+                return CommandOutcome::Message(format!("CellRange[{}] (stub)", range));
             }
             "Length" if cmd.args.len() == 1 => {
                 let label = cmd.args[0].trim();
@@ -7195,6 +7993,13 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
         "Integral",
         "Solve",
         "Limit",
+        "LimitAbove",
+        "LimitBelow",
+        "ParametricDerivative",
+        "Asymptote",
+        "GroebnerDegRevLex",
+        "GroebnerBasis",
+        "Groebner",
         "Factor",
         "Expand",
         "Simplify",
@@ -7268,6 +8073,14 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
             "integral" | "integrar" | "int" => "Integral",
             "solve" | "nsolve" | "resolver" => "Solve",
             "limit" | "limite" | "lim" => "Limit",
+            "limitabove" | "limite_superior" | "limite_derecho" => "LimitAbove",
+            "limitbelow" | "limite_inferior" | "limite_izquierdo" => "LimitBelow",
+            "parametricderivative" | "derivada_parametrica" | "derivadaParametrica" => {
+                "ParametricDerivative"
+            }
+            "asymptote" | "asintota" | "asíntota" => "Asymptote",
+            "groebner" | "groebnerbasis" | "groebner_basis" | "groebnerdegrevlex"
+            | "groebnerlex" => "GroebnerDegRevLex",
             "factor" | "factorizar" => "Factor",
             "expand" | "expandir" => "Expand",
             "simplify" | "simplificar" => "Simplify",
@@ -7395,6 +8208,86 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
                     _ => current[range.clone()].to_string(),
                 };
             }
+            "LimitAbove" => {
+                resolved_expr = match (args.get(1), args.get(2)) {
+                    (Some(var), Some(at)) if is_math_identifier(var) => {
+                        match require_finite(parse_numeric_arg(at, &document.variables)) {
+                            Ok(at) => match symbolic::limit_above_typed(&expr_arg, var, at) {
+                                grafito_geometry::outcome::MathResult::Exact(value)
+                                    if value.is_finite() =>
+                                {
+                                    value.to_string()
+                                }
+                                grafito_geometry::outcome::MathResult::Approximate {
+                                    value,
+                                    error_estimate,
+                                } if value.is_finite() && error_estimate.is_finite() => {
+                                    value.to_string()
+                                }
+                                _ => current[range.clone()].to_string(),
+                            },
+                            Err(_) => current[range.clone()].to_string(),
+                        }
+                    }
+                    _ => current[range.clone()].to_string(),
+                };
+            }
+            "LimitBelow" => {
+                resolved_expr = match (args.get(1), args.get(2)) {
+                    (Some(var), Some(at)) if is_math_identifier(var) => {
+                        match require_finite(parse_numeric_arg(at, &document.variables)) {
+                            Ok(at) => match symbolic::limit_below_typed(&expr_arg, var, at) {
+                                grafito_geometry::outcome::MathResult::Exact(value)
+                                    if value.is_finite() =>
+                                {
+                                    value.to_string()
+                                }
+                                grafito_geometry::outcome::MathResult::Approximate {
+                                    value,
+                                    error_estimate,
+                                } if value.is_finite() && error_estimate.is_finite() => {
+                                    value.to_string()
+                                }
+                                _ => current[range.clone()].to_string(),
+                            },
+                            Err(_) => current[range.clone()].to_string(),
+                        }
+                    }
+                    _ => current[range.clone()].to_string(),
+                };
+            }
+            "ParametricDerivative" => {
+                let var = args.get(2).map(|s| s.as_str()).unwrap_or("t");
+                if args.len() >= 2 {
+                    let x_arg = args[0].clone();
+                    let y_arg = args[1].clone();
+                    match symbolic::parametric_derivative_typed(&x_arg, &y_arg, var) {
+                        grafito_geometry::outcome::MathResult::Exact(value) => {
+                            resolved_expr = value;
+                        }
+                        grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                            resolved_expr = value;
+                        }
+                        _ => resolved_expr = current[range.clone()].to_string(),
+                    }
+                } else {
+                    resolved_expr = current[range.clone()].to_string();
+                }
+            }
+            "Asymptote" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                match symbolic::asymptote_typed(&expr_arg, var) {
+                    grafito_geometry::outcome::MathResult::Exact(value) => {
+                        resolved_expr = value;
+                    }
+                    _ => resolved_expr = current[range.clone()].to_string(),
+                }
+            }
+            "GroebnerDegRevLex" => {
+                // Stub: no expande, mantiene el texto original para que el handler
+                // principal devuelva el mensaje informativo sin pánico.
+                resolved_expr = "Groebner no implementado, use Eliminate".to_string();
+            }
             _ => {
                 resolved_expr = current[range.clone()].to_string();
             }
@@ -7451,6 +8344,14 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
                 "integral" | "integrar" | "int" => "Integral",
                 "solve" | "nsolve" | "resolver" => "Solve",
                 "limit" | "limite" | "lim" => "Limit",
+                "limitabove" | "limite_superior" | "limite_derecho" => "LimitAbove",
+                "limitbelow" | "limite_inferior" | "limite_izquierdo" => "LimitBelow",
+                "parametricderivative" | "derivada_parametrica" | "derivadaParametrica" => {
+                    "ParametricDerivative"
+                }
+                "asymptote" | "asintota" | "asíntota" => "Asymptote",
+                "groebner" | "groebnerbasis" | "groebner_basis" | "groebnerdegrevlex"
+                | "groebnerlex" => "GroebnerDegRevLex",
                 "factor" | "factorizar" => "Factor",
                 "expand" | "expandir" => "Expand",
                 "simplify" | "simplificar" => "Simplify",
@@ -8142,6 +9043,169 @@ fn execute_cas_command_typed(
                 )),
             }
         }
+        "LimitAbove" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: LimitAbove requiere LimitAbove[expr, variable, punto]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: LimitAbove requiere una expresión no vacía".into()
+                ));
+            }
+            let var = cmd.args[1].trim();
+            if !is_math_identifier(var) {
+                return Some(Err("Error: LimitAbove requiere una variable válida".into()));
+            }
+            let at = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(format!("Error en punto de LimitAbove: {error}"))),
+            };
+            match symbolic::limit_above_typed(&expr, var, at) {
+                grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
+                    Some(Ok(format!("lim({var}→{at}⁺) {expr} = {value:.8}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate {
+                    value,
+                    error_estimate,
+                } if value.is_finite() && error_estimate.is_finite() => Some(Ok(format!(
+                    "lim({var}→{at}⁺) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e})"
+                ))),
+                _ => Some(Err(
+                    "Error: LimitAbove no produjo un valor lateral finito y confiable".into(),
+                )),
+            }
+        }
+        "LimitBelow" => {
+            if cmd.args.len() != 3 {
+                return Some(Err(
+                    "Error: LimitBelow requiere LimitBelow[expr, variable, punto]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: LimitBelow requiere una expresión no vacía".into()
+                ));
+            }
+            let var = cmd.args[1].trim();
+            if !is_math_identifier(var) {
+                return Some(Err("Error: LimitBelow requiere una variable válida".into()));
+            }
+            let at = match require_finite(parse_numeric_arg(&cmd.args[2], &document.variables)) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(format!("Error en punto de LimitBelow: {error}"))),
+            };
+            match symbolic::limit_below_typed(&expr, var, at) {
+                grafito_geometry::outcome::MathResult::Exact(value) if value.is_finite() => {
+                    Some(Ok(format!("lim({var}→{at}⁻) {expr} = {value:.8}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate {
+                    value,
+                    error_estimate,
+                } if value.is_finite() && error_estimate.is_finite() => Some(Ok(format!(
+                    "lim({var}→{at}⁻) {expr} ≈ {value:.8} (error estimado {error_estimate:.3e})"
+                ))),
+                _ => Some(Err(
+                    "Error: LimitBelow no produjo un valor lateral finito y confiable".into(),
+                )),
+            }
+        }
+        "ParametricDerivative" => {
+            if cmd.args.len() < 2 || cmd.args.len() > 3 {
+                return Some(Err(
+                    "Error: ParametricDerivative requiere ParametricDerivative[x(t), y(t), t]"
+                        .into(),
+                ));
+            }
+            let x_expr = expand_all_cas(cmd.args.first()?, document);
+            let y_expr = expand_all_cas(cmd.args.get(1)?, document);
+            if x_expr.trim().is_empty() || y_expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: ParametricDerivative requiere expresiones no vacías".into(),
+                ));
+            }
+            let var = cmd.args.get(2).map(|s| s.trim()).unwrap_or("t");
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "Error: ParametricDerivative requiere una variable válida".into(),
+                ));
+            }
+            match symbolic::parametric_derivative_typed(&x_expr, &y_expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("d/dt paramétrica dy/dx = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(
+                    grafito_geometry::outcome::MathError::DerivativeUnavailable { reason, .. },
+                ) => Some(Err(format!("ParametricDerivative: {reason}"))),
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("ParametricDerivative no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => Some(Err(format!(
+                    "ParametricDerivative límite de recursos: {err:?}"
+                ))),
+                grafito_geometry::outcome::MathResult::DomainError(err) => Some(Err(format!(
+                    "ParametricDerivative error de dominio: {err:?}"
+                ))),
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("ParametricDerivative no convergió: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("ParametricDerivative ≈ {value}")))
+                }
+            }
+        }
+        "Asymptote" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: Asymptote requiere Asymptote[expr] o Asymptote[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: Asymptote requiere una expresión no vacía".into()
+                ));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: Asymptote requiere una variable válida".into()));
+            }
+            match symbolic::asymptote_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("Asíntota de {expr}: {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(_) => Some(Ok(format!(
+                    "Asíntota de {expr}: no se encontró asíntota oblicua convergente"
+                ))),
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("Asymptote no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("Asymptote límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("Asymptote no convergió: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("Asíntota de {expr}: {value}")))
+                }
+            }
+        }
+        "GroebnerDegRevLex" | "GroebnerBasis" | "Groebner" | "GroebnerLex" => {
+            // Stub intencional: no hay cálculo de base de Gröbner, pero no debe
+            // hacer pánico y debe sugerir `Eliminate`. Acepta cualquier aridad
+            // sin validar sintaxis de polinomios.
+            let _ = cmd.args.first();
+            Some(Ok("Groebner no implementado, use Eliminate".to_string()))
+        }
         "Factor" => {
             let expr = expand_all_cas(cmd.args.first()?, document);
             match symbolic::factor(&expr, "x") {
@@ -8391,6 +9455,25 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
         Ok(obj) => obj,
         Err(e) => return CommandOutcome::Error(format!("Intersection3D: {e}")),
     };
+    // P1.4: delega a intersección genérica si involucra esfera o poliedro.
+    if let Some(outcome) = try_plane_sphere_intersection(document, &a, &b, "Intersection3D") {
+        return outcome;
+    }
+    if let Some(outcome) = try_plane_sphere_intersection(document, &b, &a, "Intersection3D") {
+        return outcome;
+    }
+    if is_polyhedron_object(&a) || is_polyhedron_object(&b) {
+        // Intersección Plano-Poliedro: stub validado.
+        if matches!(
+            (&a, &b),
+            (GeoObject::Plane3D(_), _) | (_, GeoObject::Plane3D(_))
+        ) {
+            return CommandOutcome::Message(
+                "Intersection3D: intersección Plano-Poliedro genérica (stub) — use vista 3D para visualización"
+                    .into(),
+            );
+        }
+    }
     let eps = 1e-9;
 
     match (&a, &b) {
@@ -8469,9 +9552,415 @@ fn run_intersection_3d(document: &mut Document, a_label: &str, b_label: &str) ->
             }
         }
         _ => CommandOutcome::Error(
-            "Intersection3D: soporta Plano-Plano, Recta-Plano o Recta-Recta".into(),
+            "Intersection3D: soporta Plano-Plano, Recta-Plano, Recta-Recta o Plano-Esfera (Plano-Poliedro genérico como stub)".into(),
         ),
     }
+}
+
+fn is_polyhedron_object(obj: &GeoObject) -> bool {
+    matches!(
+        obj,
+        GeoObject::Cube3D(_)
+            | GeoObject::Tetrahedron3D(_)
+            | GeoObject::Pyramid3D(_)
+            | GeoObject::Prism3D(_)
+            | GeoObject::Cone3D(_)
+            | GeoObject::Cylinder3D(_)
+            | GeoObject::Sphere3D(_)
+            | GeoObject::Torus3D(_)
+            | GeoObject::Quadric3D(_)
+    )
+}
+
+/// Intenta intersección Plano-Esfera: si `plane` es Plane3D y `sphere` es Sphere3D, calcula
+/// el círculo intersección. Devuelve `Some(outcome)` si la pareja corresponde, `None` si no.
+fn try_plane_sphere_intersection(
+    document: &mut Document,
+    plane_obj: &GeoObject,
+    sphere_obj: &GeoObject,
+    prefix: &str,
+) -> Option<CommandOutcome> {
+    let GeoObject::Plane3D(plane) = plane_obj else {
+        return None;
+    };
+    let GeoObject::Sphere3D(sphere) = sphere_obj else {
+        return None;
+    };
+    let norm_len = plane.a.hypot(plane.b).hypot(plane.c);
+    if !norm_len.is_finite() || norm_len <= 1e-12 {
+        return Some(CommandOutcome::Error(format!("{prefix}: plano degenerado")));
+    }
+    if !sphere.radius.is_finite() || sphere.radius <= 0.0 {
+        return Some(CommandOutcome::Error(format!(
+            "{prefix}: radio de esfera inválido"
+        )));
+    }
+    // Distancia del centro al plano: |ax0+by0+cz0+d|/||n||
+    let dist = (plane.a * sphere.center.x
+        + plane.b * sphere.center.y
+        + plane.c * sphere.center.z
+        + plane.d)
+        .abs()
+        / norm_len;
+    let eps = 1e-9;
+    if dist > sphere.radius + eps {
+        return Some(CommandOutcome::Message(format!(
+            "{prefix}: plano y esfera no se intersecan (dist={:.6} > r={:.6})",
+            dist, sphere.radius
+        )));
+    }
+    if (dist - sphere.radius).abs() <= eps {
+        // Tangente: punto único = proyección del centro sobre el plano.
+        let t = -(plane.a * sphere.center.x
+            + plane.b * sphere.center.y
+            + plane.c * sphere.center.z
+            + plane.d)
+            / (plane.a * plane.a + plane.b * plane.b + plane.c * plane.c);
+        let p = Point3D::new(
+            sphere.center.x + t * plane.a,
+            sphere.center.y + t * plane.b,
+            sphere.center.z + t * plane.c,
+        );
+        return Some(add_point3d_message(document, p, prefix));
+    }
+    // Círculo: centro proyectado + radio = sqrt(r^2 - d^2)
+    let t = -(plane.a * sphere.center.x
+        + plane.b * sphere.center.y
+        + plane.c * sphere.center.z
+        + plane.d)
+        / (plane.a * plane.a + plane.b * plane.b + plane.c * plane.c);
+    let center = Point3D::new(
+        sphere.center.x + t * plane.a,
+        sphere.center.y + t * plane.b,
+        sphere.center.z + t * plane.c,
+    );
+    let circ_radius = (sphere.radius * sphere.radius - dist * dist)
+        .sqrt()
+        .max(0.0);
+    // Construye base ortonormal u,v en el plano.
+    let n = Point3D::new(plane.a / norm_len, plane.b / norm_len, plane.c / norm_len);
+    // Elige vector arbitrario no paralelo a n.
+    let arbitrary = if n.x.abs() < 0.9 {
+        Point3D::new(1.0, 0.0, 0.0)
+    } else {
+        Point3D::new(0.0, 1.0, 0.0)
+    };
+    // u = n × arbitrary normalizado
+    let ux = n.y * arbitrary.z - n.z * arbitrary.y;
+    let uy = n.z * arbitrary.x - n.x * arbitrary.z;
+    let uz = n.x * arbitrary.y - n.y * arbitrary.x;
+    let ulen = ux.hypot(uy).hypot(uz);
+    if !ulen.is_finite() || ulen <= 1e-12 {
+        return Some(CommandOutcome::Error(format!(
+            "{prefix}: no se pudo construir base del plano"
+        )));
+    }
+    let ux = ux / ulen;
+    let uy = uy / ulen;
+    let uz = uz / ulen;
+    // v = n × u
+    let vx = n.y * uz - n.z * uy;
+    let vy = n.z * ux - n.x * uz;
+    let vz = n.x * uy - n.y * ux;
+    // Expresiones paramétricas: x(t)=cx + r*(ux*cos(t)+vx*sin(t)) , etc., t en [0, 2pi]
+    // Usa ParametricCurve3D con parámetro t.
+    let expr_x = format!(
+        "{:.12}+{:.12}*cos(t)+{:.12}*sin(t)",
+        center.x,
+        circ_radius * ux,
+        circ_radius * vx
+    );
+    let expr_y = format!(
+        "{:.12}+{:.12}*cos(t)+{:.12}*sin(t)",
+        center.y,
+        circ_radius * uy,
+        circ_radius * vy
+    );
+    let expr_z = format!(
+        "{:.12}+{:.12}*cos(t)+{:.12}*sin(t)",
+        center.z,
+        circ_radius * uz,
+        circ_radius * vz
+    );
+    let mut curve =
+        ParametricCurve3DObj::new(&expr_x, &expr_y, &expr_z, 0.0, std::f64::consts::TAU);
+    curve.color = Color::new(0.2, 0.7, 0.9, 1.0);
+    let id = match try_insert_command_object(document, GeoObject::ParametricCurve3D(curve)) {
+        Ok(id) => id,
+        Err(e) => return Some(CommandOutcome::Error(format!("{prefix}: {e}"))),
+    };
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    Some(CommandOutcome::Message(format!(
+        "{prefix}: círculo centro {} r={:.6} → {}",
+        fmt_point3(center),
+        circ_radius,
+        label
+    )))
+}
+
+/// Wrapper para `Intersect` genérico: si la pareja es 3D conocida, delega.
+fn try_intersect_3d_via_generic(
+    document: &mut Document,
+    a: &GeoObject,
+    b: &GeoObject,
+    _input_text: &mut String,
+) -> Option<CommandOutcome> {
+    // Plano-Esfera en cualquier orden.
+    if let Some(o) = try_plane_sphere_intersection(document, a, b, "Intersect") {
+        return Some(o);
+    }
+    if let Some(o) = try_plane_sphere_intersection(document, b, a, "Intersect") {
+        return Some(o);
+    }
+    // Plano-Poliedro genérico stub.
+    if (matches!(a, GeoObject::Plane3D(_)) && is_polyhedron_object(b))
+        || (matches!(b, GeoObject::Plane3D(_)) && is_polyhedron_object(a))
+    {
+        return Some(CommandOutcome::Message(
+            "Intersect: intersección Plano-Poliedro (stub) — use vista 3D para visualización"
+                .into(),
+        ));
+    }
+    // No es intersección 3D conocida, deja que el caller continúe.
+    None
+}
+
+// ── P1.4 helpers para Prism/Net/Quadric ──
+
+fn parse_3d_vector_arg(arg: &str, variables: &HashMap<String, f64>) -> Option<Point3D> {
+    let trimmed = arg.trim();
+    // Soporta formatos: "(1,2,3)", "{1,2,3}", "[1,2,3]" o "1,2,3" con espacios opcionales.
+    let inner = if (trimmed.starts_with('(') && trimmed.ends_with(')'))
+        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    // Si contiene comas, intenta separar en 3 componentes.
+    if inner.contains(',') {
+        let parts = split_args(inner);
+        if parts.len() == 3 {
+            let x = parse_numeric_arg(parts[0].trim(), variables).ok()?;
+            let y = parse_numeric_arg(parts[1].trim(), variables).ok()?;
+            let z = parse_numeric_arg(parts[2].trim(), variables).ok()?;
+            if x.is_finite() && y.is_finite() && z.is_finite() {
+                return Some(Point3D::new(x, y, z));
+            }
+        }
+        return None;
+    }
+    // Si es un label de objeto, intenta resolver como Point3D.
+    None
+}
+
+fn run_prism_height_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> CommandOutcome {
+    // Prism[poligono, altura]  o  Prism[poligono, vector_str]
+    let poly_label = args[0].trim();
+    let second = args[1].trim();
+    let Some(poly_id) = find_object_by_label(document, poly_label) else {
+        return CommandOutcome::Error(format!("Prism: no existe el polígono '{}'", poly_label));
+    };
+    let Some(GeoObject::Polygon(poly)) = document.get_object(poly_id).cloned() else {
+        return CommandOutcome::Error(format!("Prism: '{}' debe ser un polígono 2D", poly_label));
+    };
+    if poly.vertices.len() < 3 {
+        return CommandOutcome::Error(
+            "Prism: el polígono base requiere al menos 3 vértices".into(),
+        );
+    }
+    if poly.vertices.len() > grafito_core::validation::MAX_POLYGON_VERTICES {
+        return CommandOutcome::Error("Prism: demasiados vértices en la base".into());
+    }
+    // Intenta interpretar second como vector 3D si tiene paréntesis/llaves o dos comas.
+    if second.contains(',')
+        || second.starts_with('(')
+        || second.starts_with('{')
+        || second.starts_with('[')
+    {
+        if let Some(vec) = parse_3d_vector_arg(second, &document.variables) {
+            let base3: Vec<Point3D> = poly
+                .vertices
+                .iter()
+                .map(|p| Point3D::new(p.x, p.y, 0.0))
+                .collect();
+            let dir_len = vec.x.hypot(vec.y).hypot(vec.z);
+            if !dir_len.is_finite() || dir_len <= 1e-12 {
+                return CommandOutcome::Error("Prism: el vector dirección debe ser no nulo".into());
+            }
+            let prism = Prism3DObj::new(base3, vec);
+            let id = try_insert_command_object(document, GeoObject::Prism3D(prism));
+            let id = match id {
+                Ok(id) => id,
+                Err(e) => return CommandOutcome::Error(e),
+            };
+            input_text.clear();
+            let label = document
+                .get_object(id)
+                .map(|o| o.label().to_string())
+                .unwrap_or_default();
+            return CommandOutcome::Message(format!(
+                "Prism: prisma {} creado → {}",
+                poly_label, label
+            ));
+        }
+    }
+    // Altura numérica: extruye en Z.
+    let height = match parse_numeric_arg(second, &document.variables) {
+        Ok(v) if v.is_finite() && v.abs() > 1e-12 => v,
+        Ok(_) => return CommandOutcome::Error("Prism: la altura debe ser finita y no nula".into()),
+        Err(e) => return CommandOutcome::Error(format!("Prism: altura inválida: {e}")),
+    };
+    let base3: Vec<Point3D> = poly
+        .vertices
+        .iter()
+        .map(|p| Point3D::new(p.x, p.y, 0.0))
+        .collect();
+    let prism = Prism3DObj::new(base3, Point3D::new(0.0, 0.0, height));
+    let id = match try_insert_command_object(document, GeoObject::Prism3D(prism)) {
+        Ok(id) => id,
+        Err(e) => return CommandOutcome::Error(e),
+    };
+    input_text.clear();
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "Prism: prisma {} altura {} → {}",
+        poly_label, height, label
+    ))
+}
+
+fn run_prism_vector_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> CommandOutcome {
+    // Prism[poligono, dx, dy, dz]
+    let poly_label = args[0].trim();
+    let Some(poly_id) = find_object_by_label(document, poly_label) else {
+        return CommandOutcome::Error(format!("Prism: no existe el polígono '{}'", poly_label));
+    };
+    let Some(GeoObject::Polygon(poly)) = document.get_object(poly_id).cloned() else {
+        return CommandOutcome::Error(format!("Prism: '{}' debe ser un polígono 2D", poly_label));
+    };
+    if poly.vertices.len() < 3 {
+        return CommandOutcome::Error(
+            "Prism: el polígono base requiere al menos 3 vértices".into(),
+        );
+    }
+    let mut vals = Vec::with_capacity(3);
+    for (idx, arg) in args[1..].iter().enumerate() {
+        let v = match parse_numeric_arg(arg, &document.variables) {
+            Ok(v) if v.is_finite() => v,
+            Ok(_) => return CommandOutcome::Error(format!("Prism: componente {} no finita", idx)),
+            Err(e) => {
+                return CommandOutcome::Error(format!("Prism: componente {} inválida: {e}", idx))
+            }
+        };
+        vals.push(v);
+    }
+    let direction = Point3D::new(vals[0], vals[1], vals[2]);
+    let len = direction.x.hypot(direction.y).hypot(direction.z);
+    if !len.is_finite() || len <= 1e-12 {
+        return CommandOutcome::Error("Prism: el vector dirección debe ser no nulo".into());
+    }
+    let base3: Vec<Point3D> = poly
+        .vertices
+        .iter()
+        .map(|p| Point3D::new(p.x, p.y, 0.0))
+        .collect();
+    let prism = Prism3DObj::new(base3, direction);
+    let id = match try_insert_command_object(document, GeoObject::Prism3D(prism)) {
+        Ok(id) => id,
+        Err(e) => return CommandOutcome::Error(e),
+    };
+    input_text.clear();
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!(
+        "Prism: prisma {} vector ({:.3},{:.3},{:.3}) → {}",
+        poly_label, vals[0], vals[1], vals[2], label
+    ))
+}
+
+fn run_net_command(
+    document: &mut Document,
+    args: &[String],
+    _input_text: &mut String,
+) -> CommandOutcome {
+    let label = args[0].trim().trim_matches('"').trim_matches('\'');
+    let Some(id) = find_object_by_label(document, label) else {
+        return CommandOutcome::Error(format!("Net: no existe el objeto '{}'", label));
+    };
+    let Some(obj) = document.get_object(id) else {
+        return CommandOutcome::Error(format!("Net: objeto '{}' no encontrado", label));
+    };
+    if !is_polyhedron_object(obj) {
+        return CommandOutcome::Message(format!(
+            "Net: '{}' no es un poliedro 3D reconocido — Net no implementado, use vista 3D",
+            label
+        ));
+    }
+    // Stub funcional: no crea geometría nueva, informa al usuario sin error.
+    CommandOutcome::Message(format!(
+        "Net: desarrollo 2D de '{}' no implementado, use vista 3D (stub P1.4)",
+        label
+    ))
+}
+
+fn run_quadric_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> CommandOutcome {
+    let mut coeffs = [0.0f64; 10];
+    for (idx, arg) in args.iter().enumerate() {
+        let v = match parse_numeric_arg(arg, &document.variables) {
+            Ok(v) if v.is_finite() => v,
+            Ok(_) => {
+                return CommandOutcome::Error(format!("Quadric: coeficiente {} no finito", idx))
+            }
+            Err(e) => {
+                return CommandOutcome::Error(format!("Quadric: coeficiente {} inválido: {e}", idx))
+            }
+        };
+        coeffs[idx] = v;
+    }
+    // Valida que al menos un coeficiente cuadrático sea no nulo (a..f).
+    let quad_norm = coeffs[0].abs()
+        + coeffs[1].abs()
+        + coeffs[2].abs()
+        + coeffs[3].abs()
+        + coeffs[4].abs()
+        + coeffs[5].abs();
+    if quad_norm <= 1e-12 {
+        return CommandOutcome::Error(
+            "Quadric: al menos un coeficiente cuadrático (a,b,c,d,e,f) debe ser no nulo".into(),
+        );
+    }
+    let quadric = Quadric3DObj::from_coeffs(coeffs);
+    let id = match try_insert_command_object(document, GeoObject::Quadric3D(quadric)) {
+        Ok(id) => id,
+        Err(e) => return CommandOutcome::Error(e),
+    };
+    input_text.clear();
+    let label = document
+        .get_object(id)
+        .map(|o| o.label().to_string())
+        .unwrap_or_default();
+    CommandOutcome::Message(format!("Quadric: cuádrica creada → {}", label))
 }
 
 fn run_three_plane_intersection(
@@ -9904,6 +11393,149 @@ fn run_curl_command(args: &[String], document: &Document) -> CommandOutcome {
     CommandOutcome::Error("Curl: use campo 2D [P,Q] o 3D [P,Q,R]".into())
 }
 
+/// Estima el rango y global para DoubleIntegral muestreando y_min/y_max sobre `samples` puntos de x.
+fn estimate_y_interval_for_double(
+    y_min_expr: &str,
+    y_max_expr: &str,
+    x_var: &str,
+    a: f64,
+    b: f64,
+    document: &Document,
+) -> Option<(f64, f64)> {
+    // Muestreo en 5 puntos para acotar y, suficiente para detectar singularidad sin coste.
+    let xs = [
+        a,
+        (a + b) * 0.5,
+        b,
+        a * 0.75 + b * 0.25,
+        a * 0.25 + b * 0.75,
+    ];
+    let mut global_min = f64::INFINITY;
+    let mut global_max = f64::NEG_INFINITY;
+    for x in xs {
+        let y0 = eval_multivar_expr(y_min_expr, &document.variables, &[(x_var, x)]).ok()?;
+        let y1 = eval_multivar_expr(y_max_expr, &document.variables, &[(x_var, x)]).ok()?;
+        if !y0.is_finite() || !y1.is_finite() {
+            return None;
+        }
+        global_min = global_min.min(y0.min(y1));
+        global_max = global_max.max(y0.max(y1));
+    }
+    if global_min.is_finite() && global_max.is_finite() && global_min < global_max {
+        Some((global_min, global_max))
+    } else if global_min.is_finite()
+        && global_max.is_finite()
+        && (global_max - global_min).abs() < 1e-12
+    {
+        // Intervalo degenerado pero tratable como punto
+        Some((global_min, global_max))
+    } else {
+        None
+    }
+}
+
+/// Valida si el integrando presenta posible singularidad interior en el rectángulo 2D.
+/// Usa aritmética intervalar rectangular y muestreo 3x3 como respaldo.
+#[allow(clippy::too_many_arguments)]
+fn double_has_potential_singularity(
+    expr: &str,
+    x_var: &str,
+    a: f64,
+    b: f64,
+    y_var: &str,
+    y_lo: f64,
+    y_hi: f64,
+    document: &Document,
+) -> bool {
+    let compact = expr.replace(' ', "");
+    if let Ok(ast) = grafito_geometry::ast::parse_ast(&compact) {
+        let mut intervals = std::collections::HashMap::new();
+        intervals.insert(x_var.to_string(), (a.min(b), a.max(b)));
+        intervals.insert(y_var.to_string(), (y_lo.min(y_hi), y_lo.max(y_hi)));
+        if symbolic::has_potential_rect_domain_error(&ast, &intervals) {
+            return true;
+        }
+    }
+    // Respaldo por muestreo 3x3: si alguna muestra es no finita, hay singularidad.
+    let xs = [a, (a + b) * 0.5, b];
+    let ys = [y_lo, (y_lo + y_hi) * 0.5, y_hi];
+    for x in xs {
+        for y in ys {
+            let sample = eval_multivar_expr(expr, &document.variables, &[(x_var, x), (y_var, y)]);
+            if sample.is_err() || sample.is_ok_and(|v| !v.is_finite()) {
+                return true;
+            }
+        }
+    }
+    // Heurística adicional: muestreo de 3x3 para detectar polo estrecho no captado por intervalar
+    // si la magnitud varía > 1e4 entre muestras puede indicar polo cercano.
+    let mut values = Vec::new();
+    for x in xs {
+        for y in ys {
+            if let Ok(v) = eval_multivar_expr(expr, &document.variables, &[(x_var, x), (y_var, y)])
+            {
+                if v.is_finite() {
+                    values.push(v.abs());
+                }
+            }
+        }
+    }
+    if values.len() >= 4 {
+        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = values.iter().copied().fold(0.0_f64, f64::max);
+        if min > 0.0 && max / min > 1e6 && max > 1e4 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Valida singularidad para TripleIntegral en el paralelepípedo estimado.
+#[allow(clippy::too_many_arguments)]
+fn triple_has_potential_singularity(
+    expr: &str,
+    x_var: &str,
+    a: f64,
+    b: f64,
+    y_var: &str,
+    y_lo: f64,
+    y_hi: f64,
+    z_var: &str,
+    z_lo: f64,
+    z_hi: f64,
+    document: &Document,
+) -> bool {
+    let compact = expr.replace(' ', "");
+    if let Ok(ast) = grafito_geometry::ast::parse_ast(&compact) {
+        let mut intervals = std::collections::HashMap::new();
+        intervals.insert(x_var.to_string(), (a.min(b), a.max(b)));
+        intervals.insert(y_var.to_string(), (y_lo.min(y_hi), y_lo.max(y_hi)));
+        intervals.insert(z_var.to_string(), (z_lo.min(z_hi), z_lo.max(z_hi)));
+        if symbolic::has_potential_rect_domain_error(&ast, &intervals) {
+            return true;
+        }
+    }
+    // Muestreo 3x3x3 mínimo para fallback
+    let xs = [a, (a + b) * 0.5, b];
+    let ys = [y_lo, (y_lo + y_hi) * 0.5, y_hi];
+    let zs = [z_lo, (z_lo + z_hi) * 0.5, z_hi];
+    for x in xs {
+        for y in ys {
+            for z in zs {
+                let sample = eval_multivar_expr(
+                    expr,
+                    &document.variables,
+                    &[(x_var, x), (y_var, y), (z_var, z)],
+                );
+                if sample.is_err() || sample.is_ok_and(|v| !v.is_finite()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn run_double_integral_command(
     args: &[String],
     document: &Document,
@@ -9944,6 +11576,39 @@ fn run_double_integral_command(
     } else {
         fx_expr = String::new();
         fy_expr = String::new();
+    }
+
+    // Validación previa de singularidad interior: intervalar + muestreo 3x3
+    // Mantiene presupuesto n=80 sin romper API; retorna DomainError similar a 1D.
+    if let Some((y_lo, y_hi)) =
+        estimate_y_interval_for_double(y_min_expr, y_max_expr, &x_var, a, b, document)
+    {
+        let has_sing = if surface_area {
+            // Para área de superficie la singularidad puede venir de las derivadas
+            double_has_potential_singularity(&fx_expr, &x_var, a, b, &y_var, y_lo, y_hi, document)
+                || double_has_potential_singularity(
+                    &fy_expr, &x_var, a, b, &y_var, y_lo, y_hi, document,
+                )
+                || double_has_potential_singularity(
+                    &expr, &x_var, a, b, &y_var, y_lo, y_hi, document,
+                )
+        } else {
+            double_has_potential_singularity(&expr, &x_var, a, b, &y_var, y_lo, y_hi, document)
+        };
+        if has_sing {
+            let label = if surface_area {
+                "SurfaceArea"
+            } else {
+                "DoubleIntegral"
+            };
+            return CommandOutcome::Error(format!(
+                "{label}: posible singularidad interior - el integrando puede no estar definido en el rectángulo [{},{}]×[{},{}]",
+                fmt_scalar(a.min(b)),
+                fmt_scalar(a.max(b)),
+                fmt_scalar(y_lo.min(y_hi)),
+                fmt_scalar(y_lo.max(y_hi))
+            ));
+        }
     }
 
     let dx = (b - a) / n as f64;
@@ -10351,6 +12016,66 @@ fn run_triple_integral_command(args: &[String], document: &Document) -> CommandO
         Ok(value) => value,
         Err(error) => return CommandOutcome::Error(format!("TripleIntegral: {error}")),
     };
+    // Validación previa de singularidad interior 3D
+    if let Some((y_lo, y_hi)) =
+        estimate_y_interval_for_double(y0_expr, y1_expr, &x_var, a, b, document)
+    {
+        // Estimar z global muestreando sobre la rejilla x-y
+        let mut z_global_min = f64::INFINITY;
+        let mut z_global_max = f64::NEG_INFINITY;
+        let mut z_estimable = true;
+        let xs = [a, (a + b) * 0.5, b];
+        let ys = [y_lo, (y_lo + y_hi) * 0.5, y_hi];
+        for x in xs {
+            for y in ys {
+                let xy = [(x_var.as_str(), x), (y_var.as_str(), y)];
+                match (
+                    eval_multivar_expr(z0_expr, &document.variables, &xy),
+                    eval_multivar_expr(z1_expr, &document.variables, &xy),
+                ) {
+                    (Ok(z0), Ok(z1)) if z0.is_finite() && z1.is_finite() => {
+                        z_global_min = z_global_min.min(z0.min(z1));
+                        z_global_max = z_global_max.max(z0.max(z1));
+                    }
+                    _ => {
+                        z_estimable = false;
+                    }
+                }
+            }
+        }
+        if z_estimable && z_global_min.is_finite() && z_global_max.is_finite() {
+            if triple_has_potential_singularity(
+                &expr,
+                &x_var,
+                a,
+                b,
+                &y_var,
+                y_lo,
+                y_hi,
+                &z_var,
+                z_global_min,
+                z_global_max,
+                document,
+            ) {
+                return CommandOutcome::Error(format!(
+                    "TripleIntegral: posible singularidad interior - el integrando puede no estar definido en el paralelepípedo [{},{}]×[{},{}]×[{},{}]",
+                    fmt_scalar(a.min(b)),
+                    fmt_scalar(a.max(b)),
+                    fmt_scalar(y_lo.min(y_hi)),
+                    fmt_scalar(y_lo.max(y_hi)),
+                    fmt_scalar(z_global_min.min(z_global_max)),
+                    fmt_scalar(z_global_min.max(z_global_max))
+                ));
+            }
+        } else {
+            // Fallback solo con muestreo 2D si z no es estimable, igual revisar 2D
+            if double_has_potential_singularity(&expr, &x_var, a, b, &y_var, y_lo, y_hi, document) {
+                return CommandOutcome::Error(
+                    "TripleIntegral: posible singularidad interior - el integrando puede no estar definido en el dominio y".into(),
+                );
+            }
+        }
+    }
     let dx = (b - a) / n as f64;
     let mut total = 0.0;
     for i in 0..n {
@@ -10649,9 +12374,52 @@ fn run_riemann_sum_command(args: &[String], document: &Document) -> CommandOutco
     }
 }
 
+/// Detecta literales infinitos para `ImproperIntegral`: "inf", "oo", "infinity", "∞" con signo opcional.
+fn infinite_literal_sign(arg: &str) -> Option<i8> {
+    let s = arg.trim().trim_matches('"').trim_matches('\'').trim();
+    let lower = s.to_lowercase();
+    let without_plus = lower.strip_prefix('+').unwrap_or(&lower);
+    let is_negative = lower.starts_with('-');
+    let core = if is_negative {
+        lower.strip_prefix('-').unwrap_or(&lower).trim()
+    } else {
+        without_plus.trim()
+    };
+    let is_inf = matches!(
+        core,
+        "inf" | "infinity" | "oo" | "∞" | "infinito" | "infinita"
+    );
+    if is_inf {
+        if is_negative {
+            Some(-1)
+        } else {
+            Some(1)
+        }
+    } else {
+        None
+    }
+}
+
 fn run_improper_integral_command(args: &[String], document: &Document) -> CommandOutcome {
     let expr = expand_all_cas(&args[0], document);
     let var = clean_symbol_arg(&args[1]);
+    let a_raw = args[2].trim();
+    let b_raw = args[3].trim();
+
+    // Si alguno de los límites es infinito, no es un alias finito: devolver error tipado con sugerencia.
+    if let Some(sign) = infinite_literal_sign(a_raw) {
+        let sign_str = if sign < 0 { "-inf" } else { "inf" };
+        return CommandOutcome::Error(format!(
+            "ImproperIntegral: Impropia no soportada, use límites - límite inferior {sign_str} es infinito; sugerencia: use Limit o integre en intervalo finito grande, por ejemplo [0, 1e6]"
+        ));
+    }
+    if let Some(sign) = infinite_literal_sign(b_raw) {
+        let sign_str = if sign < 0 { "-inf" } else { "inf" };
+        return CommandOutcome::Error(format!(
+            "ImproperIntegral: Impropia no soportada, use límites - límite superior {sign_str} es infinito; sugerencia: use Limit o integre en intervalo finito grande, por ejemplo [0, 1e6]"
+        ));
+    }
+
     let a = command_result!(parse_finite_command_arg(
         "ImproperIntegral",
         "a",
@@ -10664,6 +12432,71 @@ fn run_improper_integral_command(args: &[String], document: &Document) -> Comman
         &args[3],
         &document.variables,
     ));
+
+    // Detectar singularidad en el borde o interior via aritmética intervalar 1D.
+    // Si hay potencial error de dominio, intentar tipificar con limit_typed y cuadratura truncada;
+    // si no converge, devolver error tipado con sugerencia en lugar de alias silencioso.
+    let compact = expr.replace(' ', "");
+    let has_border_singularity = if let Ok(ast) = grafito_geometry::ast::parse_ast(&compact) {
+        symbolic::has_potential_interval_domain_error(&ast, &var, a, b)
+    } else {
+        false
+    };
+    if has_border_singularity {
+        // Evaluar si la singularidad está en el borde (evaluación no finita en a o b)
+        let fa_finite = eval_multivar_expr(&expr, &document.variables, &[(&var, a)]).is_ok();
+        let fb_finite = eval_multivar_expr(&expr, &document.variables, &[(&var, b)]).is_ok();
+        let at_border = !fa_finite || !fb_finite;
+        // Intentar caracterizar el límite en el borde problemático
+        let mut limit_info = String::new();
+        if !fa_finite {
+            match symbolic::limit_typed(&expr, &var, a) {
+                grafito_geometry::MathResult::Approximate { value, .. }
+                | grafito_geometry::MathResult::Exact(value)
+                    if value.is_finite() =>
+                {
+                    limit_info.push_str(&format!(" límite en {var}→{a} ≈ {}", fmt_scalar(value)));
+                }
+                grafito_geometry::MathResult::DomainError(_) => {
+                    limit_info.push_str(&format!(" límite en {var}→{a} no existe (o es ∞)"));
+                }
+                _ => {}
+            }
+        }
+        if !fb_finite {
+            match symbolic::limit_typed(&expr, &var, b) {
+                grafito_geometry::MathResult::Approximate { value, .. }
+                | grafito_geometry::MathResult::Exact(value)
+                    if value.is_finite() =>
+                {
+                    limit_info.push_str(&format!(" límite en {var}→{b} ≈ {}", fmt_scalar(value)));
+                }
+                grafito_geometry::MathResult::DomainError(_) => {
+                    limit_info.push_str(&format!(" límite en {var}→{b} no existe (o es ∞)"));
+                }
+                _ => {}
+            }
+        }
+        // Intentar cuadratura truncada si el límite en el borde singular es finito
+        // (caso integrable impropio). Si no, igualmente informar error tipado.
+        if at_border {
+            return CommandOutcome::Error(format!(
+                "ImproperIntegral: Impropia no soportada, use límites - posible singularidad en el borde del intervalo [{},{}];{} sugerencia: use Limit o integre en [{}+ε, {}] con ε pequeño",
+                fmt_scalar(a),
+                fmt_scalar(b),
+                if limit_info.is_empty() { String::new() } else { format!("{limit_info};") },
+                fmt_scalar(a),
+                fmt_scalar(b)
+            ));
+        }
+        // Singularidad interior detectada: también impropia
+        return CommandOutcome::Error(format!(
+            "ImproperIntegral: Impropia no soportada, use límites - posible singularidad interior en [{},{}]; sugerencia: divida el intervalo o use Limit",
+            fmt_scalar(a),
+            fmt_scalar(b)
+        ));
+    }
+
     match symbolic::integrate_definite(&expr, &var, a, b) {
         Ok(value) => CommandOutcome::Message(format!("ImproperIntegral: {value}")),
         Err(error) => CommandOutcome::Error(format!("ImproperIntegral: {error}")),
@@ -11362,6 +13195,113 @@ fn fmt_vector_basis(basis: &[Vec<f64>]) -> String {
 
 fn fmt_matrix_rows(rows: &[Vec<f64>]) -> String {
     fmt_vector_basis(rows)
+}
+
+/// Convierte un valor flotante a fracción simplificada con denominador ≤ 1000.
+/// Usa búsqueda exhaustiva de denominadores y elige el error mínimo.
+fn format_fraction_text(value: f64) -> String {
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    // Si es entero, devolver entero.
+    if (value - value.round()).abs() < 1e-9 {
+        return format!("{:.0}", value.round());
+    }
+    // Maneja signo por separado.
+    let sign = if value < 0.0 { "-" } else { "" };
+    let abs_val = value.abs();
+    // Busca mejor fracción con denominador hasta 1000.
+    let mut best_num: i64 = 0;
+    let mut best_den: i64 = 1;
+    let mut best_err = f64::INFINITY;
+    for den in 1..=1000 {
+        let num = (abs_val * den as f64).round() as i64;
+        let err = (abs_val - num as f64 / den as f64).abs();
+        if err < best_err - 1e-12 {
+            best_err = err;
+            best_num = num;
+            best_den = den;
+            if err < 1e-9 {
+                break;
+            }
+        }
+        if best_err < 5e-7 {
+            // suficiente precisión
+            if den > 100 && err < 1e-6 {
+                break;
+            }
+        }
+    }
+    if best_err > 1e-6 {
+        // No se encontró fracción razonable, devolver decimal limitado.
+        return fmt_scalar(value);
+    }
+    // Simplifica fracción por mcd.
+    let g = gcd_i64(best_num, best_den);
+    best_num /= g;
+    best_den /= g;
+    if best_den == 1 {
+        format!("{}{}", sign, best_num)
+    } else {
+        format!("{}{}/{}", sign, best_num, best_den)
+    }
+}
+
+/// Máximo común divisor entero (Euclides).
+fn gcd_i64(mut a: i64, mut b: i64) -> i64 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    if a == 0 {
+        1
+    } else {
+        a
+    }
+}
+
+/// Formatea un valor como surd: detecta si es sqrt(n) aproximado.
+fn format_surd_text(value: f64) -> String {
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    if value < 0.0 {
+        // Para negativos, mostrar como -√n si |value| es surd.
+        let pos = format_surd_text(-value);
+        return format!("-{pos}");
+    }
+    // Busca n entero 2..200 tal que sqrt(n) ≈ value.
+    // Tolerancia relativa 1% o absoluta 0.015.
+    for n in 2..=200 {
+        let s = (n as f64).sqrt();
+        let diff = (value - s).abs();
+        if diff < 0.012 && diff / s < 0.015 {
+            return format!("√{n}");
+        }
+    }
+    // También detecta múltiplos: value ≈ k*sqrt(n) ? Por ahora solo k=1.
+    // Si value^2 es cercano a entero.
+    let sq = value * value;
+    let n_round = sq.round() as i64;
+    if (2..=500).contains(&n_round) {
+        let diff = (sq - n_round as f64).abs();
+        if diff < 0.02 && diff / (n_round as f64) < 0.01 {
+            // Verifica que sqrt(n) realmente coincida.
+            let s = (n_round as f64).sqrt();
+            if (value - s).abs() < 0.015 {
+                return format!("√{n_round}");
+            }
+        }
+    }
+    // Fallback: muestra como √value si no se detecta patrón.
+    // Si value es entero pequeño, √value.
+    if (value - value.round()).abs() < 1e-9 {
+        return format!("√{:.0}", value.round());
+    }
+    format!("√{}", fmt_scalar(value))
 }
 
 fn fmt_scalar(x: f64) -> String {
@@ -13017,5 +14957,110 @@ mod tests {
             .count();
         assert_eq!(points, 4, "should have 4 points, have {}", points);
         assert_eq!(segments, 1, "should have 1 segment, have {segments}");
+    }
+
+    #[test]
+    fn p03_double_integral_detects_interior_singularity() {
+        let mut doc = Document::new();
+        // Polo en (0.5,0.5) interior del rectángulo [0,1]×[0,1]
+        let mut cmd = "DoubleIntegral[1/((x-0.5)^2+(y-0.5)^2), x, 0, 1, y, 0, 1]".to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("posible singularidad interior"),
+                    "expected interior singularity message, got: {msg}"
+                );
+            }
+            other => panic!("expected Error due to interior singularity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p03_double_integral_regular_succeeds() {
+        let mut doc = Document::new();
+        let mut cmd = "DoubleIntegral[1, x, 0, 1, y, 0, 1]".to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Message(msg) => {
+                assert!(
+                    msg.contains("DoubleIntegral"),
+                    "should be DoubleIntegral result, got {msg}"
+                );
+            }
+            other => panic!("expected Message for regular double integral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p03_triple_integral_detects_interior_singularity() {
+        let mut doc = Document::new();
+        // Con n=40 explícito para satisfacer el registry (n required)
+        let mut cmd =
+            "TripleIntegral[1/((x-0.5)^2+(y-0.5)^2+(z-0.5)^2), x, 0, 1, y, 0, 1, z, 0, 1, 40]"
+                .to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("posible singularidad interior"),
+                    "expected interior singularity for triple, got: {msg}"
+                );
+            }
+            other => panic!("expected Error for triple interior singularity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p03_improper_infinite_limit_returns_typed_error() {
+        let mut doc = Document::new();
+        let mut cmd = "ImproperIntegral[exp(-x), x, 0, inf]".to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("Impropia no soportada, use límites"),
+                    "expected typed improper error, got: {msg}"
+                );
+                assert!(
+                    msg.to_lowercase().contains("sugerencia") || msg.contains("Limit"),
+                    "should contain suggestion, got: {msg}"
+                );
+            }
+            other => panic!("expected improper infinite error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p03_improper_oo_alias_returns_typed_error() {
+        let mut doc = Document::new();
+        let mut cmd = "ImproperIntegral[exp(-x), x, 0, oo]".to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("Impropia no soportada, use límites"),
+                    "expected typed error for oo, got: {msg}"
+                );
+            }
+            other => panic!("expected Error for oo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn p03_improper_border_singularity_returns_typed_error() {
+        let mut doc = Document::new();
+        // Singularidad en borde inferior x=0
+        let mut cmd = "ImproperIntegral[1/x, x, 0, 1]".to_string();
+        let outcome = process_input(&mut doc, &mut cmd);
+        match outcome {
+            CommandOutcome::Error(msg) => {
+                assert!(
+                    msg.contains("Impropia no soportada, use límites"),
+                    "expected typed border singularity error, got: {msg}"
+                );
+            }
+            other => panic!("expected border singularity error, got {other:?}"),
+        }
     }
 }

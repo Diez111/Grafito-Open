@@ -375,7 +375,8 @@ pub fn scene_layer_2d(object: &GeoObject) -> SceneLayer2D {
         | GeoObject::Polygon(_)
         | GeoObject::Ellipse(_)
         | GeoObject::Histogram(_)
-        | GeoObject::BoxPlot(_) => SceneLayer2D::Region,
+        | GeoObject::BoxPlot(_)
+        | GeoObject::Sector(_) => SceneLayer2D::Region,
         GeoObject::Point(_) | GeoObject::ScatterPlot(_) => SceneLayer2D::Marker,
         GeoObject::Text(_) | GeoObject::ComplexIntegral(_) => SceneLayer2D::Annotation,
         _ => SceneLayer2D::Curve,
@@ -1558,6 +1559,102 @@ impl Renderer {
                                 portrait.color,
                             );
                         }
+                    }
+                }
+                GeoObject::Arc(arc) => {
+                    // Resolución 64 como pide P1.1.
+                    let pts = arc.sample_points(64);
+                    let mut prev: Option<glam::Vec2> = None;
+                    for p in pts {
+                        if !p.x.is_finite() || !p.y.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        let cur = view.world_to_screen(p);
+                        if !cur.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        if let Some(prev) = prev {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                prev,
+                                cur,
+                                arc.width,
+                                arc.color,
+                            );
+                        }
+                        prev = Some(cur);
+                    }
+                }
+                GeoObject::Sector(sector) => {
+                    let verts_world = sector.polygon_vertices(64);
+                    let mut screen_verts = Vec::with_capacity(verts_world.len());
+                    for v in &verts_world {
+                        screen_verts.push(view.world_to_screen(*v));
+                    }
+                    if let Some(fill) = sector.fill_color {
+                        Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
+                    }
+                    Self::add_polygon_stroke(
+                        &mut vertices,
+                        &mut indices,
+                        &screen_verts,
+                        sector.width,
+                        sector.color,
+                    );
+                }
+                GeoObject::BezierCurve(bez) => {
+                    let pts = bez.sample_points(64);
+                    let mut prev: Option<glam::Vec2> = None;
+                    for p in pts {
+                        if !p.x.is_finite() || !p.y.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        let cur = view.world_to_screen(p);
+                        if !cur.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        if let Some(prev) = prev {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                prev,
+                                cur,
+                                bez.width,
+                                bez.color,
+                            );
+                        }
+                        prev = Some(cur);
+                    }
+                }
+                GeoObject::Spline(spline) => {
+                    let pts = spline.sample_points(16);
+                    let mut prev: Option<glam::Vec2> = None;
+                    for p in pts {
+                        if !p.x.is_finite() || !p.y.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        let cur = view.world_to_screen(p);
+                        if !cur.is_finite() {
+                            prev = None;
+                            continue;
+                        }
+                        if let Some(prev) = prev {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                prev,
+                                cur,
+                                spline.width,
+                                spline.color,
+                            );
+                        }
+                        prev = Some(cur);
                     }
                 }
                 _ => {}

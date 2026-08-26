@@ -3330,6 +3330,56 @@ impl Document {
                     }
                     (min_x, min_y, max_x, max_y)
                 }
+                GeoObject::Arc(arc) => {
+                    let r = arc.radius;
+                    (
+                        arc.center.x - r,
+                        arc.center.y - r,
+                        arc.center.x + r,
+                        arc.center.y + r,
+                    )
+                }
+                GeoObject::Sector(sector) => {
+                    let r = sector.radius;
+                    (
+                        sector.center.x - r,
+                        sector.center.y - r,
+                        sector.center.x + r,
+                        sector.center.y + r,
+                    )
+                }
+                GeoObject::BezierCurve(bez) => {
+                    if bez.control_points.is_empty() {
+                        continue;
+                    }
+                    let mut min_x = f64::INFINITY;
+                    let mut min_y = f64::INFINITY;
+                    let mut max_x = f64::NEG_INFINITY;
+                    let mut max_y = f64::NEG_INFINITY;
+                    for pt in &bez.control_points {
+                        min_x = min_x.min(pt.x);
+                        min_y = min_y.min(pt.y);
+                        max_x = max_x.max(pt.x);
+                        max_y = max_y.max(pt.y);
+                    }
+                    (min_x, min_y, max_x, max_y)
+                }
+                GeoObject::Spline(spline) => {
+                    if spline.points.is_empty() {
+                        continue;
+                    }
+                    let mut min_x = f64::INFINITY;
+                    let mut min_y = f64::INFINITY;
+                    let mut max_x = f64::NEG_INFINITY;
+                    let mut max_y = f64::NEG_INFINITY;
+                    for pt in &spline.points {
+                        min_x = min_x.min(pt.x);
+                        min_y = min_y.min(pt.y);
+                        max_x = max_x.max(pt.x);
+                        max_y = max_y.max(pt.y);
+                    }
+                    (min_x, min_y, max_x, max_y)
+                }
                 // 3D objects are not indexed in 2D spatial index
                 GeoObject::Point3D(_)
                 | GeoObject::Segment3D(_)
@@ -3344,6 +3394,8 @@ impl Document {
                 | GeoObject::Torus3D(_)
                 | GeoObject::MoebiusStrip(_)
                 | GeoObject::Surface3D(_)
+                | GeoObject::Prism3D(_)
+                | GeoObject::Quadric3D(_)
                 | GeoObject::ParametricCurve3D(_)
                 | GeoObject::Attractor3D(_)
                 | GeoObject::RegularPolychoron4D(_)

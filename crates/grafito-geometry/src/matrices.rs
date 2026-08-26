@@ -889,6 +889,80 @@ impl fmt::Display for Matrix {
     }
 }
 
+/// Épsilon geométrico para validación de singularidad (coherente con `validation::GEOM_EPS`).
+pub const VALIDATED_MATRIX_EPS: f64 = 1e-12;
+
+/// Wrapper fail-closed que garantiza que la matriz pasó validación de rango completo.
+///
+/// Uso: `ValidatedMatrix::try_new(mat)?` antes de exponer al solver/render.
+/// Rechaza matrices no finitas, dimensiones fuera de `MAX_MATRIX_*` y
+/// matrices cuadradas con `|det| <= VALIDATED_MATRIX_EPS` (singulares).
+/// Para matrices no cuadradas exige rango completo `rank == min(rows,cols)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedMatrix(pub Matrix);
+
+impl ValidatedMatrix {
+    /// Valida la matriz y la envuelve. No hace `unwrap` interno; retorna `Result`.
+    pub fn try_new(matrix: Matrix) -> Result<Self, String> {
+        if matrix.rows == 0 || matrix.cols == 0 {
+            return Err("Matrix dimensions must be positive".to_string());
+        }
+        if matrix.rows > MAX_MATRIX_DIMENSION || matrix.cols > MAX_MATRIX_DIMENSION {
+            return Err(format!(
+                "ValidatedMatrix dimensions {}x{} exceed maximum {}",
+                matrix.rows, matrix.cols, MAX_MATRIX_DIMENSION
+            ));
+        }
+        if matrix.data.len() != matrix.rows * matrix.cols {
+            return Err("Matrix data length mismatch".to_string());
+        }
+        // Rechaza valores no finitos (NaN/Inf) antes de SVD/det.
+        for (idx, value) in matrix.data.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(format!("Matrix contains non-finite value at index {idx}"));
+            }
+        }
+        if matrix.rows == matrix.cols {
+            let det = matrix
+                .determinant()
+                .ok_or_else(|| "Matrix determinant failed".to_string())?;
+            if !det.is_finite() || det.abs() <= VALIDATED_MATRIX_EPS {
+                return Err("Matrix is singular".to_string());
+            }
+            // Chequeo adicional de condición: si SVD indica rango deficiente.
+            if let Some(cn) = condition_number(&matrix) {
+                if !cn.is_finite() {
+                    return Err("Matrix is singular".to_string());
+                }
+            }
+        } else {
+            let rank_val = rank(&matrix).ok_or_else(|| "Matrix rank failed".to_string())?;
+            let expected = matrix.rows.min(matrix.cols);
+            if rank_val != expected {
+                return Err(format!(
+                    "Matrix is rank deficient: rank {rank_val} < {expected}"
+                ));
+            }
+        }
+        Ok(Self(matrix))
+    }
+
+    /// Acceso inmutable al interior.
+    pub fn inner(&self) -> &Matrix {
+        &self.0
+    }
+
+    /// Consume el wrapper y devuelve la matriz interior.
+    pub fn into_inner(self) -> Matrix {
+        self.0
+    }
+
+    /// Determinante delegado (solo para cuadradas).
+    pub fn determinant(&self) -> Option<f64> {
+        self.0.determinant()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

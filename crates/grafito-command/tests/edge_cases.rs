@@ -267,9 +267,11 @@ fn arc_creates_a_parametric_curve_instead_of_a_chord() {
         "got {outcome:?}"
     );
     assert!(
-        doc.objects_iter()
-            .any(|(_, object)| matches!(object, GeoObject::ParametricCurve2D(_))),
-        "Arc should create a parametric curve"
+        doc.objects_iter().any(|(_, object)| matches!(
+            object,
+            GeoObject::Arc(_) | GeoObject::ParametricCurve2D(_)
+        )),
+        "Arc should create an Arc or parametric curve"
     );
 }
 

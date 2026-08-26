@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
+use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
+
+use crate::matrices::{condition_number, Matrix};
 
 /// Máximo de clases que puede generar un histograma para limitar memoria y trabajo.
 pub const MAX_HISTOGRAM_BINS: usize = 4_096;
@@ -161,8 +164,17 @@ pub fn fit_xy(kind: FitKind, xs: &[f64], ys: &[f64]) -> Result<FitResult, String
                 .ok_or_else(|| "la variación de x no permite un ajuste lineal".to_string())?;
             vec![slope, intercept]
         }
-        FitKind::Polynomial { degree } => polynomial_regression(model_xs, ys, degree)
-            .ok_or_else(|| "los datos no permiten ese ajuste polinómico".to_string())?,
+        FitKind::Polynomial { degree } => {
+            match polynomial_regression_result(model_xs, ys, degree) {
+                Ok(coeffs) => coeffs,
+                Err(message) => {
+                    if message.contains("mal condicionado") {
+                        return Err(message);
+                    }
+                    return Err("los datos no permiten ese ajuste polinómico".to_string());
+                }
+            }
+        }
         FitKind::Exponential => {
             if ys.iter().any(|value| *value <= 0.0) {
                 return Err("el ajuste exponencial requiere valores y positivos".to_string());
@@ -729,25 +741,99 @@ pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
 }
 
 pub fn polynomial_regression(xs: &[f64], ys: &[f64], degree: usize) -> Option<Vec<f64>> {
-    if degree > MAX_POLYNOMIAL_REGRESSION_DEGREE || xs.len() != ys.len() || xs.len() <= degree {
-        return None;
-    }
-    let m = degree.checked_add(1)?;
-    let mut a = vec![vec![0.0f64; m + 1]; m];
-    #[allow(clippy::needless_range_loop)]
-    for (i, row) in a.iter_mut().enumerate() {
-        for j in 0..m {
-            row[j] = xs.iter().map(|x| x.powi((i + j) as i32)).sum();
-        }
-        row[m] = xs
-            .iter()
-            .zip(ys.iter())
-            .map(|(x, y)| y * x.powi(i as i32))
-            .sum();
-    }
-    gauss_elimination(&mut a, m)
+    // Wrapper sin unwrap: mantiene API existente (Option) delegando a la versión estable con Result.
+    polynomial_regression_result(xs, ys, degree).ok()
 }
 
+/// Versión estable que normaliza x, construye Vandermonde normalizado y resuelve por SVD.
+/// Retorna Err con "mal condicionado" si κ(V) > 1e12.
+fn polynomial_regression_result(xs: &[f64], ys: &[f64], degree: usize) -> Result<Vec<f64>, String> {
+    if degree > MAX_POLYNOMIAL_REGRESSION_DEGREE {
+        return Err(format!(
+            "el grado polinómico debe estar entre 1 y {MAX_POLYNOMIAL_REGRESSION_DEGREE}"
+        ));
+    }
+    if xs.len() != ys.len() {
+        return Err("las listas x e y deben tener la misma longitud".to_string());
+    }
+    if xs.len() <= degree {
+        return Err("se necesitan más puntos que el grado".to_string());
+    }
+    if xs.len() > MAX_FIT_DATA_POINTS {
+        return Err(format!(
+            "la tabla supera el máximo de {MAX_FIT_DATA_POINTS} pares para un ajuste"
+        ));
+    }
+    if xs.iter().chain(ys.iter()).any(|value| !value.is_finite()) {
+        return Err("todos los pares de datos deben ser finitos".to_string());
+    }
+    // Normalización estable de x (misma idea que x_normalization/linear_regression).
+    let min_x = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let offset = min_x * 0.5 + max_x * 0.5;
+    let scale = xs
+        .iter()
+        .map(|value| (value - offset).abs())
+        .fold(0.0_f64, f64::max);
+    if !offset.is_finite() || !scale.is_finite() || scale == 0.0 {
+        return Err("la variación de x no permite un ajuste estable".to_string());
+    }
+    let normalized_xs: Vec<f64> = xs.iter().map(|value| (value - offset) / scale).collect();
+    if normalized_xs.iter().any(|value| !value.is_finite()) {
+        return Err("la normalización de x no es representable".to_string());
+    }
+    // Construir Vandermonde normalizado V[i][j] = x_norm^i^j
+    let n = normalized_xs.len();
+    let p = degree
+        .checked_add(1)
+        .ok_or_else(|| "el grado polinómico no es representable".to_string())?;
+    let mut vand_data = Vec::with_capacity(n * p);
+    for &x in &normalized_xs {
+        let mut pow = 1.0_f64;
+        for _ in 0..p {
+            vand_data.push(pow);
+            pow *= x;
+        }
+    }
+    let vand = Matrix::new(n, p, vand_data)
+        .ok_or_else(|| "dimensiones de Vandermonde no válidas".to_string())?;
+    // Chequeo de mal condicionamiento vía SVD.
+    if let Some(condition) = condition_number(&vand) {
+        if !condition.is_finite() || condition > 1e12 {
+            return Err(format!(
+                "mal condicionado: número de condición {condition:.3e} supera 1e12"
+            ));
+        }
+    } else {
+        return Err("no se pudo evaluar el número de condición".to_string());
+    }
+    // Resolver mínimos cuadrados V * coeff = y vía SVD (estable, con pivote implícito).
+    let dm = DMatrix::from_row_slice(n, p, &vand.data);
+    let y_vec = DVector::from_column_slice(ys);
+    let svd = dm.clone().svd(true, true);
+    if svd.singular_values.is_empty() {
+        return Err("descomposición SVD vacía".to_string());
+    }
+    let sigma_max = svd.singular_values[0];
+    if !sigma_max.is_finite() || sigma_max == 0.0 {
+        return Err("valor singular máximo no finito".to_string());
+    }
+    let eps = crate::matrices::dimension_relative_epsilon(n, p) * sigma_max;
+    let solution = svd
+        .solve(&y_vec, eps)
+        .map_err(|error| format!("fallo al resolver SVD: {error}"))?;
+    let mut coefficients = Vec::with_capacity(p);
+    for index in 0..p {
+        let value = solution[index];
+        if !value.is_finite() {
+            return Err("el ajuste produjo parámetros no finitos".to_string());
+        }
+        coefficients.push(value);
+    }
+    Ok(coefficients)
+}
+
+#[allow(dead_code)]
 fn gauss_elimination(a: &mut [Vec<f64>], n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
         let mut max_row = col;
@@ -1842,5 +1928,77 @@ mod tests {
         let (_wl, _q1, med, _q3, _wh, outliers) = boxplot_stats(&data).unwrap();
         assert!((med - 5.5).abs() < 0.1);
         assert!(!outliers.is_empty());
+    }
+
+    #[test]
+    fn polynomial_regression_es_estable_con_traslacion_grande_y_grado_alto() {
+        // Reproduce bug B7: xs en 1e9 + delta, grado 8, polinomio definido en dominio normalizado.
+        let offset = 1e9;
+        let n = 30;
+        let degree = 8;
+        let xs: Vec<f64> = (0..n).map(|i| offset + i as f64 * 0.7).collect();
+        // coeficientes verdaderos en dominio normalizado
+        let true_coeffs: Vec<f64> = (0..=degree)
+            .map(|i| (i as f64 * 0.5).sin().mul_add(2.0, (i as f64 * 0.3).cos()))
+            .collect();
+        let min_x = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let off = min_x * 0.5 + max_x * 0.5;
+        let scale = xs
+            .iter()
+            .map(|value| (value - off).abs())
+            .fold(0.0_f64, f64::max);
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|x| {
+                let xn = (x - off) / scale;
+                true_coeffs
+                    .iter()
+                    .enumerate()
+                    .fold(0.0_f64, |acc, (j, coeff)| acc + coeff * xn.powi(j as i32))
+            })
+            .collect();
+        // vía fit_xy debe ser estable con rmse muy bajo
+        let result = fit_xy(FitKind::Polynomial { degree }, &xs, &ys).expect("fit estable con 1e9");
+        assert!(
+            result.diagnostics.rmse < 1e-7,
+            "rmse {} demasiado alto",
+            result.diagnostics.rmse
+        );
+        assert!(
+            result.diagnostics.r_squared > 0.999,
+            "r2 {}",
+            result.diagnostics.r_squared
+        );
+        // directo también debe tener éxito (ahora normaliza internamente)
+        let direct =
+            polynomial_regression(&xs, &ys, degree).expect("polynomial_regression directo estable");
+        let max_resid = xs
+            .iter()
+            .zip(ys.iter())
+            .map(|(x, y)| {
+                let xn = (x - off) / scale;
+                let pred: f64 = direct
+                    .iter()
+                    .enumerate()
+                    .fold(0.0_f64, |acc, (j, coeff)| acc + coeff * xn.powi(j as i32));
+                (y - pred).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(max_resid < 1e-6, "residuo directo {max_resid}");
+    }
+
+    #[test]
+    fn polynomial_regression_detecta_mal_condicionado() {
+        // Solo dos valores distintos con grado 5 => Vandermonde rango deficiente => κ = inf
+        let xs = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let ys = vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let degree = 5;
+        assert_eq!(polynomial_regression(&xs, &ys, degree), None);
+        let err = fit_xy(FitKind::Polynomial { degree }, &xs, &ys).unwrap_err();
+        assert!(
+            err.contains("mal condicionado"),
+            "esperaba mal condicionado, obtuvo {err}"
+        );
     }
 }

@@ -481,7 +481,7 @@ fn legacy_error<T>(result: MathResult<T>) -> String {
 
 /// Conservatively detects rational and elementary-domain failures that a
 /// quadrature grid could miss between sampled points.
-fn has_potential_interval_domain_error(ast: &Expr, var: &str, a: f64, b: f64) -> bool {
+pub fn has_potential_interval_domain_error(ast: &Expr, var: &str, a: f64, b: f64) -> bool {
     use Expr::*;
     match ast {
         Div(numerator, denominator) => {
@@ -628,6 +628,222 @@ fn interval_bounds(ast: &Expr, var: &str, a: f64, b: f64) -> Option<(f64, f64)> 
     }
 }
 
+/// Cota intervalar rectangular multivariante: evalúa `ast` sobre el hiper-rectángulo
+/// definido por `intervals` (clave = nombre de variable, valor = (lo,hi)).
+/// Mantiene la misma semántica conservadora que la versión 1D: si la expresión
+/// contiene operadores no acotables devuelve `None`, lo que el detector trata como
+/// posible singularidad.
+fn interval_bounds_rect(ast: &Expr, intervals: &HashMap<String, (f64, f64)>) -> Option<(f64, f64)> {
+    use Expr::*;
+    match ast {
+        Const(value) if value.is_finite() => Some((*value, *value)),
+        Var(name) => {
+            if let Some((lo, hi)) = intervals.get(name) {
+                let (lo, hi) = (lo.min(*hi), lo.max(*hi));
+                if lo.is_finite() && hi.is_finite() {
+                    Some((lo, hi))
+                } else {
+                    None
+                }
+            } else {
+                // Variable libre no acotada → desconocido
+                None
+            }
+        }
+        Neg(argument) => interval_bounds_rect(argument, intervals).map(|(lo, hi)| (-hi, -lo)),
+        Add(left, right) => {
+            let (left_lo, left_hi) = interval_bounds_rect(left, intervals)?;
+            let (right_lo, right_hi) = interval_bounds_rect(right, intervals)?;
+            Some((left_lo + right_lo, left_hi + right_hi))
+        }
+        Sub(left, right) => {
+            let (left_lo, left_hi) = interval_bounds_rect(left, intervals)?;
+            let (right_lo, right_hi) = interval_bounds_rect(right, intervals)?;
+            Some((left_lo - right_hi, left_hi - right_lo))
+        }
+        Mul(left, right) => {
+            let (left_lo, left_hi) = interval_bounds_rect(left, intervals)?;
+            let (right_lo, right_hi) = interval_bounds_rect(right, intervals)?;
+            let products = [
+                left_lo * right_lo,
+                left_lo * right_hi,
+                left_hi * right_lo,
+                left_hi * right_hi,
+            ];
+            Some((
+                products.iter().copied().fold(f64::INFINITY, f64::min),
+                products.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ))
+        }
+        Div(numerator, denominator) => {
+            let (num_lo, num_hi) = interval_bounds_rect(numerator, intervals)?;
+            let (den_lo, den_hi) = interval_bounds_rect(denominator, intervals)?;
+            if den_lo <= 0.0 && den_hi >= 0.0 {
+                return Some((f64::NEG_INFINITY, f64::INFINITY));
+            }
+            let candidates = [
+                num_lo / den_lo,
+                num_lo / den_hi,
+                num_hi / den_lo,
+                num_hi / den_hi,
+            ];
+            if candidates.iter().any(|v| !v.is_finite()) {
+                return Some((f64::NEG_INFINITY, f64::INFINITY));
+            }
+            Some((
+                candidates.iter().copied().fold(f64::INFINITY, f64::min),
+                candidates.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            ))
+        }
+        Pow(base, exponent) => {
+            let (lo, hi) = interval_bounds_rect(base, intervals)?;
+            let exponent = match exponent.as_ref() {
+                Const(value) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0 => {
+                    *value as i32
+                }
+                _ => return None,
+            };
+            let left = lo.powi(exponent);
+            let right = hi.powi(exponent);
+            if exponent % 2 == 0 && lo <= 0.0 && hi >= 0.0 {
+                Some((0.0, left.max(right)))
+            } else {
+                Some((left.min(right), left.max(right)))
+            }
+        }
+        Exp(argument) => {
+            interval_bounds_rect(argument, intervals).map(|(lo, hi)| (lo.exp(), hi.exp()))
+        }
+        Abs(argument) => interval_bounds_rect(argument, intervals).map(|(lo, hi)| {
+            if lo <= 0.0 && hi >= 0.0 {
+                (0.0, lo.abs().max(hi.abs()))
+            } else {
+                (lo.abs().min(hi.abs()), lo.abs().max(hi.abs()))
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Detecta posible error de dominio dentro de un rectángulo nD usando aritmética
+/// intervalar conservadora y muestreo puntual 3^n (cuando la aritmética no concluye).
+/// Si `intervals` es vacío retorna `false`.
+pub fn has_potential_rect_domain_error(
+    ast: &Expr,
+    intervals: &HashMap<String, (f64, f64)>,
+) -> bool {
+    if intervals.is_empty() {
+        return false;
+    }
+    has_potential_rect_domain_error_inner(ast, intervals)
+}
+
+fn has_potential_rect_domain_error_inner(
+    ast: &Expr,
+    intervals: &HashMap<String, (f64, f64)>,
+) -> bool {
+    use Expr::*;
+    match ast {
+        Div(numerator, denominator) => {
+            interval_bounds_rect(denominator, intervals)
+                .is_none_or(|(lo, hi)| lo <= 0.0 && hi >= 0.0)
+                || has_potential_rect_domain_error_inner(numerator, intervals)
+                || has_potential_rect_domain_error_inner(denominator, intervals)
+        }
+        Ln(argument) | Log(argument) => {
+            interval_bounds_rect(argument, intervals).is_none_or(|(lo, _)| lo <= 0.0)
+                || has_potential_rect_domain_error_inner(argument, intervals)
+        }
+        Sqrt(argument) => {
+            interval_bounds_rect(argument, intervals).is_none_or(|(lo, _)| lo < 0.0)
+                || has_potential_rect_domain_error_inner(argument, intervals)
+        }
+        Neg(argument) | Sin(argument) | Cos(argument) | Tan(argument) | Asin(argument)
+        | Acos(argument) | Atan(argument) | Exp(argument) | Abs(argument) | Sinh(argument)
+        | Cosh(argument) | Tanh(argument) | Floor(argument) | Ceil(argument) | Round(argument)
+        | Sec(argument) | Csc(argument) | Cot(argument) | Asinh(argument) | Acosh(argument)
+        | Atanh(argument) | Sign(argument) | Heaviside(argument) | Cbrt(argument)
+        | Re(argument) | Im(argument) | Arg(argument) | Conj(argument) | Erf(argument)
+        | Erfc(argument) | Gamma(argument) | LnGamma(argument) | Digamma(argument)
+        | Trigamma(argument) => has_potential_rect_domain_error_inner(argument, intervals),
+        Add(left, right)
+        | Sub(left, right)
+        | Mul(left, right)
+        | Pow(left, right)
+        | Atan2(left, right)
+        | Modulo(left, right)
+        | Min(left, right)
+        | Max(left, right)
+        | Beta(left, right)
+        | BesselJ(left, right)
+        | BesselY(left, right)
+        | BesselI(left, right)
+        | Lt(left, right)
+        | Gt(left, right)
+        | Le(left, right)
+        | Ge(left, right)
+        | Eq(left, right)
+        | Ne(left, right) => {
+            has_potential_rect_domain_error_inner(left, intervals)
+                || has_potential_rect_domain_error_inner(right, intervals)
+        }
+        Clamp(value, lo, hi) => {
+            has_potential_rect_domain_error_inner(value, intervals)
+                || has_potential_rect_domain_error_inner(lo, intervals)
+                || has_potential_rect_domain_error_inner(hi, intervals)
+        }
+        Sum(body, _, start, end) | Product(body, _, start, end) => {
+            has_potential_rect_domain_error_inner(body, intervals)
+                || has_potential_rect_domain_error_inner(start, intervals)
+                || has_potential_rect_domain_error_inner(end, intervals)
+        }
+        Piecewise(branches, default) => {
+            branches.iter().any(|(condition, value)| {
+                has_potential_rect_domain_error_inner(condition, intervals)
+                    || has_potential_rect_domain_error_inner(value, intervals)
+            }) || has_potential_rect_domain_error_inner(default, intervals)
+        }
+        Const(_) | Var(_) => false,
+    }
+}
+
+/// Wrapper de conveniencia para el caso 2D rectangular.
+pub fn has_potential_interval_domain_error_2d(
+    ast: &Expr,
+    x_var: &str,
+    x_lo: f64,
+    x_hi: f64,
+    y_var: &str,
+    y_lo: f64,
+    y_hi: f64,
+) -> bool {
+    let mut intervals = HashMap::new();
+    intervals.insert(x_var.to_string(), (x_lo, x_hi));
+    intervals.insert(y_var.to_string(), (y_lo, y_hi));
+    has_potential_rect_domain_error(ast, &intervals)
+}
+
+/// Wrapper de conveniencia para el caso 3D rectangular.
+#[allow(clippy::too_many_arguments)]
+pub fn has_potential_interval_domain_error_3d(
+    ast: &Expr,
+    x_var: &str,
+    x_lo: f64,
+    x_hi: f64,
+    y_var: &str,
+    y_lo: f64,
+    y_hi: f64,
+    z_var: &str,
+    z_lo: f64,
+    z_hi: f64,
+) -> bool {
+    let mut intervals = HashMap::new();
+    intervals.insert(x_var.to_string(), (x_lo, x_hi));
+    intervals.insert(y_var.to_string(), (y_lo, y_hi));
+    intervals.insert(z_var.to_string(), (z_lo, z_hi));
+    has_potential_rect_domain_error(ast, &intervals)
+}
+
 /// Límite finito de `expr` cuando `var → at`.
 ///
 /// La estimación usa extrapolación bilateral de Richardson. Un valor finito
@@ -683,6 +899,365 @@ pub fn limit(expr: &str, var: &str, at: f64) -> Result<String, String> {
         )),
         result => Err(legacy_error(result)),
     }
+}
+
+/// Límite lateral por la derecha (`var → at⁺`).
+///
+/// Usa extrapolación de Richardson unilateral. Si el límite no converge o
+/// diverge, devuelve `LimitDoesNotExist`. Los presupuestos y validaciones
+/// son idénticos a [`limit_typed`].
+pub fn limit_above_typed(expr: &str, var: &str, at: f64) -> MathResult<f64> {
+    if !at.is_finite() {
+        return MathResult::Unsupported(MathError::NonFiniteLimitPoint {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::Limit) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    if has_proven_squeezed_zero_limit(&ast, var, at) {
+        return MathResult::Approximate {
+            value: 0.0,
+            error_estimate: 0.0,
+        };
+    }
+    if has_unresolved_oscillatory_singularity(&ast, var, at) {
+        return MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        });
+    }
+    match richardson_one_side_limit(&ast, var, at, 1.0) {
+        Some(estimate) => MathResult::Approximate {
+            value: estimate.value,
+            error_estimate: estimate.error_estimate,
+        },
+        None => MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        }),
+    }
+}
+
+/// Límite lateral por la izquierda (`var → at⁻`).
+pub fn limit_below_typed(expr: &str, var: &str, at: f64) -> MathResult<f64> {
+    if !at.is_finite() {
+        return MathResult::Unsupported(MathError::NonFiniteLimitPoint {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::Limit) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    if has_proven_squeezed_zero_limit(&ast, var, at) {
+        return MathResult::Approximate {
+            value: 0.0,
+            error_estimate: 0.0,
+        };
+    }
+    if has_unresolved_oscillatory_singularity(&ast, var, at) {
+        return MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        });
+    }
+    match richardson_one_side_limit(&ast, var, at, -1.0) {
+        Some(estimate) => MathResult::Approximate {
+            value: estimate.value,
+            error_estimate: estimate.error_estimate,
+        },
+        None => MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        }),
+    }
+}
+
+/// Adaptador para `LimitAbove` con mensaje legible.
+pub fn limit_above(expr: &str, var: &str, at: f64) -> Result<String, String> {
+    match limit_above_typed(expr, var, at) {
+        MathResult::Exact(value) | MathResult::Approximate { value, .. } => {
+            Ok(format!("lim({var}→{at}⁺) {expr} = {value:.8}"))
+        }
+        MathResult::DomainError(MathError::LimitDoesNotExist { .. }) => {
+            Ok(format!("lim({var}→{at}⁺) {expr} = no existe (o es ∞)"))
+        }
+        result => Err(legacy_error(result)),
+    }
+}
+
+/// Adaptador para `LimitBelow` con mensaje legible.
+pub fn limit_below(expr: &str, var: &str, at: f64) -> Result<String, String> {
+    match limit_below_typed(expr, var, at) {
+        MathResult::Exact(value) | MathResult::Approximate { value, .. } => {
+            Ok(format!("lim({var}→{at}⁻) {expr} = {value:.8}"))
+        }
+        MathResult::DomainError(MathError::LimitDoesNotExist { .. }) => {
+            Ok(format!("lim({var}→{at}⁻) {expr} = no existe (o es ∞)"))
+        }
+        result => Err(legacy_error(result)),
+    }
+}
+
+/// Derivada paramétrica `dy/dx = (dy/dt)/(dx/dt)`.
+///
+/// Recibe las componentes `x(t)`, `y(t)` simbólicas y la variable `var` (por
+/// ejemplo `"t"`). Si ambas derivadas son calculables simbólicamente, devuelve
+/// la expresión simplificada de `dy/dx`. Si `dx/dt` es idénticamente cero,
+/// informa `DerivativeUnavailable` sin pánico. Mantiene presupuestos y no usa
+/// `unwrap`.
+pub fn parametric_derivative_typed(x_expr: &str, y_expr: &str, var: &str) -> MathResult<String> {
+    if x_expr.len() > MAX_MATH_INPUT_BYTES || y_expr.len() > MAX_MATH_INPUT_BYTES {
+        let provided = x_expr.len().max(y_expr.len());
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: provided,
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let x_ast = match parse_math_expression(x_expr, MathOperation::SymbolicDerivative) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    let y_ast = match parse_math_expression(y_expr, MathOperation::SymbolicDerivative) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    let dx = simplify_expr(&diff_expr(&x_ast, var));
+    let dy = simplify_expr(&diff_expr(&y_ast, var));
+    // Detectar fallo de profundidad (Const(NaN) es marcador interno).
+    if matches!(dx, Expr::Const(v) if v.is_nan()) || matches!(dy, Expr::Const(v) if v.is_nan()) {
+        return MathResult::NotConverged(MathError::RecursionLimit {
+            operation: MathOperation::SymbolicDerivative,
+            lower: 0.0,
+            upper: 0.0,
+            max_depth: 256,
+            tolerance: 0.0,
+            error_estimate: f64::NAN,
+        });
+    }
+    if is_identically_zero(&dx) {
+        return MathResult::DomainError(MathError::DerivativeUnavailable {
+            expression: format!("x(t)={x_expr}, y(t)={y_expr}"),
+            variable: var.into(),
+            reason: "dx/dt es cero, derivada paramétrica no definida (tangente vertical)".into(),
+        });
+    }
+    // Si dx es una constante cero aproximada, también rechazar.
+    if let Some(value) = constant_scalar_value(&dx) {
+        if value == 0.0 {
+            return MathResult::DomainError(MathError::DerivativeUnavailable {
+                expression: format!("x(t)={x_expr}, y(t)={y_expr}"),
+                variable: var.into(),
+                reason: "dx/dt es cero".into(),
+            });
+        }
+    }
+    let result = Expr::Div(Box::new(dy), Box::new(dx));
+    let simplified = simplify_expr(&result);
+    let output = simplified.to_expr_string();
+    if output.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: output.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    MathResult::Exact(output)
+}
+
+/// Adaptador compatible de [`parametric_derivative_typed`].
+pub fn parametric_derivative(x_expr: &str, y_expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(parametric_derivative_typed(x_expr, y_expr, var))
+}
+
+/// Asíntota oblicua/horizontal de `f(var)`.
+///
+/// Calcula `m = lim_{var→±∞} f/var` y `b = lim_{var→±∞} f - m·var` por
+/// muestreo numérico en escalas crecientes. Si ambos límites convergen
+/// devuelve `"y = m*x + b"` (o `"y = b"` si `m≈0`). Si no converge,
+/// devuelve `LimitDoesNotExist` o `Unsupported`. No usa `unwrap` y respeta
+/// presupuestos de entrada.
+pub fn asymptote_typed(expr: &str, var: &str) -> MathResult<String> {
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::Limit,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::Limit) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+
+    let estimate_limit = |values: &[f64]| -> Option<f64> {
+        if values.is_empty() {
+            return None;
+        }
+        let last = *values.last()?;
+        if !last.is_finite() {
+            return None;
+        }
+        let scale = values.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+        let tol = 1e-7 + 1e-6 * scale;
+        if values
+            .iter()
+            .all(|v| v.is_finite() && (v - last).abs() <= tol)
+        {
+            Some(last)
+        } else {
+            None
+        }
+    };
+
+    let try_direction = |direction: f64| -> Option<(f64, f64)> {
+        // Escalas crecientes para aproximar el infinito. Se usa muestreo
+        // diferenciado para que `m` sea la pendiente secante entre puntos
+        // lejanos: más estable que `f/x` cuando el error de `m` se amplifica
+        // por `x` al calcular `b`.
+        const SCALES: [f64; 4] = [1e6, 1e8, 1e10, 1e12];
+        let mut xs = Vec::with_capacity(SCALES.len());
+        let mut ys = Vec::with_capacity(SCALES.len());
+        for &scale in &SCALES {
+            let x = direction * scale;
+            let fx = ast.eval_at(var, x);
+            if !fx.is_finite() || !x.is_finite() || x == 0.0 {
+                return None;
+            }
+            xs.push(x);
+            ys.push(fx);
+        }
+        // Pendientes secantes entre pares consecutivos → estiman `m`.
+        let mut m_vals = Vec::with_capacity(SCALES.len() - 1);
+        for i in 0..xs.len() - 1 {
+            let dx = xs[i + 1] - xs[i];
+            let dy = ys[i + 1] - ys[i];
+            if dx == 0.0 || !dx.is_finite() || !dy.is_finite() {
+                return None;
+            }
+            let m = dy / dx;
+            if !m.is_finite() {
+                return None;
+            }
+            m_vals.push(m);
+        }
+        let m = estimate_limit(&m_vals)?;
+        // Ordenadas al origen `b = y - m·x` evaluadas en los mismos puntos.
+        let mut b_vals = Vec::with_capacity(xs.len());
+        for (&x, &y) in xs.iter().zip(ys.iter()) {
+            let b = y - m * x;
+            if !b.is_finite() {
+                return None;
+            }
+            b_vals.push(b);
+        }
+        let b = estimate_limit(&b_vals)?;
+        Some((m, b))
+    };
+
+    let pos = try_direction(1.0);
+    let neg = try_direction(-1.0);
+
+    let format_asymptote = |m: f64, b: f64| -> String {
+        const EPS: f64 = 1e-9;
+        if m.abs() < EPS {
+            format!("y = {b:.6}")
+        } else if b.abs() < EPS {
+            format!("y = {m:.6}*{var}")
+        } else if b > 0.0 {
+            format!("y = {m:.6}*{var} + {b:.6}")
+        } else {
+            format!("y = {m:.6}*{var} - {:.6}", b.abs())
+        }
+    };
+
+    match (pos, neg) {
+        (Some((m_pos, b_pos)), Some((m_neg, b_neg))) => {
+            let same_m = (m_pos - m_neg).abs() <= 1e-6 * m_pos.abs().max(m_neg.abs()).max(1.0);
+            let same_b = (b_pos - b_neg).abs() <= 1e-6 * b_pos.abs().max(b_neg.abs()).max(1.0);
+            if same_m && same_b {
+                MathResult::Exact(format_asymptote(m_pos, b_pos))
+            } else {
+                MathResult::Exact(format!(
+                    "y = {} (x→+∞), y = {} (x→-∞)",
+                    format_asymptote(m_pos, b_pos),
+                    format_asymptote(m_neg, b_neg)
+                ))
+            }
+        }
+        (Some((m, b)), None) | (None, Some((m, b))) => MathResult::Exact(format_asymptote(m, b)),
+        (None, None) => MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at: f64::INFINITY,
+        }),
+    }
+}
+
+/// Adaptador compatible de [`asymptote_typed`].
+pub fn asymptote(expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(asymptote_typed(expr, var))
+}
+
+/// Base de Groebner — stub intencional.
+///
+/// GeoGebra expone `GroebnerBasis`, `GroebnerDegRevLex`, etc. Grafito aún no
+/// implementa bases de Groebner; este stub evita pánico y sugiere usar
+/// `Eliminate`. Nunca devuelve `unwrap` y respeta presupuestos de entrada.
+pub fn groebner_basis_typed(polys: &[String], vars: &[String]) -> MathResult<String> {
+    if polys.len() > 64 || vars.len() > 16 {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: polys.len() + vars.len(),
+            maximum_bytes: 64,
+        });
+    }
+    for poly in polys {
+        if poly.len() > MAX_MATH_INPUT_BYTES {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::SymbolicDerivative,
+                provided_bytes: poly.len(),
+                maximum_bytes: MAX_MATH_INPUT_BYTES,
+            });
+        }
+    }
+    MathResult::Exact("Groebner no implementado, use Eliminate".to_string())
+}
+
+/// Atajo para una sola expresión (usado por comandos con sintaxis simple).
+pub fn groebner_single_typed(expr: &str) -> MathResult<String> {
+    groebner_basis_typed(&[expr.to_string()], &[])
+}
+
+/// Adaptador de `groebner` para consumidores de texto.
+pub fn groebner_stub(expr: &str) -> Result<String, String> {
+    adapt_symbolic_result(groebner_single_typed(expr))
+}
+
+fn is_math_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 /// Expande productos y potencias enteras no negativas por distributividad.
@@ -1722,6 +2297,43 @@ fn richardson_limit(ast: &Expr, var: &str, at: f64) -> Option<LimitEstimate> {
         return None;
     }
 
+    let mut error_estimate = 0.0_f64;
+    for estimate in &estimates {
+        let deviation = (estimate.value - value).abs();
+        let local_error = estimate.error_estimate + deviation;
+        if !local_error.is_finite() {
+            return None;
+        }
+        error_estimate = error_estimate.max(local_error);
+    }
+    let tolerance = limit_tolerance(value);
+    (error_estimate <= tolerance).then_some(LimitEstimate {
+        value,
+        error_estimate,
+    })
+}
+
+fn richardson_one_side_limit(ast: &Expr, var: &str, at: f64, sign: f64) -> Option<LimitEstimate> {
+    const STEP_SCALES: [f64; 3] = [0.125, 0.1, 0.075];
+    let local_scale = at.abs().max(1.0);
+    let mut estimates = Vec::with_capacity(STEP_SCALES.len());
+    for scale in STEP_SCALES {
+        let initial_step = scale * local_scale;
+        let estimate = stable_side_limit(ast, var, at, sign, initial_step)?;
+        estimates.push(estimate);
+    }
+    // Promedia las estimas con pesos decrecientes, igual que `richardson_limit`.
+    let mut value = estimates[0].value;
+    for (index, estimate) in estimates.iter().enumerate().skip(1) {
+        let difference = estimate.value - value;
+        if !difference.is_finite() {
+            return None;
+        }
+        value += difference / (index + 1) as f64;
+    }
+    if !value.is_finite() {
+        return None;
+    }
     let mut error_estimate = 0.0_f64;
     for estimate in &estimates {
         let deviation = (estimate.value - value).abs();
