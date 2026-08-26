@@ -184,7 +184,8 @@ impl ViewTransform {
         if (self.x_log && anchor_world.x <= 0.0) || (self.y_log && anchor_world.y <= 0.0) {
             return;
         }
-        self.scale = (self.scale * factor as f64).clamp(1e-15, 1e15);
+        // Infinito Geogebra: 60 órdenes (1e-30..1e30) — praktisch sin límite, f32 safe (3e38)
+        self.scale = (self.scale * factor as f64).clamp(1e-30, 1e30);
         let ox = self.screen_size.x as f64 * 0.5 + self.offset.x;
         let oy = self.screen_size.y as f64 * 0.5 + self.offset.y;
         // Use log-aware coordinate transform, consistent with world_to_screen()

@@ -511,22 +511,107 @@ impl Default for Camera3D {
 
 impl Camera3D {
     pub fn new(aspect: f32) -> Self {
-        Self {
-            aspect,
+        let mut cam = Self {
+            aspect: aspect.max(0.001).clamp(0.1, 10.0),
             ..Default::default()
+        };
+        cam.sanitize();
+        cam
+    }
+
+    /// Distancia sanitizada y finita, nunca 0 ni NaN — Geogebra infinito 1e-6..1e9.
+    pub fn sanitized_distance(&self) -> f32 {
+        if !self.distance.is_finite() || self.distance <= 0.0 {
+            10.0
+        } else {
+            self.distance.clamp(1e-6, 1e9)
+        }
+    }
+
+    /// Plano cercano/lejosano efectivo que siempre contiene el target y evita clipping negro.
+    /// Mantiene `near < distance < far` con margen 100× para profundidad estable, ahora infinito.
+    pub fn effective_clip(&self) -> (f32, f32) {
+        let d = self.sanitized_distance();
+        // near ≈ 1% de la distancia, nunca <1e-9 ni >1e4 para conservar precisión en infinito.
+        let near = (d * 0.01).clamp(1e-9, 1e4).min(d * 0.4).max(1e-9);
+        // far ≈ 100× distancia, mínimo 1, máximo 1e12 para no saturar depth pero permitir infinito.
+        let mut far = (d * 100.0).clamp(1.0, 1e12);
+        // Si la escena se ha pandeado lejos del origen, asegura que far supere la distancia + extents.
+        let target_dist = self.target.length().abs();
+        if target_dist.is_finite() {
+            far = far.max(target_dist + d * 10.0 + 100.0);
+            far = far.clamp(near * 10.0, 1e12);
+        }
+        if !near.is_finite() || !far.is_finite() || far <= near {
+            return (0.1, 10000.0);
+        }
+        (near, far)
+    }
+
+    /// Sanea todos los campos de la cámara a rangos finitos sin panear bruscamente.
+    pub fn sanitize(&mut self) {
+        if !self.theta.is_finite() {
+            self.theta = 0.8;
+        }
+        if !self.phi.is_finite() {
+            self.phi = 0.6;
+        }
+        self.phi = self.phi.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+        self.theta = self.theta.rem_euclid(std::f32::consts::TAU);
+        self.distance = self.sanitized_distance();
+        if !self.target.is_finite() {
+            self.target = Vec3::ZERO;
+        } else {
+            // Evita target a distancia absurda que haría far gigante (infinito: hasta 1e9).
+            if self.target.length_squared() > 1e18 {
+                self.target = self.target.normalize_or_zero() * 1e9;
+            }
+        }
+        if !self.fov.is_finite() || self.fov <= 1.0 || self.fov >= 179.0 {
+            self.fov = 60.0;
+        }
+        if !self.aspect.is_finite() || self.aspect <= 0.0 {
+            self.aspect = 1.6;
+        }
+        self.aspect = self.aspect.clamp(0.1, 10.0);
+        if !self.near.is_finite() || self.near <= 0.0 {
+            self.near = 0.1;
+        }
+        if !self.far.is_finite() || self.far <= self.near {
+            self.far = 10000.0;
+        }
+        // Mantén near/far en rango efectivo si están muy desfasados de la distancia (infinito).
+        let (eff_near, eff_far) = self.effective_clip();
+        // Solo corrige si el ratio es patológico (evita reescribir cada frame si el usuario tiene clip custom).
+        if self.near > self.distance * 0.5
+            || self.near < eff_near * 0.1
+            || self.far < self.distance * 1.5
+        {
+            self.near = eff_near;
+            self.far = eff_far;
         }
     }
 
     pub fn position(&self) -> Vec3 {
+        let d = self.sanitized_distance();
+        // Usa d sanitizado para evitar NaN en posición.
         Vec3::new(
-            self.distance * self.phi.cos() * self.theta.cos(),
-            self.distance * self.phi.sin(),
-            self.distance * self.phi.cos() * self.theta.sin(),
+            d * self.phi.cos() * self.theta.cos(),
+            d * self.phi.sin(),
+            d * self.phi.cos() * self.theta.sin(),
         ) + self.target
     }
 
     pub fn orbit(&mut self, dtheta: f32, dphi: f32) {
+        if !dtheta.is_finite() || !dphi.is_finite() {
+            return;
+        }
         self.theta -= dtheta;
+        // Normaliza theta para evitar overflow de f32 tras muchas órbitas.
+        self.theta = self.theta.rem_euclid(std::f32::consts::TAU);
         self.phi = (self.phi + dphi).clamp(
             -std::f32::consts::FRAC_PI_2 + 0.01,
             std::f32::consts::FRAC_PI_2 - 0.01,
@@ -534,32 +619,107 @@ impl Camera3D {
     }
 
     pub fn zoom(&mut self, factor: f32) {
-        if factor.is_nan() || factor.is_infinite() || factor <= 1e-4 {
+        if factor.is_nan() || factor.is_infinite() || factor <= 1e-4 || factor >= 1e4 {
             return;
         }
-        // Rango amplio y continuo: acercarse 5x más que antes y alejarse
-        // 25x más, sin bloquearse, coherente con los planos near/far.
-        self.distance = (self.distance * factor).clamp(0.1, 5000.0);
+        // Clampa factor para evitar saltos brutales de rueda/touch (0.5..2.0 ≈ ±1 stop).
+        let factor = factor.clamp(0.5, 2.0);
+        // Infinito Geogebra: 1e-6..1e9 (30 órdenes, 60 stops) — sin tope percibido.
+        self.distance = (self.sanitized_distance() * factor).clamp(1e-6, 1e9);
+        // Actualiza clip dinámico para que el target nunca quede recortado (negro).
+        let (eff_near, eff_far) = self.effective_clip();
+        self.near = eff_near;
+        self.far = eff_far;
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.distance = 10.0;
+        self.target = Vec3::ZERO;
+        let (eff_near, eff_far) = self.effective_clip();
+        self.near = eff_near;
+        self.far = eff_far;
     }
 
     pub fn pan(&mut self, dx: f32, dy: f32) {
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
+        // Evita avalanchas cuando distance es 50k y dx es 1000 (gesto táctil).
+        let dx = dx.clamp(-5000.0, 5000.0);
+        let dy = dy.clamp(-5000.0, 5000.0);
         let right = self.right();
         let up = self.up();
-        let scale = self.distance * 0.002;
-        self.target -= right * dx * scale;
-        self.target -= up * dy * scale;
+        let scale = self.sanitized_distance() * 0.002;
+        // scale ya incluye distancia, pero clamp adicional para no teleportar en infinito.
+        let scale = scale.clamp(1e-9, 1e6);
+        let delta = right * dx * scale + up * dy * scale;
+        if !delta.is_finite() {
+            return;
+        }
+        self.target -= delta;
+        // Sanea target si se va a infinito por pan extremo (hasta 1e9).
+        if !self.target.is_finite() || self.target.length_squared() > 1e18 {
+            self.target = self.target.clamp_length_max(1e9);
+            if !self.target.is_finite() {
+                self.target = Vec3::ZERO;
+            }
+        }
+        // Si el pan aleja mucho el target, expande far para no recortar (sin romper tests de far pequeño: solo expande).
+        let (eff_near, eff_far) = self.effective_clip();
+        if self.far < eff_far * 0.5 {
+            self.far = eff_far;
+        }
+        if self.near > eff_near * 2.0 {
+            self.near = eff_near;
+        }
     }
 
     pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.position(), self.target, self.up())
+        // Up robusto: si forward es casi vertical, cruza con X para evitar matriz degenerada.
+        let pos = self.position();
+        let forward = (self.target - pos).normalize_or_zero();
+        let world_up = if forward.y.abs() > 0.999 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        // Si forward es cero (distance sanitized evita), fallback a Y.
+        if forward.length_squared() < 1e-12 {
+            return Mat4::look_at_rh(pos, self.target, Vec3::Y);
+        }
+        Mat4::look_at_rh(pos, self.target, world_up)
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
+        // Usa near/far almacenados (respetan tests de clipping), pero si son default y están
+        // desfasados de la distancia (near > distance), usa efectivo para evitar pantalla negra.
+        let mut near = if self.near.is_finite() && self.near > 0.0 {
+            self.near
+        } else {
+            self.effective_clip().0
+        };
+        let mut far = if self.far.is_finite() && self.far > near {
+            self.far
+        } else {
+            self.effective_clip().1
+        };
+        // Si es el clip default (0.1/10000) y está desfasado, corrige al vuelo.
+        let is_default = (self.near - 0.1).abs() < 1e-6 && (self.far - 10000.0).abs() < 1e-6;
+        if is_default {
+            let d = self.sanitized_distance();
+            if near > d * 0.5 || far < d * 1.5 {
+                let (eff_near, eff_far) = self.effective_clip();
+                near = eff_near;
+                far = eff_far;
+            }
+        }
         Mat4::perspective_rh(
-            self.fov.to_radians(),
-            self.aspect.max(0.001),
-            self.near,
-            self.far,
+            self.fov
+                .to_radians()
+                .clamp(1.0_f32.to_radians(), 179.0_f32.to_radians()),
+            self.aspect.clamp(0.1, 10.0),
+            near,
+            far,
         )
     }
 
@@ -595,21 +755,44 @@ impl Camera3D {
             || !self.fov.is_finite()
             || self.fov <= 1.0e-3
             || self.fov >= 179.0
-            || !self.near.is_finite()
+        {
+            return None;
+        }
+        // Degenerado (far <= near) debe rechazar rayo — test `far == near`.
+        if !self.near.is_finite()
             || !self.far.is_finite()
             || self.near <= 0.0
             || self.far <= self.near
         {
             return None;
         }
-
         let position = self.position();
         if !position.is_finite() {
             return None;
         }
-        let aspect = screen_w / screen_h;
-        let view = Mat4::look_at_rh(position, self.target, self.up());
-        let projection = Mat4::perspective_rh(self.fov.to_radians(), aspect, self.near, self.far);
+        // Respeta near/far almacenados (tests de clipping), pero si es default desfasado, corrige para no negro.
+        let mut near = self.near;
+        let mut far = self.far;
+        let is_default = (self.near - 0.1).abs() < 1e-6 && (self.far - 10000.0).abs() < 1e-6;
+        if is_default {
+            let d = self.sanitized_distance();
+            if near > d * 0.5 || far < d * 1.5 {
+                let (eff_near, eff_far) = self.effective_clip();
+                near = eff_near;
+                far = eff_far;
+            }
+        }
+        let aspect = (screen_w / screen_h).clamp(0.1, 10.0);
+        // Usa view robusto (up adaptado).
+        let view = self.view_matrix();
+        let projection = Mat4::perspective_rh(
+            self.fov
+                .to_radians()
+                .clamp(1.0_f32.to_radians(), 179.0_f32.to_radians()),
+            aspect,
+            near,
+            far,
+        );
         let view_projection = projection * view;
         let determinant = view_projection.determinant();
         // Usa tolerancia relativa a la dimensión en lugar de umbral absoluto 1e-12.
@@ -702,12 +885,28 @@ impl Camera3D {
             || !screen_h.is_finite()
             || screen_w <= 0.0
             || screen_h <= 0.0
-            || !self.near.is_finite()
-            || self.near <= 0.0
-            || !self.far.is_finite()
-            || self.far <= self.near
         {
             return None;
+        }
+        let mut near = if self.near.is_finite() && self.near > 0.0 {
+            self.near
+        } else {
+            self.effective_clip().0
+        };
+        let mut far = if self.far.is_finite() && self.far > near {
+            self.far
+        } else {
+            self.effective_clip().1
+        };
+        // Si es default desfasado, usa efectivo para no negro al acercar mucho.
+        let is_default = (self.near - 0.1).abs() < 1e-6 && (self.far - 10000.0).abs() < 1e-6;
+        if is_default {
+            let d = self.sanitized_distance();
+            if near > d * 0.5 || far < d * 1.5 {
+                let (eff_near, eff_far) = self.effective_clip();
+                near = eff_near;
+                far = eff_far;
+            }
         }
         let point = p.to_vec3();
         if !point.is_finite() {
@@ -717,7 +916,8 @@ impl Camera3D {
         if !clip.is_finite() {
             return None;
         }
-        if clip.w < self.near {
+        // w es profundidad de vista; debe estar delante del near almacenado y detrás de far.
+        if clip.w < near || clip.w > far * 1.5 {
             return None;
         }
         let ndc = clip.truncate() / clip.w;

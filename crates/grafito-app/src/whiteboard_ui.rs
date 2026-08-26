@@ -5,7 +5,11 @@
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
-use grafito_ui::tokens::{RADIUS_MD, RADIUS_PILL, SPACE_MD, SPACE_SM, SPACE_XS};
+use grafito_ui::tokens::{
+    RADIUS_MD, RADIUS_PILL, SHADOW_ALPHA, SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y, SPACE_MD,
+    SPACE_SM, SPACE_XS, TYPE_XS, ZOOM_ICON_HIT, ZOOM_PCT_MIN_W, ZOOM_PILL_GAP, ZOOM_PILL_PAD_X,
+    ZOOM_PILL_PAD_Y, ZOOM_PILL_RADIUS, ZOOM_WB_DEFAULT, ZOOM_WB_MAX, ZOOM_WB_MIN,
+};
 use grafito_whiteboard::{
     arrow_tip, smooth_stroke, WhiteboardDoc, WhiteboardElement, WhiteboardInteraction,
     WhiteboardTool,
@@ -26,7 +30,7 @@ impl WhiteboardPage {
             title: format!("Hoja {}", id),
             doc: WhiteboardDoc::new(),
             pan: (0.0, 0.0),
-            zoom: 1.0,
+            zoom: ZOOM_WB_DEFAULT,
         }
     }
 }
@@ -136,7 +140,7 @@ impl Default for WhiteboardSession {
             interaction: WhiteboardInteraction::Idle,
             pencil_points: Vec::new(),
             pan: (0.0, 0.0),
-            zoom: 1.0,
+            zoom: ZOOM_WB_DEFAULT,
             active_text: None,
             marquee: None,
             // Color por defecto con contraste en ambos temas; paleta permite cambiar.
@@ -204,9 +208,9 @@ impl WhiteboardSession {
             return;
         }
         let before = self.world_from_screen(screen, rect);
-        self.zoom = (self.zoom * factor).clamp(0.2, 6.0);
+        self.zoom = (self.zoom * factor).clamp(ZOOM_WB_MIN, ZOOM_WB_MAX);
         if !self.zoom.is_finite() {
-            self.zoom = 1.0;
+            self.zoom = ZOOM_WB_DEFAULT;
         }
         let after = self.world_from_screen(screen, rect);
         if !before.0.is_finite() || !after.0.is_finite() {
@@ -491,6 +495,46 @@ impl WhiteboardSession {
         if zoom_delta != 1.0 {
             if let Some(pos) = current_pos {
                 self.zoom_at(zoom_delta as f64, pos, rect);
+            }
+        }
+        // Rueda del mouse: zoom centrado en el cursor
+        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll.abs() > f32::EPSILON {
+            if let Some(pos) = current_pos {
+                if rect.contains(pos) {
+                    let factor = (1.0 + scroll * 0.008).clamp(0.85, 1.15) as f64;
+                    self.zoom_at(factor, pos, rect);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        // Atajos de teclado: Ctrl/Cmd + rueda ya cubiertos; +/- y 0 para reset
+        if ui.input(|i| i.modifiers.ctrl || i.modifiers.command) {
+            if ui.input(|i| i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus)) {
+                if let Some(pos) = current_pos.or(Some(rect.center())) {
+                    self.zoom_at(1.2, pos, rect);
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Minus)) {
+                if let Some(pos) = current_pos.or(Some(rect.center())) {
+                    self.zoom_at(0.8333, pos, rect);
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Num0)) {
+                self.zoom = ZOOM_WB_DEFAULT;
+                self.pan = (0.0, 0.0);
+            }
+        } else {
+            // Sin Ctrl: +/- también funcionan si el canvas tiene foco
+            if ui.input(|i| i.key_pressed(egui::Key::Equals) || i.key_pressed(egui::Key::Plus)) {
+                if let Some(pos) = current_pos.or(Some(rect.center())) {
+                    self.zoom_at(1.15, pos, rect);
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Minus)) {
+                if let Some(pos) = current_pos.or(Some(rect.center())) {
+                    self.zoom_at(0.87, pos, rect);
+                }
             }
         }
         if response.dragged_by(egui::PointerButton::Middle) {
@@ -949,6 +993,11 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                     });
             });
     }
+    // ── Canvas + controles de zoom (Scandinavian: pill sutil abajo-derecha) ──
+    let mut zoom_in = false;
+    let mut zoom_out = false;
+    let mut zoom_reset = false;
+    let current_zoom = app.whiteboard.zoom;
     egui::CentralPanel::default()
         .frame(egui::Frame::none().fill(theme.canvas_bg))
         .show(ctx, |ui| {
@@ -956,10 +1005,11 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             if available.width() < 10.0 || available.height() < 10.0 {
                 return;
             }
-            // Canvas ocupa TODO lo disponible (SidePanels ya recortaron el ancho,
-            // Top/Bottom son Areas flotantes así que no recortan el alto).
             let canvas_rect = available.shrink(8.0);
-            eprintln!("[WB-MEGA] avail={:?} canvas={:?}", available, canvas_rect);
+            ctx.memory_mut(|mem| {
+                mem.data
+                    .insert_temp(egui::Id::new("whiteboard_canvas_rect"), canvas_rect)
+            });
             ui.painter().rect_stroke(
                 canvas_rect,
                 RADIUS_MD,
@@ -967,7 +1017,142 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             );
             app.whiteboard.handle_canvas_input(canvas_rect, ui);
             app.whiteboard.draw(ui, canvas_rect);
+
+            // Pill de zoom abajo-derecha — Scandinavian: infinito Geogebra 1e-6..1e6
+            let zoom_percent_f = current_zoom * 100.0;
+            let at_min = current_zoom <= ZOOM_WB_MIN * 1.001;
+            let at_max = current_zoom >= ZOOM_WB_MAX * 0.999;
+            let at_limits_exact = at_min || at_max;
+            // Infinito: botones siempre habilitados salvo en los extremos absolutos
+            let minus_enabled = !at_min;
+            let plus_enabled = !at_max;
+            egui::Area::new(egui::Id::new("whiteboard_zoom_controls"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -56.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(theme.panel_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.separator))
+                        .rounding(ZOOM_PILL_RADIUS)
+                        .inner_margin(egui::Margin::symmetric(ZOOM_PILL_PAD_X, ZOOM_PILL_PAD_Y))
+                        .shadow(egui::Shadow {
+                            offset: egui::vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+                            blur: SHADOW_POPUP_BLUR,
+                            spread: 0.0,
+                            color: Color32::from_black_alpha(SHADOW_ALPHA),
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = ZOOM_PILL_GAP;
+                                ui.add_enabled_ui(minus_enabled, |ui| {
+                                    let col = if minus_enabled {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_tertiary
+                                    };
+                                    if action_icon_button(ui, Icon::Minus, col, "Alejar (-)")
+                                        .clicked()
+                                    {
+                                        zoom_out = true;
+                                    }
+                                });
+                                let pct_text = if zoom_percent_f >= 1e7 {
+                                    format!("{:.0e}%", zoom_percent_f)
+                                } else if zoom_percent_f >= 1000.0 {
+                                    format!("{:.0}%", zoom_percent_f)
+                                } else if zoom_percent_f < 0.1 {
+                                    format!("{:.3}%", zoom_percent_f)
+                                } else if zoom_percent_f < 10.0 {
+                                    format!("{:.1}%", zoom_percent_f)
+                                } else {
+                                    format!("{:.0}%", zoom_percent_f)
+                                };
+                                let pct_color = if at_limits_exact {
+                                    theme.warning
+                                } else {
+                                    theme.text_secondary
+                                };
+                                let pct_btn = egui::Button::new(
+                                    egui::RichText::new(pct_text)
+                                        .size(TYPE_XS)
+                                        .color(pct_color)
+                                        .monospace(),
+                                )
+                                .min_size(egui::vec2(ZOOM_PCT_MIN_W, ZOOM_ICON_HIT))
+                                .frame(false);
+                                if ui
+                                    .add(pct_btn)
+                                    .on_hover_text("Clic para 100% — Ctrl+0 / doble clic canvas")
+                                    .clicked()
+                                {
+                                    zoom_reset = true;
+                                }
+                                ui.add_enabled_ui(plus_enabled, |ui| {
+                                    let col = if plus_enabled {
+                                        theme.text_primary
+                                    } else {
+                                        theme.text_tertiary
+                                    };
+                                    if action_icon_button(ui, Icon::Plus, col, "Acercar (+)")
+                                        .clicked()
+                                    {
+                                        zoom_in = true;
+                                    }
+                                });
+                                ui.add_space(SPACE_SM);
+                                ui.separator();
+                                ui.add_space(SPACE_SM);
+                                if action_icon_button(
+                                    ui,
+                                    Icon::Grid,
+                                    theme.text_secondary,
+                                    "Ajustar vista (Ctrl+0)",
+                                )
+                                .clicked()
+                                {
+                                    zoom_reset = true;
+                                }
+                            });
+                        });
+                });
         });
+    // Aplicar zoom anclado al centro del canvas real (Memory), no screen dummy
+    let canvas_center_and_rect = ctx.memory(|mem| {
+        mem.data
+            .get_temp::<egui::Rect>(egui::Id::new("whiteboard_canvas_rect"))
+            .map(|r| (r.center(), r))
+    });
+    let (zoom_center, zoom_rect) = canvas_center_and_rect.unwrap_or_else(|| {
+        let c = ctx.screen_rect().center();
+        (c, egui::Rect::from_center_size(c, egui::vec2(400.0, 300.0)))
+    });
+    if zoom_in {
+        app.whiteboard.zoom_at(1.2, zoom_center, zoom_rect);
+    }
+    if zoom_out {
+        app.whiteboard.zoom_at(0.8333, zoom_center, zoom_rect);
+    }
+    if zoom_reset {
+        app.whiteboard.zoom = ZOOM_WB_DEFAULT;
+        app.whiteboard.pan = (0.0, 0.0);
+    }
+    // Doble clic en canvas resetea zoom (gesto rápido) — solo si fue sobre el lienzo
+    if ctx.input(|i| {
+        i.pointer
+            .button_double_clicked(egui::PointerButton::Primary)
+    }) {
+        if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+            if let Some(canvas) = ctx.memory(|mem| {
+                mem.data
+                    .get_temp::<egui::Rect>(egui::Id::new("whiteboard_canvas_rect"))
+            }) {
+                if canvas.contains(pos) {
+                    app.whiteboard.zoom = ZOOM_WB_DEFAULT;
+                    app.whiteboard.pan = (0.0, 0.0);
+                }
+            }
+        }
+    }
 
     if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
         if app.whiteboard.show_palette {

@@ -110,6 +110,24 @@ pub const SHADOW_ALPHA: u8 = 8;
 pub const TOP_BAR_HEIGHT: f32 = 48.0;
 
 // ═══════════════════════════════════════════════════════════
+// Zoom — rangos y pill (Scandinavian, opaco, sin translucidez)
+// Geogebra-like infinito: 12 órdenes (1e-6..1e6) pizarra, 15 órdenes (1e-6..1e9) 3D
+// ═══════════════════════════════════════════════════════════
+
+pub const ZOOM_WB_MIN: f64 = 1e-6;
+pub const ZOOM_WB_MAX: f64 = 1e6;
+pub const ZOOM_WB_DEFAULT: f64 = 1.0;
+pub const ZOOM_3D_MIN: f32 = 1e-6;
+pub const ZOOM_3D_MAX: f32 = 1e9;
+pub const ZOOM_3D_DEFAULT: f32 = 10.0;
+pub const ZOOM_PILL_RADIUS: f32 = RADIUS_SM;
+pub const ZOOM_PILL_PAD_X: f32 = SPACE_XS;
+pub const ZOOM_PILL_PAD_Y: f32 = SPACE_XS;
+pub const ZOOM_PILL_GAP: f32 = SPACE_XS;
+pub const ZOOM_PCT_MIN_W: f32 = 52.0;
+pub const ZOOM_ICON_HIT: f32 = 32.0;
+
+// ═══════════════════════════════════════════════════════════
 // Animation timings
 // ═══════════════════════════════════════════════════════════
 

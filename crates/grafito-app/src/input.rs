@@ -1347,14 +1347,16 @@ impl GrafitoApp {
 
         if response.hovered() {
             let sc = ui.input(|i| i.smooth_scroll_delta);
-            if sc.y != 0.0 {
+            // Filtra scroll NaN/Inf y limita delta para no saltar de 0.01 a 50k en un frame.
+            if sc.y.is_finite() && sc.y.abs() > f32::EPSILON && sc.y.abs() < 1e4 {
                 #[cfg(feature = "profile")]
                 puffin::profile_scope!("input_zoom");
                 self.pause_multidimensional_motion();
                 self.is_view_changing = true;
                 self.last_interaction_time = Instant::now();
                 self.document.render_quality = RenderQuality::Preview;
-                self.camera.zoom(1.0 + sc.y * 0.005);
+                let factor = (1.0 + sc.y * 0.005).clamp(0.8, 1.25);
+                self.camera.zoom(factor);
             }
         }
 

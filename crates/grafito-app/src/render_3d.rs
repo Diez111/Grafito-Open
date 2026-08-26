@@ -994,11 +994,14 @@ impl GrafitoApp {
         };
         let h = canvas_size.y;
         let approx_scale = (2.0
-            * self.camera.distance as f64
-            * ((self.camera.fov as f64).to_radians() * 0.5).tan()
-            / h as f64
+            * self.camera.sanitized_distance() as f64
+            * ((self.camera.fov as f64).to_radians() * 0.5)
+                .tan()
+                .abs()
+                .max(1e-6)
+            / (h as f64).max(1.0)
             * DEFAULT_CREATION_RADIUS_PIXELS)
-            .max(1.0e-6);
+            .clamp(1.0e-6, 1e6);
         let time = ui.ctx().input(|i| i.time);
 
         match self.current_tool {
@@ -1211,9 +1214,10 @@ impl GrafitoApp {
     ) {
         let origin = canvas.min;
 
-        // Dynamic step calculation based on camera distance
-        let fov_rad = self.camera.fov.to_radians();
-        let frustum_height = 2.0 * self.camera.distance * (fov_rad * 0.5).tan();
+        // Dynamic step calculation based on camera distance (sanitizado para no NaN/black)
+        let dist = self.camera.sanitized_distance();
+        let fov_rad = self.camera.fov.to_radians().clamp(0.01, 3.0);
+        let frustum_height = 2.0 * dist * (fov_rad * 0.5).tan().abs().max(1e-6);
         let pixels_per_unit = (h / frustum_height) as f64;
         let target_world_step = 120.0 / pixels_per_unit.max(1e-30);
         let magnitude = target_world_step.log10().floor();
@@ -1426,7 +1430,7 @@ impl GrafitoApp {
                 let dy = 0.0 - cam_pos.y as f64;
                 let dz = 0.0 - cam_pos.z as f64;
                 let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist > self.camera.distance as f64 * 1.8 {
+                if dist > self.camera.sanitized_distance() as f64 * 1.8 {
                     continue;
                 }
 
@@ -1481,7 +1485,7 @@ impl GrafitoApp {
                 let dy = y - cam_pos.y as f64;
                 let dz = 0.0 - cam_pos.z as f64;
                 let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist > self.camera.distance as f64 * 1.8 {
+                if dist > self.camera.sanitized_distance() as f64 * 1.8 {
                     continue;
                 }
 
@@ -1535,7 +1539,7 @@ impl GrafitoApp {
                 let dy = 0.0 - cam_pos.y as f64;
                 let dz = z - cam_pos.z as f64;
                 let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                if dist > self.camera.distance as f64 * 1.8 {
+                if dist > self.camera.sanitized_distance() as f64 * 1.8 {
                     continue;
                 }
 
