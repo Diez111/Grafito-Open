@@ -3269,6 +3269,25 @@ impl GrafitoApp {
             self.document.view_mut().scale = scale;
             self.document.view_mut().offset =
                 grafito_geometry::Point2::new(-cx * scale, cy * scale);
+            self.document.bump_version();
+            self.is_view_changing = true;
+            self.last_interaction_time = std::time::Instant::now();
+        } else {
+            // Sin objetos: centrar al origen con escala por defecto (antes no hacía nada y parecía roto)
+            let screen = self.document.view().screen_size;
+            let x_log = self.document.view().x_log;
+            let y_log = self.document.view().y_log;
+            *self.document.view_mut() = grafito_geometry::ViewTransform {
+                offset: grafito_geometry::Point2::new(0.0, 0.0),
+                scale: 50.0,
+                screen_size: screen,
+                x_log,
+                y_log,
+            };
+            self.document.bump_version();
+            self.is_view_changing = true;
+            self.last_interaction_time = std::time::Instant::now();
+            self.document.render_quality = grafito_core::RenderQuality::High;
         }
     }
 }
@@ -3868,39 +3887,36 @@ impl eframe::App for GrafitoApp {
                             self.handle_canvas_input(ui, canvas_rect);
                         }
 
-                        // Compact canvas controls — top-right corner, inside canvas
-                        let ctrl_x = canvas_rect.right() - 44.0;
-                        let ctrl_y = canvas_rect.top() + 8.0;
-                        let painter = ui.painter();
-                        // Zoom-fit button
+                        // Compact canvas controls — top-right corner, dentro del canvas
+                        // Scandinavian: botón quiet con hairline 10%, RADIUS 4, sobre Order::Foreground
                         let zf_rect = egui::Rect::from_min_size(
-                            egui::pos2(ctrl_x, ctrl_y),
+                            egui::pos2(canvas_rect.right() - 44.0, canvas_rect.top() + 8.0),
                             egui::vec2(34.0, 28.0),
                         );
-                        painter.rect(
-                            zf_rect,
-                            4.0,
-                            theme.toolbar_bg,
-                            egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
-                        );
-                        painter.text(
-                            zf_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "[ ]",
-                            egui::FontId::proportional(16.0),
-                            theme.text_primary,
-                        );
-                        let zoom_fit =
-                            ui.interact(zf_rect, ui.id().with("zf"), egui::Sense::click());
-                        zoom_fit.widget_info(|| {
+                        // Usar ui.put (Button widget) en lugar de painter+interact manual:
+                        // asegura hit-test correcto por encima de handle_canvas_input (click_and_drag del canvas)
+                        // y feedback hover/pressed visible.
+                        let zf_btn = egui::Button::new(
+                            egui::RichText::new("[ ]")
+                                .size(14.0)
+                                .color(theme.text_primary),
+                        )
+                        .fill(theme.toolbar_bg)
+                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                        .rounding(4.0);
+                        let zf_resp = ui.put(zf_rect, zf_btn);
+                        // Hover text accesible y tooltip Scandinavian
+                        let zf_resp = zf_resp.on_hover_text("Ajustar Vista — centrar en (0,0)");
+                        zf_resp.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
                                 true,
                                 "Ajustar vista",
                             )
                         });
-                        if zoom_fit.on_hover_text("Ajustar Vista").clicked() {
+                        if zf_resp.clicked() {
                             self.zoom_to_fit();
+                            ui.ctx().request_repaint();
                         }
 
                         let scene_plan = crate::canvas::plan_2d_scene(
