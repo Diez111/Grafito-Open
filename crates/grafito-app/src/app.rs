@@ -3897,8 +3897,8 @@ impl eframe::App for GrafitoApp {
                         // asegura hit-test correcto por encima de handle_canvas_input (click_and_drag del canvas)
                         // y feedback hover/pressed visible.
                         let zf_btn = egui::Button::new(
-                            egui::RichText::new("[ ]")
-                                .size(14.0)
+                            egui::RichText::new("[]")
+                                .size(13.0)
                                 .color(theme.text_primary),
                         )
                         .fill(theme.toolbar_bg)
