@@ -1435,9 +1435,64 @@ fn parse_assistant_blocks(content: &str) -> Vec<AssistantMessageBlock> {
     blocks
 }
 
+fn is_bare_display_math(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('$') || trimmed.contains("```") {
+        return false;
+    }
+    // Heurística: línea con \frac / \sqrt / \int y con = o \cdot y parseable como MathExpr
+    let has_frac =
+        trimmed.contains(r"\frac") || trimmed.contains(r"\dfrac") || trimmed.contains(r"\sqrt");
+    let has_math_op = trimmed.contains('=')
+        || trimmed.contains(r"\cdot")
+        || trimmed.contains(r"\times")
+        || trimmed.contains(r"\div");
+    if !(has_frac && has_math_op) {
+        return false;
+    }
+    // Intentar parsear como math puro (ignorando texto previo suelto)
+    // Buscar primer \ y probar parse desde ahí
+    if let Some(start) = trimmed.find('\\') {
+        let candidate = trimmed[start..].trim();
+        // Si empieza con \frac y el resto es mayormente math, considerar display
+        if MathParser::parse(candidate).is_some() && candidate.len() > trimmed.len() / 2 {
+            return true;
+        }
+        // También si toda la línea parsea
+        if MathParser::parse(trimmed).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 fn flush_assistant_paragraph(blocks: &mut Vec<AssistantMessageBlock>, paragraph: &mut Vec<String>) {
     if !paragraph.is_empty() {
-        blocks.push(AssistantMessageBlock::Paragraph(paragraph.join(" ")));
+        let text = paragraph.join(" ");
+        if is_bare_display_math(&text) {
+            // Promover a DisplayMath para estructura y separación (fracciones apiladas, no inline plano)
+            // Extraer solo la parte matemática desde el primer \
+            let trimmed = text.trim();
+            let math_source = if let Some(start) = trimmed.find('\\') {
+                // Si hay texto previo no-matemático ("El resultado es \frac..."), mantener como párrafo
+                // pero si el texto previo es corto (<30 chars) y el resto es math largo, promover solo math
+                let before = trimmed[..start].trim();
+                let candidate = trimmed[start..].trim();
+                if before.is_empty() || (before.len() < 30 && candidate.len() > before.len()) {
+                    candidate.to_string()
+                } else {
+                    // No promover, dejar como párrafo (bare math será manejado inline)
+                    blocks.push(AssistantMessageBlock::Paragraph(text));
+                    paragraph.clear();
+                    return;
+                }
+            } else {
+                trimmed.to_string()
+            };
+            blocks.push(AssistantMessageBlock::DisplayMath(math_source));
+        } else {
+            blocks.push(AssistantMessageBlock::Paragraph(text));
+        }
         paragraph.clear();
     }
 }
@@ -5505,10 +5560,15 @@ impl<'a> MathParser<'a> {
         self.take_if('\\')?;
         let first = self.take()?;
         if !first.is_ascii_alphabetic() {
-            if matches!(first, '!' | ',' | ';' | ':') {
-                return self.node(MathExpr::Text(String::new()));
-            }
-            return self.node(MathExpr::Text(first.to_string()));
+            // Espaciado fino LaTeX: \, → thin space, \; y \: → medium/thick, \! → negative (ignorado)
+            let thin = match first {
+                ',' => " ", // U+2009 thin space
+                ';' => " ",
+                ':' => " ",
+                '!' => "",
+                _ => return self.node(MathExpr::Text(first.to_string())),
+            };
+            return self.node(MathExpr::Text(thin.to_string()));
         }
         let mut command = first.to_string();
         while self
@@ -5537,7 +5597,8 @@ impl<'a> MathParser<'a> {
                 self.parse_group()
             }
             "left" | "right" => self.node(MathExpr::Text(String::new())),
-            "quad" | "qquad" => self.node(MathExpr::Text(" ".into())),
+            "quad" => self.node(MathExpr::Text(" ".into())), // em space → separación visible
+            "qquad" => self.node(MathExpr::Text("  ".into())),
             _ => self.node(MathExpr::Text(math_command_symbol(&command)?.into())),
         }
     }
@@ -5607,6 +5668,7 @@ fn math_command_symbol(command: &str) -> Option<&'static str> {
         "pm" => Some("±"),
         "times" => Some("×"),
         "cdot" => Some("·"),
+        "div" => Some("÷"),
         "infty" => Some("∞"),
         "sum" => Some("∑"),
         "int" => Some("∫"),
@@ -5618,6 +5680,16 @@ fn math_command_symbol(command: &str) -> Option<&'static str> {
         "log" => Some("log "),
         "ln" => Some("ln "),
         "exp" => Some("exp "),
+        "checkmark" => Some("✓"),
+        "circ" => Some("∘"),
+        "bullet" => Some("•"),
+        "star" => Some("★"),
+        "ast" => Some("*"),
+        "ldots" | "cdots" | "vdots" | "ddots" => Some("…"),
+        "prime" => Some("′"),
+        "dagger" => Some("†"),
+        "ddagger" => Some("‡"),
+        "ell" => Some("ℓ"),
         _ => None,
     }
 }
@@ -5874,6 +5946,77 @@ fn layout_math(
     }
 }
 
+/// Detecta un fragmento bare LaTeX sin $ delimiters (ej: \frac{2}{3} \cdot \frac{9}{4} = ...)
+/// Retorna (byte_start, byte_end, plain) si el fragmento parsea como MathExpr.
+fn find_bare_math_fragment(text: &str) -> Option<(usize, usize, String)> {
+    // Triggers más comunes de math bare
+    let triggers = [
+        r"\frac", r"\dfrac", r"\sqrt", r"\cdot", r"\times", r"\div", r"\int", r"\sum",
+    ];
+    let mut best_start = None;
+    let mut best_end = 0usize;
+    let mut best_plain = String::new();
+    for trig in triggers {
+        if let Some(pos) = text.find(trig) {
+            // Intentar extraer desde pos hasta el final o hasta doble espacio/punto que no sea math
+            // Probar longitudes decrecientes hasta que MathParser::parse tenga éxito
+            // Limitar a 300 chars para no parsear texto normal largo
+            let max_len = (text.len() - pos).min(400);
+            let slice = &text[pos..pos + max_len];
+            // Buscar el prefijo más largo parseable que termine en espacio, ), , o fin
+            for end in (trig.len()..=slice.len()).rev() {
+                // Solo probar cortes en boundaries de char y en whitespaces/puntuación
+                if !slice.is_char_boundary(end) {
+                    continue;
+                }
+                let candidate = slice[..end].trim();
+                if candidate.len() < trig.len() {
+                    continue;
+                }
+                // Evitar cortar en medio de \command
+                if candidate.ends_with('\\') {
+                    continue;
+                }
+                // Solo considerar si termina en dígito, }, ), o espacio
+                let last = candidate.chars().last().unwrap_or(' ');
+                if !(last.is_ascii_digit()
+                    || last == '}'
+                    || last == ')'
+                    || last.is_whitespace()
+                    || last == '.'
+                    || last == '✓'
+                    || last == '·'
+                    || last == '×')
+                {
+                    // Para candidatos que terminan en letra, probablemente incompletos
+                    if last.is_ascii_alphabetic() && !candidate.ends_with("checkmark") {
+                        continue;
+                    }
+                }
+                if MathParser::parse(candidate).is_some() {
+                    let plain = math_to_plain(candidate);
+                    if !plain.is_empty() && plain != candidate {
+                        if best_start.is_none_or(|bs| pos < bs) {
+                            best_start = Some(pos);
+                            best_end = pos + end;
+                            best_plain = plain;
+                        }
+                        break;
+                    }
+                }
+                // Limitar iteraciones para no ser O(n^2) muy grande: solo probar cada ~8 chars o boundaries
+                if end < slice.len() && slice[..end].chars().rev().take(2).any(|c| c == ' ') {
+                    // ya probamos en espacios, continuar
+                }
+            }
+            if best_start.is_some() {
+                break;
+            }
+        }
+    }
+    best_start.map(|s| (s, best_end, best_plain))
+}
+
 fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
     let theme = current_theme(ui.ctx());
     let normal = egui::TextFormat {
@@ -5917,26 +6060,63 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
                     .map(|position| (position, *start, *end, *format))
             })
             .min_by_key(|(position, _, _, _)| *position);
-        let Some((position, start, end, format)) = next else {
-            job.append(remaining, 0.0, normal.clone());
-            break;
-        };
-        if position > 0 {
-            job.append(&remaining[..position], 0.0, normal.clone());
+        if let Some((position, start, end, format)) = next {
+            if position > 0 {
+                // Antes del marker, verificar si hay bare math en el prefijo
+                let prefix = &remaining[..position];
+                if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
+                    if b_s > 0 {
+                        job.append(&prefix[..b_s], 0.0, normal.clone());
+                    }
+                    job.append(&b_plain, 0.0, math.clone());
+                    let after_bare = &prefix[b_e..];
+                    if !after_bare.is_empty() {
+                        job.append(after_bare, 0.0, normal.clone());
+                    }
+                    // No consumir el marker aún, re-evaluar desde el marker
+                    remaining = &remaining[position..];
+                    continue;
+                }
+                job.append(&remaining[..position], 0.0, normal.clone());
+            }
+            let after_start = &remaining[position + start.len()..];
+            let Some(end_position) = after_start.find(end) else {
+                job.append(&remaining[position..], 0.0, normal.clone());
+                break;
+            };
+            let source_end = position + start.len() + end_position + end.len();
+            let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
+                inline_math_text(&remaining[position..source_end])
+            } else {
+                after_start[..end_position].to_owned()
+            };
+            job.append(&inline, 0.0, format.clone());
+            remaining = &after_start[end_position + end.len()..];
+            continue;
         }
-        let after_start = &remaining[position + start.len()..];
-        let Some(end_position) = after_start.find(end) else {
-            job.append(&remaining[position..], 0.0, normal.clone());
+        // Sin markers $...$, buscar bare math
+        if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
+            if b_s > 0 {
+                job.append(&remaining[..b_s], 0.0, normal.clone());
+            }
+            job.append(&b_plain, 0.0, math.clone());
+            // Si hay texto después del bare fragment, también como normal
+            let after = &remaining[b_e..];
+            if !after.trim().is_empty() {
+                // Evitar recursión infinita si el resto sigue siendo bare math
+                // Intentar seguir parseando el after en siguiente iteración
+                remaining = after;
+                // Si el after no contiene más bare math, append como normal y break
+                if find_bare_math_fragment(remaining).is_none() {
+                    job.append(remaining, 0.0, normal.clone());
+                    break;
+                }
+                continue;
+            }
             break;
-        };
-        let source_end = position + start.len() + end_position + end.len();
-        let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
-            inline_math_text(&remaining[position..source_end])
-        } else {
-            after_start[..end_position].to_owned()
-        };
-        job.append(&inline, 0.0, format.clone());
-        remaining = &after_start[end_position + end.len()..];
+        }
+        job.append(remaining, 0.0, normal.clone());
+        break;
     }
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
@@ -5983,26 +6163,56 @@ fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color
                     .map(|position| (position, *start, *end, *format))
             })
             .min_by_key(|(position, _, _, _)| *position);
-        let Some((position, start, end, format)) = next else {
-            job.append(remaining, 0.0, normal.clone());
-            break;
-        };
-        if position > 0 {
-            job.append(&remaining[..position], 0.0, normal.clone());
+        if let Some((position, start, end, format)) = next {
+            if position > 0 {
+                let prefix = &remaining[..position];
+                if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(prefix) {
+                    if b_s > 0 {
+                        job.append(&prefix[..b_s], 0.0, normal.clone());
+                    }
+                    job.append(&b_plain, 0.0, math.clone());
+                    let after_bare = &prefix[b_e..];
+                    if !after_bare.is_empty() {
+                        job.append(after_bare, 0.0, normal.clone());
+                    }
+                    remaining = &remaining[position..];
+                    continue;
+                }
+                job.append(&remaining[..position], 0.0, normal.clone());
+            }
+            let after_start = &remaining[position + start.len()..];
+            let Some(end_position) = after_start.find(end) else {
+                job.append(&remaining[position..], 0.0, normal.clone());
+                break;
+            };
+            let source_end = position + start.len() + end_position + end.len();
+            let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
+                inline_math_text(&remaining[position..source_end])
+            } else {
+                after_start[..end_position].to_owned()
+            };
+            job.append(&inline, 0.0, format.clone());
+            remaining = &after_start[end_position + end.len()..];
+            continue;
         }
-        let after_start = &remaining[position + start.len()..];
-        let Some(end_position) = after_start.find(end) else {
-            job.append(&remaining[position..], 0.0, normal.clone());
+        if let Some((b_s, b_e, b_plain)) = find_bare_math_fragment(remaining) {
+            if b_s > 0 {
+                job.append(&remaining[..b_s], 0.0, normal.clone());
+            }
+            job.append(&b_plain, 0.0, math.clone());
+            let after = &remaining[b_e..];
+            if !after.trim().is_empty() {
+                remaining = after;
+                if find_bare_math_fragment(remaining).is_none() {
+                    job.append(remaining, 0.0, normal.clone());
+                    break;
+                }
+                continue;
+            }
             break;
-        };
-        let source_end = position + start.len() + end_position + end.len();
-        let inline = if matches!(start, "$$" | "$" | r"\[" | r"\(") {
-            inline_math_text(&remaining[position..source_end])
-        } else {
-            after_start[..end_position].to_owned()
-        };
-        job.append(&inline, 0.0, format.clone());
-        remaining = &after_start[end_position + end.len()..];
+        }
+        job.append(remaining, 0.0, normal.clone());
+        break;
     }
     ui.add(egui::Label::new(job).wrap().selectable(true));
 }
@@ -7425,6 +7635,29 @@ mod tests {
         assert!(!assistant_uses_bottom_sheet(
             ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH
         ));
+    }
+
+    #[test]
+    fn bare_math_fraction_chain_renders_with_checkmark() {
+        let src = r"\frac{2}{3} \cdot \frac{9}{4} = \frac{18}{12} = \frac{3}{2} \quad (\checkmark \, 1.5)";
+        let plain = math_to_plain(src);
+        assert!(plain.contains("2 / 3"), "plain was {plain}");
+        assert!(plain.contains("·"), "cdot missing in {plain}");
+        assert!(plain.contains("✓"), "checkmark missing in {plain}");
+        assert!(plain.contains("1.5"), "1.5 missing in {plain}");
+        // Bare detection should find fragment
+        let frag = find_bare_math_fragment(src);
+        assert!(frag.is_some(), "bare fragment not detected for {src}");
+        // DisplayMath promotion heuristic
+        assert!(is_bare_display_math(src));
+        // Block parsing should promote to DisplayMath
+        let blocks = parse_assistant_blocks(src);
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, AssistantMessageBlock::DisplayMath(_))),
+            "blocks were {blocks:?}"
+        );
     }
 
     #[test]
