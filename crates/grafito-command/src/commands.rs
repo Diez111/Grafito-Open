@@ -1347,6 +1347,58 @@ fn process_input_in_place_with_budget(
         return CommandOutcome::Error(message);
     }
 
+    // ── Batch: pegar múltiples comandos en líneas separadas (ej: Segment + 4 Points) ──
+    // Grafito históricamente solo acepta un comando por submit; al pegar 5 líneas
+    // `parse_cas_command` ve texto tras el primer `]` y devuelve error
+    // "no se permite texto después del corchete final". Detectar batch y ejecutar secuencialmente.
+    if raw_text.contains('\n') {
+        let lines: Vec<String> = raw_text
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("grafito"))
+            .collect();
+        if lines.len() > 1 && lines.len() <= MAX_SCRIPT_COMMANDS {
+            let is_batch = lines.iter().all(|l| {
+                let t = l.trim();
+                // Cada línea debe parecer comando bracketed, asignación o expresión con paréntesis
+                looks_like_bracketed_command(t)
+                    || t.contains('=')
+                    || t.starts_with('(')
+                    || parse_cas_command(t).is_some()
+                    || t.eq_ignore_ascii_case("eraseall")
+            });
+            if is_batch {
+                let mut last_outcome = CommandOutcome::Ok;
+                let mut any_error = None;
+                for line in &lines {
+                    if script_budget.executed_commands >= MAX_SCRIPT_COMMANDS {
+                        return CommandOutcome::Error(format!(
+                            "Batch excede el límite de {MAX_SCRIPT_COMMANDS} comandos"
+                        ));
+                    }
+                    script_budget.executed_commands += 1;
+                    let mut line_buf = line.clone();
+                    let outcome =
+                        process_input_in_place_with_budget(document, &mut line_buf, script_budget);
+                    match &outcome {
+                        CommandOutcome::Error(msg) => {
+                            // Reportar línea fallida con contexto, pero seguir para diagnóstico completo
+                            any_error = Some(format!("{line}: {msg}"));
+                            last_outcome = outcome;
+                            break;
+                        }
+                        _ => last_outcome = outcome,
+                    }
+                }
+                if let Some(err) = any_error {
+                    return CommandOutcome::Error(err);
+                }
+                input_text.clear();
+                return last_outcome;
+            }
+        }
+    }
+
     // Sanitize mathematical unicode symbols from the virtual keyboard.
     // Do not rewrite global `X`/`Y`: command names and object labels are case-sensitive.
     let text = raw_text
@@ -12943,5 +12995,27 @@ mod tests {
             has_grid,
             "Should automatically create a ComplexGrid for complex expressions"
         );
+    }
+
+    #[test]
+    fn test_batch_multiline_segment_and_points() {
+        let mut doc = Document::new();
+        let input = "GRAFITO\n\nSegment[(0, 0), (1, 0)]\nPoint[(0, 0)]\nPoint[(0.3333, 0)]\nPoint[(0.6667, 0)]\nPoint[(1, 0)]";
+        let mut buf = input.to_string();
+        let outcome = process_input(&mut doc, &mut buf);
+        assert!(
+            !matches!(outcome, CommandOutcome::Error(_)),
+            "batch should succeed, got {outcome:?}"
+        );
+        let points = doc
+            .objects_iter()
+            .filter(|(_, o)| matches!(o, GeoObject::Point(_)))
+            .count();
+        let segments = doc
+            .objects_iter()
+            .filter(|(_, o)| matches!(o, GeoObject::Line(_)))
+            .count();
+        assert_eq!(points, 4, "should have 4 points, have {}", points);
+        assert_eq!(segments, 1, "should have 1 segment, have {segments}");
     }
 }
