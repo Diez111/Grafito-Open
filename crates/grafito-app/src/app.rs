@@ -4309,15 +4309,14 @@ impl eframe::App for GrafitoApp {
 }
 
 impl GrafitoApp {
-    /// Dibuja la ventana modal "Acerca de Grafito": versión, licencia, autor y
-    /// un resumen en español de los cambios principales de la release actual.
+    /// Ventana "Acerca de Grafito" — resumida, Scandinavian quiet.
     fn draw_about_window(&mut self, ctx: &egui::Context) {
         let theme = grafito_ui::theme::current_theme(ctx);
         egui::Window::new("Acerca de Grafito")
             .id(egui::Id::new("about_window"))
             .collapsible(false)
             .resizable(false)
-            .default_width(460.0)
+            .default_width(420.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .frame(
                 egui::Frame::window(&ctx.style())
@@ -4339,82 +4338,39 @@ impl GrafitoApp {
                             .size(13.0)
                             .color(theme.text_secondary),
                     );
-                    ui.add_space(4.0);
+                    ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("Geometría interactiva - Algebra - Calculo - CAS")
+                        egui::RichText::new(
+                            "Calculadora gráfica interactiva para geometría, álgebra, \
+                             cálculo, CAS y estadística. Rápida, precisa y simple.",
+                        )
+                        .size(12.0)
+                        .color(theme.text_primary),
+                    );
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("Creado por Lautaro Agustin Diez")
                             .size(12.0)
+                            .strong()
+                            .color(theme.text_primary),
+                    );
+                    ui.label(
+                        egui::RichText::new("HECHO EN ARGENTINA")
+                            .size(11.0)
+                            .color(theme.text_secondary),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Licencia GPL-3.0-or-later · Código abierto")
+                            .size(11.0)
                             .color(theme.text_tertiary),
                     );
                 });
-                ui.add_space(10.0);
+                ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(8.0);
-
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("¿Qué es Grafito?")
-                                .size(14.0)
-                                .strong()
-                                .color(theme.text_primary),
-                        );
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Grafito es una calculadora gráfica matemática \
-                                 moderna y de alto rendimiento escrita en Rust. \
-                                 Permite graficar funciones en 2D y 3D, curvas \
-                                 paramétricas e implícitas, resolver EDOs y \
-                                 sistemas, hacer análisis simbólico (raíces, \
-                                 extremos, integrales, tangentes, curvatura) y \
-                                 trabajar con mapeos complejos, estadística, \
-                                 probabilidad y mucho más.",
-                            )
-                            .size(12.0)
-                            .color(theme.text_primary),
-                        );
-
-                        ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new("Cambios principales de esta versión")
-                                .size(14.0)
-                                .strong()
-                                .color(theme.text_primary),
-                        );
-                        ui.add_space(4.0);
-
-                        let cambios = build_about_changelog();
-                        for linea in cambios {
-                            ui.label(
-                                egui::RichText::new(format!("- {}", linea))
-                                    .size(12.0)
-                                    .color(theme.text_primary),
-                            );
-                        }
-
-                        ui.add_space(10.0);
-                        ui.label(
-                            egui::RichText::new("Información")
-                                .size(14.0)
-                                .strong()
-                                .color(theme.text_primary),
-                        );
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "Licencia: GPL-3.0-or-later. Código abierto. \
-                                 Hecho con Rust + egui + wgpu.",
-                            )
-                            .size(12.0)
-                            .color(theme.text_secondary),
-                        );
-                    });
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
                 ui.vertical_centered(|ui| {
                     if ui
                         .add(
@@ -4449,9 +4405,8 @@ impl GrafitoApp {
     }
 }
 
-/// Resumen en español de los cambios de la release 1.1.4 para la ventana
-/// "Acerca de Grafito". Se mantiene en un helper para que sea fácil de
-/// actualizar cuando se libera una nueva versión.
+/// Resumen histórico de cambios — conservado para referencia, no mostrado en UI resumida.
+#[allow(dead_code)]
 fn build_about_changelog() -> &'static [&'static str] {
     &[
         "Mapeos conformes algebraicos de primera clase (1/z, z^n, exp, log, sin, cos, Joukowski, Möbius, etc.).",

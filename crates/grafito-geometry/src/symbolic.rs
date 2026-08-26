@@ -1217,11 +1217,629 @@ pub fn asymptote(expr: &str, var: &str) -> Result<String, String> {
     adapt_symbolic_result(asymptote_typed(expr, var))
 }
 
-/// Base de Groebner — stub intencional.
+/// Límite para factorización prima (1e12) — respeta MAX y evita explosión.
+const MAX_PRIME_FACTOR: u64 = 1_000_000_000_000;
+
+/// Convierte `a*x^2 + b*x + c` a `a*(x + b/(2a))^2 + (c - b^2/(4a))`.
 ///
-/// GeoGebra expone `GroebnerBasis`, `GroebnerDegRevLex`, etc. Grafito aún no
-/// implementa bases de Groebner; este stub evita pánico y sugiere usar
-/// `Eliminate`. Nunca devuelve `unwrap` y respeta presupuestos de entrada.
+/// Valida `MAX_MATH_INPUT_BYTES`, identificador y que sea cuadrático. No usa
+/// `unwrap` y respeta presupuestos de salida.
+pub fn complete_square_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::SymbolicDerivative) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    let Some(coeffs) = collect_polynomial_coeffs(&ast, var, 2) else {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "no es polinomio cuadrático en la variable indicada".into(),
+        });
+    };
+    if coeffs.iter().any(|c| !c.is_finite()) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "coeficientes no finitos".into(),
+        });
+    }
+    let a = coeffs[2];
+    let b = coeffs[1];
+    let c = coeffs[0];
+    if a == 0.0 || !a.is_finite() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "el coeficiente cuadrático es cero, no es grado 2".into(),
+        });
+    }
+    if !b.is_finite() || !c.is_finite() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "coeficientes no finitos".into(),
+        });
+    }
+    let two_a = 2.0 * a;
+    let four_a = 4.0 * a;
+    if two_a == 0.0 || four_a == 0.0 || !two_a.is_finite() || !four_a.is_finite() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "división por cero en completar cuadrado".into(),
+        });
+    }
+    let h = b / two_a;
+    let k = c - b * b / four_a;
+    if !h.is_finite() || !k.is_finite() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "resultado no finito al completar cuadrado".into(),
+        });
+    }
+    // Normaliza -0.0 a 0.0
+    let h = if h == 0.0 { 0.0 } else { h };
+    let k = if k == 0.0 { 0.0 } else { k };
+    let a_norm = if a == 0.0 { 0.0 } else { a };
+    // Construcción con manejo de signos
+    let fmt = |v: f64| {
+        if v == 0.0 {
+            "0".to_string()
+        } else {
+            // Evita -0
+            let v = if v == 0.0 { 0.0 } else { v };
+            v.to_string()
+        }
+    };
+    let inner = if h == 0.0 {
+        format!("({var})")
+    } else if h > 0.0 {
+        format!("({var} + {})", fmt(h))
+    } else {
+        format!("({var} - {})", fmt(-h))
+    };
+    let inner_sq = format!("{inner}^2");
+    let a_part = if a_norm == 1.0 {
+        inner_sq.clone()
+    } else if a_norm == -1.0 {
+        format!("-{inner_sq}")
+    } else {
+        format!("{}*{inner_sq}", fmt(a_norm))
+    };
+    let output = if k == 0.0 {
+        a_part
+    } else if k > 0.0 {
+        format!("{a_part} + {}", fmt(k))
+    } else {
+        format!("{a_part} - {}", fmt(-k))
+    };
+    if output.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: output.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    MathResult::Exact(output)
+}
+
+/// Adaptador de `CompleteSquare` para consumidores de texto.
+pub fn complete_square(expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(complete_square_typed(expr, var))
+}
+
+/// Factorización prima por trial division hasta sqrt.
+///
+/// Respeta `n <= 1e12` y `MAX_MATH_INPUT_BYTES`, sin `unwrap`. Devuelve
+/// cadena tipo "2^2 * 3 * 5".
+pub fn prime_factors_typed(n_str: &str) -> MathResult<String> {
+    if n_str.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: n_str.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    let trimmed = n_str.trim();
+    if trimmed.is_empty() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: n_str.into(),
+            reason: "entrada vacía para PrimeFactors".into(),
+        });
+    }
+    // Intenta parseo entero directo, si falla intenta evaluación numérica
+    let mut parsed: Option<i128> = trimmed.replace(' ', "").parse::<i128>().ok();
+    if parsed.is_none() {
+        if let Ok(val) = crate::expr::evaluate(trimmed, &[]) {
+            if val.is_finite() && val.fract() == 0.0 && val.abs() <= MAX_PRIME_FACTOR as f64 * 2.0 {
+                let as_i128 = val as i128;
+                if (as_i128 as f64) == val {
+                    parsed = Some(as_i128);
+                }
+            }
+        }
+    }
+    let Some(n_raw) = parsed else {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: n_str.into(),
+            reason: "no se pudo interpretar como entero".into(),
+        });
+    };
+    if n_raw == 0 {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: n_str.into(),
+            reason: "no se puede factorizar 0".into(),
+        });
+    }
+    if n_raw == 1 || n_raw == -1 {
+        return MathResult::Exact("1".to_string());
+    }
+    let negative = n_raw < 0;
+    let n_abs_u128 = n_raw.unsigned_abs();
+    if n_abs_u128 > MAX_PRIME_FACTOR as u128 {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: n_abs_u128.to_string().len(),
+            maximum_bytes: MAX_PRIME_FACTOR.to_string().len(),
+        });
+    }
+    let n_abs = n_abs_u128 as u64;
+    let factors = prime_factors_u64(n_abs);
+    if factors.is_empty() {
+        return MathResult::Exact(n_abs.to_string());
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for (prime, exp) in factors {
+        if exp == 1 {
+            parts.push(prime.to_string());
+        } else {
+            parts.push(format!("{prime}^{exp}"));
+        }
+    }
+    let mut out = parts.join(" * ");
+    if negative {
+        out = format!("-1 * {out}");
+    }
+    if out.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: out.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    MathResult::Exact(out)
+}
+
+/// Adaptador de `PrimeFactors` para consumidores de texto.
+pub fn prime_factors(n_str: &str) -> Result<String, String> {
+    adapt_symbolic_result(prime_factors_typed(n_str))
+}
+
+fn prime_factors_u64(mut n: u64) -> Vec<(u64, u32)> {
+    let mut factors: Vec<(u64, u32)> = Vec::new();
+    if n < 2 {
+        return factors;
+    }
+    let mut count = 0u32;
+    while n.is_multiple_of(2) {
+        n /= 2;
+        count += 1;
+    }
+    if count > 0 {
+        factors.push((2, count));
+    }
+    let mut p: u64 = 3;
+    while p * p <= n {
+        if n.is_multiple_of(p) {
+            let mut c = 0u32;
+            while n.is_multiple_of(p) {
+                n /= p;
+                c += 1;
+            }
+            factors.push((p, c));
+        }
+        p += 2;
+        // Evita bucle infinito para n grande: p*p puede desbordar u64, pero n <=1e12 así que p <=1e6
+        if p > 1_000_000 && n > 1 {
+            break;
+        }
+    }
+    if n > 1 {
+        factors.push((n, 1));
+    }
+    factors
+}
+
+/// Factorización entera: si `expr` es entero delega a `PrimeFactors`, si es
+/// polinomio extrae contenido entero (gcd) y lo factoriza con `PrimeFactors`.
+///
+/// Reusa `PrimeFactors` para coeficientes como pide la tarea.
+pub fn ifactor_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    let var = if var.trim().is_empty() {
+        "x"
+    } else {
+        var.trim()
+    };
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: "expresión vacía para IFactor".into(),
+        });
+    }
+    // Caso entero puro: delega directamente
+    let direct_int = trimmed.replace(' ', "").parse::<i128>().ok();
+    if let Some(n) = direct_int {
+        if n.unsigned_abs() <= MAX_PRIME_FACTOR as u128 && n != 0 {
+            return prime_factors_typed(&n.to_string());
+        }
+    }
+    // Intenta evaluación numérica entera (ej. "2*30")
+    if let Ok(val) = crate::expr::evaluate(trimmed, &[]) {
+        if val.is_finite() && val.fract() == 0.0 && val.abs() <= MAX_PRIME_FACTOR as f64 {
+            let as_i128 = val as i128;
+            if (as_i128 as f64) == val && as_i128 != 0 {
+                return prime_factors_typed(&as_i128.to_string());
+            }
+        }
+    }
+    // Caso polinómico: intenta extraer coeficientes enteros
+    let ast = match parse_math_expression(expr, MathOperation::SymbolicDerivative) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    if let Some(coeffs) = collect_polynomial_coeffs(&ast, var, 20) {
+        // Verifica que todos los coeficientes sean finitos y enteros (con tolerancia)
+        let mut int_coeffs: Vec<i128> = Vec::new();
+        let mut all_integer = true;
+        for &c in &coeffs {
+            if !c.is_finite() {
+                all_integer = false;
+                break;
+            }
+            // Tolerancia para f64 entero
+            let rounded = c.round();
+            if (c - rounded).abs() > 1e-9 {
+                all_integer = false;
+                break;
+            }
+            if rounded.abs() > MAX_PRIME_FACTOR as f64 {
+                all_integer = false;
+                break;
+            }
+            int_coeffs.push(rounded as i128);
+        }
+        if all_integer && !int_coeffs.is_empty() {
+            // Calcula gcd del contenido (valor absoluto, ignora ceros)
+            let mut gcd_val: i128 = 0;
+            for &ic in &int_coeffs {
+                let av = ic.abs();
+                if av == 0 {
+                    continue;
+                }
+                if gcd_val == 0 {
+                    gcd_val = av;
+                } else {
+                    gcd_val = gcd_i128(gcd_val, av);
+                }
+            }
+            if gcd_val > 1 {
+                // Factoriza gcd con PrimeFactors y muestra contenido
+                let gcd_factors = match prime_factors_typed(&gcd_val.to_string()) {
+                    MathResult::Exact(s) => s,
+                    _ => gcd_val.to_string(),
+                };
+                // Construye polinomio primitivo dividiendo por gcd
+                let primitive_coeffs: Vec<f64> =
+                    coeffs.iter().map(|&c| c / gcd_val as f64).collect();
+                let prim_str = format_polynomial_from_coeffs(&primitive_coeffs, var);
+                // Intenta factorizar la parte primitiva con `factor`
+                let factored_prim = match factor(&prim_str, var) {
+                    Ok(s) => {
+                        // `factor` devuelve "x = ..." o "2 * (x+...)"? Para polinomio devuelve "a * (x ...)"?
+                        // Si es polinomio, factor devuelve "a * (x - r)..." ya formateado.
+                        // Extrae solo la parte de factores si contiene "="
+                        if s.contains('=') {
+                            s.split('=').next_back().unwrap_or(&s).trim().to_string()
+                        } else {
+                            s
+                        }
+                    }
+                    Err(_) => prim_str.clone(),
+                };
+                // Decide salida: si prim es "1" o "0" simplifica
+                let primitive_display_raw = if prim_str.trim() == "0" || prim_str.trim().is_empty()
+                {
+                    "0".to_string()
+                } else {
+                    factored_prim
+                };
+                // Limpia prefijo redundante "1 * " que produce `factor` para polinomios mónicos
+                let primitive_display = {
+                    let trimmed = primitive_display_raw.trim();
+                    if let Some(rest) = trimmed.strip_prefix("1 * ") {
+                        rest.trim_start().to_string()
+                    } else if let Some(rest) = trimmed.strip_prefix("1*") {
+                        rest.trim_start().to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                };
+                let out = if primitive_display == "1" {
+                    gcd_factors.clone()
+                } else if primitive_display.trim() == "0" {
+                    "0".to_string()
+                } else {
+                    // Evita doble paréntesis si ya está parentizado
+                    let needs_wrap =
+                        !(primitive_display.starts_with('(') && primitive_display.ends_with(')'));
+                    if primitive_display.contains('+')
+                        || primitive_display.contains('-')
+                        || primitive_display.contains('*')
+                    {
+                        if needs_wrap {
+                            format!("{gcd_factors} * ({primitive_display})")
+                        } else {
+                            format!("{gcd_factors} * {primitive_display}")
+                        }
+                    } else {
+                        format!("{gcd_factors} * {primitive_display}")
+                    }
+                };
+                if out.len() > MAX_MATH_INPUT_BYTES {
+                    return MathResult::ResourceLimit(MathError::InputTooLarge {
+                        operation: MathOperation::SymbolicDerivative,
+                        provided_bytes: out.len(),
+                        maximum_bytes: MAX_MATH_INPUT_BYTES,
+                    });
+                }
+                return MathResult::Exact(out);
+            }
+        }
+    }
+    // Fallback: factorización polinómica normal
+    match factor(expr, var) {
+        Ok(f) => {
+            if f.len() > MAX_MATH_INPUT_BYTES {
+                return MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::SymbolicDerivative,
+                    provided_bytes: f.len(),
+                    maximum_bytes: MAX_MATH_INPUT_BYTES,
+                });
+            }
+            MathResult::Exact(f)
+        }
+        Err(e) => MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: expr.into(),
+            reason: e,
+        }),
+    }
+}
+
+/// Adaptador de `IFactor`.
+pub fn ifactor(expr: &str, var: &str) -> Result<String, String> {
+    adapt_symbolic_result(ifactor_typed(expr, var))
+}
+
+fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
+    a = a.abs();
+    b = b.abs();
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn format_polynomial_from_coeffs(coeffs: &[f64], var: &str) -> String {
+    if coeffs.is_empty() {
+        return "0".to_string();
+    }
+    let mut terms: Vec<String> = Vec::new();
+    for (deg, &coeff) in coeffs.iter().enumerate().rev() {
+        if coeff == 0.0 {
+            continue;
+        }
+        let abs_coeff = coeff.abs();
+        let sign_positive = coeff > 0.0;
+        let coeff_str = if deg == 0 {
+            abs_coeff.to_string()
+        } else if abs_coeff == 1.0 {
+            "".to_string()
+        } else {
+            abs_coeff.to_string()
+        };
+        let var_part = match deg {
+            0 => "".to_string(),
+            1 => var.to_string(),
+            _ => format!("{var}^{deg}"),
+        };
+        let term_body = match (coeff_str.is_empty(), var_part.is_empty()) {
+            (true, true) => "1".to_string(),
+            (true, false) => var_part,
+            (false, true) => coeff_str,
+            (false, false) => format!("{coeff_str}*{var_part}"),
+        };
+        if terms.is_empty() {
+            if sign_positive {
+                terms.push(term_body);
+            } else {
+                terms.push(format!("-{term_body}"));
+            }
+        } else if sign_positive {
+            terms.push(format!(" + {term_body}"));
+        } else {
+            terms.push(format!(" - {term_body}"));
+        }
+    }
+    if terms.is_empty() {
+        "0".to_string()
+    } else {
+        terms.concat()
+    }
+}
+
+/// Intenta extraer coeficientes lineales `a_i` y término constante para `expr`
+/// respecto de `vars`. Usa evaluación numérica y verifica linealidad en varios
+/// puntos. Devuelve `None` si no es lineal.
+fn linear_coeffs_for_expr(expr: &str, vars: &[String]) -> Option<(Vec<f64>, f64)> {
+    if vars.is_empty() {
+        return None;
+    }
+    // Coeficiente constante en origen
+    let zero_vars: Vec<(String, f64)> = vars.iter().map(|v| (v.clone(), 0.0)).collect();
+    let c = crate::expr::evaluate(expr, &zero_vars).ok()?;
+    if !c.is_finite() {
+        return None;
+    }
+    let mut coeffs: Vec<f64> = Vec::with_capacity(vars.len());
+    for (idx, _var) in vars.iter().enumerate() {
+        let mut one_vars = zero_vars.clone();
+        one_vars[idx].1 = 1.0;
+        let val = crate::expr::evaluate(expr, &one_vars).ok()?;
+        if !val.is_finite() {
+            return None;
+        }
+        let coeff = val - c;
+        if !coeff.is_finite() {
+            return None;
+        }
+        // Verifica que mover 2 unidades duplique el efecto (lineal)
+        let mut two_vars = zero_vars.clone();
+        two_vars[idx].1 = 2.0;
+        let val2 = crate::expr::evaluate(expr, &two_vars).ok()?;
+        if !val2.is_finite() {
+            return None;
+        }
+        let coeff2 = val2 - c;
+        if (coeff2 - 2.0 * coeff).abs() > 1e-6 * coeff.abs().max(1.0) {
+            return None;
+        }
+        coeffs.push(coeff);
+    }
+    // Verificación con puntos mixtos para descartar términos cruzados o cuadráticos
+    let test_cases: Vec<Vec<f64>> = if vars.len() == 2 {
+        vec![
+            vec![1.0, 1.0],
+            vec![2.0, -1.0],
+            vec![-1.0, 2.0],
+            vec![0.5, 0.5],
+        ]
+    } else if vars.len() == 3 {
+        vec![vec![1.0, 1.0, 1.0], vec![1.0, 2.0, -1.0]]
+    } else {
+        vec![vec![1.0; vars.len()]]
+    };
+    for point in test_cases {
+        if point.len() != vars.len() {
+            continue;
+        }
+        let test_vars: Vec<(String, f64)> = vars
+            .iter()
+            .zip(point.iter())
+            .map(|(v, &x)| (v.clone(), x))
+            .collect();
+        let actual = crate::expr::evaluate(expr, &test_vars).ok()?;
+        if !actual.is_finite() {
+            return None;
+        }
+        let predicted: f64 = coeffs
+            .iter()
+            .zip(point.iter())
+            .map(|(a, x)| a * x)
+            .sum::<f64>()
+            + c;
+        let tol = 1e-6 * actual.abs().max(predicted.abs()).max(1.0);
+        if (actual - predicted).abs() > tol {
+            return None;
+        }
+    }
+    Some((coeffs, c))
+}
+
+fn format_linear_poly(coeffs: &[f64], constant: f64, vars: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (coeff, var) in coeffs.iter().zip(vars.iter()) {
+        if *coeff == 0.0 {
+            continue;
+        }
+        let coeff_str = if *coeff == 1.0 {
+            var.clone()
+        } else if *coeff == -1.0 {
+            format!("-{var}")
+        } else {
+            format!("{coeff}*{var}")
+        };
+        parts.push(coeff_str);
+    }
+    // El término constante se añade al final con signo explícito
+    let constant_is_zero = constant == 0.0;
+    if parts.is_empty() {
+        return if constant_is_zero {
+            "0".to_string()
+        } else {
+            constant.to_string()
+        };
+    }
+    let mut out = parts[0].clone();
+    for p in parts.iter().skip(1) {
+        if let Some(stripped) = p.strip_prefix('-') {
+            out.push_str(&format!(" - {stripped}"));
+        } else {
+            out.push_str(&format!(" + {p}"));
+        }
+    }
+    if !constant_is_zero {
+        if constant > 0.0 {
+            out.push_str(&format!(" + {constant}"));
+        } else {
+            out.push_str(&format!(" - {}", -constant));
+        }
+    }
+    out
+}
+
+/// Base de Groebner — con mejora para 2 polinomios lineales.
+///
+/// Si detecta dos polinomios lineales en dos variables, calcula eliminación
+/// por combinación lineal (resultante) y devuelve una base triangular
+/// simplificada. En cualquier otro caso mantiene el stub informativo sin
+/// pánico y respeta presupuestos.
 pub fn groebner_basis_typed(polys: &[String], vars: &[String]) -> MathResult<String> {
     if polys.len() > 64 || vars.len() > 16 {
         return MathResult::ResourceLimit(MathError::InputTooLarge {
@@ -1239,6 +1857,154 @@ pub fn groebner_basis_typed(polys: &[String], vars: &[String]) -> MathResult<Str
             });
         }
     }
+    // Normaliza entrada: si viene un único string con llaves "{a,b}", lo expande
+    let normalized_polys: Vec<String> = if polys.len() == 1 && polys[0].trim().starts_with('{') {
+        let inner = polys[0].trim();
+        let inner = inner.strip_prefix('{').unwrap_or(inner);
+        let inner = inner.strip_suffix('}').unwrap_or(inner);
+        // split_args respeta anidamiento; reimplementación simple aquí
+        let mut out: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut depth: i32 = 0;
+        for ch in inner.chars() {
+            match ch {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    let t = current.trim().to_string();
+                    if !t.is_empty() {
+                        out.push(t);
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
+        }
+        let t = current.trim().to_string();
+        if !t.is_empty() {
+            out.push(t);
+        }
+        if out.is_empty() {
+            polys.to_vec()
+        } else {
+            out
+        }
+    } else {
+        polys.to_vec()
+    };
+    let normalized_vars: Vec<String> = if vars.len() == 1 && vars[0].trim().starts_with('{') {
+        let inner = vars[0].trim();
+        let inner = inner.strip_prefix('{').unwrap_or(inner);
+        let inner = inner.strip_suffix('}').unwrap_or(inner);
+        inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        vars.iter()
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .collect()
+    };
+    // Intento de eliminación lineal para 2 polinomios en 2 variables
+    if normalized_polys.len() == 2 && normalized_vars.len() == 2 {
+        let var_x = normalized_vars[0].clone();
+        let var_y = normalized_vars[1].clone();
+        if is_math_identifier(&var_x) && is_math_identifier(&var_y) {
+            let vars_pair = vec![var_x.clone(), var_y.clone()];
+            if let (Some((coeffs1, c1)), Some((coeffs2, c2))) = (
+                linear_coeffs_for_expr(&normalized_polys[0], &vars_pair),
+                linear_coeffs_for_expr(&normalized_polys[1], &vars_pair),
+            ) {
+                // Coeffs: [a,b] para x,y
+                if coeffs1.len() == 2 && coeffs2.len() == 2 {
+                    let a1 = coeffs1[0];
+                    let b1 = coeffs1[1];
+                    let a2 = coeffs2[0];
+                    let b2 = coeffs2[1];
+                    // Evita degeneración
+                    if a1.is_finite()
+                        && b1.is_finite()
+                        && c1.is_finite()
+                        && a2.is_finite()
+                        && b2.is_finite()
+                        && c2.is_finite()
+                    {
+                        // Eliminación por combinación lineal
+                        // poly1: a1 x + b1 y + c1 =0 ; poly2: a2 x + b2 y + c2=0
+                        // Elimina x: (a2*b1 - a1*b2) y + (a2*c1 - a1*c2)=0
+                        // Elimina y: (b2*a1 - b1*a2) x + (b2*c1 - b1*c2)=0  (simétrico)
+                        let coeff_y = a2 * b1 - a1 * b2;
+                        let const_y = a2 * c1 - a1 * c2;
+                        let coeff_x = b2 * a1 - b1 * a2; // = -coeff_y
+                        let const_x = b2 * c1 - b1 * c2;
+                        let mut basis: Vec<String> = Vec::new();
+                        // Solo añade polinomios no degenerados
+                        if coeff_y.abs() > 1e-12 || const_y.abs() > 1e-12 {
+                            // Normaliza para que el coeficiente líder sea 1 si es posible
+                            let (nc, nconst) = if coeff_y.abs() > 1e-12 {
+                                (1.0, const_y / coeff_y)
+                            } else {
+                                (coeff_y, const_y)
+                            };
+                            // Formatea como "coeff*y + const"
+                            let poly_y = if coeff_y.abs() > 1e-12 {
+                                format_linear_poly(&[nc], nconst, std::slice::from_ref(&var_y))
+                            } else {
+                                nconst.to_string()
+                            };
+                            // Si es trivial "0", lo omite
+                            if poly_y.trim() != "0" && !poly_y.trim().is_empty() {
+                                basis.push(poly_y);
+                            }
+                        }
+                        if coeff_x.abs() > 1e-12 || const_x.abs() > 1e-12 {
+                            let (nc, nconst) = if coeff_x.abs() > 1e-12 {
+                                (1.0, const_x / coeff_x)
+                            } else {
+                                (coeff_x, const_x)
+                            };
+                            let poly_x = if coeff_x.abs() > 1e-12 {
+                                format_linear_poly(&[nc], nconst, std::slice::from_ref(&var_x))
+                            } else {
+                                nconst.to_string()
+                            };
+                            if poly_x.trim() != "0" && !poly_x.trim().is_empty() {
+                                // Evita duplicar si ya está
+                                if !basis.contains(&poly_x) {
+                                    basis.push(poly_x);
+                                }
+                            }
+                        }
+                        // Si se pudo construir una base no vacía, la devuelve
+                        if !basis.is_empty() {
+                            // Añade también los polinomios originales si no están representados?
+                            // Para dar base triangular completa, si solo se generó uno (cuando el otro es dependiente),
+                            // incluye el original más simple como segundo elemento.
+                            if basis.len() == 1 {
+                                // Incluye el primer polinomio normalizado como segundo elemento si aporta info
+                                let orig = format_linear_poly(&coeffs1, c1, &vars_pair);
+                                if !basis.contains(&orig) && orig.trim() != "0" {
+                                    basis.push(orig);
+                                }
+                            }
+                            let out = format!("{{{}}}", basis.join(", "));
+                            if out.len() <= MAX_MATH_INPUT_BYTES {
+                                return MathResult::Exact(out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback al stub informativo
     MathResult::Exact("Groebner no implementado, use Eliminate".to_string())
 }
 

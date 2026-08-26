@@ -1740,6 +1740,219 @@ pub fn f_distribution_cdf(x: f64, d1: f64, d2: f64) -> f64 {
     regularized_incomplete_beta(d1 / 2.0, d2 / 2.0, z)
 }
 
+/// Cuantil chi-cuadrado (inversa de la CDF chi²). Usa bisección sobre `chi_squared_cdf`.
+/// Devuelve `NAN` si `p` no está en (0,1) o `k <= 0` o no finito.
+#[allow(clippy::nonminimal_bool)]
+pub fn chi_squared_quantile(p: f64, k: f64) -> f64 {
+    if !p.is_finite() || !(0.0 < p && p < 1.0) || !k.is_finite() || k <= 0.0 {
+        return f64::NAN;
+    }
+    // Rango inicial: lo=0, hi estima por media+varianza
+    let mut lo = 0.0;
+    // hi inicial heurístico: k + 10*sqrt(2k) + 10, al menos 20
+    let mut hi = (k + 10.0 * (2.0 * k).sqrt() + 10.0).max(20.0);
+    // Expandir hi hasta que CDF >= p (para colas muy pesadas p~0.999)
+    let mut expand_iter = 0;
+    while expand_iter < 200 {
+        let cdf = chi_squared_cdf(hi, k);
+        if !cdf.is_finite() {
+            return f64::NAN;
+        }
+        if cdf >= p {
+            break;
+        }
+        hi *= 2.0;
+        if !hi.is_finite() || hi > 1e12 {
+            return f64::INFINITY;
+        }
+        expand_iter += 1;
+    }
+    // Si p muy pequeño y lo ya tiene cdf>p (no debería porque lo=0 cdf=0)
+    for _ in 0..120 {
+        let mid = lo + (hi - lo) / 2.0;
+        if mid == lo || mid == hi || !mid.is_finite() {
+            break;
+        }
+        let cdf = chi_squared_cdf(mid, k);
+        if !cdf.is_finite() {
+            return f64::NAN;
+        }
+        if cdf < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if (hi - lo).abs() <= 1e-12 * hi.abs().max(1.0) {
+            break;
+        }
+    }
+    lo + (hi - lo) / 2.0
+}
+
+/// Cuantil F de Fisher-Snedecor. Bisección sobre `f_distribution_cdf`.
+#[allow(clippy::nonminimal_bool)]
+pub fn f_quantile(p: f64, d1: f64, d2: f64) -> f64 {
+    if !p.is_finite()
+        || !(0.0 < p && p < 1.0)
+        || !d1.is_finite()
+        || !d2.is_finite()
+        || d1 <= 0.0
+        || d2 <= 0.0
+    {
+        return f64::NAN;
+    }
+    let mut lo = 0.0;
+    // hi heurístico: para F, media aproximada d2/(d2-2) cuando d2>2, varianza grande
+    let mut hi = 10.0;
+    // Si ambas dfs grandes, el cuantil se acerca a 1, sino puede ser grande
+    if d2 <= 4.0 {
+        hi = 100.0;
+    }
+    let mut expand_iter = 0;
+    while expand_iter < 200 {
+        let cdf = f_distribution_cdf(hi, d1, d2);
+        if !cdf.is_finite() {
+            return f64::NAN;
+        }
+        if cdf >= p {
+            break;
+        }
+        hi *= 2.0;
+        if !hi.is_finite() || hi > 1e12 {
+            return f64::INFINITY;
+        }
+        expand_iter += 1;
+    }
+    for _ in 0..140 {
+        let mid = lo + (hi - lo) / 2.0;
+        if mid == lo || mid == hi || !mid.is_finite() {
+            break;
+        }
+        let cdf = f_distribution_cdf(mid, d1, d2);
+        if !cdf.is_finite() {
+            return f64::NAN;
+        }
+        if cdf < p {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if (hi - lo).abs() <= 1e-12 * hi.abs().max(1.0) {
+            break;
+        }
+    }
+    lo + (hi - lo) / 2.0
+}
+
+/// T-test pareado: prueba sobre las diferencias `a - b` contra mu=0.
+/// Retorna `(t, p)` bilateral; `None` si longitudes difieren o insuficientes.
+pub fn t_test_paired(sample1: &[f64], sample2: &[f64]) -> Option<(f64, f64)> {
+    if sample1.len() != sample2.len() || sample1.len() < 2 {
+        return None;
+    }
+    if sample1
+        .iter()
+        .chain(sample2.iter())
+        .any(|value| !value.is_finite())
+    {
+        return None;
+    }
+    let diffs: Vec<f64> = sample1
+        .iter()
+        .zip(sample2.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    t_test_one_sample(&diffs, 0.0)
+}
+
+/// Formatea una tabla de frecuencias como texto legible (FrequencyTable).
+/// Cada fila: valor | frecuencia | proporción | acumulada
+pub fn frequency_table_text(data: &[f64]) -> String {
+    if data.is_empty() {
+        return "FrequencyTable: sin datos".to_string();
+    }
+    if data.iter().any(|value| !value.is_finite()) {
+        return "FrequencyTable: datos no finitos".to_string();
+    }
+    let table = frequency_table(data);
+    let mut out = String::from("valor | frec | prop | acum\n");
+    out.push_str("------|------|------|------\n");
+    for (value, count, prop, cum) in table {
+        out.push_str(&format!(
+            "{:.4} | {} | {:.4} | {:.4}\n",
+            value, count, prop, cum
+        ));
+    }
+    out
+}
+
+/// Genera un gráfico de tallo y hoja (StemPlot) como texto.
+/// Cada hoja son los dígitos decimales; el tallo es la parte entera.
+pub fn stem_plot_text(data: &[f64]) -> String {
+    if data.is_empty() {
+        return "StemPlot: sin datos".to_string();
+    }
+    if data.iter().any(|value| !value.is_finite()) {
+        return "StemPlot: datos no finitos".to_string();
+    }
+    // Agrupa por tallo = floor(valor) para negativos maneja bien
+    let mut stems: HashMap<i64, Vec<u8>> = HashMap::new();
+    for &value in data {
+        let stem = value.floor() as i64;
+        // hoja: primer decimal (0-9), valor absoluto del decimal
+        let leaf = ((value - stem as f64).abs() * 10.0).floor() as u8;
+        let leaf = leaf.min(9);
+        stems.entry(stem).or_default().push(leaf);
+    }
+    let mut sorted_stems: Vec<_> = stems.into_iter().collect();
+    sorted_stems.sort_by_key(|(stem, _)| *stem);
+    let mut out = String::from("Stem | Leaves\n");
+    out.push_str("-----|--------\n");
+    for (stem, mut leaves) in sorted_stems {
+        leaves.sort_unstable();
+        let leaves_str: String = leaves.iter().map(|d| char::from(b'0' + *d)).collect();
+        // Inserta espacios cada dígito para legibilidad
+        let spaced: String = leaves_str
+            .chars()
+            .map(|c| format!("{c} "))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        out.push_str(&format!("{stem:>4} | {spaced}\n"));
+    }
+    out
+}
+
+/// Texto de ResidualPlot para un ajuste lineal sobre `xs, ys`.
+/// Calcula regresión lineal y lista `x, y, y_pred, residuo`.
+pub fn residual_plot_text(xs: &[f64], ys: &[f64]) -> Option<String> {
+    if xs.len() != ys.len() || xs.len() < 2 {
+        return None;
+    }
+    if xs.iter().chain(ys.iter()).any(|value| !value.is_finite()) {
+        return None;
+    }
+    let (slope, intercept, _) = linear_regression(xs, ys)?;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return None;
+    }
+    let mut out = String::from("x | y | y_pred | residuo\n");
+    out.push_str("---|---|--------|--------\n");
+    for (&x, &y) in xs.iter().zip(ys) {
+        let y_pred = slope * x + intercept;
+        let resid = y - y_pred;
+        out.push_str(&format!(
+            "{:.4} | {:.4} | {:.4} | {:.4}\n",
+            x, y, y_pred, resid
+        ));
+    }
+    out.push_str(&format!(
+        "Ajuste lineal: y = {:.4}*x + {:.4}\n",
+        slope, intercept
+    ));
+    Some(out)
+}
+
 pub fn confidence_interval_mean(data: &[f64], confidence: f64) -> Option<(f64, f64, f64)> {
     let n = data.len();
     if n < 2 {
@@ -2000,5 +2213,83 @@ mod tests {
             err.contains("mal condicionado"),
             "esperaba mal condicionado, obtuvo {err}"
         );
+    }
+
+    #[test]
+    fn inverse_normal_0975_aproxima_196() {
+        let q = normal_quantile(0.975, 0.0, 1.0);
+        assert!(
+            (q - 1.95996).abs() < 0.005,
+            "InverseNormal 0.975 esperaba ~1.96, obtuvo {q}"
+        );
+        // Inversa confirma CDF
+        assert!((normal_cdf(q, 0.0, 1.0) - 0.975).abs() < 0.001);
+        // Con mu y sigma no nulos
+        let q2 = normal_quantile(0.975, 10.0, 2.0);
+        assert!((q2 - (10.0 + 2.0 * 1.95996)).abs() < 0.02);
+    }
+
+    #[test]
+    fn inverse_t_median_cero_y_colas_opuestas() {
+        let q_mid = student_t_quantile(0.5, 10.0);
+        assert!(q_mid.abs() < 1e-12);
+        let q_high = student_t_quantile(0.975, 10.0);
+        let q_low = student_t_quantile(0.025, 10.0);
+        assert!(q_high > 2.0 && q_high < 2.5);
+        assert!((q_high + q_low).abs() < 0.001);
+        // Consistencia con CDF
+        assert!((student_t_cdf(q_high, 10.0) - 0.975).abs() < 0.001);
+    }
+
+    #[test]
+    fn chi_squared_quantile_consistente_con_cdf() {
+        let q = chi_squared_quantile(0.95, 4.0);
+        assert!(q.is_finite() && q > 0.0);
+        // Valor de referencia: chi2(0.95,4) ≈ 9.4877
+        assert!((q - 9.4877).abs() < 0.1, "obtuvo {q}");
+        assert!((chi_squared_cdf(q, 4.0) - 0.95).abs() < 0.001);
+        assert!(chi_squared_quantile(0.0, 4.0).is_nan());
+        assert!(chi_squared_quantile(0.5, -1.0).is_nan());
+    }
+
+    #[test]
+    fn f_quantile_consistente_con_cdf() {
+        let q = f_quantile(0.95, 5.0, 10.0);
+        assert!(q.is_finite() && q > 0.0);
+        // Referencia aprox: F0.95(5,10) ≈ 3.3258
+        assert!((q - 3.3258).abs() < 0.15, "obtuvo {q}");
+        assert!((f_distribution_cdf(q, 5.0, 10.0) - 0.95).abs() < 0.001);
+        assert!(f_quantile(0.5, 0.0, 5.0).is_nan());
+    }
+
+    #[test]
+    fn t_test_paired_detecta_diferencia() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = [1.1, 2.1, 3.1, 4.1, 5.1];
+        let result = t_test_paired(&a, &b).expect("paired debe calcular");
+        assert!(result.0.is_finite() && result.1.is_finite());
+        // Diferencias constantes -0.1 => t grande y p pequeño
+        assert!(result.1 < 0.05);
+        // Longitudes distintas -> None
+        assert_eq!(t_test_paired(&[1.0, 2.0], &[1.0]), None);
+    }
+
+    #[test]
+    fn frequency_table_y_stem_plot_text_no_vacio() {
+        let data = [1.0, 1.0, 2.0, 2.0, 2.0, 3.5];
+        let ft = frequency_table_text(&data);
+        assert!(ft.contains("valor") && ft.contains("1.0000"));
+        let sp = stem_plot_text(&data);
+        assert!(sp.contains("Stem") && sp.contains("Leaves"));
+    }
+
+    #[test]
+    fn residual_plot_text_linear() {
+        let xs = [1.0, 2.0, 3.0, 4.0];
+        let ys = [2.0, 4.0, 6.0, 8.0];
+        let text = residual_plot_text(&xs, &ys).expect("residual debe existir");
+        assert!(text.contains("residuo") && text.contains("y ="));
+        // Caso insuficiente
+        assert!(residual_plot_text(&[1.0], &[2.0]).is_none());
     }
 }

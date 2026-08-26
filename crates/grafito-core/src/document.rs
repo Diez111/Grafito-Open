@@ -220,6 +220,11 @@ pub struct Document {
     #[serde(default, deserialize_with = "deserialize_next_label_numbers")]
     next_label_number: HashMap<String, usize>,
     pub variables: HashMap<String, f64>,
+    /// Hipótesis simbólicas por variable (ej. "x" -> "positive" para Assume[x>0]).
+    /// Stub persistido para el CAS; las claves son identificadores válidos y los
+    /// valores describen la restricción (positive, nonzero, real, integer, etc.).
+    #[serde(default)]
+    pub variables_assumptions: HashMap<String, String>,
     #[serde(default)]
     variable_meta: HashMap<String, VariableMeta>,
     pub spreadsheet: Vec<Vec<String>>,
@@ -262,6 +267,7 @@ impl Default for Document {
             selection: Vec::new(),
             next_label_number: HashMap::new(),
             variables: HashMap::new(),
+            variables_assumptions: HashMap::new(),
             variable_meta: HashMap::new(),
             spreadsheet: Vec::new(),
             cas_worksheet: Vec::new(),

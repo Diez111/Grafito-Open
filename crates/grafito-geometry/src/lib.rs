@@ -27,6 +27,7 @@ pub mod boolean;
 pub mod cas;
 pub mod dd;
 pub mod derivation;
+pub mod discrete;
 pub mod exact;
 pub mod expr;
 pub mod fractals;

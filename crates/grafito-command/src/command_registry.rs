@@ -156,6 +156,13 @@ impl CommandSpec {
             "am2.triple-integral" => return count == 11,
             "am2.flux" | "am2.green" => return count == 8,
             "am2.gauss-ostrogradski" => return count == 11,
+            "discrete.convex-hull"
+            | "discrete.delaunay"
+            | "discrete.voronoi"
+            | "discrete.mst"
+            | "discrete.tsp" => return (1..=10000).contains(&count),
+            "discrete.shortest-distance" => return count == 2,
+            "statistics.anova" => return (2..=100).contains(&count),
             _ => {}
         }
 
@@ -787,10 +794,10 @@ const COMMANDS: &[CommandSpec] = &[
         "FillColumn",
         ["fill_column", "fillcol"],
         "Estadistica",
-        "Rellena una columna de la hoja: stub minimo que no falla.",
+        "Rellena una columna de la hoja iterando filas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE.",
         CreatesObject,
-        Low,
-        false,
+        Medium,
+        true,
         "FillColumn",
         [
             signature!("FillColumn[col, valor]"; "col": Expression required, "valor": Expression optional),
@@ -798,14 +805,29 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
+        "spreadsheet.fill-cells",
+        "FillCells",
+        ["fill_cells", "fillcells", "rellenar"],
+        "Estadistica",
+        "Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet.",
+        CreatesObject,
+        Medium,
+        true,
+        "FillCells",
+        [
+            signature!("FillCells[rango, valor]"; "rango": Expression required, "valor": Expression optional),
+            signature!("FillCells[a1, b2, valor]"; "a1": Expression required, "b2": Expression required, "valor": Expression optional)
+        ]
+    ),
+    command!(
         "spreadsheet.cell-range",
         "CellRange",
         ["cell_range", "rango"],
         "Estadistica",
-        "Rango de celdas: stub minimo que no falla.",
+        "Resuelve un rango A1:B2 a array de valores evaluados; soporta A1:B2 o A1,B2.",
         ReadOnly,
         Low,
-        false,
+        true,
         "CellRange",
         [
             signature!("CellRange[a1, b2]"; "a1": Expression required, "b2": Expression optional),
@@ -1235,6 +1257,65 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("Taylor[expr, variable, centro, orden]"; "expr": Expression required, "variable": Variable required, "centro": Number optional, "orden": Integer optional)
         ]
+    ),
+    command!(
+        "cas.complete-square",
+        "CompleteSquare",
+        [
+            "complete_square",
+            "completesquare",
+            "completarCuadrado",
+            "completar_cuadrado"
+        ],
+        "CAS",
+        "Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a).",
+        ReadOnly,
+        Low,
+        true,
+        "CompleteSquare",
+        [
+            signature!("CompleteSquare[expr, variable]"; "expr": Expression required, "variable": Variable required),
+            signature!("CompleteSquare[expr]"; "expr": Expression required)
+        ]
+    ),
+    command!(
+        "cas.prime-factors",
+        "PrimeFactors",
+        ["prime_factors", "primefactors", "factoresPrimos", "factores_primos"],
+        "CAS",
+        "Factoriza un entero n (2 <= n <= 1e12) en primos por trial division.",
+        ReadOnly,
+        Low,
+        true,
+        "PrimeFactors",
+        [signature!("PrimeFactors[n]"; "n": Integer required)]
+    ),
+    command!(
+        "cas.ifactor",
+        "IFactor",
+        ["ifactor", "ifactorizar", "factorEntero", "factor_entero"],
+        "CAS",
+        "Factorización entera: si es entero usa PrimeFactors, si es polinomio extrae contenido entero y lo factoriza.",
+        ReadOnly,
+        Low,
+        true,
+        "IFactor",
+        [
+            signature!("IFactor[expr]"; "expr": Expression required),
+            signature!("IFactor[expr, variable]"; "expr": Expression required, "variable": Variable required)
+        ]
+    ),
+    command!(
+        "cas.assume",
+        "Assume",
+        ["assume", "asumir", "suponer", "supone"],
+        "CAS",
+        "Almacena hipótesis como x>0 (positive), x!=0 (nonzero), x real/integer; guarda en Document.variables_assumptions.",
+        ReadOnly,
+        Low,
+        true,
+        "Assume",
+        [signature!("Assume[predicado]"; "predicado": Expression required)]
     ),
     command!(
         "analysis.root",
@@ -1810,6 +1891,253 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Correlation",
         [signature!("Correlation[{xs}, {ys}]"; "xs": Data required, "ys": Data required)]
+    ),
+    command!(
+        "probability.inverse-normal",
+        "InverseNormal",
+        [
+            "inverse_normal",
+            "inversenormal",
+            "cuantilnormal",
+            "cuantil_normal"
+        ],
+        "Probabilidad",
+        "Cuantil normal: InverseNormal[p, mu, sigma] (p en (0,1), sigma>0); con un arg usa N(0,1).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseNormal",
+        [
+            signature!("InverseNormal[p]"; "p": Number required),
+            signature!("InverseNormal[p, mu, sigma]"; "p": Number required, "mu": Number required, "sigma": Number required)
+        ]
+    ),
+    command!(
+        "probability.inverse-t",
+        "InverseT",
+        ["inverse_t", "inverset", "cuantilt", "cuantil_t"],
+        "Probabilidad",
+        "Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseT",
+        [signature!("InverseT[p, df]"; "p": Number required, "df": Number required)]
+    ),
+    command!(
+        "probability.inverse-chi-squared",
+        "InverseChiSquared",
+        [
+            "inverse_chi_squared",
+            "inversechisquared",
+            "inversachicuadrado",
+            "cuantilchicuadrado"
+        ],
+        "Probabilidad",
+        "Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseChiSquared",
+        [signature!("InverseChiSquared[p, df]"; "p": Number required, "df": Number required)]
+    ),
+    command!(
+        "probability.inverse-f",
+        "InverseF",
+        ["inverse_f", "inversef", "cuantilf", "cuantil_f"],
+        "Probabilidad",
+        "Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0).",
+        ReadOnly,
+        Low,
+        true,
+        "InverseF",
+        [signature!("InverseF[p, df1, df2]"; "p": Number required, "df1": Number required, "df2": Number required)]
+    ),
+    command!(
+        "statistics.frequency-table",
+        "FrequencyTable",
+        ["frequency_table", "frecuencia", "tabl frecuencias"],
+        "Estadistica",
+        "Tabla de frecuencias: FrequencyTable[{datos}].",
+        ReadOnly,
+        Low,
+        true,
+        "FrequencyTable",
+        [signature!("FrequencyTable[{datos}]"; "datos": Data required)]
+    ),
+    command!(
+        "statistics.stem-plot",
+        "StemPlot",
+        ["stem_plot", "stemleaf", "tallo_hoja", "diagrama_tallo"],
+        "Estadistica",
+        "Diagrama tallo-hoja: StemPlot[{datos}] texto.",
+        ReadOnly,
+        Low,
+        true,
+        "StemPlot",
+        [signature!("StemPlot[{datos}]"; "datos": Data required)]
+    ),
+    command!(
+        "statistics.residual-plot",
+        "ResidualPlot",
+        ["residual_plot", "residuos", "grafico_residuos"],
+        "Estadistica",
+        "Residuos de regresión lineal: ResidualPlot[{xs}, {ys}] o ResidualPlot[tabla].",
+        ReadOnly,
+        Low,
+        true,
+        "ResidualPlot",
+        [
+            signature!("ResidualPlot[{xs}, {ys}]"; "xs": Data required, "ys": Data required),
+            signature!("ResidualPlot[tabla]"; "tabla": Object required)
+        ]
+    ),
+    command!(
+        "statistics.t-test",
+        "TTest",
+        ["ttest", "t_test", "prueba_t"],
+        "Estadistica",
+        "Prueba t de una muestra: TTest[{datos}, mu0].",
+        ReadOnly,
+        Low,
+        true,
+        "TTest",
+        [signature!("TTest[{datos}, mu0]"; "datos": Data required, "mu0": Number required)]
+    ),
+    command!(
+        "statistics.t-test-two-sample",
+        "TTest2",
+        ["ttest2", "t_test2", "prueba_t2"],
+        "Estadistica",
+        "Prueba t de dos muestras independientes: TTest2[{a}, {b}].",
+        ReadOnly,
+        Low,
+        true,
+        "TTest2",
+        [signature!("TTest2[{a}, {b}]"; "a": Data required, "b": Data required)]
+    ),
+    command!(
+        "statistics.t-test-paired",
+        "TTestPaired",
+        ["ttest_paired", "t_paired", "prueba_t_pareada", "ttestpareado"],
+        "Estadistica",
+        "Prueba t pareada: TTestPaired[{antes}, {despues}].",
+        ReadOnly,
+        Low,
+        true,
+        "TTestPaired",
+        [signature!("TTestPaired[{a}, {b}]"; "a": Data required, "b": Data required)]
+    ),
+    command!(
+        "statistics.z-test",
+        "ZTest",
+        ["ztest", "z_test", "prueba_z"],
+        "Estadistica",
+        "Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma].",
+        ReadOnly,
+        Low,
+        true,
+        "ZTest",
+        [signature!("ZTest[{datos}, mu0, sigma]"; "datos": Data required, "mu0": Number required, "sigma": Number required)]
+    ),
+    command!(
+        "statistics.chi-squared-test",
+        "ChiSqTest",
+        ["chisqtest", "chi2test", "prueba_chi2", "chi_cuadrado"],
+        "Estadistica",
+        "Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}].",
+        ReadOnly,
+        Low,
+        true,
+        "ChiSqTest",
+        [signature!("ChiSqTest[{obs}, {esp}]"; "obs": Data required, "esp": Data required)]
+    ),
+    command!(
+        "statistics.anova",
+        "ANOVA",
+        ["anova", "anova_oneway"],
+        "Estadistica",
+        "ANOVA de un factor: ANOVA[{g1}, {g2}, ...].",
+        ReadOnly,
+        Low,
+        true,
+        "ANOVA",
+        [signature!("ANOVA[{g1}, {g2}]"; "g1": Data required, "g2": Data required)]
+    ),
+    command!(
+        "finance.rate",
+        "Rate",
+        ["rate", "tasa", "tipo"],
+        "Financiera",
+        "Calcula la tasa periodica (tipo 0=anual) resolviendo TVM con exp/log; 4-5 args.",
+        ReadOnly,
+        Low,
+        true,
+        "Rate",
+        [
+            signature!("Rate[nper, pmt, pv, fv]"; "nper": Number required, "pmt": Number required, "pv": Number required, "fv": Number required),
+            signature!("Rate[nper, pmt, pv, fv, tipo]"; "nper": Number required, "pmt": Number required, "pv": Number required, "fv": Number required, "tipo": Integer optional)
+        ]
+    ),
+    command!(
+        "finance.nper",
+        "Nper",
+        ["nper", "n_per", "periodos", "plazo"],
+        "Financiera",
+        "Calcula numero de periodos via TVM con exp/log; usa log((pmt*(1+r*tipo)-fv*r)/(pmt*(1+r*tipo)+pv*r))/log(1+r).",
+        ReadOnly,
+        Low,
+        true,
+        "Nper",
+        [
+            signature!("Nper[rate, pmt, pv, fv]"; "rate": Number required, "pmt": Number required, "pv": Number required, "fv": Number required),
+            signature!("Nper[rate, pmt, pv, fv, tipo]"; "rate": Number required, "pmt": Number required, "pv": Number required, "fv": Number required, "tipo": Integer optional)
+        ]
+    ),
+    command!(
+        "finance.pmt",
+        "Pmt",
+        ["pmt", "pago", "cuota"],
+        "Financiera",
+        "Calcula el pago periodico TVM; 4-5 args con tipo 0/1.",
+        ReadOnly,
+        Low,
+        true,
+        "Pmt",
+        [
+            signature!("Pmt[rate, nper, pv, fv]"; "rate": Number required, "nper": Number required, "pv": Number required, "fv": Number required),
+            signature!("Pmt[rate, nper, pv, fv, tipo]"; "rate": Number required, "nper": Number required, "pv": Number required, "fv": Number required, "tipo": Integer optional)
+        ]
+    ),
+    command!(
+        "finance.pv",
+        "PV",
+        ["pv", "va", "valoractual", "presentvalue"],
+        "Financiera",
+        "Calcula valor presente TVM; usa exp/log para (1+rate)^nper.",
+        ReadOnly,
+        Low,
+        true,
+        "PV",
+        [
+            signature!("PV[rate, nper, pmt, fv]"; "rate": Number required, "nper": Number required, "pmt": Number required, "fv": Number required),
+            signature!("PV[rate, nper, pmt, fv, tipo]"; "rate": Number required, "nper": Number required, "pmt": Number required, "fv": Number required, "tipo": Integer optional)
+        ]
+    ),
+    command!(
+        "finance.fv",
+        "FV",
+        ["fv", "vf", "valorfuturo", "futurevalue"],
+        "Financiera",
+        "Calcula valor futuro TVM; usa exp/log para (1+rate)^nper.",
+        ReadOnly,
+        Low,
+        true,
+        "FV",
+        [
+            signature!("FV[rate, nper, pmt, pv]"; "rate": Number required, "nper": Number required, "pmt": Number required, "pv": Number required),
+            signature!("FV[rate, nper, pmt, pv, tipo]"; "rate": Number required, "nper": Number required, "pmt": Number required, "pv": Number required, "tipo": Integer optional)
+        ]
     ),
     // Sistemas dinamicos, fractales y dimensiones superiores
     command!(
@@ -2503,6 +2831,228 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("Circumcircle[A, B, C]"; "A": Point required, "B": Point required, "C": Point required)
         ]
+    ),
+    command!(
+        "discrete.convex-hull",
+        "ConvexHull",
+        ["convex_hull", "convexhull", "envolventeconvexa", "envolvente"],
+        "Discreta",
+        "Calcula la envolvente convexa de un conjunto de puntos con monotone chain; respeta MAX_POLYGON_VERTICES 8192 y MAX_DISCRETE_COUNT 10000.",
+        CreatesObject,
+        Medium,
+        true,
+        "ConvexHull",
+        [
+            signature!("ConvexHull[puntos]"; "puntos": Data required),
+            signature!("ConvexHull[{p1, p2, ...}]"; "p1": Point required)
+        ]
+    ),
+    command!(
+        "discrete.delaunay",
+        "DelaunayTriangulation",
+        ["delaunay", "delaunaytriangulation", "triangulaciondelaunay"],
+        "Discreta",
+        "Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos.",
+        CreatesObject,
+        Medium,
+        true,
+        "DelaunayTriangulation",
+        [signature!("DelaunayTriangulation[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.voronoi",
+        "Voronoi",
+        ["voronoi", "cellsvoronoi", "diagramaVoronoi"],
+        "Discreta",
+        "Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible.",
+        CreatesObject,
+        Medium,
+        true,
+        "Voronoi",
+        [signature!("Voronoi[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.mst",
+        "MinimumSpanningTree",
+        ["mst", "minimumspanningtree", "arbolminimo", "kruskal"],
+        "Discreta",
+        "Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos.",
+        CreatesObject,
+        Medium,
+        true,
+        "MinimumSpanningTree",
+        [signature!("MinimumSpanningTree[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.tsp",
+        "TravelingSalesman",
+        ["tsp", "travelingsalesman", "viajante", "travellingsalesman"],
+        "Discreta",
+        "Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto.",
+        CreatesObject,
+        Medium,
+        true,
+        "TravelingSalesman",
+        [signature!("TravelingSalesman[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.shortest-distance",
+        "ShortestDistance",
+        ["shortestdistance", "distanciaminima", "closestdistance", "distanciamínima"],
+        "Discreta",
+        "Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites.",
+        ReadOnly,
+        Low,
+        true,
+        "ShortestDistance",
+        [
+            signature!("ShortestDistance[punto, objeto]"; "punto": Point required, "objeto": Object required)
+        ]
+    ),
+    // ---- Lista funcional (P2.5) — operaciones puras sin tocar Document ----
+    command!(
+        "list.sequence",
+        "Sequence",
+        ["seq", "secuencia", "rango", "table"],
+        "Lista",
+        "Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k.",
+        ReadOnly,
+        Low,
+        true,
+        "Sequence",
+        [signature!("Sequence[expr, var, start, end]"; "expr": Expression required, "var": Variable required, "start": Number required, "end": Number required)]
+    ),
+    command!(
+        "list.zip",
+        "Zip",
+        ["zip", "emparejar", "cremallera"],
+        "Lista",
+        "Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Zip",
+        [signature!("Zip[list1, list2]"; "list1": Data required, "list2": Data required)]
+    ),
+    command!(
+        "list.flatten",
+        "Flatten",
+        ["flatten", "aplanar", "aplanado"],
+        "Lista",
+        "Aplana un nivel de anidamiento {{1,2},{3,4}}→{1,2,3,4}; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Flatten",
+        [signature!("Flatten[list]"; "list": Data required)]
+    ),
+    command!(
+        "list.sort",
+        "Sort",
+        ["sort", "ordenar", "orden"],
+        "Lista",
+        "Ordena ascendentemente una lista plana numérica; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Sort",
+        [signature!("Sort[list]"; "list": Data required)]
+    ),
+    command!(
+        "list.reverse",
+        "Reverse",
+        ["reverse", "invertir", "reversa"],
+        "Lista",
+        "Invierte el orden de una lista; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Reverse",
+        [signature!("Reverse[list]"; "list": Data required)]
+    ),
+    command!(
+        "list.join",
+        "Join",
+        ["join", "unir", "concat", "concatenar"],
+        "Lista",
+        "Concatena dos listas; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Join",
+        [signature!("Join[list1, list2]"; "list1": Data required, "list2": Data required)]
+    ),
+    command!(
+        "list.append",
+        "Append",
+        ["append", "anexar", "agregar"],
+        "Lista",
+        "Añade un elemento al final de la lista; valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Append",
+        [signature!("Append[list, elem]"; "list": Data required, "elem": Number required)]
+    ),
+    command!(
+        "list.first",
+        "First",
+        ["first", "primero", "head"],
+        "Lista",
+        "Primer elemento de la lista.",
+        ReadOnly,
+        Low,
+        true,
+        "First",
+        [signature!("First[list]"; "list": Data required)]
+    ),
+    command!(
+        "list.last",
+        "Last",
+        ["last", "ultimo", "último", "tail"],
+        "Lista",
+        "Último elemento de la lista.",
+        ReadOnly,
+        Low,
+        true,
+        "Last",
+        [signature!("Last[list]"; "list": Data required)]
+    ),
+    command!(
+        "list.take",
+        "Take",
+        ["take", "tomar", "coger"],
+        "Lista",
+        "Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "Take",
+        [signature!("Take[list, n]"; "list": Data required, "n": Integer required)]
+    ),
+    command!(
+        "list.keep-if",
+        "KeepIf",
+        ["keepif", "keep_if", "filtrar", "selectif", "filter"],
+        "Lista",
+        "Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH.",
+        ReadOnly,
+        Low,
+        true,
+        "KeepIf",
+        [signature!("KeepIf[list, predicado]"; "list": Data required, "predicado": Expression required)]
+    ),
+    command!(
+        "list.count-if",
+        "CountIf",
+        ["countif", "count_if", "contarsi", "contar_si"],
+        "Lista",
+        "Cuenta elementos que cumplen predicado simple sobre x; valida longitud.",
+        ReadOnly,
+        Low,
+        true,
+        "CountIf",
+        [signature!("CountIf[list, predicado]"; "list": Data required, "predicado": Expression required)]
     ),
 ];
 

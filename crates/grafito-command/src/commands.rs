@@ -147,6 +147,12 @@ const REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT: usize = 6;
 /// A fixed-step trajectory includes its initial point, so this is one less
 /// than the persisted open-polyline limit.
 const MAX_ODE_PLOT_STEPS: usize = grafito_core::pencil::MAX_PENCIL_POINTS.saturating_sub(1);
+/// Presupuesto para solvers financieros iterativos (Rate).
+const MAX_FINANCIAL_ITERATIONS: usize = 100;
+/// Tolerancia para convergencia financiera.
+const FINANCIAL_EPSILON: f64 = 1e-12;
+/// Limite prudente para nper grande (evita DoS via exp).
+const MAX_FINANCIAL_NPER: f64 = 1_000_000.0;
 
 fn validate_ode_plot_steps(command: &str, steps: usize) -> Result<(), CommandOutcome> {
     if steps > MAX_ODE_PLOT_STEPS {
@@ -829,6 +835,648 @@ fn validate_fractal_command_budget(
         fractal.max_iter,
     )
     .map_err(|error| CommandOutcome::Error(format!("{command}: {error}")))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers financieros (TVM) — usan f64, validan finitud y usan exp/log.
+// ---------------------------------------------------------------------------
+
+/// Parsea el parametro tipo (0=anual vencido, 1=anticipado).
+fn parse_financial_tipo(
+    command: &str,
+    arg: Option<&String>,
+    variables: &HashMap<String, f64>,
+) -> Result<i32, CommandOutcome> {
+    let Some(value) = arg else {
+        return Ok(0);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    let numeric = require_finite(parse_numeric_arg(trimmed, variables))
+        .map_err(|_| CommandOutcome::Error(format!("{command}: tipo debe ser 0 o 1")))?;
+    // Permite 0.0 o 1.0 con tolerancia.
+    if (numeric - 0.0).abs() < 1e-9 {
+        Ok(0)
+    } else if (numeric - 1.0).abs() < 1e-9 {
+        Ok(1)
+    } else {
+        Err(CommandOutcome::Error(format!(
+            "{command}: tipo debe ser 0 (vencido) o 1 (anticipado)"
+        )))
+    }
+}
+
+/// Calcula (1+rate)^nper usando exp/log para estabilidad; valida dominio.
+fn finance_pow1p(rate: f64, nper: f64) -> Result<f64, String> {
+    if !rate.is_finite() || !nper.is_finite() {
+        return Err("rate y nper deben ser finitos".into());
+    }
+    if nper.abs() > MAX_FINANCIAL_NPER {
+        return Err(format!(
+            "nper {nper} excede el máximo {}",
+            MAX_FINANCIAL_NPER
+        ));
+    }
+    if rate.abs() < FINANCIAL_EPSILON {
+        // Limite: (1+rate)^nper ~ exp(nper*ln1p(rate))
+        // Para rate~0 usamos aproximación directa para evitar log(1) =0
+        if rate == 0.0 {
+            return Ok(1.0);
+        }
+    }
+    let base = 1.0 + rate;
+    if base <= 0.0 {
+        return Err("1+rate debe ser positivo para log".into());
+    }
+    // Usa exp(nper * ln(1+rate)) como pide la tarea.
+    let exponent = nper * base.ln();
+    let result = exponent.exp();
+    if !result.is_finite() {
+        return Err("pow desbordó a no finito".into());
+    }
+    Ok(result)
+}
+
+/// PV TVM clásico.
+fn finance_pv(rate: f64, nper: f64, pmt: f64, fv: f64, tipo: i32) -> Result<f64, String> {
+    for (name, value) in [("rate", rate), ("nper", nper), ("pmt", pmt), ("fv", fv)] {
+        if !value.is_finite() {
+            return Err(format!("{name} debe ser finito"));
+        }
+    }
+    if nper < 0.0 || !nper.is_finite() {
+        return Err("nper debe ser finito y no negativo".into());
+    }
+    if tipo != 0 && tipo != 1 {
+        return Err("tipo debe ser 0 o 1".into());
+    }
+    if rate.abs() < FINANCIAL_EPSILON {
+        let result = -fv - pmt * nper;
+        if !result.is_finite() {
+            return Err("PV no finito".into());
+        }
+        return Ok(result);
+    }
+    let factor = finance_pow1p(rate, nper)?;
+    if factor == 0.0 {
+        return Err("factor nulo".into());
+    }
+    let tipo_f = tipo as f64;
+    let annuity = pmt * (1.0 + rate * tipo_f) * (factor - 1.0) / rate;
+    let result = -(fv + annuity) / factor;
+    if !result.is_finite() {
+        return Err("PV no finito".into());
+    }
+    Ok(result)
+}
+
+/// FV TVM clásico.
+fn finance_fv(rate: f64, nper: f64, pmt: f64, pv: f64, tipo: i32) -> Result<f64, String> {
+    for (name, value) in [("rate", rate), ("nper", nper), ("pmt", pmt), ("pv", pv)] {
+        if !value.is_finite() {
+            return Err(format!("{name} debe ser finito"));
+        }
+    }
+    if nper < 0.0 {
+        return Err("nper debe ser no negativo".into());
+    }
+    if tipo != 0 && tipo != 1 {
+        return Err("tipo debe ser 0 o 1".into());
+    }
+    if rate.abs() < FINANCIAL_EPSILON {
+        let result = -pv - pmt * nper;
+        if !result.is_finite() {
+            return Err("FV no finito".into());
+        }
+        return Ok(result);
+    }
+    let factor = finance_pow1p(rate, nper)?;
+    let tipo_f = tipo as f64;
+    let annuity = pmt * (1.0 + rate * tipo_f) * (factor - 1.0) / rate;
+    let result = -pv * factor - annuity;
+    if !result.is_finite() {
+        return Err("FV no finito".into());
+    }
+    Ok(result)
+}
+
+/// PMT TVM clásico.
+fn finance_pmt(rate: f64, nper: f64, pv: f64, fv: f64, tipo: i32) -> Result<f64, String> {
+    for (name, value) in [("rate", rate), ("nper", nper), ("pv", pv), ("fv", fv)] {
+        if !value.is_finite() {
+            return Err(format!("{name} debe ser finito"));
+        }
+    }
+    if nper <= 0.0 || !nper.is_finite() {
+        return Err("nper debe ser finito y positivo".into());
+    }
+    if tipo != 0 && tipo != 1 {
+        return Err("tipo debe ser 0 o 1".into());
+    }
+    if rate.abs() < FINANCIAL_EPSILON {
+        let result = -(pv + fv) / nper;
+        if !result.is_finite() {
+            return Err("PMT no finito".into());
+        }
+        return Ok(result);
+    }
+    let factor = finance_pow1p(rate, nper)?;
+    let tipo_f = tipo as f64;
+    let denom = (1.0 + rate * tipo_f) * (factor - 1.0);
+    if denom.abs() < FINANCIAL_EPSILON {
+        return Err("denominador PMT cercano a cero".into());
+    }
+    let result = -(pv * factor + fv) * rate / denom;
+    if !result.is_finite() {
+        return Err("PMT no finito".into());
+    }
+    Ok(result)
+}
+
+/// NPER TVM clásico usando log.
+fn finance_nper(rate: f64, pmt: f64, pv: f64, fv: f64, tipo: i32) -> Result<f64, String> {
+    for (name, value) in [("rate", rate), ("pmt", pmt), ("pv", pv), ("fv", fv)] {
+        if !value.is_finite() {
+            return Err(format!("{name} debe ser finito"));
+        }
+    }
+    if tipo != 0 && tipo != 1 {
+        return Err("tipo debe ser 0 o 1".into());
+    }
+    if rate.abs() < FINANCIAL_EPSILON {
+        if pmt.abs() < FINANCIAL_EPSILON {
+            return Err("con rate=0, pmt no puede ser cero".into());
+        }
+        let result = -(pv + fv) / pmt;
+        if !result.is_finite() || result < 0.0 {
+            return Err("NPER no finito o negativo".into());
+        }
+        return Ok(result);
+    }
+    let base = 1.0 + rate;
+    if base <= 0.0 || !base.is_finite() {
+        return Err("1+rate debe ser positivo".into());
+    }
+    let tipo_f = tipo as f64;
+    let factor_pmt = pmt * (1.0 + rate * tipo_f);
+    let numerator = factor_pmt - fv * rate;
+    let denominator = factor_pmt + pv * rate;
+    if denominator.abs() < FINANCIAL_EPSILON {
+        return Err("denominador NPER cercano a cero".into());
+    }
+    let ratio = numerator / denominator;
+    if ratio <= 0.0 || !ratio.is_finite() {
+        return Err("ratio NPER no positivo o no finito".into());
+    }
+    // Usa exp/log: nper = ln(ratio)/ln(1+rate)
+    let nper = ratio.ln() / base.ln();
+    if !nper.is_finite() || nper < 0.0 {
+        return Err("NPER no finito o negativo".into());
+    }
+    if nper.abs() > MAX_FINANCIAL_NPER {
+        return Err(format!("NPER {nper} excede máximo"));
+    }
+    Ok(nper)
+}
+
+/// RATE iterativo (Newton + secante), usa exp/log internamente via finance_pow1p.
+#[allow(unused_assignments)]
+fn finance_rate(nper: f64, pmt: f64, pv: f64, fv: f64, tipo: i32) -> Result<f64, String> {
+    for (name, value) in [("nper", nper), ("pmt", pmt), ("pv", pv), ("fv", fv)] {
+        if !value.is_finite() {
+            return Err(format!("{name} debe ser finito"));
+        }
+    }
+    if nper <= 0.0 || !nper.is_finite() || nper.abs() > MAX_FINANCIAL_NPER {
+        return Err("nper debe ser finito y positivo".into());
+    }
+    if tipo != 0 && tipo != 1 {
+        return Err("tipo debe ser 0 o 1".into());
+    }
+    // Caso directo cuando pmt~0: rate = (-fv/pv)^(1/nper)-1
+    if pmt.abs() < FINANCIAL_EPSILON {
+        if pv.abs() < FINANCIAL_EPSILON {
+            return Err("con pmt=0, pv no puede ser cero".into());
+        }
+        let ratio = -fv / pv;
+        if ratio <= 0.0 || !ratio.is_finite() {
+            return Err("sin solución real para rate con pmt=0".into());
+        }
+        // rate = exp( ln(ratio)/nper ) -1
+        let rate = (ratio.ln() / nper).exp() - 1.0;
+        if !rate.is_finite() {
+            return Err("rate no finito".into());
+        }
+        if rate <= -1.0 {
+            return Err("rate <= -1 no permitido".into());
+        }
+        return Ok(rate);
+    }
+    // Función TVM f(rate) = pv*(1+rate)^nper + pmt*(1+rate*tipo)*( (1+rate)^nper -1)/rate + fv
+    let eval_f = |rate: f64| -> Result<f64, String> {
+        if !rate.is_finite() {
+            return Err("rate no finito".into());
+        }
+        if rate <= -1.0 {
+            return Err("rate <= -1".into());
+        }
+        if rate.abs() < FINANCIAL_EPSILON {
+            // Aproximación limite: pv + pmt*nper + fv + términos de orden rate
+            Ok(pv + pmt * nper + fv)
+        } else {
+            let factor = finance_pow1p(rate, nper)?;
+            let tipo_f = tipo as f64;
+            let term = pmt * (1.0 + rate * tipo_f) * (factor - 1.0) / rate;
+            let result = pv * factor + term + fv;
+            if !result.is_finite() {
+                return Err("f(rate) no finito".into());
+            }
+            Ok(result)
+        }
+    };
+    // Newton-Raphson con derivada numérica (varias semillas)
+    #[allow(unused_assignments)]
+    let mut rate = 0.1_f64; // estimación inicial 10% (para referencia)
+    let mut best_rate: Option<f64> = None;
+    let mut best_err = f64::INFINITY;
+    for attempt in 0..3 {
+        let guess = match attempt {
+            0 => 0.1,
+            1 => 0.05,
+            _ => -0.05,
+        };
+        let mut r = guess;
+        for _ in 0..MAX_FINANCIAL_ITERATIONS {
+            let f = match eval_f(r) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            if !f.is_finite() {
+                break;
+            }
+            let abs_f = f.abs();
+            if abs_f < best_err {
+                best_err = abs_f;
+                best_rate = Some(r);
+            }
+            if abs_f < 1e-9 {
+                return Ok(r);
+            }
+            // derivada numérica central
+            let eps = 1e-7;
+            let f_plus = eval_f(r + eps).unwrap_or(f64::NAN);
+            let f_minus = eval_f(r - eps).unwrap_or(f64::NAN);
+            if !f_plus.is_finite() || !f_minus.is_finite() {
+                break;
+            }
+            let deriv = (f_plus - f_minus) / (2.0 * eps);
+            if deriv.abs() < 1e-12 || !deriv.is_finite() {
+                break;
+            }
+            let delta = f / deriv;
+            if !delta.is_finite() {
+                break;
+            }
+            let next = r - delta;
+            if !next.is_finite() || next <= -0.9999 || !next.is_finite() {
+                break;
+            }
+            if (next - r).abs() < 1e-10 {
+                let f_next = eval_f(next).unwrap_or(f64::INFINITY);
+                if f_next.abs() < 1e-7 {
+                    return Ok(next);
+                }
+                r = next;
+                break;
+            }
+            r = next;
+        }
+        // Si no converge, intenta siguiente guess
+        rate = r;
+        let _ = rate;
+    }
+    if let Some(br) = best_rate {
+        if best_err < 1e-6 {
+            return Ok(br);
+        }
+    }
+    // Fallback búsqueda por bisección si hay cambio de signo entre -0.9 y 10
+    let mut low = -0.9_f64;
+    let mut high = 10.0_f64;
+    let f_low = eval_f(low).unwrap_or(f64::NAN);
+    let f_high = eval_f(high).unwrap_or(f64::NAN);
+    if f_low.is_finite() && f_high.is_finite() && f_low * f_high < 0.0 {
+        for _ in 0..MAX_FINANCIAL_ITERATIONS {
+            let mid = 0.5 * (low + high);
+            let f_mid = eval_f(mid).unwrap_or(f64::NAN);
+            if !f_mid.is_finite() {
+                break;
+            }
+            if f_mid.abs() < 1e-9 {
+                return Ok(mid);
+            }
+            if f_low * f_mid <= 0.0 {
+                high = mid;
+            } else {
+                low = mid;
+            }
+            if (high - low).abs() < 1e-10 {
+                return Ok(mid);
+            }
+        }
+    }
+    Err("Rate no converge con presupuestos dados".into())
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de spreadsheet (FillColumn, FillCells, CellRange)
+// ---------------------------------------------------------------------------
+
+/// Convierte una etiqueta de columna (A, B, AA) o índice numérico a índice 0-based.
+fn parse_spreadsheet_column_index(
+    col_arg: &str,
+    variables: &HashMap<String, f64>,
+) -> Result<usize, CommandOutcome> {
+    let trimmed = col_arg
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim();
+    if trimmed.is_empty() {
+        return Err(CommandOutcome::Error("columna vacía".into()));
+    }
+    // Letras puras -> columna Excel
+    if trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        let upper = trimmed.to_ascii_uppercase();
+        let mut col: usize = 0;
+        for ch in upper.bytes() {
+            if !ch.is_ascii_uppercase() {
+                return Err(CommandOutcome::Error(format!(
+                    "columna inválida '{trimmed}'"
+                )));
+            }
+            col = col
+                .checked_mul(26)
+                .and_then(|v| v.checked_add((ch - b'A' + 1) as usize))
+                .ok_or_else(|| CommandOutcome::Error("columna desborda".into()))?;
+        }
+        let col = col
+            .checked_sub(1)
+            .ok_or_else(|| CommandOutcome::Error("columna inválida".into()))?;
+        if col >= Document::MAX_SPREADSHEET_COLS {
+            return Err(CommandOutcome::Error(format!(
+                "columna {col} excede máximo {}",
+                Document::MAX_SPREADSHEET_COLS
+            )));
+        }
+        return Ok(col);
+    }
+    // Intenta como número/expresión
+    let val = require_finite(parse_numeric_arg(trimmed, variables))
+        .map_err(|e| CommandOutcome::Error(format!("columna inválida: {e}")))?;
+    if val < 0.0 || val > Document::MAX_SPREADSHEET_COLS as f64 - 1.0 {
+        return Err(CommandOutcome::Error(format!(
+            "columna {val} fuera de rango"
+        )));
+    }
+    Ok(val as usize)
+}
+
+/// Parsea una etiqueta de celda tipo A1 a (row, col) 0-based.
+fn parse_cell_label_to_indices(cell: &str) -> Option<(usize, usize)> {
+    let trimmed = cell
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim()
+        .to_ascii_uppercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let letter_count = trimmed
+        .bytes()
+        .take_while(|b| b.is_ascii_uppercase())
+        .count();
+    if letter_count == 0 || letter_count == trimmed.len() {
+        return None;
+    }
+    let (letters, row_text) = trimmed.split_at(letter_count);
+    if row_text.starts_with('0') {
+        return None;
+    }
+    let row = row_text.parse::<usize>().ok()?.checked_sub(1)?;
+    if row >= Document::MAX_SPREADSHEET_ROWS {
+        return None;
+    }
+    let mut col: usize = 0;
+    for letter in letters.bytes() {
+        col = col
+            .checked_mul(26)?
+            .checked_add((letter - b'A' + 1) as usize)?;
+    }
+    let col = col.checked_sub(1)?;
+    if col >= Document::MAX_SPREADSHEET_COLS {
+        return None;
+    }
+    // Validación canónica: reconstruye y compara
+    let mut canonical_col = col;
+    let mut rev = String::new();
+    loop {
+        rev.push(char::from(b'A' + (canonical_col % 26) as u8));
+        if canonical_col < 26 {
+            break;
+        }
+        canonical_col = canonical_col / 26 - 1;
+    }
+    let canonical = format!("{}{}", rev.chars().rev().collect::<String>(), row + 1);
+    if canonical != trimmed {
+        return None;
+    }
+    Some((row, col))
+}
+
+/// Parsea un rango "A1:B2" o dos celdas separadas.
+fn parse_cell_range_arg(arg: &str) -> Option<((usize, usize), (usize, usize))> {
+    let trimmed = arg
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim()
+        .to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Formas: "A1:B2", "A1 B2", "A1,B2"
+    let separators = [':', ',', ' '];
+    for sep in separators {
+        if trimmed.contains(sep) {
+            let parts: Vec<&str> = trimmed
+                .split(sep)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.len() == 2 {
+                let a = parse_cell_label_to_indices(parts[0])?;
+                let b = parse_cell_label_to_indices(parts[1])?;
+                return Some((a, b));
+            }
+        }
+    }
+    // Si no hay separador, no es rango combinado
+    None
+}
+
+/// Ejecuta FillColumn de forma transaccional.
+fn run_fill_column(
+    document: &mut Document,
+    col: usize,
+    start_row: usize,
+    end_row: usize,
+    value: &str,
+) -> Result<String, CommandOutcome> {
+    if start_row > end_row {
+        return Err(CommandOutcome::Error(
+            "FillColumn: inicio debe ser <= fin".into(),
+        ));
+    }
+    let count = end_row
+        .checked_sub(start_row)
+        .and_then(|d| d.checked_add(1))
+        .ok_or_else(|| CommandOutcome::Error("rango desborda".into()))?;
+    if count > Document::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+        return Err(CommandOutcome::Error(format!(
+            "FillColumn: {} celdas excede máximo {}",
+            count,
+            Document::MAX_SPREADSHEET_RECOMPUTE_CELLS
+        )));
+    }
+    if end_row >= Document::MAX_SPREADSHEET_ROWS {
+        return Err(CommandOutcome::Error(format!(
+            "FillColumn: fila {} excede máximo {}",
+            end_row + 1,
+            Document::MAX_SPREADSHEET_ROWS
+        )));
+    }
+    if col >= Document::MAX_SPREADSHEET_COLS {
+        return Err(CommandOutcome::Error(format!(
+            "columna {} excede máximo",
+            col
+        )));
+    }
+    if value.len() > grafito_core::validation::MAX_STRING_LENGTH {
+        return Err(CommandOutcome::Error("valor excede longitud máxima".into()));
+    }
+    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(count);
+    for row in start_row..=end_row {
+        edits.push((row, col, value.to_string()));
+    }
+    // Las ediciones deben estar ordenadas
+    edits.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+    let staged = document
+        .stage_spreadsheet_cell_edits(&edits)
+        .map_err(CommandOutcome::Error)?;
+    *document = staged;
+    Ok(format!(
+        "FillColumn: {} celdas rellenadas en col {} filas {}..{}",
+        count,
+        col,
+        start_row + 1,
+        end_row + 1
+    ))
+}
+
+/// Ejecuta FillCells para un rectángulo.
+fn run_fill_cells(
+    document: &mut Document,
+    range: ((usize, usize), (usize, usize)),
+    value: &str,
+) -> Result<String, CommandOutcome> {
+    let ((r1, c1), (r2, c2)) = range;
+    let (row_min, row_max) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+    let (col_min, col_max) = if c1 <= c2 { (c1, c2) } else { (c2, c1) };
+    let rows = row_max - row_min + 1;
+    let cols = col_max - col_min + 1;
+    let count = rows
+        .checked_mul(cols)
+        .ok_or_else(|| CommandOutcome::Error("rango desborda".into()))?;
+    if count > Document::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+        return Err(CommandOutcome::Error(format!(
+            "FillCells: {} celdas excede máximo {}",
+            count,
+            Document::MAX_SPREADSHEET_RECOMPUTE_CELLS
+        )));
+    }
+    if value.len() > grafito_core::validation::MAX_STRING_LENGTH {
+        return Err(CommandOutcome::Error("valor excede longitud máxima".into()));
+    }
+    let mut edits = Vec::with_capacity(count);
+    for r in row_min..=row_max {
+        for c in col_min..=col_max {
+            edits.push((r, c, value.to_string()));
+        }
+    }
+    edits.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+    let staged = document
+        .stage_spreadsheet_cell_edits(&edits)
+        .map_err(CommandOutcome::Error)?;
+    *document = staged;
+    Ok(format!(
+        "FillCells: {} celdas rellenadas en rango {}{}:{}{}",
+        count,
+        {
+            let mut col = col_min;
+            let mut s = String::new();
+            loop {
+                s.push(char::from(b'A' + (col % 26) as u8));
+                if col < 26 {
+                    break;
+                }
+                col = col / 26 - 1;
+            }
+            s.chars().rev().collect::<String>()
+        },
+        row_min + 1,
+        {
+            let mut col = col_max;
+            let mut s = String::new();
+            loop {
+                s.push(char::from(b'A' + (col % 26) as u8));
+                if col < 26 {
+                    break;
+                }
+                col = col / 26 - 1;
+            }
+            s.chars().rev().collect::<String>()
+        },
+        row_max + 1
+    ))
+}
+
+/// Resuelve CellRange a vector de valores.
+fn resolve_cell_range(document: &Document, range: ((usize, usize), (usize, usize))) -> Vec<String> {
+    let ((r1, c1), (r2, c2)) = range;
+    let (row_min, row_max) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+    let (col_min, col_max) = if c1 <= c2 { (c1, c2) } else { (c2, c1) };
+    let mut values = Vec::new();
+    for r in row_min..=row_max {
+        for c in col_min..=col_max {
+            let raw = document.get_spreadsheet_cell(r, c);
+            if raw.is_empty() {
+                values.push("".to_string());
+            } else if let Some(num) = document.eval_spreadsheet_cell(r, c) {
+                // Si es coordenada tipo "(x,y)" ya es punto, muestra raw
+                if raw.trim().starts_with('(') && raw.contains(',') {
+                    values.push(raw);
+                } else if num.is_finite() {
+                    values.push(format!("{}", num));
+                } else {
+                    values.push(raw);
+                }
+            } else {
+                values.push(raw);
+            }
+        }
+    }
+    values
 }
 
 /// Parse attractor parameters, supporting key=value syntax.
@@ -4496,31 +5144,397 @@ fn process_input_in_place_with_budget(
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
-            "FillColumn" => {
-                // Stub mínimo: acepta 1..4 argumentos, no falla.
-                if cmd.args.is_empty() {
+            "Rate" => {
+                if !(4..=5).contains(&cmd.args.len()) {
                     return CommandOutcome::Error(
-                        "FillColumn: se requiere al menos la columna".into(),
+                        "Rate: se requieren 4-5 args: nper, pmt, pv, fv, [tipo]".into(),
                     );
                 }
-                // Opcionalmente se podría rellenar la hoja, pero como stub basta con mensaje.
-                let msg = format!(
-                    "FillColumn: stub aceptado con {} argumento(s)",
-                    cmd.args.len()
-                );
-                input_text.clear();
-                return CommandOutcome::Message(msg);
+                let nper = command_result!(parse_finite_command_arg(
+                    "Rate",
+                    "nper",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let pmt = command_result!(parse_finite_command_arg(
+                    "Rate",
+                    "pmt",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let pv = command_result!(parse_finite_command_arg(
+                    "Rate",
+                    "pv",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let fv = command_result!(parse_finite_command_arg(
+                    "Rate",
+                    "fv",
+                    &cmd.args[3],
+                    &document.variables,
+                ));
+                let tipo = command_result!(parse_financial_tipo(
+                    "Rate",
+                    cmd.args.get(4),
+                    &document.variables,
+                ));
+                match finance_rate(nper, pmt, pv, fv, tipo) {
+                    Ok(rate) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!("Rate = {:.10}", rate));
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("Rate: {e}")),
+                }
+            }
+            "Nper" => {
+                if !(4..=5).contains(&cmd.args.len()) {
+                    return CommandOutcome::Error(
+                        "Nper: se requieren 4-5 args: rate, pmt, pv, fv, [tipo]".into(),
+                    );
+                }
+                let rate = command_result!(parse_finite_command_arg(
+                    "Nper",
+                    "rate",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let pmt = command_result!(parse_finite_command_arg(
+                    "Nper",
+                    "pmt",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let pv = command_result!(parse_finite_command_arg(
+                    "Nper",
+                    "pv",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let fv = command_result!(parse_finite_command_arg(
+                    "Nper",
+                    "fv",
+                    &cmd.args[3],
+                    &document.variables,
+                ));
+                let tipo = command_result!(parse_financial_tipo(
+                    "Nper",
+                    cmd.args.get(4),
+                    &document.variables,
+                ));
+                match finance_nper(rate, pmt, pv, fv, tipo) {
+                    Ok(nper) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!("Nper = {:.10}", nper));
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("Nper: {e}")),
+                }
+            }
+            "Pmt" => {
+                if !(4..=5).contains(&cmd.args.len()) {
+                    return CommandOutcome::Error(
+                        "Pmt: se requieren 4-5 args: rate, nper, pv, fv, [tipo]".into(),
+                    );
+                }
+                let rate = command_result!(parse_finite_command_arg(
+                    "Pmt",
+                    "rate",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let nper = command_result!(parse_finite_command_arg(
+                    "Pmt",
+                    "nper",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let pv = command_result!(parse_finite_command_arg(
+                    "Pmt",
+                    "pv",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let fv = command_result!(parse_finite_command_arg(
+                    "Pmt",
+                    "fv",
+                    &cmd.args[3],
+                    &document.variables,
+                ));
+                let tipo = command_result!(parse_financial_tipo(
+                    "Pmt",
+                    cmd.args.get(4),
+                    &document.variables,
+                ));
+                match finance_pmt(rate, nper, pv, fv, tipo) {
+                    Ok(pmt) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!("Pmt = {:.10}", pmt));
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("Pmt: {e}")),
+                }
+            }
+            "PV" => {
+                if !(4..=5).contains(&cmd.args.len()) {
+                    return CommandOutcome::Error(
+                        "PV: se requieren 4-5 args: rate, nper, pmt, fv, [tipo]".into(),
+                    );
+                }
+                let rate = command_result!(parse_finite_command_arg(
+                    "PV",
+                    "rate",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let nper = command_result!(parse_finite_command_arg(
+                    "PV",
+                    "nper",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let pmt = command_result!(parse_finite_command_arg(
+                    "PV",
+                    "pmt",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let fv = command_result!(parse_finite_command_arg(
+                    "PV",
+                    "fv",
+                    &cmd.args[3],
+                    &document.variables,
+                ));
+                let tipo = command_result!(parse_financial_tipo(
+                    "PV",
+                    cmd.args.get(4),
+                    &document.variables,
+                ));
+                match finance_pv(rate, nper, pmt, fv, tipo) {
+                    Ok(pv) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!("PV = {:.10}", pv));
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("PV: {e}")),
+                }
+            }
+            "FV" => {
+                if !(4..=5).contains(&cmd.args.len()) {
+                    return CommandOutcome::Error(
+                        "FV: se requieren 4-5 args: rate, nper, pmt, pv, [tipo]".into(),
+                    );
+                }
+                let rate = command_result!(parse_finite_command_arg(
+                    "FV",
+                    "rate",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let nper = command_result!(parse_finite_command_arg(
+                    "FV",
+                    "nper",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let pmt = command_result!(parse_finite_command_arg(
+                    "FV",
+                    "pmt",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                let pv = command_result!(parse_finite_command_arg(
+                    "FV",
+                    "pv",
+                    &cmd.args[3],
+                    &document.variables,
+                ));
+                let tipo = command_result!(parse_financial_tipo(
+                    "FV",
+                    cmd.args.get(4),
+                    &document.variables,
+                ));
+                match finance_fv(rate, nper, pmt, pv, tipo) {
+                    Ok(fv) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!("FV = {:.10}", fv));
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("FV: {e}")),
+                }
+            }
+            "FillColumn" => {
+                if cmd.args.is_empty() || cmd.args.len() > 4 {
+                    return CommandOutcome::Error(
+                        "FillColumn: usa FillColumn[col, valor] o FillColumn[col, inicio, fin, valor]".into(),
+                    );
+                }
+                let col = command_result!(parse_spreadsheet_column_index(
+                    &cmd.args[0],
+                    &document.variables
+                ));
+                // Determina forma: 2 args => col, valor (rellena filas 1..10 por defecto)
+                // 4 args => col, inicio, fin, valor
+                let (start_row, end_row, value) = if cmd.args.len() == 2 {
+                    // Rellena 10 filas por defecto para no hacer DoS en columnas completas
+                    let valor = cmd.args[1]
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string();
+                    (0_usize, 9_usize, valor)
+                } else if cmd.args.len() == 4 {
+                    let inicio = command_result!(parse_finite_command_arg(
+                        "FillColumn",
+                        "inicio",
+                        &cmd.args[1],
+                        &document.variables,
+                    ));
+                    let fin = command_result!(parse_finite_command_arg(
+                        "FillColumn",
+                        "fin",
+                        &cmd.args[2],
+                        &document.variables,
+                    ));
+                    if inicio < 1.0
+                        || fin < 1.0
+                        || !inicio.is_finite()
+                        || !fin.is_finite()
+                        || inicio.fract() != 0.0
+                        || fin.fract() != 0.0
+                    {
+                        return CommandOutcome::Error(
+                            "FillColumn: inicio y fin deben ser enteros >=1".into(),
+                        );
+                    }
+                    let Some(s) = (inicio as usize).checked_sub(1) else {
+                        return CommandOutcome::Error("FillColumn: inicio inválido".into());
+                    };
+                    let Some(e) = (fin as usize).checked_sub(1) else {
+                        return CommandOutcome::Error("FillColumn: fin inválido".into());
+                    };
+                    let valor = cmd.args[3]
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string();
+                    (s, e, valor)
+                } else if cmd.args.len() == 3 {
+                    // Compatibilidad: FillColumn[col, inicio, valor] -> interpreta como col, valor? No, trata como error guiado
+                    return CommandOutcome::Error(
+                        "FillColumn: usa FillColumn[col, valor] o FillColumn[col, inicio, fin, valor]".into(),
+                    );
+                } else {
+                    // 1 arg: col sola -> error porque falta valor
+                    return CommandOutcome::Error(
+                        "FillColumn: se requiere valor para rellenar".into(),
+                    );
+                };
+                match run_fill_column(document, col, start_row, end_row, &value) {
+                    Ok(msg) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(msg);
+                    }
+                    Err(e) => return e,
+                }
+            }
+            "FillCells" => {
+                if cmd.args.len() < 2 || cmd.args.len() > 3 {
+                    return CommandOutcome::Error(
+                        "FillCells: usa FillCells[rango, valor] o FillCells[a1, b2, valor]".into(),
+                    );
+                }
+                let (range, value) = if cmd.args.len() == 2 {
+                    // rango puede ser "A1:B2" o "A1"
+                    let range_str = cmd.args[0].trim();
+                    let valor = cmd.args[1]
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string();
+                    let Some(parsed) = parse_cell_range_arg(range_str)
+                        .or_else(|| {
+                            // Si no tiene ':', intenta como dos celdas separadas por coma
+                            let cleaned = range_str.trim_matches(|c| c == '"' || c == '\'');
+                            parse_cell_range_arg(cleaned)
+                        })
+                        .or_else(|| {
+                            parse_cell_label_to_indices(range_str).map(|cell| (cell, cell))
+                        })
+                    else {
+                        return CommandOutcome::Error(format!(
+                            "FillCells: rango inválido '{}'",
+                            range_str
+                        ));
+                    };
+                    (parsed, valor)
+                } else {
+                    // 3 args: a1, b2, valor
+                    let Some(a) = parse_cell_label_to_indices(&cmd.args[0]) else {
+                        return CommandOutcome::Error(format!(
+                            "FillCells: celda inválida '{}'",
+                            cmd.args[0]
+                        ));
+                    };
+                    let Some(b) = parse_cell_label_to_indices(&cmd.args[1]) else {
+                        return CommandOutcome::Error(format!(
+                            "FillCells: celda inválida '{}'",
+                            cmd.args[1]
+                        ));
+                    };
+                    let valor = cmd.args[2]
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string();
+                    ((a, b), valor)
+                };
+                match run_fill_cells(document, range, &value) {
+                    Ok(msg) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(msg);
+                    }
+                    Err(e) => return e,
+                }
             }
             "CellRange" => {
-                if cmd.args.is_empty() {
+                if cmd.args.is_empty() || cmd.args.len() > 2 {
                     return CommandOutcome::Error(
-                        "CellRange: se requiere al menos un rango".into(),
+                        "CellRange: usa CellRange[A1, B2] o CellRange[\"A1:B2\"]".into(),
                     );
                 }
-                // Stub: devuelve el rango solicitado sin validar contenido profundo.
-                let range = cmd.args.join(", ");
+                // Resuelve rango
+                let range_opt: Option<((usize, usize), (usize, usize))> = if cmd.args.len() == 2 {
+                    let a = parse_cell_label_to_indices(&cmd.args[0]);
+                    let b = parse_cell_label_to_indices(&cmd.args[1]);
+                    match (a, b) {
+                        (Some(a), Some(b)) => Some((a, b)),
+                        _ => None,
+                    }
+                } else {
+                    // 1 arg: puede ser "A1:B2" o "A1"
+                    let single = cmd.args[0].trim();
+                    if let Some(parsed) = parse_cell_range_arg(single) {
+                        Some(parsed)
+                    } else {
+                        parse_cell_label_to_indices(single).map(|cell| (cell, cell))
+                    }
+                };
+                let Some(range) = range_opt else {
+                    return CommandOutcome::Error(format!(
+                        "CellRange: rango inválido '{}'",
+                        cmd.args.join(", ")
+                    ));
+                };
+                // Limita tamaño del rango para no hacer DoS
+                let ((r1, c1), (r2, c2)) = range;
+                let rows = r1.max(r2) - r1.min(r2) + 1;
+                let cols = c1.max(c2) - c1.min(c2) + 1;
+                let total = rows.saturating_mul(cols);
+                if total > Document::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+                    return CommandOutcome::Error(format!(
+                        "CellRange: {} celdas excede máximo {}",
+                        total,
+                        Document::MAX_SPREADSHEET_RECOMPUTE_CELLS
+                    ));
+                }
+                let values = resolve_cell_range(document, range);
                 input_text.clear();
-                return CommandOutcome::Message(format!("CellRange[{}] (stub)", range));
+                // Formato tipo array {1, 2, 3}
+                let array_str = format!("{{{}}}", values.join(", "));
+                return CommandOutcome::Message(format!("CellRange = {array_str}"));
             }
             "Length" if cmd.args.len() == 1 => {
                 let label = cmd.args[0].trim();
@@ -5648,6 +6662,127 @@ fn process_input_in_place_with_budget(
                     command_result!(require_finite_outputs("Correlation", &[r]));
                     input_text.clear();
                     return CommandOutcome::Message(format!("r = {:.6}", r));
+                }
+            }
+            // ---- Lista funcional (P2.5) — comandos puros ----
+            "Sequence" => {
+                let outcome = run_sequence_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Zip" => {
+                let outcome = run_zip_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Flatten" => {
+                let outcome = run_flatten_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Sort" => {
+                let outcome = run_sort_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Reverse" => {
+                let outcome = run_reverse_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Join" => {
+                let outcome = run_join_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Append" => {
+                let outcome = run_append_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "First" => {
+                let outcome = run_first_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Last" => {
+                let outcome = run_last_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "Take" => {
+                let outcome = run_take_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "KeepIf" => {
+                let outcome = run_keep_if_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
+                }
+            }
+            "CountIf" => {
+                let outcome = run_count_if_command(&cmd.args, document);
+                match &outcome {
+                    CommandOutcome::Error(_) => return outcome,
+                    _ => {
+                        input_text.clear();
+                        return outcome;
+                    }
                 }
             }
             "Determinant" if !cmd.args.is_empty() => {
@@ -7121,6 +8256,238 @@ fn process_input_in_place_with_budget(
                         f_stat, p_value
                     ));
                 }
+                // Si no se pudo calcular (p. ej. grupos insuficientes o varianza nula),
+                // devuelve mensaje coherente sin error duro.
+                input_text.clear();
+                return CommandOutcome::Message(
+                    "ANOVA: no se pudo calcular (verifique que haya >=2 grupos con varianza finita)"
+                        .into(),
+                );
+            }
+            "InverseNormal" if matches!(cmd.args.len(), 1 | 3) => {
+                let p = command_result!(parse_finite_command_arg(
+                    "InverseNormal",
+                    "p",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                if !(0.0 < p && p < 1.0) {
+                    return CommandOutcome::Error(
+                        "InverseNormal: p debe estar en el intervalo (0,1)".into(),
+                    );
+                }
+                let mu = if cmd.args.len() == 3 {
+                    command_result!(parse_finite_command_arg(
+                        "InverseNormal",
+                        "mu",
+                        &cmd.args[1],
+                        &document.variables,
+                    ))
+                } else {
+                    0.0
+                };
+                let sigma = if cmd.args.len() == 3 {
+                    command_result!(parse_finite_command_arg(
+                        "InverseNormal",
+                        "sigma",
+                        &cmd.args[2],
+                        &document.variables,
+                    ))
+                } else {
+                    1.0
+                };
+                if sigma <= 0.0 || !sigma.is_finite() || !mu.is_finite() {
+                    return CommandOutcome::Error(
+                        "InverseNormal: mu finito y sigma>0 requeridos".into(),
+                    );
+                }
+                let q = grafito_geometry::statistics::normal_quantile(p, mu, sigma);
+                command_result!(require_finite_outputs("InverseNormal", &[q]));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "InverseNormal[{p}, {mu}, {sigma}] = {:.6}",
+                    q
+                ));
+            }
+            "InverseT" if cmd.args.len() == 2 => {
+                let p = command_result!(parse_finite_command_arg(
+                    "InverseT",
+                    "p",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let df = command_result!(parse_finite_command_arg(
+                    "InverseT",
+                    "df",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                if !(0.0 < p && p < 1.0) {
+                    return CommandOutcome::Error("InverseT: p debe estar en (0,1)".into());
+                }
+                if !df.is_finite() || df <= 0.0 {
+                    return CommandOutcome::Error("InverseT: df debe ser positivo y finito".into());
+                }
+                let q = grafito_geometry::statistics::student_t_quantile(p, df);
+                command_result!(require_finite_outputs("InverseT", &[q]));
+                input_text.clear();
+                return CommandOutcome::Message(format!("InverseT[{p}, {df}] = {:.6}", q));
+            }
+            "InverseChiSquared" if cmd.args.len() == 2 => {
+                let p = command_result!(parse_finite_command_arg(
+                    "InverseChiSquared",
+                    "p",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let df = command_result!(parse_finite_command_arg(
+                    "InverseChiSquared",
+                    "df",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                if !(0.0 < p && p < 1.0) {
+                    return CommandOutcome::Error(
+                        "InverseChiSquared: p debe estar en (0,1)".into(),
+                    );
+                }
+                if !df.is_finite() || df <= 0.0 {
+                    return CommandOutcome::Error(
+                        "InverseChiSquared: df debe ser positivo y finito".into(),
+                    );
+                }
+                let q = grafito_geometry::statistics::chi_squared_quantile(p, df);
+                command_result!(require_finite_outputs("InverseChiSquared", &[q]));
+                input_text.clear();
+                return CommandOutcome::Message(format!("InverseChiSquared[{p}, {df}] = {:.6}", q));
+            }
+            "InverseF" if cmd.args.len() == 3 => {
+                let p = command_result!(parse_finite_command_arg(
+                    "InverseF",
+                    "p",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let df1 = command_result!(parse_finite_command_arg(
+                    "InverseF",
+                    "df1",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                let df2 = command_result!(parse_finite_command_arg(
+                    "InverseF",
+                    "df2",
+                    &cmd.args[2],
+                    &document.variables,
+                ));
+                if !(0.0 < p && p < 1.0) {
+                    return CommandOutcome::Error("InverseF: p debe estar en (0,1)".into());
+                }
+                if !df1.is_finite() || df1 <= 0.0 || !df2.is_finite() || df2 <= 0.0 {
+                    return CommandOutcome::Error(
+                        "InverseF: df1 y df2 deben ser positivos y finitos".into(),
+                    );
+                }
+                let q = grafito_geometry::statistics::f_quantile(p, df1, df2);
+                command_result!(require_finite_outputs("InverseF", &[q]));
+                input_text.clear();
+                return CommandOutcome::Message(format!("InverseF[{p}, {df1}, {df2}] = {:.6}", q));
+            }
+            "FrequencyTable" if cmd.args.len() == 1 => {
+                let data = command_result!(parse_data_command_arg(
+                    "FrequencyTable",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                // Presupuesto: limita tamaño de salida (no más de 5000 filas únicas implícitas)
+                if data.len() > 20_000 {
+                    return CommandOutcome::Error(
+                        "FrequencyTable: demasiados datos (máx 20000)".into(),
+                    );
+                }
+                let text = grafito_geometry::statistics::frequency_table_text(&data);
+                input_text.clear();
+                return CommandOutcome::Message(text);
+            }
+            "StemPlot" if cmd.args.len() == 1 => {
+                let data = command_result!(parse_data_command_arg(
+                    "StemPlot",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                if data.len() > 20_000 {
+                    return CommandOutcome::Error("StemPlot: demasiados datos (máx 20000)".into());
+                }
+                let text = grafito_geometry::statistics::stem_plot_text(&data);
+                input_text.clear();
+                return CommandOutcome::Message(text);
+            }
+            "ResidualPlot" => {
+                if cmd.args.len() == 1 {
+                    // ResidualPlot[tabla] -> busca DataTable por etiqueta
+                    let (_id, xs, ys) =
+                        match data_table_for_fit(document, "ResidualPlot", &cmd.args[0]) {
+                            Ok(v) => v,
+                            Err(outcome) => return outcome,
+                        };
+                    if let Some(text) = grafito_geometry::statistics::residual_plot_text(&xs, &ys) {
+                        input_text.clear();
+                        return CommandOutcome::Message(text);
+                    }
+                    return CommandOutcome::Error(
+                        "ResidualPlot: no se pudo calcular residuos (verifique tabla)".into(),
+                    );
+                } else if cmd.args.len() == 2 {
+                    let xs = command_result!(parse_data_command_arg(
+                        "ResidualPlot",
+                        &cmd.args[0],
+                        &document.variables,
+                    ));
+                    let ys = command_result!(parse_data_command_arg(
+                        "ResidualPlot",
+                        &cmd.args[1],
+                        &document.variables,
+                    ));
+                    if let Some(text) = grafito_geometry::statistics::residual_plot_text(&xs, &ys) {
+                        input_text.clear();
+                        return CommandOutcome::Message(text);
+                    }
+                    return CommandOutcome::Error(
+                        "ResidualPlot: datos insuficientes o colineales".into(),
+                    );
+                }
+            }
+            "TTestPaired" if cmd.args.len() == 2 => {
+                let data1 = command_result!(parse_data_command_arg(
+                    "TTestPaired",
+                    &cmd.args[0],
+                    &document.variables,
+                ));
+                let data2 = command_result!(parse_data_command_arg(
+                    "TTestPaired",
+                    &cmd.args[1],
+                    &document.variables,
+                ));
+                if data1.len() != data2.len() {
+                    return CommandOutcome::Error(
+                        "TTestPaired: las listas deben tener la misma longitud".into(),
+                    );
+                }
+                if let Some((t_stat, p_value)) =
+                    grafito_geometry::statistics::t_test_paired(&data1, &data2)
+                {
+                    command_result!(require_finite_outputs("TTestPaired", &[t_stat, p_value]));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "t-test pareado: t = {:.4}, p = {:.6}",
+                        t_stat, p_value
+                    ));
+                }
+                // stub coherente si no se puede calcular (varianza nula, etc.)
+                input_text.clear();
+                return CommandOutcome::Message(
+                    "TTestPaired: no se pudo calcular (verifique n>=2 y varianza finita)".into(),
+                );
             }
             "CIMean" if matches!(cmd.args.len(), 1 | 2) => {
                 let data = command_result!(parse_data_command_arg(
@@ -7668,6 +9035,190 @@ fn process_input_in_place_with_budget(
                 input_text.clear();
                 return CommandOutcome::Message("Implicit curve created".into());
             }
+            // ── Discreta: ConvexHull / Delaunay / Voronoi / MST / TSP / ShortestDistance ──
+            "ConvexHull" => {
+                let points = match collect_discrete_points(&cmd.args, document) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("ConvexHull: {e}")),
+                };
+                let hull = match grafito_geometry::discrete::convex_hull(&points) {
+                    Ok(h) => h,
+                    Err(e) => return CommandOutcome::Error(format!("ConvexHull: {e}")),
+                };
+                if hull.len() == 1 {
+                    insert_command_object!(document, GeoObject::Point(PointObj::new(hull[0])));
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "ConvexHull: casco con 1 punto ({:.4}, {:.4})",
+                        hull[0].x, hull[0].y
+                    ));
+                }
+                if hull.len() == 2 {
+                    let line = LineObj::new(hull[0], hull[1]);
+                    insert_command_object!(document, GeoObject::Line(line));
+                    input_text.clear();
+                    return CommandOutcome::Message(
+                        "ConvexHull: segmentocolineal de 2 puntos".into(),
+                    );
+                }
+                let poly = PolygonObj::new(hull.clone());
+                insert_command_object!(document, GeoObject::Polygon(poly));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "ConvexHull: polígono con {} vértices",
+                    hull.len()
+                ));
+            }
+            "DelaunayTriangulation" => {
+                let points = match collect_discrete_points(&cmd.args, document) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("DelaunayTriangulation: {e}")),
+                };
+                let tris = match grafito_geometry::discrete::delaunay_fan_triangulation(&points) {
+                    Ok(t) => t,
+                    Err(e) => return CommandOutcome::Error(format!("DelaunayTriangulation: {e}")),
+                };
+                let mut count = 0usize;
+                for tri in tris {
+                    let poly = PolygonObj::new(vec![tri[0], tri[1], tri[2]]);
+                    insert_command_object!(document, GeoObject::Polygon(poly));
+                    count += 1;
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "DelaunayTriangulation: {} triángulos (fan) creados",
+                    count
+                ));
+            }
+            "Voronoi" => {
+                let points = match collect_discrete_points(&cmd.args, document) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("Voronoi: {e}")),
+                };
+                let cells = match grafito_geometry::discrete::voronoi_stub_cells(&points) {
+                    Ok(c) => c,
+                    Err(e) => return CommandOutcome::Error(format!("Voronoi: {e}")),
+                };
+                // Stub: genera polígonos circulares aproximados y un punto en el sitio
+                for (idx, ring) in cells.iter().enumerate() {
+                    let center = points[idx];
+                    // Crea un polígono que aproxima la celda
+                    let poly = PolygonObj::new(ring.clone());
+                    insert_command_object!(document, GeoObject::Polygon(poly));
+                    // Además un punto visible en el sitio (si no existe ya)
+                    let _ = document.try_add_object(GeoObject::Point(PointObj::new(center)));
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "Voronoi: {} celdas stub (círculos {} lados) creadas",
+                    cells.len(),
+                    cells.first().map(|c| c.len()).unwrap_or(0)
+                ));
+            }
+            "MinimumSpanningTree" => {
+                let points = match collect_discrete_points(&cmd.args, document) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("MinimumSpanningTree: {e}")),
+                };
+                let (edges, total) =
+                    match grafito_geometry::discrete::minimum_spanning_tree(&points) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return CommandOutcome::Error(format!("MinimumSpanningTree: {e}"))
+                        }
+                    };
+                for edge in &edges {
+                    let a = points[edge.from];
+                    let b = points[edge.to];
+                    let line = LineObj::new(a, b);
+                    insert_command_object!(document, GeoObject::Line(line));
+                }
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "MinimumSpanningTree: {} aristas, longitud total {:.4}",
+                    edges.len(),
+                    total
+                ));
+            }
+            "TravelingSalesman" => {
+                let points = match collect_discrete_points(&cmd.args, document) {
+                    Ok(v) => v,
+                    Err(e) => return CommandOutcome::Error(format!("TravelingSalesman: {e}")),
+                };
+                let (order, total) =
+                    match grafito_geometry::discrete::traveling_salesman_nearest(&points) {
+                        Ok(v) => v,
+                        Err(e) => return CommandOutcome::Error(format!("TravelingSalesman: {e}")),
+                    };
+                // Crea polígono cerrado con el orden del tour
+                let verts: Vec<Point2> = order.iter().map(|&i| points[i]).collect();
+                // El polígono se cierra implícitamente, no duplicamos el primero
+                let poly = PolygonObj::new(verts.clone());
+                insert_command_object!(document, GeoObject::Polygon(poly));
+                // También crea segmentos para visualización explícita si se quiere
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "TravelingSalesman: tour {} puntos, longitud {:.4}, orden {:?}",
+                    order.len(),
+                    total,
+                    order
+                ));
+            }
+            "ShortestDistance" => {
+                if cmd.args.len() != 2 {
+                    return CommandOutcome::Error(
+                        "ShortestDistance: se requieren exactamente 2 argumentos (punto, objeto)"
+                            .into(),
+                    );
+                }
+                // Primer argumento: punto (literal o etiqueta)
+                let p = match resolve_point_arg(document, &cmd.args[0]) {
+                    Ok((pt, _)) => pt,
+                    Err(e) => {
+                        // Intenta parse directo como "(x,y)"
+                        match parse_finite_point_arg(&cmd.args[0], &document.variables) {
+                            Ok(pt) => pt,
+                            Err(_) => {
+                                return CommandOutcome::Error(format!(
+                                    "ShortestDistance: punto inválido: {e}"
+                                ))
+                            }
+                        }
+                    }
+                };
+                if !p.x.is_finite() || !p.y.is_finite() {
+                    return CommandOutcome::Error(
+                        "ShortestDistance: coordenadas del punto no finitas".into(),
+                    );
+                }
+                let label = cmd.args[1].trim().trim_matches('"').trim_matches('\'');
+                let Some(id) = find_object_by_label(document, label) else {
+                    return CommandOutcome::Error(format!(
+                        "ShortestDistance: objeto '{}' no encontrado",
+                        label
+                    ));
+                };
+                let Some(obj) = document.get_object(id).cloned() else {
+                    return CommandOutcome::Error(format!(
+                        "ShortestDistance: objeto '{}' no encontrado",
+                        label
+                    ));
+                };
+                let dist = match distance_point_to_object(p, &obj) {
+                    Ok(d) if d.is_finite() => d,
+                    Ok(d) => {
+                        return CommandOutcome::Error(format!(
+                            "ShortestDistance: distancia no finita ({d})"
+                        ))
+                    }
+                    Err(e) => return CommandOutcome::Error(format!("ShortestDistance: {e}")),
+                };
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "ShortestDistance({:.4}, {:.4} → {}) = {:.6}",
+                    p.x, p.y, label, dist
+                ));
+            }
             _ => {}
         }
         result = match execute_cas_command_typed(document, &cmd) {
@@ -8004,6 +9555,10 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
         "Expand",
         "Simplify",
         "Taylor",
+        "CompleteSquare",
+        "PrimeFactors",
+        "IFactor",
+        "Assume",
         "deriv",
         "diff",
         "int",
@@ -8016,6 +9571,10 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
         "factorizar",
         "expandir",
         "simplificar",
+        "completarCuadrado",
+        "prime_factors",
+        "ifactor",
+        "assume",
     ];
 
     for &kw in &keywords {
@@ -8085,6 +9644,14 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
             "expand" | "expandir" => "Expand",
             "simplify" | "simplificar" => "Simplify",
             "taylor" => "Taylor",
+            "completesquare" | "complete_square" | "completarcuadrado" | "completar_cuadrado" => {
+                "CompleteSquare"
+            }
+            "primefactors" | "prime_factors" | "factoresprimos" | "factores_primos" => {
+                "PrimeFactors"
+            }
+            "ifactor" | "ifactorizar" | "factorentero" | "factor_entero" => "IFactor",
+            "assume" | "asumir" | "suponer" | "supone" => "Assume",
             "tangentat" | "tangenteen" => "TangentAt",
             "normalat" | "normalen" => "NormalAt",
             "arclength" | "longitudarco" => "ArcLength",
@@ -8183,6 +9750,33 @@ pub fn expand_all_cas(text: &str, document: &Document) -> String {
             "Simplify" => {
                 resolved_expr = symbolic::simplify(&expr_arg)
                     .unwrap_or_else(|_| current[range.clone()].to_string());
+            }
+            "CompleteSquare" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                resolved_expr = match symbolic::complete_square_typed(&expr_arg, var) {
+                    grafito_geometry::outcome::MathResult::Exact(v) => v,
+                    grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                        value.to_string()
+                    }
+                    _ => current[range.clone()].to_string(),
+                };
+            }
+            "PrimeFactors" => {
+                resolved_expr = match symbolic::prime_factors_typed(&expr_arg) {
+                    grafito_geometry::outcome::MathResult::Exact(v) => v,
+                    _ => current[range.clone()].to_string(),
+                };
+            }
+            "IFactor" => {
+                let var = args.get(1).map(|s| s.as_str()).unwrap_or("x");
+                resolved_expr = match symbolic::ifactor_typed(&expr_arg, var) {
+                    grafito_geometry::outcome::MathResult::Exact(v) => v,
+                    _ => current[range.clone()].to_string(),
+                };
+            }
+            "Assume" => {
+                // No expansión dentro de expresiones: mantiene texto
+                resolved_expr = current[range.clone()].to_string();
             }
             "Limit" => {
                 resolved_expr = match (args.get(1), args.get(2)) {
@@ -8355,6 +9949,13 @@ pub fn parse_cas_command(text: &str) -> Option<CasCmd> {
                 "factor" | "factorizar" => "Factor",
                 "expand" | "expandir" => "Expand",
                 "simplify" | "simplificar" => "Simplify",
+                "completesquare" | "complete_square" | "completarcuadrado"
+                | "completar_cuadrado" => "CompleteSquare",
+                "primefactors" | "prime_factors" | "factoresprimos" | "factores_primos" => {
+                    "PrimeFactors"
+                }
+                "ifactor" | "ifactorizar" | "factorentero" | "factor_entero" => "IFactor",
+                "assume" | "asumir" | "suponer" | "supone" => "Assume",
                 "tangentat" | "tangenteen" => "TangentAt",
                 "normalat" | "normalen" => "NormalAt",
                 "arclength" | "longitudarco" => "ArcLength",
@@ -9200,11 +10801,303 @@ fn execute_cas_command_typed(
             }
         }
         "GroebnerDegRevLex" | "GroebnerBasis" | "Groebner" | "GroebnerLex" => {
-            // Stub intencional: no hay cálculo de base de Gröbner, pero no debe
-            // hacer pánico y debe sugerir `Eliminate`. Acepta cualquier aridad
-            // sin validar sintaxis de polinomios.
-            let _ = cmd.args.first();
-            Some(Ok("Groebner no implementado, use Eliminate".to_string()))
+            let polys_arg = cmd.args.first().map(|s| s.as_str()).unwrap_or("");
+            let vars_arg = cmd.args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let polys_vec: Vec<String> = if polys_arg.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![polys_arg.to_string()]
+            };
+            let vars_vec: Vec<String> = if vars_arg.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![vars_arg.to_string()]
+            };
+            match symbolic::groebner_basis_typed(&polys_vec, &vars_vec) {
+                grafito_geometry::outcome::MathResult::Exact(value) => Some(Ok(value)),
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => Some(Ok(value)),
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("Groebner límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("Groebner error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("Groebner no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("Groebner no convergió: {err:?}")))
+                }
+            }
+        }
+        "CompleteSquare" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: CompleteSquare requiere CompleteSquare[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err(
+                    "Error: CompleteSquare requiere una expresión no vacía".into()
+                ));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err(
+                    "Error: CompleteSquare requiere una variable válida".into()
+                ));
+            }
+            match symbolic::complete_square_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("{expr} = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("{expr} ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("CompleteSquare error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("CompleteSquare límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("CompleteSquare no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("CompleteSquare no convergió: {err:?}")))
+                }
+            }
+        }
+        "PrimeFactors" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: PrimeFactors requiere PrimeFactors[n]".into()));
+            }
+            let n_str = cmd.args[0].trim();
+            if n_str.is_empty() {
+                return Some(Err("Error: PrimeFactors requiere un entero no vacío".into()));
+            }
+            let resolved = if let Some(&val) = document.variables.get(n_str) {
+                if val.is_finite() && val.fract() == 0.0 {
+                    format!("{}", val as i64)
+                } else {
+                    n_str.to_string()
+                }
+            } else {
+                n_str.to_string()
+            };
+            match symbolic::prime_factors_typed(&resolved) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("PrimeFactors[{resolved}] = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("PrimeFactors[{resolved}] ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("PrimeFactors error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("PrimeFactors límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("PrimeFactors no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("PrimeFactors no convergió: {err:?}")))
+                }
+            }
+        }
+        "IFactor" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return Some(Err(
+                    "Error: IFactor requiere IFactor[expr] o IFactor[expr, variable]".into(),
+                ));
+            }
+            let expr = expand_all_cas(cmd.args.first()?, document);
+            if expr.trim().is_empty() {
+                return Some(Err("Error: IFactor requiere una expresión no vacía".into()));
+            }
+            let var = cmd
+                .args
+                .get(1)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("x");
+            if !is_math_identifier(var) {
+                return Some(Err("Error: IFactor requiere una variable válida".into()));
+            }
+            match symbolic::ifactor_typed(&expr, var) {
+                grafito_geometry::outcome::MathResult::Exact(value) => {
+                    Some(Ok(format!("IFactor[{expr}] = {value}")))
+                }
+                grafito_geometry::outcome::MathResult::Approximate { value, .. } => {
+                    Some(Ok(format!("IFactor[{expr}] ≈ {value}")))
+                }
+                grafito_geometry::outcome::MathResult::DomainError(err) => {
+                    Some(Err(format!("IFactor error de dominio: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
+                    Some(Err(format!("IFactor límite de recursos: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::Unsupported(err) => {
+                    Some(Err(format!("IFactor no soportado: {err:?}")))
+                }
+                grafito_geometry::outcome::MathResult::NotConverged(err) => {
+                    Some(Err(format!("IFactor no convergió: {err:?}")))
+                }
+            }
+        }
+        "Assume" => {
+            if cmd.args.len() != 1 {
+                return Some(Err("Error: Assume requiere Assume[predicado]".into()));
+            }
+            let raw = cmd.args[0]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string();
+            if raw.is_empty() {
+                return Some(Err("Error: Assume requiere un predicado no vacío".into()));
+            }
+            if raw.len() > grafito_geometry::MAX_MATH_INPUT_BYTES {
+                return Some(Err(format!(
+                    "Assume: predicado excede límite {} bytes",
+                    grafito_geometry::MAX_MATH_INPUT_BYTES
+                )));
+            }
+            let mut var_name: Option<String> = None;
+            let mut assumption_kind: String = raw.clone();
+            let compact = raw.replace(' ', "");
+            if compact.contains(">=") {
+                if let Some(pos) = compact.find(">=") {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + 2..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "nonnegative".to_string();
+                    }
+                }
+            } else if compact.contains("<=") {
+                if let Some(pos) = compact.find("<=") {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + 2..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "nonpositive".to_string();
+                    }
+                }
+            } else if compact.contains("!=") {
+                if let Some(pos) = compact.find("!=") {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + 2..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "nonzero".to_string();
+                    }
+                }
+            } else if compact.contains('≠') {
+                if let Some(pos) = compact.find('≠') {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + '≠'.len_utf8()..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "nonzero".to_string();
+                    }
+                }
+            } else if compact.contains('>') {
+                if let Some(pos) = compact.find('>') {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + 1..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "positive".to_string();
+                    }
+                }
+            } else if compact.contains('<') {
+                if let Some(pos) = compact.find('<') {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + 1..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "negative".to_string();
+                    }
+                }
+            } else if compact.contains("==") || compact.contains('=') {
+                let op = if compact.contains("==") { "==" } else { "=" };
+                if let Some(pos) = compact.find(op) {
+                    let left = compact[..pos].to_string();
+                    let right = compact[pos + op.len()..].to_string();
+                    if is_math_identifier(&left) && (right == "0" || right == "0.0") {
+                        var_name = Some(left);
+                        assumption_kind = "zero".to_string();
+                    }
+                }
+            }
+            if var_name.is_none() {
+                let lower = raw.to_lowercase();
+                let mut candidate = String::new();
+                for ch in raw.chars() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        candidate.push(ch);
+                    } else if !candidate.is_empty() {
+                        break;
+                    }
+                }
+                let candidate = candidate.trim().to_string();
+                if is_math_identifier(&candidate) {
+                    if lower.contains("positive")
+                        || lower.contains("positivo")
+                        || lower.contains(" > 0")
+                    {
+                        var_name = Some(candidate.clone());
+                        assumption_kind = "positive".to_string();
+                    } else if lower.contains("nonzero")
+                        || lower.contains("no cero")
+                        || lower.contains("!= 0")
+                    {
+                        var_name = Some(candidate.clone());
+                        assumption_kind = "nonzero".to_string();
+                    } else if lower.contains("real") {
+                        var_name = Some(candidate.clone());
+                        assumption_kind = "real".to_string();
+                    } else if lower.contains("integer") || lower.contains("entero") {
+                        var_name = Some(candidate.clone());
+                        assumption_kind = "integer".to_string();
+                    } else if lower.contains("complex") || lower.contains("complejo") {
+                        var_name = Some(candidate.clone());
+                        assumption_kind = "complex".to_string();
+                    } else {
+                        var_name = Some(candidate);
+                        assumption_kind = raw.clone();
+                    }
+                }
+            }
+            let (var, kind) = match (var_name, assumption_kind) {
+                (Some(v), k) => (v, k),
+                (None, _) => {
+                    return Some(Err(format!(
+                        "Assume: no se pudo interpretar el predicado '{raw}'"
+                    )))
+                }
+            };
+            if !is_math_identifier(&var) {
+                return Some(Err(format!(
+                    "Assume: variable '{var}' no es un identificador válido"
+                )));
+            }
+            if kind.len() > grafito_core::validation::MAX_STRING_LENGTH {
+                return Some(Err("Assume: hipótesis excede longitud máxima".into()));
+            }
+            document
+                .variables_assumptions
+                .insert(var.clone(), kind.clone());
+            Some(Ok(format!("Assume: {var} es {kind}")))
         }
         "Factor" => {
             let expr = expand_all_cas(cmd.args.first()?, document);
@@ -10978,6 +12871,984 @@ fn parse_brace_list(s: &str, variables: &HashMap<String, f64>) -> Result<Vec<f64
                 .map_err(|error| format!("valor inválido '{value}': {error}"))
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers de lista funcional (P2.5) — operaciones puras sin mutar Document.
+// ---------------------------------------------------------------------------
+
+/// Elemento de lista: escalar o sub-lista anidada (un nivel).
+#[derive(Debug, Clone, PartialEq)]
+enum ListElem {
+    Scalar(f64),
+    List(Vec<ListElem>),
+}
+
+/// Formatea un escalar con `fmt_scalar`.
+fn fmt_list_scalar(value: f64) -> String {
+    fmt_scalar(value)
+}
+
+/// Formatea un elemento (escalar o sub-lista).
+fn fmt_list_elem(elem: &ListElem) -> String {
+    match elem {
+        ListElem::Scalar(value) => fmt_list_scalar(*value),
+        ListElem::List(inner) => format_list(inner),
+    }
+}
+
+/// Formatea una lista como `{a, b, c}`; sub-listas se anidan.
+fn format_list(elems: &[ListElem]) -> String {
+    if elems.is_empty() {
+        return "{}".to_string();
+    }
+    let inner = elems
+        .iter()
+        .map(fmt_list_elem)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{inner}}}")
+}
+
+/// Parsea una lista literal con posible anidamiento (recursivo).
+///
+/// Ejemplo: `{1,2,3}` → `[Scalar(1),Scalar(2),Scalar(3)]`
+/// `{{1,2},{3,4}}` → `[List([1,2]), List([3,4])]`
+/// Usa `split_args` para respetar `{` `}` anidados y valida longitud.
+fn parse_generic_list_literal(
+    s: &str,
+    variables: &HashMap<String, f64>,
+) -> Result<Vec<ListElem>, String> {
+    let trimmed = s.trim().trim_matches('"').trim_matches('\'').trim();
+    let inner = trimmed
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| "se esperaba lista con sintaxis {a, b, c}".to_string())?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let tokens = split_args(inner);
+    if tokens.len() > grafito_core::validation::MAX_ARRAY_LENGTH {
+        return Err(format!(
+            "lista excede el máximo {} elementos",
+            grafito_core::validation::MAX_ARRAY_LENGTH
+        ));
+    }
+    let mut elems = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err("la lista contiene un valor vacío".into());
+        }
+        if token.starts_with('{') && token.ends_with('}') {
+            let inner_elems = parse_generic_list_literal(token, variables)?;
+            elems.push(ListElem::List(inner_elems));
+        } else {
+            let value = require_finite(parse_numeric_arg(token, variables))
+                .map_err(|error| format!("valor inválido '{token}': {error}"))?;
+            elems.push(ListElem::Scalar(value));
+        }
+    }
+    Ok(elems)
+}
+
+/// Resuelve un argumento de lista: literal `{…}` o etiqueta de `DataTable`.
+///
+/// Soporta `DataTable` con sufijo opcional `.xs` / `.ys` (por defecto `xs`).
+/// No crea objetos; solo consulta `Document` o evalúa literales.
+fn resolve_list_arg(arg: &str, document: &Document) -> Result<Vec<ListElem>, String> {
+    // Corrige la inserción espuria de `*` que `insert_implicit_multiplication`
+    // hace sobre `D.ys` → `D.y*s` (y seguida de letra tras punto).
+    let trimmed_raw = arg
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    let trimmed = trimmed_raw
+        .replace(".y*s", ".ys")
+        .replace(".x*s", ".xs")
+        .replace(".y*S", ".ys")
+        .replace(".x*S", ".xs");
+    if trimmed.is_empty() {
+        return Err("argumento de lista vacío".into());
+    }
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return parse_generic_list_literal(&trimmed, &document.variables);
+    }
+    // Intenta resolver como DataTable[.xs|.ys]
+    let (label_part, suffix) = if let Some(dot_pos) = trimmed.rfind('.') {
+        let candidate_suffix = trimmed[dot_pos + 1..].trim();
+        if candidate_suffix.eq_ignore_ascii_case("xs")
+            || candidate_suffix.eq_ignore_ascii_case("x")
+            || candidate_suffix.eq_ignore_ascii_case("ys")
+            || candidate_suffix.eq_ignore_ascii_case("y")
+        {
+            (trimmed[..dot_pos].trim(), Some(candidate_suffix))
+        } else {
+            (trimmed.as_str(), None)
+        }
+    } else {
+        (trimmed.as_str(), None)
+    };
+    let label = clean_label(label_part);
+    if let Some(id) = find_object_by_label(document, label) {
+        if let Some(GeoObject::DataTable(table)) = document.get_object(id) {
+            let data: &[f64] = match suffix {
+                Some(s) if s.eq_ignore_ascii_case("xs") || s.eq_ignore_ascii_case("x") => &table.xs,
+                Some(s) if s.eq_ignore_ascii_case("ys") || s.eq_ignore_ascii_case("y") => &table.ys,
+                Some(s) => return Err(format!("DataTable: sufijo '{s}' inválido, usa .xs o .ys")),
+                None => &table.xs,
+            };
+            if data.len() > grafito_core::validation::MAX_ARRAY_LENGTH {
+                return Err(format!(
+                    "DataTable lista excede el máximo {}",
+                    grafito_core::validation::MAX_ARRAY_LENGTH
+                ));
+            }
+            return Ok(data.iter().copied().map(ListElem::Scalar).collect());
+        }
+        return Err(format!("'{label}' no es una lista ni DataTable"));
+    }
+    Err(format!(
+        "no se pudo resolver lista '{}': usa {{a,b}} o etiqueta DataTable",
+        trimmed
+    ))
+}
+
+/// Valida longitud contra `MAX_ARRAY_LENGTH`.
+fn validate_list_len(len: usize, command: &str) -> Result<(), String> {
+    if len > grafito_core::validation::MAX_ARRAY_LENGTH {
+        return Err(format!(
+            "{command}: longitud {len} excede el máximo {}",
+            grafito_core::validation::MAX_ARRAY_LENGTH
+        ));
+    }
+    Ok(())
+}
+
+/// Evalúa un predicado simple sobre un valor `x`.
+///
+/// Intenta `evaluate(predicado, {x, ...document.variables})`; si la expresión
+/// no contiene operador de comparación, se considera verdadero cuando el valor
+/// evaluado es distinto de cero (no finito → error). Como respaldo, parsea
+/// manualmente operadores simples (`<=, >=, ==, !=, <, >, =`).
+fn eval_predicate(predicate: &str, x_value: f64, document: &Document) -> Result<bool, String> {
+    let pred = predicate.trim().trim_matches('"').trim_matches('\'').trim();
+    if pred.is_empty() {
+        return Err("predicado vacío".into());
+    }
+    let mut vars_vec: Vec<(String, f64)> = document
+        .variables
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    vars_vec.push(("x".to_string(), x_value));
+    // Intento directo con el evaluador (soporta comparaciones)
+    if let Ok(value) = evaluate(pred, &vars_vec) {
+        if !value.is_finite() {
+            return Err(format!("predicado no finito: {value}"));
+        }
+        // Las comparaciones devuelven 1.0 (verdadero) o 0.0 (falso) vía Lt/Gt etc.
+        // Cualquier valor no nulo se considera verdadero.
+        return Ok(value.abs() > 1e-12 && value != 0.0);
+    }
+    // Respaldo manual para predicados simples tipo "x>2" o "x mod 2 == 0"
+    let ops: [&str; 7] = ["<=", ">=", "==", "!=", "<", ">", "="];
+    for op in ops {
+        if let Some(pos) = pred.find(op) {
+            // Evita confundir "<=" con "<" ya iteramos en orden correcto
+            if op == "<" && pred[pos..].starts_with("<=") {
+                continue;
+            }
+            if op == ">" && pred[pos..].starts_with(">=") {
+                continue;
+            }
+            if op == "="
+                && (pred[pos..].starts_with("==")
+                    || pred[pos..].starts_with("<=")
+                    || pred[pos..].starts_with(">="))
+            {
+                continue;
+            }
+            let left = pred[..pos].trim();
+            let right = pred[pos + op.len()..].trim();
+            if left.is_empty() || right.is_empty() {
+                continue;
+            }
+            let mut vars_map = document.variables.clone();
+            vars_map.insert("x".to_string(), x_value);
+            let vars_ref: Vec<(String, f64)> =
+                vars_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let left_val = evaluate(left, &vars_ref)
+                .map_err(|error| format!("predicado lado izq inválido '{left}': {error}"))?;
+            let right_val = evaluate(right, &vars_ref)
+                .map_err(|error| format!("predicado lado der inválido '{right}': {error}"))?;
+            if !left_val.is_finite() || !right_val.is_finite() {
+                return Err("comparación con valor no finito".into());
+            }
+            let result = match op {
+                "<=" => left_val <= right_val,
+                ">=" => left_val >= right_val,
+                "==" | "=" => (left_val - right_val).abs() < 1e-9,
+                "!=" => (left_val - right_val).abs() >= 1e-9,
+                "<" => left_val < right_val,
+                ">" => left_val > right_val,
+                _ => false,
+            };
+            return Ok(result);
+        }
+    }
+    Err(format!("predicado no reconocido '{}'", pred))
+}
+
+/// Ejecuta `Sequence[expr, var, start, end]` de forma pura (sin mutar Document).
+fn run_sequence_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "Sequence: se requieren 4 argumentos Sequence[expr, var, start, end]".into(),
+        );
+    }
+    let expr = args[0].trim().trim_matches('"').trim_matches('\'');
+    let var = args[1].trim().trim_matches('"').trim_matches('\'');
+    if !is_math_identifier(var) {
+        return CommandOutcome::Error("Sequence: var debe ser un identificador válido".into());
+    }
+    let start_val = match require_finite(parse_numeric_arg(&args[2], &document.variables)) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Sequence: start inválido: {error}")),
+    };
+    let end_val = match require_finite(parse_numeric_arg(&args[3], &document.variables)) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Sequence: end inválido: {error}")),
+    };
+    // Requiere enteros para la variable de iteración
+    let start_is_int = (start_val - start_val.round()).abs() < 1e-9;
+    let end_is_int = (end_val - end_val.round()).abs() < 1e-9;
+    if !start_is_int || !end_is_int {
+        return CommandOutcome::Error("Sequence: start y end deben ser enteros".into());
+    }
+    let start_i = start_val.round() as i64;
+    let end_i = end_val.round() as i64;
+    let len = (end_i - start_i).unsigned_abs() as usize + 1;
+    if len > MAX_DISCRETE_COUNT as usize {
+        return CommandOutcome::Error(format!(
+            "Sequence: longitud {len} excede el máximo {MAX_DISCRETE_COUNT}"
+        ));
+    }
+    if let Err(error) = validate_list_len(len, "Sequence") {
+        return CommandOutcome::Error(error);
+    }
+    let mut results: Vec<ListElem> = Vec::with_capacity(len);
+    let step: i64 = if end_i >= start_i { 1 } else { -1 };
+    let mut current = start_i;
+    loop {
+        let mut vars_vec: Vec<(String, f64)> = document
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        vars_vec.push((var.to_string(), current as f64));
+        // `expr` puede contener la variable de iteración y otras del documento
+        let value = match evaluate(expr, &vars_vec) {
+            Ok(value) if value.is_finite() => value,
+            Ok(value) => {
+                return CommandOutcome::Error(format!(
+                    "Sequence: evaluación no finita en {var}={current}: {value}"
+                ))
+            }
+            Err(error) => {
+                return CommandOutcome::Error(format!(
+                    "Sequence: no se pudo evaluar '{expr}' con {var}={current}: {error}"
+                ))
+            }
+        };
+        results.push(ListElem::Scalar(value));
+        if current == end_i {
+            break;
+        }
+        current += step;
+    }
+    CommandOutcome::Message(format_list(&results))
+}
+
+/// Ejecuta `Zip[list1, list2]`: lista de pares `{ {a1,b1}, {a2,b2}, … }`.
+fn run_zip_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Zip: se requieren 2 listas Zip[list1, list2]".into());
+    }
+    let list1 = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Zip: lista1 inválida: {error}")),
+    };
+    let list2 = match resolve_list_arg(&args[1], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Zip: lista2 inválida: {error}")),
+    };
+    // Para Zip, se esperan listas planas de escalares
+    let flat1: Vec<f64> = match list1
+        .iter()
+        .map(|elem| match elem {
+            ListElem::Scalar(value) => Ok(*value),
+            ListElem::List(_) => Err("Zip requiere listas planas, no anidadas".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(values) => values,
+        Err(error) => return CommandOutcome::Error(format!("Zip: {error}")),
+    };
+    let flat2: Vec<f64> = match list2
+        .iter()
+        .map(|elem| match elem {
+            ListElem::Scalar(value) => Ok(*value),
+            ListElem::List(_) => Err("Zip requiere listas planas, no anidadas".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(values) => values,
+        Err(error) => return CommandOutcome::Error(format!("Zip: {error}")),
+    };
+    let len = flat1.len().min(flat2.len());
+    if let Err(error) = validate_list_len(len, "Zip") {
+        return CommandOutcome::Error(error);
+    }
+    let mut out: Vec<ListElem> = Vec::with_capacity(len);
+    for index in 0..len {
+        out.push(ListElem::List(vec![
+            ListElem::Scalar(flat1[index]),
+            ListElem::Scalar(flat2[index]),
+        ]));
+    }
+    CommandOutcome::Message(format_list(&out))
+}
+
+/// Ejecuta `Flatten[list]`: aplana un nivel.
+fn run_flatten_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Flatten: se requiere 1 lista Flatten[list]".into());
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Flatten: {error}")),
+    };
+    let has_nested = list.iter().any(|elem| matches!(elem, ListElem::List(_)));
+    if !has_nested {
+        return CommandOutcome::Message(format_list(&list));
+    }
+    let mut flattened: Vec<ListElem> = Vec::new();
+    for elem in list {
+        match elem {
+            ListElem::List(inner) => flattened.extend(inner),
+            scalar @ ListElem::Scalar(_) => flattened.push(scalar),
+        }
+    }
+    if let Err(error) = validate_list_len(flattened.len(), "Flatten") {
+        return CommandOutcome::Error(error);
+    }
+    CommandOutcome::Message(format_list(&flattened))
+}
+
+/// Ejecuta `Sort[list]`: ordena ascendentemente.
+fn run_sort_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Sort: se requiere 1 lista Sort[list]".into());
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Sort: {error}")),
+    };
+    let mut values: Vec<f64> = match list
+        .iter()
+        .map(|elem| match elem {
+            ListElem::Scalar(value) => Ok(*value),
+            ListElem::List(_) => Err("Sort requiere lista plana numérica".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(values) => values,
+        Err(error) => return CommandOutcome::Error(format!("Sort: {error}")),
+    };
+    values.sort_by(|left, right| left.total_cmp(right));
+    let out: Vec<ListElem> = values.into_iter().map(ListElem::Scalar).collect();
+    CommandOutcome::Message(format_list(&out))
+}
+
+/// Ejecuta `Reverse[list]`: invierte el orden.
+fn run_reverse_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Reverse: se requiere 1 lista Reverse[list]".into());
+    }
+    let mut list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Reverse: {error}")),
+    };
+    list.reverse();
+    CommandOutcome::Message(format_list(&list))
+}
+
+/// Ejecuta `Join[list1, list2]`: concatena.
+fn run_join_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Join: se requieren 2 listas Join[list1, list2]".into());
+    }
+    let mut list1 = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Join: lista1 inválida: {error}")),
+    };
+    let list2 = match resolve_list_arg(&args[1], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Join: lista2 inválida: {error}")),
+    };
+    let total = list1.len() + list2.len();
+    if let Err(error) = validate_list_len(total, "Join") {
+        return CommandOutcome::Error(error);
+    }
+    list1.extend(list2);
+    CommandOutcome::Message(format_list(&list1))
+}
+
+/// Ejecuta `Append[list, elem]`: añade un elemento al final.
+fn run_append_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "Append: se requieren 2 argumentos Append[list, elem]".into(),
+        );
+    }
+    let mut list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Append: lista inválida: {error}")),
+    };
+    let elem_str = args[1].trim().trim_matches('"').trim_matches('\'');
+    // Intenta como escalar numérico
+    let new_elem = if elem_str.starts_with('{') && elem_str.ends_with('}') {
+        // Si es lista literal de un elemento, lo desempaqueta; si son varios,
+        // se añade como sub-lista anidada (un solo elemento lista).
+        match parse_generic_list_literal(elem_str, &document.variables) {
+            Ok(inner) if inner.len() == 1 => {
+                inner.into_iter().next().unwrap_or(ListElem::Scalar(0.0))
+            }
+            Ok(inner) => ListElem::List(inner),
+            Err(error) => return CommandOutcome::Error(format!("Append: elem inválido: {error}")),
+        }
+    } else {
+        match require_finite(parse_numeric_arg(elem_str, &document.variables)) {
+            Ok(value) => ListElem::Scalar(value),
+            Err(error) => {
+                return CommandOutcome::Error(format!(
+                    "Append: elem debe ser número o lista: {error}"
+                ))
+            }
+        }
+    };
+    if let Err(error) = validate_list_len(list.len() + 1, "Append") {
+        return CommandOutcome::Error(error);
+    }
+    list.push(new_elem);
+    CommandOutcome::Message(format_list(&list))
+}
+
+/// Ejecuta `First[list]`.
+fn run_first_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("First: se requiere 1 lista First[list]".into());
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("First: {error}")),
+    };
+    match list.first() {
+        Some(elem) => CommandOutcome::Message(fmt_list_elem(elem)),
+        None => CommandOutcome::Error("First: lista vacía".into()),
+    }
+}
+
+/// Ejecuta `Last[list]`.
+fn run_last_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("Last: se requiere 1 lista Last[list]".into());
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Last: {error}")),
+    };
+    match list.last() {
+        Some(elem) => CommandOutcome::Message(fmt_list_elem(elem)),
+        None => CommandOutcome::Error("Last: lista vacía".into()),
+    }
+}
+
+/// Ejecuta `Take[list, n]`: primeros `n` elementos.
+fn run_take_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Take: se requieren 2 argumentos Take[list, n]".into());
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Take: lista inválida: {error}")),
+    };
+    let n_val = match require_finite(parse_numeric_arg(&args[1], &document.variables)) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("Take: n inválido: {error}")),
+    };
+    if n_val < 0.0 || (n_val - n_val.round()).abs() > 1e-9 {
+        return CommandOutcome::Error("Take: n debe ser entero no negativo".into());
+    }
+    let n = n_val.round() as usize;
+    if n > list.len() {
+        return CommandOutcome::Error(format!("Take: n={n} excede longitud {}", list.len()));
+    }
+    if let Err(error) = validate_list_len(n, "Take") {
+        return CommandOutcome::Error(error);
+    }
+    let out = list.into_iter().take(n).collect::<Vec<_>>();
+    CommandOutcome::Message(format_list(&out))
+}
+
+/// Ejecuta `KeepIf[list, predicado]`: filtra con predicado simple sobre `x`.
+fn run_keep_if_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "KeepIf: se requieren 2 argumentos KeepIf[list, predicado]".into(),
+        );
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("KeepIf: lista inválida: {error}")),
+    };
+    let predicate = args[1].trim().trim_matches('"').trim_matches('\'');
+    let mut kept: Vec<ListElem> = Vec::new();
+    for elem in &list {
+        let value = match elem {
+            ListElem::Scalar(scalar) => *scalar,
+            ListElem::List(_) => {
+                return CommandOutcome::Error("KeepIf: requiere lista plana numérica".into())
+            }
+        };
+        let keep = match eval_predicate(predicate, value, document) {
+            Ok(result) => result,
+            Err(error) => return CommandOutcome::Error(format!("KeepIf: {error}")),
+        };
+        if keep {
+            kept.push(elem.clone());
+        }
+    }
+    if let Err(error) = validate_list_len(kept.len(), "KeepIf") {
+        return CommandOutcome::Error(error);
+    }
+    CommandOutcome::Message(format_list(&kept))
+}
+
+/// Ejecuta `CountIf[list, predicado]`: cuenta elementos que cumplen el predicado.
+fn run_count_if_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "CountIf: se requieren 2 argumentos CountIf[list, predicado]".into(),
+        );
+    }
+    let list = match resolve_list_arg(&args[0], document) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("CountIf: lista inválida: {error}")),
+    };
+    let predicate = args[1].trim().trim_matches('"').trim_matches('\'');
+    let mut count: usize = 0;
+    for elem in &list {
+        let value = match elem {
+            ListElem::Scalar(scalar) => *scalar,
+            ListElem::List(_) => {
+                return CommandOutcome::Error("CountIf: requiere lista plana numérica".into())
+            }
+        };
+        let matches = match eval_predicate(predicate, value, document) {
+            Ok(result) => result,
+            Err(error) => return CommandOutcome::Error(format!("CountIf: {error}")),
+        };
+        if matches {
+            count += 1;
+        }
+    }
+    CommandOutcome::Message(format!("{count}"))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers discretos (P2.2) — colección de puntos, límites y distancias
+// ---------------------------------------------------------------------------
+
+/// Recolecta un conjunto de puntos 2D desde los argumentos de un comando discreto.
+///
+/// Soporta:
+/// - un único argumento con lista con llaves `"{(0,0),(1,0),(0,1)}"` o DataTable
+///   por etiqueta,
+/// - dos listas numéricas `"{1,2,3}" "{4,5,6}"` interpretadas como xs/ys,
+/// - múltiples argumentos cada uno un punto `"(x,y)"` o etiqueta de `Point`,
+/// - puntos con llaves `"{x,y}"` y listas planas `"{0,0,1,0}"`.
+fn collect_discrete_points(args: &[String], document: &Document) -> Result<Vec<Point2>, String> {
+    if args.is_empty() {
+        return Err("se requieren puntos".into());
+    }
+    // Caso de dos listas numéricas xs/ys
+    if args.len() == 2
+        && args[0].trim().starts_with('{')
+        && args[1].trim().starts_with('{')
+        && args[0].trim().ends_with('}')
+        && args[1].trim().ends_with('}')
+    {
+        if let (Ok(xs), Ok(ys)) = (
+            parse_brace_list(&args[0], &document.variables),
+            parse_brace_list(&args[1], &document.variables),
+        ) {
+            if xs.len() == ys.len() && !xs.is_empty() {
+                let mut pts = Vec::with_capacity(xs.len());
+                for (x, y) in xs.iter().zip(ys.iter()) {
+                    if !x.is_finite() || !y.is_finite() {
+                        return Err("coordenadas no finitas".into());
+                    }
+                    pts.push(Point2::new(*x, *y));
+                }
+                validate_discrete_point_count(&pts)?;
+                return Ok(pts);
+            }
+        }
+    }
+    if args.len() == 1 {
+        let trimmed = args[0].trim();
+        // Etiqueta de DataTable / Polygon / Point
+        if let Some(id) = find_object_by_label(document, trimmed) {
+            if let Some(obj) = document.get_object(id) {
+                match obj {
+                    GeoObject::DataTable(table) => {
+                        if table.xs.len() != table.ys.len() {
+                            return Err("DataTable xs/ys longitud distinta".into());
+                        }
+                        let mut pts = Vec::with_capacity(table.xs.len());
+                        for (x, y) in table.xs.iter().zip(table.ys.iter()) {
+                            if !x.is_finite() || !y.is_finite() {
+                                return Err("coordenadas de tabla no finitas".into());
+                            }
+                            pts.push(Point2::new(*x, *y));
+                        }
+                        validate_discrete_point_count(&pts)?;
+                        return Ok(pts);
+                    }
+                    GeoObject::Polygon(poly) => {
+                        validate_discrete_point_count(&poly.vertices)?;
+                        return Ok(poly.vertices.clone());
+                    }
+                    GeoObject::Point(pt) => {
+                        return Ok(vec![pt.position]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Lista con llaves "{...}"
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if inner.trim().is_empty() {
+                return Err("lista vacía".into());
+            }
+            let tokens = split_args(inner);
+            // Lista plana numérica "{0,0,1,0,0,1}" -> pares
+            let all_numeric = tokens
+                .iter()
+                .all(|t| parse_numeric_arg(t.trim(), &document.variables).is_ok());
+            if all_numeric && tokens.len().is_multiple_of(2) && tokens.len() >= 2 {
+                let mut pts = Vec::with_capacity(tokens.len() / 2);
+                for chunk in tokens.chunks(2) {
+                    let x = parse_numeric_arg(chunk[0].trim(), &document.variables)
+                        .map_err(|e| format!("x inválido: {e}"))?;
+                    let y = parse_numeric_arg(chunk[1].trim(), &document.variables)
+                        .map_err(|e| format!("y inválido: {e}"))?;
+                    if !x.is_finite() || !y.is_finite() {
+                        return Err("coordenadas no finitas".into());
+                    }
+                    pts.push(Point2::new(x, y));
+                }
+                if !pts.is_empty() {
+                    validate_discrete_point_count(&pts)?;
+                    return Ok(pts);
+                }
+            }
+            // Tokens como puntos "(x,y)" / "{x,y}" / etiqueta
+            let mut pts = Vec::with_capacity(tokens.len());
+            for token in tokens {
+                let token = token.trim();
+                if token.is_empty() {
+                    continue;
+                }
+                if let Some(id) = find_object_by_label(document, token) {
+                    if let Some(GeoObject::Point(pt)) = document.get_object(id) {
+                        pts.push(pt.position);
+                        continue;
+                    }
+                    return Err(format!("'{}' no es un punto", token));
+                }
+                if token.starts_with('{') && token.ends_with('}') {
+                    let inner_pt = &token[1..token.len() - 1];
+                    let comps = split_args(inner_pt);
+                    if comps.len() == 2 {
+                        let x = parse_numeric_arg(comps[0].trim(), &document.variables)?;
+                        let y = parse_numeric_arg(comps[1].trim(), &document.variables)?;
+                        if !x.is_finite() || !y.is_finite() {
+                            return Err("coordenadas no finitas".into());
+                        }
+                        pts.push(Point2::new(x, y));
+                        continue;
+                    }
+                }
+                match parse_finite_point_arg(token, &document.variables) {
+                    Ok(p) => pts.push(p),
+                    Err(e) => return Err(format!("punto inválido '{}': {e}", token)),
+                }
+            }
+            if pts.is_empty() {
+                return Err("no se encontraron puntos".into());
+            }
+            validate_discrete_point_count(&pts)?;
+            return Ok(pts);
+        }
+        // Punto individual "(x,y)" o etiqueta
+        if let Some(id) = find_object_by_label(document, trimmed) {
+            if let Some(GeoObject::Point(pt)) = document.get_object(id) {
+                return Ok(vec![pt.position]);
+            }
+        }
+        if let Ok(p) = parse_finite_point_arg(trimmed, &document.variables) {
+            return Ok(vec![p]);
+        }
+        // Lista separada por comas sin llaves "(0,0),(1,0)"
+        if trimmed.contains('(') && trimmed.contains(')') && trimmed.contains(',') {
+            let tokens = split_args(trimmed);
+            let mut pts = Vec::new();
+            let mut any_point = false;
+            for token in &tokens {
+                if let Ok(p) = parse_finite_point_arg(token.trim(), &document.variables) {
+                    pts.push(p);
+                    any_point = true;
+                } else if let Some(id) = find_object_by_label(document, token.trim()) {
+                    if let Some(GeoObject::Point(pt)) = document.get_object(id) {
+                        pts.push(pt.position);
+                        any_point = true;
+                    }
+                }
+            }
+            if any_point {
+                validate_discrete_point_count(&pts)?;
+                return Ok(pts);
+            }
+        }
+        return Err(format!(
+            "no se pudo interpretar '{}' como lista de puntos",
+            trimmed
+        ));
+    }
+    // Múltiples argumentos: cada uno un punto o DataTable
+    let mut pts = Vec::with_capacity(args.len());
+    for arg in args {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            return Err("argumento de punto vacío".into());
+        }
+        // Forma "{x,y}" como punto individual entre múltiples args
+        if arg.starts_with('{') && arg.ends_with('}') {
+            let inner = &arg[1..arg.len() - 1];
+            let comps = split_args(inner);
+            if comps.len() == 2 {
+                if let (Ok(x), Ok(y)) = (
+                    parse_numeric_arg(comps[0].trim(), &document.variables),
+                    parse_numeric_arg(comps[1].trim(), &document.variables),
+                ) {
+                    if x.is_finite() && y.is_finite() {
+                        pts.push(Point2::new(x, y));
+                        continue;
+                    }
+                }
+            }
+            if let Ok(vals) = parse_brace_list(arg, &document.variables) {
+                if vals.len() == 2 {
+                    pts.push(Point2::new(vals[0], vals[1]));
+                    continue;
+                }
+            }
+        }
+        if let Some(id) = find_object_by_label(document, arg) {
+            match document.get_object(id) {
+                Some(GeoObject::Point(pt)) => {
+                    pts.push(pt.position);
+                    continue;
+                }
+                Some(GeoObject::DataTable(table)) => {
+                    for (x, y) in table.xs.iter().zip(table.ys.iter()) {
+                        if !x.is_finite() || !y.is_finite() {
+                            return Err("coordenadas de tabla no finitas".into());
+                        }
+                        pts.push(Point2::new(*x, *y));
+                    }
+                    continue;
+                }
+                Some(GeoObject::Polygon(poly)) => {
+                    for v in &poly.vertices {
+                        pts.push(*v);
+                    }
+                    continue;
+                }
+                _ => return Err(format!("'{}' no es un punto ni tabla", arg)),
+            }
+        }
+        match parse_finite_point_arg(arg, &document.variables) {
+            Ok(p) => pts.push(p),
+            Err(e) => {
+                if arg.starts_with('{') && arg.ends_with('}') {
+                    if let Ok(vals) = parse_brace_list(arg, &document.variables) {
+                        if vals.len() == 2 {
+                            pts.push(Point2::new(vals[0], vals[1]));
+                            continue;
+                        }
+                    }
+                }
+                return Err(format!("punto inválido '{}': {e}", arg));
+            }
+        }
+    }
+    if pts.is_empty() {
+        return Err("no se encontraron puntos".into());
+    }
+    validate_discrete_point_count(&pts)?;
+    Ok(pts)
+}
+
+fn validate_discrete_point_count(points: &[Point2]) -> Result<(), String> {
+    if points.len() > MAX_DISCRETE_COUNT as usize {
+        return Err(format!(
+            "demasiados puntos ({} > {})",
+            points.len(),
+            MAX_DISCRETE_COUNT
+        ));
+    }
+    if points.len() > grafito_core::validation::MAX_ARRAY_LENGTH {
+        return Err(format!(
+            "demasiados puntos ({} > {})",
+            points.len(),
+            grafito_core::validation::MAX_ARRAY_LENGTH
+        ));
+    }
+    if points.len() > grafito_core::validation::MAX_POLYGON_VERTICES
+        && points.len() > MAX_DISCRETE_COUNT as usize
+    {
+        return Err(format!(
+            "demasiados vértices ({} > {})",
+            points.len(),
+            grafito_core::validation::MAX_POLYGON_VERTICES
+        ));
+    }
+    for (idx, p) in points.iter().enumerate() {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return Err(format!("punto {idx} no finito ({}, {})", p.x, p.y));
+        }
+    }
+    Ok(())
+}
+
+/// Distancia mínima punto-objeto para los tipos 2D soportados.
+fn distance_point_to_object(p: Point2, obj: &GeoObject) -> Result<f64, String> {
+    match obj {
+        GeoObject::Point(pt) => Ok(grafito_geometry::discrete::distance_point_to_point(
+            p,
+            pt.position,
+        )),
+        GeoObject::Line(line) => {
+            let d = match line.kind {
+                LineKind::Segment => {
+                    grafito_geometry::distance_point_to_segment(p, line.start, line.end)
+                }
+                LineKind::Ray => grafito_geometry::distance_point_to_ray(p, line.start, line.end),
+                LineKind::Line => grafito_geometry::distance_point_to_line(p, line.start, line.end),
+            };
+            Ok(d)
+        }
+        GeoObject::Circle(c) => Ok(grafito_geometry::discrete::distance_point_to_circle(
+            p, c.center, c.radius,
+        )),
+        GeoObject::Polygon(poly) => Ok(grafito_geometry::discrete::distance_point_to_polygon(
+            p,
+            &poly.vertices,
+        )),
+        GeoObject::Ellipse(e) => Ok(grafito_geometry::discrete::distance_point_to_ellipse(
+            p, e.center, e.rx, e.ry,
+        )),
+        GeoObject::Arc(a) => {
+            // Muestreo del arco por 180 puntos
+            let mut best = f64::INFINITY;
+            let steps = 180usize;
+            let span = a.end_angle - a.start_angle;
+            for k in 0..=steps {
+                let theta = a.start_angle + span * (k as f64) / (steps as f64);
+                let q = Point2::new(
+                    a.center.x + a.radius * theta.cos(),
+                    a.center.y + a.radius * theta.sin(),
+                );
+                let d = p.distance(&q);
+                if d < best {
+                    best = d;
+                }
+            }
+            Ok(best)
+        }
+        GeoObject::Sector(s) => {
+            // Aproxima como arco + radios
+            let mut best =
+                grafito_geometry::discrete::distance_point_to_circle(p, s.center, s.radius);
+            // Distancias a los dos radios como segmentos
+            let p1 = Point2::new(
+                s.center.x + s.radius * s.start_angle.cos(),
+                s.center.y + s.radius * s.start_angle.sin(),
+            );
+            let p2 = Point2::new(
+                s.center.x + s.radius * s.end_angle.cos(),
+                s.center.y + s.radius * s.end_angle.sin(),
+            );
+            best = best
+                .min(grafito_geometry::distance_point_to_segment(p, s.center, p1))
+                .min(grafito_geometry::distance_point_to_segment(p, s.center, p2));
+            Ok(best)
+        }
+        GeoObject::BezierCurve(b) => {
+            let mut best = f64::INFINITY;
+            for w in &b.control_points {
+                let d = p.distance(w);
+                if d < best {
+                    best = d;
+                }
+            }
+            Ok(best)
+        }
+        GeoObject::Spline(s) => {
+            let mut best = f64::INFINITY;
+            for w in &s.points {
+                let d = p.distance(w);
+                if d < best {
+                    best = d;
+                }
+            }
+            Ok(best)
+        }
+        GeoObject::DataTable(table) => {
+            let mut best = f64::INFINITY;
+            for (x, y) in table.xs.iter().zip(table.ys.iter()) {
+                let d = p.distance(&Point2::new(*x, *y));
+                if d < best {
+                    best = d;
+                }
+            }
+            if best.is_infinite() {
+                return Err("DataTable vacía".into());
+            }
+            Ok(best)
+        }
+        _ => Err(format!(
+            "ShortestDistance: objeto '{}' no soportado para distancia 2D",
+            obj.name()
+        )),
+    }
 }
 
 fn parse_matrix_arg_strict(s: &str, variables: &HashMap<String, f64>) -> Result<Matrix, String> {
