@@ -2034,10 +2034,13 @@ version = "1.2.34-beta"
 dependencies = [
  "base64",
  "grafito-agent",
+ "grafito-anim",
  "grafito-assistant-types",
  "grafito-command",
  "grafito-core",
  "grafito-geometry",
+ "grafito-pedagogy",
+ "grafito-profile",
  "image",
  "reqwest",
  "serde",
@@ -2083,6 +2086,7 @@ dependencies = [
  "geo",
  "grafito-complex",
  "grafito-geometry",
+ "grafito-whiteboard",
  "libc",
  "log",
  "num-complex",
@@ -2121,6 +2125,7 @@ name = "grafito-pedagogy"
 version = "1.2.34-beta"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -2183,6 +2188,9 @@ dependencies = [
 [[package]]
 name = "grafito-whiteboard"
 version = "1.2.34-beta"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "half"

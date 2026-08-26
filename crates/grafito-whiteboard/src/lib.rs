@@ -11,7 +11,7 @@ pub use interaction::{make_element, select_in_marquee, WhiteboardInteraction, Wh
 pub use text::TextBuffer;
 
 /// Elemento dibujable de la pizarra.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum WhiteboardElement {
     /// Trazo libre (lista de puntos en coordenadas mundo).
     Stroke {
@@ -103,7 +103,7 @@ fn point_segment_distance(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> f64 {
 }
 
 /// Documento de pizarra con elementos y selección.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WhiteboardDoc {
     elements: Vec<WhiteboardElement>,
     selected: Option<usize>,

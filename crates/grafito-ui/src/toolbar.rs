@@ -246,6 +246,104 @@ pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Advanced,
 ];
 
+// ── Progressive disclosure F5 Scandinavian — filtrado por nivel pedagógico ──
+// Sin laberinto: Primary muestra solo lo esencial, Secondary añade medición/análisis,
+// University expone todo. Los slices son `&'static` para evitar asignaciones.
+// Se proveen helpers tanto tipados (PedagogicalLevel) como ligeros (u32) para
+// no acoplar toolbar a pedagogy si hiciera falta (feature/udl.rs).
+
+/// Primary (level_value 0..=4): 5 grupos esenciales — Mover, Punto, Recta, Círculo, Polígono.
+pub const PRIMARY_TOOL_GROUPS: &[ToolGroupId] = &[
+    ToolGroupId::Move,
+    ToolGroupId::Point,
+    ToolGroupId::Line,
+    ToolGroupId::Circle,
+    ToolGroupId::Polygon,
+];
+
+/// Secondary (5..=10): Primary + Lápiz, Medición, Análisis = 8 grupos.
+pub const SECONDARY_TOOL_GROUPS: &[ToolGroupId] = &[
+    ToolGroupId::Move,
+    ToolGroupId::Point,
+    ToolGroupId::Line,
+    ToolGroupId::Circle,
+    ToolGroupId::Polygon,
+    ToolGroupId::Pencil,
+    ToolGroupId::Measure,
+    ToolGroupId::Analysis,
+];
+
+/// University (11+): todos los grupos — Secondary + Constraint, Boolean, Advanced, Dynamics, ThreeD/FourD, Eraser, Conic, Curve.
+pub const UNIVERSITY_TOOL_GROUPS: &[ToolGroupId] = &[
+    ToolGroupId::Move,
+    ToolGroupId::Point,
+    ToolGroupId::Line,
+    ToolGroupId::Circle,
+    ToolGroupId::Polygon,
+    ToolGroupId::Pencil,
+    ToolGroupId::Eraser,
+    ToolGroupId::Conic,
+    ToolGroupId::Curve,
+    ToolGroupId::Measure,
+    ToolGroupId::Analysis,
+    ToolGroupId::Constraint,
+    ToolGroupId::Boolean,
+    ToolGroupId::Advanced,
+    ToolGroupId::Dynamics,
+    ToolGroupId::ThreeD,
+    ToolGroupId::FourD,
+];
+
+/// Helper ligero sin dependencia de `grafito-pedagogy`: filtra por `level_value` (u32).
+/// 0..=4 → Primary (5), 5..=10 → Secondary (8), 11+ → University (todos).
+/// No rompe API — devuelve `&'static` sin asignación.
+pub fn toolbar_groups_for_level_value(level_value: u32) -> &'static [ToolGroupId] {
+    match level_value {
+        0..=4 => PRIMARY_TOOL_GROUPS,
+        5..=10 => SECONDARY_TOOL_GROUPS,
+        _ => UNIVERSITY_TOOL_GROUPS,
+    }
+}
+
+/// Vec-owned variant for callers that expect `Vec<ToolGroupId>` (spec compat).
+pub fn toolbar_groups_for_level_value_owned(level_value: u32) -> Vec<ToolGroupId> {
+    toolbar_groups_for_level_value(level_value).to_vec()
+}
+
+/// Helper tipado: filtra por `PedagogicalLevel` (usa `level_value()` internamente).
+/// Requiere `grafito-pedagogy`; delega al helper ligero para mantener single source.
+pub fn toolbar_groups_for_level(
+    level: grafito_pedagogy::PedagogicalLevel,
+) -> &'static [ToolGroupId] {
+    toolbar_groups_for_level_value(level.level_value())
+}
+
+/// Alias Vec para `PedagogicalLevel`.
+pub fn toolbar_groups_for_level_owned(
+    level: grafito_pedagogy::PedagogicalLevel,
+) -> Vec<ToolGroupId> {
+    toolbar_groups_for_level(level).to_vec()
+}
+
+/// Filtra una lista arbitraria de grupos por nivel (intersección con el set permitido).
+/// Útil para `PerspectiveLayout::visible_tool_groups` + progressive disclosure.
+pub fn filter_groups_by_level(groups: &[ToolGroupId], level_value: u32) -> Vec<ToolGroupId> {
+    let allowed = toolbar_groups_for_level_value(level_value);
+    groups
+        .iter()
+        .copied()
+        .filter(|g| allowed.contains(g))
+        .collect()
+}
+
+/// Versión tipada de `filter_groups_by_level`.
+pub fn filter_groups_by_pedagogical_level(
+    groups: &[ToolGroupId],
+    level: grafito_pedagogy::PedagogicalLevel,
+) -> Vec<ToolGroupId> {
+    filter_groups_by_level(groups, level.level_value())
+}
+
 // ── Vector icon drawing functions ──
 
 fn icon_move(painter: &Painter, rect: Rect, color: Color32) {

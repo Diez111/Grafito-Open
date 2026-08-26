@@ -35,6 +35,35 @@ pub(crate) const MIN_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 0.25;
 pub(crate) const DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 1.0;
 pub(crate) const MAX_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 2.0;
 
+// ── F5 Scandinavian progressive disclosure — toolbar filtrado por nivel ──
+// Sin laberinto: Primary (level_value 0..=4) → 5 grupos compactos
+// [Move, Point, Line, Circle, Polygon]; Secondary (5..=10) → 8 (añade Pencil, Measure, Analysis);
+// University (11+) → todos (Constraint, Boolean, Advanced, Dynamics, ThreeD…).
+// Helper ligero vía `grafito_ui::toolbar::toolbar_groups_for_level_value(level_value)` o
+// tipado `toolbar_groups_for_level(PedagogicalLevel)` sin romper API existente.
+// Uso: `toolbar_groups_for_level_filtered(perspective.layout().visible_tool_groups, self.profile.level)`
+// Si level_value <5, fuerza compact set aunque la perspectiva pida más — evita sobrecarga en primaria.
+
+/// Filtra los grupos visibles de la perspectiva por nivel pedagógico (progressive disclosure).
+/// Si `level_value <5` usa compact set (5), si <11 usa secondary (8), else university (todos).
+/// Intersecta con `perspective_groups` para respetar la perspectiva y no añadir grupos extra.
+#[allow(dead_code)]
+pub(crate) fn toolbar_groups_for_level_filtered(
+    perspective_groups: &[grafito_ui::toolbar::ToolGroupId],
+    level_value: u32,
+) -> Vec<grafito_ui::toolbar::ToolGroupId> {
+    grafito_ui::toolbar::filter_groups_by_level(perspective_groups, level_value)
+}
+
+/// Variante tipada que acepta `PedagogicalLevel` directamente (convierte vía `level_value()`).
+#[allow(dead_code)]
+pub(crate) fn toolbar_groups_for_pedagogical_level(
+    perspective_groups: &[grafito_ui::toolbar::ToolGroupId],
+    level: grafito_pedagogy::PedagogicalLevel,
+) -> Vec<grafito_ui::toolbar::ToolGroupId> {
+    grafito_ui::toolbar::filter_groups_by_pedagogical_level(perspective_groups, level)
+}
+
 /// The trigonometric explorer draws a 2D canvas overlay, so it is unavailable in 3D.
 pub(crate) fn trig_animation_supported(view: ViewMode) -> bool {
     view != ViewMode::D3
@@ -1568,6 +1597,7 @@ impl GrafitoApp {
             allow_fusion_fallback: self.assistant.allow_fusion_fallback,
             assistant_full_permission: self.assistant.full_permission,
             assistant_agent_mode: self.assistant.agent_mode,
+            onboarding_completed: existing.onboarding_completed,
             enabled_plugins: existing.enabled_plugins,
             disabled_plugins: existing.disabled_plugins,
         });

@@ -3,17 +3,26 @@
 //! tutor-orquestador «Mora» usa para adaptar el plan, ir ramificando y medir
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
+pub mod bkt;
 pub mod exam;
 pub mod long_memory;
 pub mod mascot;
+pub mod scheduler;
+pub mod working_memory;
 
 // Re-exportar tipos de avatar/mascota en la raíz
+pub use bkt::{bkt_params_for_branch, bkt_update, BktParams, BktState, BKT_DEFAULT_PARAMS};
 pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{
     AvatarAccessory, AvatarBlush, AvatarConfig, AvatarEyeStyle, AvatarMouthStyle, AvatarShape,
     DailyMission, FurnitureKind, HouseTheme, MascotConfig, MascotMood, MascotSpecies, Outfit,
     OutfitLayer, OutfitTier, Personality, ShopItem, Wardrobe, MAX_DISPLAY_NAME, MAX_NAME,
 };
+pub use scheduler::{
+    is_due, next_interval, review_schedule_for, schedule_next_review, ReviewSchedule,
+    SchedulerError, DAY_SECS, MAX_BOX_LEVEL,
+};
+pub use working_memory::WorkingMemory;
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -30,6 +39,10 @@ const MASTER_THRESHOLD: f64 = 0.8;
 /// Retención EMA en fallos: mastery *= EMA_RETENTION (0.95).
 const EMA_RETENTION: f64 = 0.95;
 
+fn default_bkt_p_known() -> f64 {
+    0.3
+}
+
 /// Estado de una rama de estudio (ej. Álgebra, Cálculo, Geometría 3D).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchState {
@@ -44,6 +57,15 @@ pub struct BranchState {
     /// VecDeque para rotación O(1) con `pop_front` (LRU 64).
     #[serde(default)]
     pub domain_history: VecDeque<(u64, f32)>,
+    /// Próximo repaso espaciado (epoch segundos). `None` si nunca se practicó.
+    #[serde(default)]
+    pub next_review_epoch: Option<u64>,
+    /// Caja Leitner 0..=8 (0 sin repasar, 1 primera caja, 8 máxima).
+    #[serde(default)]
+    pub box_level: u8,
+    /// Probabilidad latente BKT P(sabe) para esta rama.
+    #[serde(default = "default_bkt_p_known")]
+    pub bkt_p_known: f64,
 }
 
 /// Tipo de evento de aprendizaje registrado.
@@ -98,6 +120,10 @@ pub struct StudentProfile {
     /// Memoria a largo plazo (hechos, preferencias, vínculo).
     #[serde(default)]
     pub long_memory: LongTermMemory,
+    /// Memoria de trabajo episódica de la sesión (WorkingMemory).
+    /// F5 inline: contexto socrático sin tocar memoria larga; se sincroniza con AssistantPanelState.
+    #[serde(default)]
+    pub working_memory: WorkingMemory,
 }
 
 impl Default for StudentProfile {
@@ -114,6 +140,7 @@ impl Default for StudentProfile {
             avatar: AvatarConfig::default(),
             mascot: None,
             long_memory: LongTermMemory::default(),
+            working_memory: WorkingMemory::default(),
         }
     }
 }
@@ -164,6 +191,9 @@ impl StudentProfile {
             mastery: 0.0,
             last_study_epoch: None,
             domain_history: VecDeque::new(),
+            next_review_epoch: None,
+            box_level: 0,
+            bkt_p_known: default_bkt_p_known(),
         });
         Some(self.branches.len() - 1)
     }
@@ -175,7 +205,7 @@ impl StudentProfile {
         self.ensure_branch(id, name).unwrap_or(usize::MAX)
     }
 
-    /// Registra una respuesta y actualiza dominio (EMA) y progreso.
+    /// Registra una respuesta y actualiza dominio (EMA + BKT), Leitner y progreso.
     pub fn record_outcome(&mut self, branch_id: &str, name: &str, epoch: u64, correct: bool) {
         let Some(index) = self.ensure_branch(branch_id, name) else {
             return;
@@ -194,6 +224,19 @@ impl StudentProfile {
             branch.mastery *= EMA_RETENTION as f32;
             self.streak = 0;
         }
+        // BKT: actualizar P(sabe) con evidencia
+        let params = bkt::bkt_params_for_branch(branch_id);
+        let next_p = bkt::bkt_update(branch.bkt_p_known, correct, &params);
+        branch.bkt_p_known = next_p.clamp(0.0, 1.0);
+        // Leitner: subir/bajar caja
+        if correct {
+            branch.box_level = (branch.box_level.saturating_add(1)).min(MAX_BOX_LEVEL);
+        } else {
+            branch.box_level = branch.box_level.saturating_sub(2);
+        }
+        // Scheduler: próximo repaso
+        let interval = scheduler::next_interval(branch.box_level, branch.mastery);
+        branch.next_review_epoch = Some(epoch.saturating_add(interval));
         branch.last_study_epoch = Some(epoch);
         // Evolución de dominio acotada (64 muestras por rama) — VecDeque LRU.
         branch.domain_history.push_back((epoch, branch.mastery));
@@ -268,6 +311,75 @@ impl StudentProfile {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         pending
+    }
+
+    /// Ramas cuyo repaso venció en `now` (Leitner due).
+    pub fn branches_due(&self, now: u64) -> Vec<&BranchState> {
+        self.branches
+            .iter()
+            .filter(|b| {
+                if let Some(epoch) = b.next_review_epoch {
+                    scheduler::is_due(epoch, now)
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    /// Ramas sin cubrir priorizando vencidas (due primero) y luego menor dominio/BKT.
+    /// Mantiene compatibilidad: no cambia `recommend_next()` existente.
+    pub fn recommend_next_with_scheduler(&self, now: u64) -> Vec<&BranchState> {
+        let mut pending: Vec<&BranchState> = self.branches.iter().filter(|b| !b.covered).collect();
+        pending.sort_by(|a, b| {
+            let a_due = a
+                .next_review_epoch
+                .is_some_and(|e| scheduler::is_due(e, now));
+            let b_due = b
+                .next_review_epoch
+                .is_some_and(|e| scheduler::is_due(e, now));
+            match (a_due, b_due) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    // Entre mismo estado due, prioriza próximo vencimiento más antiguo.
+                    let ord_epoch = a.next_review_epoch.cmp(&b.next_review_epoch);
+                    if ord_epoch != std::cmp::Ordering::Equal {
+                        return ord_epoch;
+                    }
+                    // Fallback: menor mastery/BKT primero (más débil)
+                    let ord_mastery = a
+                        .mastery
+                        .partial_cmp(&b.mastery)
+                        .unwrap_or(std::cmp::Ordering::Equal);
+                    if ord_mastery != std::cmp::Ordering::Equal {
+                        return ord_mastery;
+                    }
+                    a.bkt_p_known
+                        .partial_cmp(&b.bkt_p_known)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+        });
+        pending
+    }
+
+    /// Schedules actuales por rama (para UI/debug).
+    pub fn review_schedules(&self) -> Vec<ReviewSchedule> {
+        self.branches
+            .iter()
+            .filter_map(|b| {
+                let epoch = b.next_review_epoch?;
+                let interval = scheduler::next_interval(b.box_level, b.mastery);
+                let days = (interval / scheduler::DAY_SECS) as u32;
+                Some(ReviewSchedule {
+                    branch_id: b.id.clone(),
+                    next_review_epoch: epoch,
+                    interval_days: days.max(1),
+                    box_level: b.box_level,
+                })
+            })
+            .collect()
     }
 
     pub fn display_name(&self) -> &str {
@@ -578,5 +690,140 @@ mod tests {
         w.unlock_for_level(6);
         assert!(w.is_owned("cap_prim"));
         assert!(w.is_owned("hat_sec"));
+    }
+
+    #[test]
+    fn bkt_update_correct_increases_incorrect_decreases() {
+        let mut p = StudentProfile::new("BKT");
+        p.record_outcome("algebra", "Álgebra", 100, true);
+        let bkt_after_correct = p.branches[0].bkt_p_known;
+        assert!(
+            bkt_after_correct > 0.3,
+            "BKT debe subir con acierto: {bkt_after_correct}"
+        );
+        p.record_outcome("algebra", "Álgebra", 200, false);
+        let bkt_after_incorrect = p.branches[0].bkt_p_known;
+        assert!(
+            bkt_after_incorrect < bkt_after_correct,
+            "BKT debe bajar con fallo: {bkt_after_incorrect} vs {bkt_after_correct}"
+        );
+    }
+
+    #[test]
+    fn scheduler_interval_grows_with_box_level() {
+        let i1 = next_interval(1, 0.5);
+        let i2 = next_interval(2, 0.5);
+        let i4 = next_interval(4, 0.5);
+        assert!(i1 < i2);
+        assert!(i2 < i4);
+    }
+
+    #[test]
+    fn branches_due_filters_correctly() {
+        let mut p = StudentProfile::new("Due");
+        // Dos ramas con distinto vencimiento
+        p.record_outcome("algebra", "Álgebra", 0, true); // -> next_review ~ 129600
+        p.record_outcome("calculus", "Cálculo", 0, true);
+        // Forzar una vencida y otra futura
+        if let Some(b) = p.branches.iter_mut().find(|b| b.id == "algebra") {
+            b.next_review_epoch = Some(100);
+        }
+        if let Some(b) = p.branches.iter_mut().find(|b| b.id == "calculus") {
+            b.next_review_epoch = Some(9_999_999);
+        }
+        let due = p.branches_due(500);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "algebra");
+        let all_due = p.branches_due(10_000_000);
+        assert_eq!(all_due.len(), 2);
+    }
+
+    #[test]
+    fn recommend_next_with_scheduler_prioritizes_due() {
+        let mut p = StudentProfile::new("Sched");
+        // Álgebra débil y vencida, geometría fuerte y no vencida
+        p.record_outcome("algebra", "Álgebra", 0, false); // mastery bajo
+        p.record_outcome("geometry", "Geometría", 0, true);
+        // Ajustar vencimientos: algebra due, geometry futuro
+        for b in &mut p.branches {
+            if b.id == "algebra" {
+                b.mastery = 0.2;
+                b.next_review_epoch = Some(10);
+                b.box_level = 1;
+            } else if b.id == "geometry" {
+                b.mastery = 0.9;
+                b.next_review_epoch = Some(9_999_999);
+                b.box_level = 3;
+            }
+        }
+        let ranked = p.recommend_next_with_scheduler(100);
+        assert!(!ranked.is_empty());
+        assert_eq!(ranked[0].id, "algebra", "vencida debe ir primero");
+    }
+
+    #[test]
+    fn box_level_increments_on_correct_and_decrements_on_failure() {
+        let mut p = StudentProfile::new("Box");
+        p.record_outcome("algebra", "Álgebra", 0, true);
+        assert_eq!(p.branches[0].box_level, 1);
+        p.record_outcome("algebra", "Álgebra", 1, true);
+        assert_eq!(p.branches[0].box_level, 2);
+        p.record_outcome("algebra", "Álgebra", 2, false);
+        assert_eq!(p.branches[0].box_level, 0, "debe bajar 2 niveles");
+        // No debe underflow
+        p.record_outcome("algebra", "Álgebra", 3, false);
+        assert_eq!(p.branches[0].box_level, 0);
+        // Subir hasta tope 8
+        for i in 0..20 {
+            p.record_outcome("algebra", "Álgebra", 10 + i, true);
+        }
+        assert!(p.branches[0].box_level <= 8);
+        assert_eq!(p.branches[0].box_level, 8);
+    }
+
+    #[test]
+    fn branch_state_migration_defaults_bkt_and_scheduler() {
+        let json = r#"{"id":"old","name":"Vieja","covered":false,"mastery":0.5,"last_study_epoch":null,"domain_history":[]}"#;
+        let branch: BranchState = serde_json::from_str(json).expect("migrate branch");
+        assert_eq!(branch.next_review_epoch, None);
+        assert_eq!(branch.box_level, 0);
+        assert!((branch.bkt_p_known - 0.3).abs() < 1e-9);
+        let json2 = serde_json::to_string(&branch).expect("serialize migrated");
+        assert!(json2.contains("old"));
+    }
+
+    #[test]
+    fn profile_migration_defaults_bkt_scheduler() {
+        let json = r#"{"name":"Old","level":1,"xp":0,"branches":[{"id":"algebra","name":"Álgebra","covered":false,"mastery":0.4,"last_study_epoch":null,"domain_history":[]}],"history":[],"exams":[],"streak":0,"best_streak":0}"#;
+        let restored: StudentProfile = serde_json::from_str(json).expect("migration");
+        assert_eq!(restored.branches[0].box_level, 0);
+        assert!(restored.branches[0].next_review_epoch.is_none());
+        assert!((restored.branches[0].bkt_p_known - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bkt_p_known_is_finite_and_bounded() {
+        let mut p = StudentProfile::new("Fin");
+        for i in 0..100 {
+            p.record_outcome("algebra", "Álgebra", i, i % 3 == 0);
+            assert!(p.branches[0].bkt_p_known.is_finite());
+            assert!((0.0..=1.0).contains(&p.branches[0].bkt_p_known));
+        }
+    }
+
+    #[test]
+    fn next_review_epoch_is_set_and_monotonic_with_box() {
+        let mut p = StudentProfile::new("Rev");
+        p.record_outcome("algebra", "Álgebra", 1_000, true);
+        let first = p.branches[0].next_review_epoch.expect("review set");
+        assert!(first > 1_000);
+        let first_interval = first - 1_000;
+        p.record_outcome("algebra", "Álgebra", 2_000, true);
+        let second = p.branches[0].next_review_epoch.expect("review set");
+        let second_interval = second - 2_000;
+        assert!(
+            second_interval > first_interval,
+            "interval debe crecer con box_level: {first_interval} vs {second_interval}"
+        );
     }
 }

@@ -1294,40 +1294,15 @@ pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, Str
 }
 
 /// Tools seguras por defecto que el modo agente ofrece al modelo.
+///
+/// Incluye las 3 base (evaluate_expr, grafito_docs, ask_user) más las 6
+/// pedagógicas F3.2 (scaffold, generate_exercise, assess_answer,
+/// get_curriculum, suggest_next, generate_animation) para orquestación
+/// vía OpenCode Go sin salir del chat. Todas son puras y sin Document.
 pub fn default_agent_tools() -> Vec<ToolSchema> {
-    vec![
-        ToolSchema::new(
-            "evaluate_expr",
-            "Evalúa una expresión matemática con variables opcionales; devuelve un número finito o un error de dominio.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string"},
-                    "variables": {"type": "object", "additionalProperties": {"type": "number"}}
-                },
-                "required": ["expression"]
-            }),
-        ),
-        ToolSchema::new(
-            "grafito_docs",
-            "Devuelve el catálogo acotado de comandos verificados de Grafito que coinciden con una consulta.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"]
-            }),
-        ),
-        ToolSchema::new(
-            "ask_user",
-            "Hace una única pregunta corta de aclaración matemática al usuario cuando falta un valor obligatorio.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {"question": {"type": "string"}},
-                "required": ["question"]
-            }),
-        )
-        .with_consent(true),
-    ]
+    // Delegamos al dispatcher canónico para mantener una única fuente de verdad
+    // entre schema y dispatch (grafito-assistant/src/agent.rs).
+    crate::agent::all_safe_tool_schemas()
 }
 
 /// System prompt base más las instrucciones locales de plugins, acotadas.

@@ -1,4 +1,4 @@
-# docs/architecture.md — Grafito v1.2.33 (Auditoria 2026-08-24)
+# docs/architecture.md — Grafito v1.2.35 (Plan supera GeoGebra 2026-08-26)
 
 ## 1. Vision
 Grafito es pizarra geometrica con **Cerebro** (Rust puro) y **Piel** (egui/wgpu).
@@ -139,18 +139,38 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 Baseline 2026-08-20: 7/8 PASS, gpu_compute SKIP headless, release-build SKIP 45m.
 
-## 10. Riesgos residuales
+## 10. Novedades v1.2.35 — supera GeoGebra (2026-08-26)
 
-- RUSTSEC-2026-0194/0195 quick-xml/zbus expiran 2026-09-30
-- HashMap debug no determinista en Document (migrar a BTreeMap, P0)
-- Transformed matriz singular solo check trivial "0" (P1, falta Jacobian det)
-- AssistantRuntime sin Statem formal (P1, distribuido)
-- App God Object y God Function update (P1)
+**Pedagogía multi-nivel (primaria→ingeniería)**
+- `grafito-pedagogy::Curriculum` 42 LOs: UTN AM1 8, AM2 7, Álgebra 6, Prob 6, Secundaria 10, Primaria 5 (level_min, requires DAG, tags, topological_order Kahn)
+- `UdlProfile {Concrete,Graphic,Symbolic,Formal}` + `level_value()` (Primary 2, Secondary 8, AM1 12...)
+- `SocraticFsm` Review→HeuristicQ→AwaitStudent→Rectify→Summarize (Telling<5%), `ScaffoldEngine` ya usa `history`
+- `ExerciseGenerator::generate_with_seed` wyhash paramétrico (a,b,c) + `ValidatorKind` + `FeedbackEngine` 8 misconceptions (Sign/Distributive/ChainRule/Fraction/Domain/Notation)
 
-## 11. Proximos pasos (por capas)
+**Perfil adaptativo**
+- `BKT` bayesiano + `Scheduler` Leitner `next_interval=86400*2^(level-1)*(2-mastery)` → `BranchState {next_review_epoch, box_level, bkt_p_known}` + `branches_due()` + `recommend_next_with_scheduler()`
+- `WorkingMemory` sesión (steps_tried, misconception_counts) sincronizado `assistant.rs:520` con `StudentProfile`
 
-1. F1 Cerebro: ValidatedDocument wrapper + BTreeMap + CoreError 100% + ValidatedMatrix
-2. F2 Anim: cancel() API publica + Cancelling estado + transiciones consume Self + tests <2s placeholder
-3. F2 Anim: templates completos con progress por frames reales + export mp4 + verbose stderr
-4. F3 Piel: mover I/O assistant a thread, UI fn render(&State), ThinkingOrb Statem, fix ViewMode duplicado
-5. F4 Estabilidad: check examples/benches, doc -D warnings, WGPU_BACKEND=gl, packaging fixtures
+**Asistente OpenCode Go socrático**
+- `PedagogyDispatcher` 6 tools puras (`scaffold`, `generate_exercise`, `assess_answer`, `get_curriculum`, `suggest_next`, `generate_animation`) + 3 base = 9 `all_safe_tool_schemas()` OpenAI-compat (`agent.rs` 680L, 14 tests)
+- `TeachingTopic` 14 variantes, `teaching_ui::whiteboard_elements_for_hint` 14 mappings (fracción, vector, matriz, prob, serie, trig, cónica...), `anim_native` templates pedagógicos, `AssistantExerciseCard` inline `grafito-exercise`
+
+**UI Scandinavian sin laberinto**
+- `toolbar.rs` `PRIMARY 5` `SECONDARY 8` `UNIVERSITY 17` + `toolbar_groups_for_level_value(u32)` + `udl.rs` helper sin depender de pedagogy; `filter_groups_by_level`
+- `AssistantPanelState` `max_composer 88..260` quiet, tokens 64%/44%/10%/5% documentados, `whiteboard:WhiteboardDoc` persistente en `Document` (serde, cota 500 elementos), `spreadsheet` `=A1+B1` stripping, `AppConfig::onboarding_completed`
+
+**Gates:** `cargo fmt 0` `clippy -D warnings 0` `test --workspace ~1500 verdes`
+
+## 11. Riesgos residuales
+
+- BTreeMap determinismo total pendiente (mitigado `ValidatedDocument` + ordenación explícita; próximo: migrar `objects: HashMap→BTreeMap`)
+- `Transformed` Jacobian det pendiente
+- `fill_compute` aún `None` (ahorra 128 MiB, habilitar lazy si `ImplicitCurve != Eq`)
+- App God Object `app.rs 4752L` parcialmente extraído (`controllers.rs` stubs)
+
+## 12. Próximos pasos
+
+1. Migrar `Document {objects,variables}` a `BTreeMap` + `ValidatedMatrix`
+2. `WhiteboardDoc` export SVG + `GeoObject::Whiteboard` independiente
+3. `fill_compute` lazy + `DomainColoring` en export
+4. Classroom P2P opt-in (feature flag)

@@ -4,6 +4,10 @@
 //! cálida neutra (canvas #FAFAF9), acento sage #6B7A6F. Sin sombras
 //! duras ni translucidez. Todo opaco (`from_rgb`).
 //!
+//! F5 quiet 2026-08-21: ink secondary 64% y tertiary 44%, border 10%,
+//! hover 5% — definidos en `theme.rs` vía gamma_multiply (ver `Theme`);
+//! tokens aquí fijan spacing/radios, no colores.
+//!
 //! Estos tokens son la **única fuente de verdad** para tamaños y
 //! espacios. Ningún `.size(N)` o `vec2(N,M)` hardcodeado fuera de aquí.
 

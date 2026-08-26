@@ -71,6 +71,472 @@ fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::Whiteboar
             from: (0.5, 0.25),
             to: (1.5, 2.25),
         });
+    } else if lower.contains("fracc")
+        || lower.contains("dividido en partes")
+        || lower.contains("común denominador")
+        || lower.contains("comun denominador")
+        || lower.contains("fracciones equivalentes")
+        || lower.contains("rectángulo dividido")
+        || lower.contains("rectangulo dividido")
+    {
+        // Fracción — rectángulo dividido en 3 + sombreado 2/3 + texto
+        elems.push(WhiteboardElement::Rectangle {
+            min: (0.0, 0.0),
+            max: (2.4, 1.0),
+            fill: None,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.8, 0.0), (0.8, 1.0)],
+            color: (55, 55, 55),
+            width: 1.4,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(1.6, 0.0), (1.6, 1.0)],
+            color: (55, 55, 55),
+            width: 1.4,
+        });
+        // Sombrear dos tercios
+        elems.push(WhiteboardElement::Rectangle {
+            min: (0.05, 0.05),
+            max: (0.75, 0.95),
+            fill: Some((135, 180, 255)),
+        });
+        elems.push(WhiteboardElement::Rectangle {
+            min: (0.85, 0.05),
+            max: (1.55, 0.95),
+            fill: Some((135, 180, 255)),
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.15, -0.35),
+            text: "2/3 del rectángulo".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.2, 1.2),
+            text: "1/2 + 1/3 = 5/6".into(),
+            size: 9.0,
+        });
+    } else if lower.contains("vector")
+        || lower.contains("flecha en ejes")
+        || lower.contains("dos flechas")
+        || lower.contains("pizarra vectorial")
+        || lower.contains("r²")
+        || lower.contains("r2")
+    {
+        // Vector — ejes + dos flechas (u, v) y suma tip-to-tail
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.5, 0.0), (1.8, 0.0)],
+            color: (55, 55, 55),
+            width: 1.2,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, -1.2), (0.0, 1.6)],
+            color: (55, 55, 55),
+            width: 1.2,
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (0.0, 0.0),
+            to: (1.2, 0.8),
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (0.0, 0.0),
+            to: (0.6, 1.3),
+        });
+        // Suma visual tip-to-tail
+        elems.push(WhiteboardElement::Arrow {
+            from: (1.2, 0.8),
+            to: (1.8, 2.1),
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.35, 0.55),
+            text: "v=(2,3)".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.15, 1.35),
+            text: "u".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (1.25, 1.95),
+            text: "u+v".into(),
+            size: 9.0,
+        });
+    } else if lower.contains("matriz")
+        || lower.contains("matrices")
+        || lower.contains("grilla")
+        || lower.contains("2x2")
+        || lower.contains("determinante")
+        || lower.contains("gauss")
+        || lower.contains("pivote")
+        || lower.contains("aumentada")
+    {
+        // Matriz — grilla 2×2 + etiquetas + determinante
+        for row in 0..2 {
+            for col in 0..2 {
+                let x0 = col as f64 * 0.95;
+                let y0 = row as f64 * 0.70;
+                elems.push(WhiteboardElement::Rectangle {
+                    min: (x0, y0),
+                    max: (x0 + 0.85, y0 + 0.60),
+                    fill: None,
+                });
+            }
+        }
+        // diagonales para pivotes
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.05, 0.05), (0.80, 0.55)],
+            color: (66, 133, 244),
+            width: 1.5,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(1.00, 0.75), (1.75, 1.25)],
+            color: (66, 133, 244),
+            width: 1.5,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.22, 0.22),
+            text: "1".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (1.17, 0.22),
+            text: "2".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.22, 0.92),
+            text: "3".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (1.17, 0.92),
+            text: "4".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.15, 1.55),
+            text: "det≠0 → invertible".into(),
+            size: 8.0,
+        });
+    } else if lower.contains("probab")
+        || lower.contains("histograma")
+        || lower.contains("árbol")
+        || lower.contains("arbol")
+        || lower.contains("contingencia")
+        || lower.contains("normal")
+        || lower.contains("bayes")
+        || lower.contains("muestreo")
+        || lower.contains("binom")
+        || lower.contains("distrib")
+        || lower.contains("curva normal")
+    {
+        // Probabilidad — histograma de 4 barras + eje + fórmula
+        let heights = [0.45, 0.95, 0.65, 0.35];
+        for (i, h) in heights.iter().enumerate() {
+            let x = i as f64 * 0.60;
+            elems.push(WhiteboardElement::Rectangle {
+                min: (x, 0.0),
+                max: (x + 0.45, *h),
+                fill: Some((126, 214, 160)),
+            });
+        }
+        // eje base
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, 0.0), (2.45, 0.0)],
+            color: (55, 55, 55),
+            width: 1.2,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.15, 1.15),
+            text: "P(A)=|A|/|Ω|".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.15, -0.35),
+            text: "Ω  →  evento A".into(),
+            size: 9.0,
+        });
+    } else if lower.contains("serie")
+        || lower.contains("taylor")
+        || lower.contains("fourier")
+        || lower.contains("sucesi")
+        || lower.contains("geométrica")
+        || lower.contains("geometrica")
+        || lower.contains("suma parcial")
+        || lower.contains("aproxima")
+    {
+        // Serie — seno + polinomios de Taylor que se acercan
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![
+                (-1.8, 0.0),
+                (-1.0, 0.85),
+                (0.0, 0.0),
+                (1.0, -0.85),
+                (1.8, 0.0),
+            ],
+            color: (55, 55, 55),
+            width: 1.6,
+        });
+        // polinomio aproximante (más grueso, punteado visual con color)
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.2, -0.25), (-0.6, 0.45), (0.6, -0.45), (1.2, 0.25)],
+            color: (66, 133, 244),
+            width: 1.3,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-1.6, 1.15),
+            text: "f(x)≈ Σ f⁽ⁿ⁾/n!·(x-a)ⁿ".into(),
+            size: 8.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-1.5, -0.55),
+            text: "Sₙ → L".into(),
+            size: 10.0,
+        });
+    } else if lower.contains("trigon")
+        || lower.contains("seno")
+        || lower.contains("coseno")
+        || lower.contains("círculo unitario")
+        || lower.contains("circulo unitario")
+        || lower.contains("onda seno")
+        || lower.contains("sin(")
+        || lower.contains("cos(")
+    {
+        // Trigonometría — círculo unitario + ángulo + triángulo
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.0, 0.0),
+            rx: 1.0,
+            ry: 1.0,
+        });
+        // radio en 45°
+        elems.push(WhiteboardElement::Arrow {
+            from: (0.0, 0.0),
+            to: (0.71, 0.71),
+        });
+        // proyecciones
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.71, 0.71), (0.71, 0.0)],
+            color: (66, 133, 244),
+            width: 1.2,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, 0.0), (0.71, 0.0)],
+            color: (235, 120, 80),
+            width: 1.2,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-0.95, 1.25),
+            text: "sin²+cos²=1".into(),
+            size: 9.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.35, -0.25),
+            text: "cos".into(),
+            size: 8.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.78, 0.35),
+            text: "sin".into(),
+            size: 8.0,
+        });
+    } else if lower.contains("cónica")
+        || lower.contains("conica")
+        || lower.contains("cono cortado")
+        || lower.contains("elipse con focos")
+        || lower.contains("hipérbola")
+        || lower.contains("hiperbola")
+        || (lower.contains("elipse") && lower.contains("focos"))
+    {
+        // Cónica — elipse con focos + ejes
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.0, 0.2),
+            rx: 1.35,
+            ry: 0.85,
+        });
+        // focos
+        elems.push(WhiteboardElement::Ellipse {
+            center: (-0.75, 0.2),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.75, 0.2),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        // ejes punteados sutiles
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.35, 0.2), (1.35, 0.2)],
+            color: (55, 55, 55),
+            width: 1.0,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, -0.65), (0.0, 1.05)],
+            color: (55, 55, 55),
+            width: 1.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-1.2, 1.20),
+            text: "x²/a²+y²/b²=1".into(),
+            size: 8.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-0.90, -0.45),
+            text: "foco".into(),
+            size: 7.0,
+        });
+    } else if lower.contains("ecuac")
+        || lower.contains("cuadrática")
+        || lower.contains("cuadratica")
+        || lower.contains("parábola y raíces")
+        || lower.contains("parabola y raices")
+        || lower.contains("discriminante")
+        || lower.contains("recta y corte")
+        || lower.contains("dos rectas")
+        || lower.contains("sistema")
+    {
+        // Ecuación — parábola con raíces + discriminante + sistema de rectas
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![
+                (-1.4, 1.2),
+                (-0.7, 0.15),
+                (0.0, -0.25),
+                (0.7, 0.15),
+                (1.4, 1.2),
+            ],
+            color: (55, 55, 55),
+            width: 1.6,
+        });
+        // eje x
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.6, 0.0), (1.6, 0.0)],
+            color: (55, 55, 55),
+            width: 1.0,
+        });
+        // raíces marcadas
+        elems.push(WhiteboardElement::Ellipse {
+            center: (-0.85, 0.0),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.85, 0.0),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        // sistema alternativa: dos rectas que se cortan (si hint contiene sistema/dos rectas)
+        if lower.contains("sistema") || lower.contains("dos rectas") {
+            elems.push(WhiteboardElement::Stroke {
+                points: vec![(-1.3, -0.9), (1.3, 0.9)],
+                color: (66, 133, 244),
+                width: 1.2,
+            });
+            elems.push(WhiteboardElement::Stroke {
+                points: vec![(-1.3, 0.9), (1.3, -0.9)],
+                color: (235, 120, 80),
+                width: 1.2,
+            });
+        }
+        elems.push(WhiteboardElement::Text {
+            at: (-1.45, 1.40),
+            text: "Δ=b²-4ac".into(),
+            size: 9.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (0.95, -0.35),
+            text: "raíz".into(),
+            size: 8.0,
+        });
+    } else if lower.contains("límite")
+        || lower.contains("limite")
+        || lower.contains("hueco en a")
+        || lower.contains("flechas hacia a")
+        || lower.contains("cálculo paso a paso")
+        || lower.contains("calculo paso a paso")
+    {
+        // Límite — recta con hueco + flechas de acercamiento
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.5, -0.9), (1.5, 0.9)],
+            color: (55, 55, 55),
+            width: 1.5,
+        });
+        // hueco abierto en a=0
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.0, 0.0),
+            rx: 0.12,
+            ry: 0.12,
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (-0.85, -0.45),
+            to: (-0.12, -0.06),
+        });
+        elems.push(WhiteboardElement::Arrow {
+            from: (0.85, 0.45),
+            to: (0.12, 0.06),
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-0.25, 0.35),
+            text: "a".into(),
+            size: 10.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-1.35, 1.1),
+            text: "limₓ→ₐ f(x)=L".into(),
+            size: 9.0,
+        });
+    } else if lower.contains("función")
+        || lower.contains("funcion")
+        || lower.contains("ejes con puntos")
+        || lower.contains("tabla de valores")
+        || lower.contains("curva con ejes")
+        || lower.contains("ejemplo con gráfica")
+        || lower.contains("gráfica interactiva")
+    {
+        // Función — ejes + curva + puntos (x, f(x))
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(-1.6, 0.0), (1.6, 0.0)],
+            color: (55, 55, 55),
+            width: 1.1,
+        });
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![(0.0, -1.2), (0.0, 1.4)],
+            color: (55, 55, 55),
+            width: 1.1,
+        });
+        // curva f(x)=x² leve
+        elems.push(WhiteboardElement::Stroke {
+            points: vec![
+                (-1.2, 1.1),
+                (-0.6, 0.25),
+                (0.0, 0.05),
+                (0.6, 0.25),
+                (1.2, 1.1),
+            ],
+            color: (66, 133, 244),
+            width: 1.6,
+        });
+        // puntos marcados
+        elems.push(WhiteboardElement::Ellipse {
+            center: (-0.6, 0.25),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        elems.push(WhiteboardElement::Ellipse {
+            center: (0.6, 0.25),
+            rx: 0.07,
+            ry: 0.07,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-0.55, 0.45),
+            text: "(x, f(x))".into(),
+            size: 8.0,
+        });
+        elems.push(WhiteboardElement::Text {
+            at: (-1.45, -0.95),
+            text: "f: x → y".into(),
+            size: 9.0,
+        });
     } else if lower.contains("rectángulo")
         || lower.contains("rectangulo")
         || lower.contains("riemann")
@@ -94,7 +560,9 @@ fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::Whiteboar
         });
     } else if lower.contains("pitágoras")
         || lower.contains("pitagoras")
-        || lower.contains("triángulo")
+        || lower.contains("triángulo rectángulo")
+        || lower.contains("triangulo rectangulo")
+        || lower.contains("cuadrados en cada lado")
     {
         elems.push(WhiteboardElement::Rectangle {
             min: (-2.0, -1.0),

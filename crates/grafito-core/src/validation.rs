@@ -369,6 +369,30 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         )?;
     }
 
+    // Whiteboard persistente — cota: acotada a 500 elementos / 8192 puntos por trazo ya validado en whiteboard lib.
+    if doc.whiteboard.len() > 500 {
+        return Err("Whiteboard contiene demasiados elementos (máx 500)".to_string());
+    }
+    for element in doc.whiteboard.elements() {
+        match element {
+            grafito_whiteboard::WhiteboardElement::Stroke { points, width, .. } => {
+                if points.len() > crate::pencil::MAX_PENCIL_POINTS {
+                    return Err("Whiteboard Stroke excede MAX_PENCIL_POINTS".to_string());
+                }
+                validate_positive_f32(*width as f32, "Whiteboard Stroke.width")?;
+                for (idx, (x, y)) in points.iter().enumerate() {
+                    validate_finite(*x, &format!("Whiteboard Stroke.points[{idx}].x"))?;
+                    validate_finite(*y, &format!("Whiteboard Stroke.points[{idx}].y"))?;
+                }
+            }
+            grafito_whiteboard::WhiteboardElement::Text { text, size, .. } => {
+                validate_string(text, "Whiteboard Text.text")?;
+                validate_positive_f32(*size as f32, "Whiteboard Text.size")?;
+            }
+            _ => {}
+        }
+    }
+
     for (id, object) in doc.objects_iter() {
         let GeoObject::Pencil(locus) = object else {
             continue;

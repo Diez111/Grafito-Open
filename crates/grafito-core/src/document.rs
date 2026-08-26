@@ -240,6 +240,10 @@ pub struct Document {
     pub complex_base_symbol: String,
     #[serde(default)]
     pub constraints: ConstraintGraph,
+    /// Pizarra libre persistente (Scandinavian, inline teaching) — opcional y
+    /// acotada: se serializa en el documento y aparece en Mora/pizarra.
+    #[serde(default)]
+    pub whiteboard: grafito_whiteboard::WhiteboardDoc,
     #[serde(skip)]
     pub render_quality: crate::RenderQuality,
     #[serde(skip)]
@@ -268,6 +272,7 @@ impl Default for Document {
             spatial_variables_hash: 0,
             complex_base_symbol: "z".to_string(),
             constraints: ConstraintGraph::new(),
+            whiteboard: grafito_whiteboard::WhiteboardDoc::default(),
             render_quality: crate::RenderQuality::default(),
             last_solution: HashMap::new(),
             version: 0,
@@ -4381,7 +4386,11 @@ impl Document {
         let mut dependency_counts = vec![0usize; cells.len()];
         let mut dependents = vec![Vec::new(); cells.len()];
         for (index, (_, expression)) in cells.iter().enumerate() {
-            for dependency in Self::spreadsheet_expression_references(expression) {
+            let expr_for_deps = expression
+                .trim()
+                .strip_prefix('=')
+                .unwrap_or(expression.trim());
+            for dependency in Self::spreadsheet_expression_references(expr_for_deps) {
                 if let Some(&dependency_index) = cell_indices.get(&dependency) {
                     dependency_counts[index] += 1;
                     dependents[dependency_index].push(index);
@@ -4407,7 +4416,17 @@ impl Document {
         let mut resolved = HashSet::new();
         while let Some(index) = ready.pop_front() {
             let (label, expression) = &cells[index];
-            let Ok(value) = grafito_geometry::expr::evaluate(expression, &variables) else {
+            // Hoja vinculada GeoGebra-like: soporta "=A1+B1" además de "A1+B1"
+            let expr_trimmed = expression.trim();
+            let expr_for_eval = if let Some(stripped) = expr_trimmed.strip_prefix('=') {
+                stripped.trim()
+            } else {
+                expr_trimmed
+            };
+            if expr_for_eval.is_empty() {
+                continue;
+            }
+            let Ok(value) = grafito_geometry::expr::evaluate(expr_for_eval, &variables) else {
                 continue;
             };
             if !value.is_finite() {

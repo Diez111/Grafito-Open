@@ -43,6 +43,9 @@ pub(crate) struct AppConfig {
     /// Modo agente (loop con herramientas) para el asistente.
     #[serde(default)]
     pub(crate) assistant_agent_mode: bool,
+    /// Onboarding 30s ya visto (Scandinavian, sin laberinto).
+    #[serde(default)]
+    pub(crate) onboarding_completed: bool,
 }
 
 fn default_full_permission() -> bool {
@@ -71,6 +74,7 @@ impl Default for AppConfig {
             disabled_plugins: Vec::new(),
             assistant_full_permission: default_full_permission(),
             assistant_agent_mode: false,
+            onboarding_completed: false,
         }
     }
 }

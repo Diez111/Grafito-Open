@@ -89,6 +89,11 @@ const ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH: f32 =
 const ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT: f32 = 160.0;
 // The nested panel keeps its height in egui memory. Keep it deterministic so
 // an old expanded state cannot strand the composer halfway up the assistant.
+// F5 Scandinavian quiet 2026-08-21: composer heights 116+44+32 — clamp 88..260, sin ScrollArea envolvente.
+// El editor es TextEdit::multiline con wrap (desired_rows=2, 44px) y el TopBottomPanel
+// externo limita a max_composer = (available*0.38).clamp(88,260). No envolver en
+// ScrollArea para que input+botones queden siempre visibles; la barra solo aparece
+// para attachments si exceden el máximo.
 const ASSISTANT_COMPOSER_BASE_HEIGHT: f32 = 116.0;
 const ASSISTANT_COMPOSER_EDITOR_HEIGHT: f32 = 44.0;
 const ASSISTANT_COMPOSER_FOCUS_HEIGHT: f32 = 32.0;
@@ -199,6 +204,79 @@ pub struct PluginRow {
     pub description: String,
     pub enabled: bool,
     pub error: Option<String>,
+}
+
+/// Ejercicio pedagógico inline — F5: se renderiza como Code block con prompt + validator hint.
+/// El LLM puede emitir ```grafito-exercise\nprompt: ...\nhint: ...\ndifficulty: medium\n``` y
+/// este card se parsea a Code block para no romper el transcript. Si no hay parser dedicado,
+/// el fallback es mostrarlo como bloque de código con validación local (Exercise::validate).
+/// TODO F5: si se requiere ExerciseInline interactivo (input + check), mapear este struct a
+/// un widget con TextEdit + botón Validar que llame a FeedbackEngine.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantExerciseCard {
+    pub prompt: String,
+    pub hint: String,
+    pub difficulty: String,
+}
+
+#[allow(dead_code)]
+impl AssistantExerciseCard {
+    pub fn new(
+        prompt: impl Into<String>,
+        hint: impl Into<String>,
+        difficulty: impl Into<String>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            hint: hint.into(),
+            difficulty: difficulty.into(),
+        }
+    }
+    /// Representación como bloque grafito-exercise para el transcript (compatible con Code block renderer).
+    pub fn to_code_block(&self) -> String {
+        format!(
+            "```grafito-exercise\nprompt: {}\nhint: {}\ndifficulty: {}\n```",
+            self.prompt, self.hint, self.difficulty
+        )
+    }
+    /// Parsea un bloque grafito-exercise simple (prompt/hint/difficulty) si existe.
+    pub fn from_code_block(text: &str) -> Option<Self> {
+        let lower = text.to_lowercase();
+        if !(lower.contains("prompt:") || lower.contains("hint:")) {
+            return None;
+        }
+        let mut prompt = String::new();
+        let mut hint = String::new();
+        let mut difficulty = "medium".to_string();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(v) = line
+                .strip_prefix("prompt:")
+                .or_else(|| line.strip_prefix("Prompt:"))
+            {
+                prompt = v.trim().to_string();
+            } else if let Some(v) = line
+                .strip_prefix("hint:")
+                .or_else(|| line.strip_prefix("Hint:"))
+            {
+                hint = v.trim().to_string();
+            } else if let Some(v) = line
+                .strip_prefix("difficulty:")
+                .or_else(|| line.strip_prefix("Difficulty:"))
+            {
+                difficulty = v.trim().to_ascii_lowercase();
+            }
+        }
+        if prompt.is_empty() {
+            return None;
+        }
+        Some(Self {
+            prompt,
+            hint,
+            difficulty,
+        })
+    }
 }
 
 /// Snapshot local que vincula una corrección al documento y foco que la originaron.
@@ -328,6 +406,9 @@ pub struct AssistantPanelState {
     pub long_memory: grafito_profile::LongTermMemory,
     /// Borrador para añadir hecho a la memoria.
     pub new_fact_draft: String,
+    /// Memoria de trabajo episódica (WorkingMemory sincronizada con perfil).
+    /// F5 inline: permite al tutor socrático adaptar pistas sin tocar memoria a largo plazo.
+    pub working_memory: grafito_profile::WorkingMemory,
 }
 
 impl Default for AssistantPanelState {
@@ -390,6 +471,7 @@ impl Default for AssistantPanelState {
             avatar: grafito_profile::AvatarConfig::default(),
             long_memory: grafito_profile::LongTermMemory::default(),
             new_fact_draft: String::new(),
+            working_memory: grafito_profile::WorkingMemory::default(),
         }
     }
 }
@@ -3418,6 +3500,8 @@ fn draw_panel_contents(
     let composer_height = assistant_composer_height(state);
     // Composer crece con el contenido pero nunca desborda: máx 38% del alto,
     // suelo 88px para que input+botones quepan sin scrollbar prematura.
+    // F5 Scandinavian quiet (fix 2026-08-21): clamp 88..260, sin ScrollArea envolvente,
+    // wrap via TextEdit::multiline (desired_rows 2) — el TopBottomPanel ya limita altura.
     // La barra sólo aparece si las attachments exceden el máximo.
     let available = ui.available_height().max(120.0);
     let max_composer = (available * 0.38).clamp(88.0, 260.0);
@@ -4143,6 +4227,7 @@ fn draw_assistant_composer(
     }
 
     // Composer Scandinavian: input limpio hairline 10%, radio 12, sin outer_margin oscuro
+    // F5 quiet: TextEdit::multiline con wrap (default egui) y altura fija 44px — no requiere ScrollArea envolvente.
     egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))

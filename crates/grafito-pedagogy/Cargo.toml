@@ -12,6 +12,9 @@ description = "Motor pedagógico puro de Grafito: niveles, currículum UTN, scaf
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true
 

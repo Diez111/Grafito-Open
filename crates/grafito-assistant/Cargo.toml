@@ -10,10 +10,13 @@ rust-version.workspace = true
 [dependencies]
 base64.workspace = true
 grafito-agent.workspace = true
+grafito-anim.workspace = true
 grafito-assistant-types.workspace = true
 grafito-command.workspace = true
 grafito-core.workspace = true
 grafito-geometry.workspace = true
+grafito-pedagogy.workspace = true
+grafito-profile.workspace = true
 image.workspace = true
 reqwest.workspace = true
 serde.workspace = true

@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 grafito-geometry = { path = "../grafito-geometry" }
 grafito-complex = { path = "../grafito-complex" }
+grafito-whiteboard = { path = "../grafito-whiteboard" }
 
 serde.workspace = true
 serde_json.workspace = true

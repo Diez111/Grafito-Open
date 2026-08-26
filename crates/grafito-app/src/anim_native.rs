@@ -107,12 +107,73 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
     {
         return "derivative-slope";
     }
-    // genericos con mapping elegante
+    // genericos con mapping elegante — F5: fracciones, vectores, matrices, proba inline
     if c.contains("vector") || c.contains("campo") && c.contains("vectorial") {
         return "conformal-map";
     }
-    if c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad") {
+    if c.contains("probab")
+        || c.contains("binom")
+        || c.contains("distrib")
+        || c.contains("estad")
+        || c.contains("bayes")
+        || c.contains("muestreo")
+        || c.contains("histograma")
+    {
         return "integral-area";
+    }
+    if c.contains("fracc")
+        || c.contains("rectángulo dividido")
+        || c.contains("rectangulo dividido")
+        || c.contains("común denominador")
+        || c.contains("comun denominador")
+    {
+        return "integral-area";
+    }
+    if c.contains("matriz")
+        || c.contains("matrices")
+        || c.contains("determin")
+        || c.contains("gauss")
+    {
+        return "universal";
+    }
+    if c.contains("serie")
+        || c.contains("sucesi")
+        || c.contains("fourier")
+        || c.contains("geométrica")
+        || c.contains("geometrica")
+    {
+        return "taylor-series";
+    }
+    if c.contains("ecuac")
+        || c.contains("cuadrática")
+        || c.contains("cuadratica")
+        || c.contains("parábola")
+        || c.contains("parabola")
+        || c.contains("sistema")
+    {
+        return "derivative-slope";
+    }
+    if c.contains("trigon")
+        || c.contains("círculo unitario")
+        || c.contains("circulo unitario")
+        || c.contains("onda seno")
+    {
+        return "taylor-series";
+    }
+    if c.contains("conica")
+        || c.contains("cónica")
+        || c.contains("elipse")
+        || c.contains("hiperbola")
+        || c.contains("hipérbola")
+        || c.contains("cono cortado")
+    {
+        return "conformal-map";
+    }
+    if c.contains("límite") || c.contains("limite") || c.contains("hueco en a") {
+        return "derivative-slope";
+    }
+    if c.contains("func") {
+        return "universal";
     }
     if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
         return "taylor-series";
@@ -941,6 +1002,15 @@ pub fn render_anim_for_concept(
             "conformal-map" => "conformal-map",
             "pitagoras" | "pythagoras" => "pitagoras",
             "universal" => "universal",
+            // F5: templates pedagógicos inline — mapeo a nativos existentes
+            "fraccion-visual" => "integral-area",
+            "vector-anim" => "conformal-map",
+            "matriz-anim" => "universal",
+            "prob-anim" => "integral-area",
+            "serie-anim" => "taylor-series",
+            "ecuacion-anim" => "derivative-slope",
+            "trig-anim" => "taylor-series",
+            "conica-anim" => "conformal-map",
             _ => detect_template_for_concept(concept),
         }
     };
@@ -958,12 +1028,14 @@ pub fn render_anim_for_concept(
 pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<egui::ColorImage> {
     // Compat: si se llama solo con template, usar universal como fallback elegante
     match template {
-        "integral-area" => render_integral_frames(width, height),
-        "taylor-series" => render_taylor_frames(width, height),
-        "conformal-map" => render_conformal_frames(width, height),
+        "integral-area" | "fraccion-visual" | "prob-anim" => render_integral_frames(width, height),
+        "taylor-series" | "serie-anim" | "trig-anim" => render_taylor_frames(width, height),
+        "conformal-map" | "vector-anim" | "conica-anim" => render_conformal_frames(width, height),
         "pitagoras" | "pythagoras" => render_pitagoras_frames(width, height),
-        "universal" => render_universal_youtube_frames("matem\u{00e1}tica", width, height),
-        "derivative-slope" => render_native_animation_frames(width, height),
+        "matriz-anim" | "universal" => {
+            render_universal_youtube_frames("matem\u{00e1}tica", width, height)
+        }
+        "derivative-slope" | "ecuacion-anim" => render_native_animation_frames(width, height),
         _ => {
             // template desconocido -> universal con ese texto como concepto para no quedar vacio
             if template.trim().is_empty() {

@@ -518,12 +518,17 @@ impl GrafitoApp {
             }
             self.assistant.user_name = self.profile.display_name().to_owned();
             self.assistant.long_memory = self.profile.long_memory.clone();
+            // F5 inline: sincroniza WorkingMemory episódica (si existe campo en AssistantPanelState)
+            // Si no existe campo, este bloque es el comentario de integración pedido en la tarea.
+            self.assistant.working_memory = self.profile.working_memory.clone();
             self.avatar_draft = self.profile.avatar.clone();
         } else {
             // Ventana abierta: preview persistente + merge no destructivo de progreso externo
             // Sincronizar solo campos de progreso (nivel, branch) va en tutor_*, no en avatar
             // Mantener avatar_draft sincronizado para preview
             self.avatar_draft = self.assistant.avatar.clone();
+            // F5 inline: también en modo preview mantener WorkingMemory sincronizada para debug inline
+            self.assistant.working_memory = self.profile.working_memory.clone();
             // Si el perfil ganó XP mientras se edita, no sobrescribir avatar; solo actualizar long_memory si es externa (no editar facts manualmente mientras abierta)
             if self.assistant.long_memory.enabled != self.profile.long_memory.enabled {
                 // respetar cambio externo si el usuario no tocó el toggle en esta sesión
@@ -708,6 +713,23 @@ impl GrafitoApp {
         ctx: &egui::Context,
         action: AssistantUiAction,
     ) {
+        // F3.2 PedagogyDispatcher — integración OpenCode Go
+        // -------------------------------------------------
+        // Las 6 tools pedagógicas (scaffold, generate_exercise, assess_answer,
+        // get_curriculum, suggest_next, generate_animation) ya están expuestas al LLM
+        // vía `grafito_assistant::default_agent_tools()` → `agent::all_safe_tool_schemas()`
+        // y despachadas por `SafeGrafitoDispatcher` / `PedagogyDispatcher` (puras, sin Document).
+        // El modo agente (AssistantAgentJob, start_agent_assistant_job) las orquesta vía
+        // OpenCode Go (OpenAI-compatible tool calling) sin salir del chat.
+        //
+        // assistant_tool_catalog (grafito_command) sigue siendo el catálogo de comandos
+        // verificados de Grafito; las pedagógicas viajan como OpenAI tools, no como fences.
+        //
+        // TODO(F3.2-inline): si se quiere invocación directa sin LLM (ej. botón "Andamiar"
+        // o comando /scaffold), cablear aquí un match que llame a
+        // `grafito_assistant::agent::PedagogyDispatcher.dispatch(&call)` con un ToolCall
+        // construido localmente y renderice el ToolResult en el chat. Hoy la orquestación
+        // pedagógica pasa exclusivamente por el loop agente cuando `assistant.agent_mode==true`.
         match action {
             AssistantUiAction::Submit => {
                 // Solo anima si pedís explícitamente "anim..." (animá, animación, animar)
@@ -1715,6 +1737,7 @@ impl GrafitoApp {
     }
 
     /// Registra el feedback del usuario en la memoria del tutor y persiste.
+    /// F5 inline: además alimenta WorkingMemory episódica para el tutor socrático.
     fn record_learning(&mut self, correct: bool) {
         let epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1722,6 +1745,15 @@ impl GrafitoApp {
             .unwrap_or(0);
         let (id, name) = self.learning_branch();
         self.profile.record_outcome(id, name, epoch, correct);
+        // F5 WorkingMemory hook: cada intento alimenta la RAM episódica.
+        // - correct: solo incrementa pasos (misconception vacía)
+        // - incorrect: registra la rama como misconception para adaptación socrática
+        let misconception = if correct { "" } else { id };
+        self.profile.working_memory.record_attempt(misconception);
+        self.profile.working_memory.set_topic(name);
+        self.profile.working_memory.set_session_epoch(epoch);
+        // Sincroniza vista inline del chat
+        self.assistant.working_memory = self.profile.working_memory.clone();
         // I/O en background thread para no bloquear UI (60fps)
         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
         self.notify(

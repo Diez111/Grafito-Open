@@ -3,6 +3,14 @@
 //! Paleta calm restraint: canvas #FAFAF9, panel #FFFFFF, separator
 //! #E8E8E6, accent sage #6B7A6F. Sin translucidez (from_rgb opaco),
 //! radios 8/12/16, sombras sutiles 0,2,8 alpha 8. Tipografía Inter.
+//!
+//! F5 Scandinavian quiet 2026-08-21:
+//! - Ink secondary 64% → `text_secondary` DARK #A3A3A3 (163/255 ≈64%) para overlay calm sin competir con primary.
+//! - Ink tertiary 44% → `text_tertiary` DARK #737373 (115/255 ≈45%) para hints discretos.
+//! - Border 10% → `separator.gamma_multiply(0.10)` usado en hairlines de composer/toolbar.
+//! - Hover 5% → `separator.gamma_multiply(0.05)` / `hover_overlay` sutil (LIGHT #EBEDEA 5% blend) — verificado, no cambiar.
+//!
+//! LIGHT secondary/tertiary más oscuros por contraste sobre #FAFAF9, pero mantienen ratio calm.
 
 use crate::tokens::{
     ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SHADOW_ALPHA, SHADOW_POPUP_BLUR,
@@ -29,7 +37,7 @@ pub struct Theme {
     pub sidebar_tab_inactive: Color32,
     pub sidebar_tab_active: Color32,
     pub status_bar_bg: Color32,
-    pub separator: Color32,
+    pub separator: Color32, // border 10% vía gamma_multiply(0.10) en composer/toolbar hairlines
     pub input_bg: Color32,
     pub input_text: Color32,
     pub button_bg: Color32,
@@ -49,10 +57,10 @@ pub struct Theme {
     pub keyboard_delete_hover: Color32,
     pub keyboard_delete_hover_text: Color32,
 
-    // ── Texto ──
+    // ── Texto ── Scandinavian quiet F5: secondary 64% ink, tertiary 44% ink (dark values #A3/#73; light ajustado por contraste)
     pub text_primary: Color32,
-    pub text_secondary: Color32,
-    pub text_tertiary: Color32,
+    pub text_secondary: Color32, // 64% ink — secondary calm
+    pub text_tertiary: Color32,  // 44% ink — tertiary hint
     pub text_label: Color32,
 
     // ── Acentos y estados ──
@@ -94,12 +102,12 @@ pub struct Theme {
     pub object_polygon: Color32,
     pub object_label: Color32,
 
-    // ── Highlights y overlays ──
+    // ── Highlights y overlays ── border 10% (separator*0.10), hover 5% (hover_overlay sutil)
     pub highlight: Color32,
     pub ghost_preview: Color32,
     pub newly_created_glow: Color32,
     pub selection_outline: Color32,
-    pub hover_overlay: Color32,
+    pub hover_overlay: Color32, // 5% hover — Scandinavian quiet
 }
 
 /// Rol visual de una tecla del teclado matemático.

@@ -17,14 +17,16 @@ pub mod exercise;
 pub mod feedback;
 pub mod level;
 pub mod scaffold;
+pub mod socratic;
 pub mod teaching;
 
 pub use curriculum::{Curriculum, LearningObjective};
-pub use exercise::{Exercise, ExerciseDifficulty, ExerciseGenerator, ExerciseKind};
+pub use exercise::{Exercise, ExerciseDifficulty, ExerciseGenerator, ExerciseKind, ValidatorKind};
 pub use feedback::{Feedback, FeedbackEngine, Misconception};
 pub use level::PedagogicalLevel;
-pub use level::UTNProgram;
-pub use scaffold::{Scaffold, ScaffoldEngine};
+pub use level::{UTNProgram, UdlProfile, UdlRepresentation};
+pub use scaffold::{Scaffold, ScaffoldEngine, Turn};
+pub use socratic::{GuardError, SocraticFsm, SocraticState};
 pub use teaching::{TeachingSession, TeachingStep, TeachingTopic};
 
 /// Error tipado del motor pedagógico.
