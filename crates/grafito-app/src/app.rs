@@ -3891,16 +3891,18 @@ impl eframe::App for GrafitoApp {
                         // Scandinavian: botón quiet con hairline 10%, RADIUS 4, sobre Order::Foreground
                         let zf_rect = egui::Rect::from_min_size(
                             egui::pos2(canvas_rect.right() - 44.0, canvas_rect.top() + 8.0),
-                            egui::vec2(34.0, 28.0),
+                            egui::vec2(38.0, 28.0),
                         );
                         // Usar ui.put (Button widget) en lugar de painter+interact manual:
                         // asegura hit-test correcto por encima de handle_canvas_input (click_and_drag del canvas)
-                        // y feedback hover/pressed visible.
+                        // y feedback hover/pressed visible. [] junto sin espacio + wrap Extend evita
+                        // que '[' y ']' se apilen verticalmente en 34px.
                         let zf_btn = egui::Button::new(
                             egui::RichText::new("[]")
-                                .size(13.0)
+                                .size(12.0)
                                 .color(theme.text_primary),
                         )
+                        .wrap_mode(egui::TextWrapMode::Extend)
                         .fill(theme.toolbar_bg)
                         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
                         .rounding(4.0);
