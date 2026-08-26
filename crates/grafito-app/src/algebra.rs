@@ -6,7 +6,9 @@ use egui::Color32;
 use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
-use grafito_ui::tokens::{RADIUS_MD, TYPE_SM};
+use grafito_ui::tokens::{
+    RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_SM, SPACE_XS, TYPE_MD, TYPE_SM, TYPE_XS,
+};
 
 pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 = egui::Vec2::new(28.0, 24.0);
 
@@ -248,12 +250,12 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
 
     let mut row_clicked = false;
     let mut delete = false;
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
     egui::Frame::none()
         .fill(frame_fill)
         .rounding(RADIUS_MD)
         .stroke(border)
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -347,7 +349,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                         let lbl_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(txt)
-                                    .size(TYPE_SM + 1.0) // TYPE_SM (12) +1 = original 13
+                                    .size(TYPE_SM) // TYPE_SM (12) +1 = original 13
                                     .color(theme.text_primary),
                             )
                             .sense(egui::Sense::click())
@@ -377,7 +379,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
             app.selected_object = None;
         }
     }
-    ui.add_space(2.0);
+    ui.add_space(SPACE_XS);
 }
 
 pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
@@ -389,25 +391,25 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let txt_col = theme.text_primary;
     let _txt_dim = theme.text_tertiary;
 
-    egui::SidePanel::left("algebra_panel").show_separator_line(false)
-    .default_width(220.0)
-    .min_width(160.0)
-    .max_width((ctx.available_rect().width()*0.45).max(200.0))
+    egui::SidePanel::left("algebra_panel").show_separator_line(true)
+    .default_width(240.0)
+    .min_width(180.0)
+    .max_width((ctx.available_rect().width()*0.45).max(220.0))
     .resizable(true)
-    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
+    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, theme.separator)))
     .show(ctx, |ui| {
-        ui.add_space(8.0);
+        ui.add_space(SPACE_SM);
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("Álgebra")
                     .color(accent)
-                    .size(16.0)
+                    .size(TYPE_MD)
                     .strong(),
             );
             ui.label(
                 egui::RichText::new(format!("{} objetos", app.document.object_count()))
                     .color(theme.text_tertiary)
-                    .size(11.0),
+                    .size(TYPE_XS),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if action_icon_button(
@@ -422,18 +424,18 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(SPACE_SM);
         // Input row in-panel: es la affordance principal para "agregar cosas"
         // en el panel de Álgebra. Editar aquí equivale a la barra inferior
         // (ambas usan `app.input_text`); lo dejamos visible acá porque es
         // donde el usuario espera tipear.
         egui::Frame::none()
             .fill(theme.input_bg)
-            .inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 6.0, bottom: 6.0 })
+            .inner_margin(egui::Margin { left: SPACE_SM, right: SPACE_SM, top: SPACE_SM, bottom: SPACE_SM })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
-                    ui.add_space(3.0);
+                    ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
+                    ui.add_space(SPACE_XS);
                     let response = crate::ui::draw_command_input(
                         ui,
                         app,
@@ -454,10 +456,20 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     }
                 });
             });
+        ui.add_space(SPACE_SM);
         ui.add(egui::Separator::default().spacing(0.0));
+        ui.add_space(SPACE_SM);
 
         // ── Object list — compact, 1 line each ──────────────────────
-        egui::ScrollArea::vertical().auto_shrink([false;2]).show(ui, |ui| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin {
+                left: SPACE_SM,
+                right: SPACE_SM,
+                top: SPACE_SM,
+                bottom: SPACE_SM,
+            })
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false;2]).show(ui, |ui| {
             let mut delete_id: Option<ObjectId> = None;
             let ids: Vec<ObjectId> = app.document.objects_iter().map(|(id,_)| *id).collect();
             for oid in ids {
@@ -610,12 +622,12 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 };
 
                 let mut row_clicked = false;
-                ui.add_space(4.0);
+                ui.add_space(SPACE_XS);
                 egui::Frame::none()
                     .fill(frame_fill)
-                    .rounding(8.0)
+                    .rounding(RADIUS_SM)
                     .stroke(border)
-                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                    .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -694,7 +706,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         format!("{}: {}", obj_label, obj_name)
                                     };
                                     let lbl_resp = ui.add(egui::Label::new(
-                                        egui::RichText::new(txt).size(TYPE_SM + 1.0).color(txt_col)).sense(egui::Sense::click()).truncate()); // TYPE_SM (12) +1 = original 13
+                                        egui::RichText::new(txt).size(TYPE_SM).color(txt_col)).sense(egui::Sense::click()).truncate()); // TYPE_SM (12) +1 = original 13
                                     if lbl_resp.clicked() { row_clicked = true; }
                                     if lbl_resp.double_clicked() && !obj_expr.is_empty() && (obj_name == "Function" || obj_name == "Point") {
                                         app.input_text = format!("{}={}", obj_label, obj_expr);
@@ -708,7 +720,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             // Edit a detached copy so idle controls cannot bump the
                             // document revision while an assistant request is pending.
                             if let Some(mut edited) = app.document.get_object(oid).cloned() {
-                                ui.add_space(2.0);
+                                ui.add_space(SPACE_XS);
                                 ui.scope(|ui| {
                                     // Sin overrides de light mode: confiamos en
                                     // los tokens del theme LIGHT definidos en
@@ -716,50 +728,50 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     match &mut edited {
                                         GeoObject::Line(l) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Circle(c) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Function(f) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point(p) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pt").size(10.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("pt").size(TYPE_XS).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Point3D(p) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pt").size(10.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("pt").size(TYPE_XS).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Polygon(poly) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("w").size(14.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
                                             });
                                         }
                                         GeoObject::Pencil(pencil) => {
                                             ui.horizontal(|ui| {
-                                                ui.add_space(20.0);
-                                                ui.label(egui::RichText::new("pen").size(12.0).color(theme.text_tertiary));
+                                                ui.add_space(SPACE_LG);
+                                                ui.label(egui::RichText::new("pen").size(TYPE_SM).color(theme.text_tertiary));
                                                 ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true));
                                             });
                                         }
@@ -788,11 +800,11 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 }
                             }
                         } else if is_sel {
-                            ui.add_space(2.0);
+                            ui.add_space(SPACE_XS);
                             ui.label(
                                 egui::RichText::new("Abrí el Inspector para editar este objeto 3D.")
                                     .color(theme.text_tertiary)
-                                    .size(11.0),
+                                    .size(TYPE_XS),
                             );
                         }
                     });
@@ -800,7 +812,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 if row_clicked {
                     app.selected_object = if is_sel { None } else { Some(oid) };
                 }
-                ui.add_space(2.0);
+                ui.add_space(SPACE_XS);
             }
             if let Some(id) = delete_id {
                 snapshot.capture(&app.document);
@@ -810,7 +822,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
             // Variables
             if !app.document.variables.is_empty() {
-                ui.add_space(10.0);
+                ui.add_space(SPACE_SM);
 
                 let vars: Vec<(String, f64)> = app
                     .document
@@ -833,13 +845,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     );
 
                     egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 // Top row: name = value and options
                                 ui.horizontal(|ui| {
                                     let val_str = if v.fract() == 0.0 { format!("{v:.0}") } else { format!("{v:.2}") };
-                                    ui.label(egui::RichText::new(format!("{}    {}", name, val_str)).size(14.0).color(txt_col));
+                                    ui.label(egui::RichText::new(format!("{}    {}", name, val_str)).size(TYPE_SM).color(txt_col));
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         let settings_id = ui.make_persistent_id(("variable_settings", name));
@@ -910,7 +922,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                           else { "1x" };
 
                                         egui::ComboBox::from_id_salt(format!("speed_{}", name))
-                                            .selected_text(egui::RichText::new(speed_label).size(12.0).color(theme.text_secondary))
+                                            .selected_text(egui::RichText::new(speed_label).size(TYPE_SM).color(theme.text_secondary))
                                             .width(50.0)
                                             .show_ui(ui, |ui| {
                                                 let mut new_speed_abs = speed_abs;
@@ -939,15 +951,15 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     });
                                 });
 
-                                ui.add_space(4.0);
+                                ui.add_space(SPACE_XS);
 
                                 // Bottom row: min, slider, max
                                 if min.is_finite() && max.is_finite() && min < max {
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(format!("{}", min)).size(12.0));
+                                        ui.label(egui::RichText::new(format!("{}", min)).size(TYPE_SM));
 
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.label(egui::RichText::new(format!("{}", max)).size(12.0));
+                                            ui.label(egui::RichText::new(format!("{}", max)).size(TYPE_SM));
 
                                             let mut sl_resp = None;
                                             ui.scope(|ui| {
@@ -1015,7 +1027,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         }
                     }
 
-                    ui.add_space(2.0);
+                    ui.add_space(SPACE_XS);
                     ui.separator();
                 }
                 if let Some(to_del) = var_to_delete {
@@ -1023,6 +1035,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     app.document.remove_variable(&to_del);
                 }
             }
+                });
         });
     });
     let _ = snapshot.save_if_semantically_changed(

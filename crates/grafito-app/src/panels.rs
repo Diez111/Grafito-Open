@@ -10,8 +10,8 @@ use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    RADIUS_LG, RADIUS_MD, RADIUS_PILL, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_MD, TYPE_SM,
-    TYPE_XS,
+    RADIUS_LG, RADIUS_MD, RADIUS_PILL, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_MD,
+    TYPE_SM, TYPE_XS,
 };
 use std::collections::VecDeque;
 use std::fs::File;
@@ -691,24 +691,22 @@ fn draw_inspector_section(
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.panel_bg)
-        // borde sutil 10% negro — quiet Scandinavian
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(26)))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(18)))
         .rounding(egui::Rounding::same(RADIUS_LG))
-        .inner_margin(egui::Margin::same(SPACE_SM))
+        .inner_margin(egui::Margin::symmetric(SPACE_LG, SPACE_MD))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(title)
                     .color(theme.text_primary)
-                    .size(TYPE_BASE)
+                    .size(TYPE_SM)
                     .strong(),
             );
             if !description.is_empty() {
-                ui.add_space(2.0);
+                ui.add_space(SPACE_XS);
                 ui.label(
                     egui::RichText::new(description)
-                        // secundaria quiet para descripciones
-                        .color(theme.text_secondary)
-                        .size(TYPE_SM),
+                        .color(theme.text_tertiary)
+                        .size(TYPE_XS),
                 );
             }
             ui.add_space(SPACE_SM);
@@ -953,14 +951,18 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // Panel CAS — Scandinavian quiet: secciones calm con disclosure progresivo
     egui::SidePanel::left("cas_panel")
-        .show_separator_line(false)
+        .show_separator_line(true)
         .default_width(260.0)
         .min_width(180.0)
         .max_width((ctx.available_rect().width() * 0.45).max(200.0))
         .resizable(true)
-        .frame(egui::Frame::none().fill(panel_bg).stroke(egui::Stroke::NONE))
+        .frame(
+            egui::Frame::none()
+                .fill(panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
+        )
         .show(ctx, |ui| {
-            ui.add_space(SPACE_SM);
+            ui.add_space(SPACE_LG);
             ui.horizontal(|ui| {
                 ui.add_space(SPACE_SM);
                 ui.label(
@@ -988,184 +990,197 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .id_salt("cas_panel_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Acciones rápidas — pills Scandinavian dentro de sección inspector
-                    draw_inspector_section(
-                        ui,
-                        "Acciones rápidas",
-                        "Deriva, integra, resuelve y límites sin escribir la sintaxis completa.",
-                        |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                                for (label, snippet) in [
-                                    ("Derivar", "Derivative["),
-                                    ("Integrar", "Integral["),
-                                    ("Resolver", "Solve["),
-                                    ("Límite", "Limit["),
-                                ] {
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new(label)
-                                            .size(TYPE_SM)
-                                            .color(theme.text_primary),
-                                    )
-                                    .rounding(RADIUS_PILL)
-                                    .fill(theme.input_bg)
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        Color32::from_black_alpha(26),
-                                    ));
-                                    if ui
-                                        .add(btn)
-                                        .on_hover_text(format!("Insertar {snippet}"))
-                                        .clicked()
-                                    {
-                                        app.input_text = snippet.to_string();
-                                    }
-                                }
-                            });
-                        },
-                    );
-                    ui.add_space(SPACE_SM);
-
-                    // Entrada destacada — frame input_bg + RADIUS_LG + borde 10% black
                     egui::Frame::none()
-                        .fill(theme.input_bg)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(26)))
-                        .rounding(egui::Rounding::same(RADIUS_LG))
-                        .inner_margin(egui::Margin::same(SPACE_SM))
+                        .inner_margin(egui::Margin {
+                            left: SPACE_SM,
+                            right: SPACE_SM,
+                            top: SPACE_SM,
+                            bottom: SPACE_SM,
+                        })
                         .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new("Entrada CAS")
-                                    .color(theme.text_secondary)
-                                    .size(TYPE_SM)
-                                    .strong(),
-                            );
-                            ui.add_space(SPACE_XS);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
+                            // Acciones rápidas — pills Scandinavian dentro de sección inspector
+                            draw_inspector_section(
+                                ui,
+                                "Acciones rápidas",
+                                "Atajos — inserta sintaxis mínima.",
                                 |ui| {
-                                    let mut execute_cas = false;
-                                    if action_icon_button(
-                                        ui,
-                                        Icon::Play,
-                                        accent,
-                                        "Ejecutar entrada CAS",
-                                    )
-                                    .clicked()
-                                    {
-                                        execute_cas = true;
-                                    }
-                                    let response = crate::ui::draw_command_input(
-                                        ui,
-                                        app,
-                                        "cas_panel",
-                                        [ui.available_width(), 24.0],
-                                        "Comando CAS...  Ej: Derivative[x^2, x]",
-                                        true,
-                                    );
-                                    if response.submitted {
-                                        execute_cas = true;
-                                    }
-                                    if execute_cas && !app.input_text.is_empty() {
-                                        let time = ui.ctx().input(|i| i.time);
-                                        app.submit_cas_worksheet_cell(time);
-                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing =
+                                            egui::vec2(SPACE_XS, SPACE_XS);
+                                        for (label, snippet) in [
+                                            ("Derivar", "Derivative["),
+                                            ("Integrar", "Integral["),
+                                            ("Resolver", "Solve["),
+                                            ("Límite", "Limit["),
+                                        ] {
+                                            let btn = egui::Button::new(
+                                                egui::RichText::new(label)
+                                                    .size(TYPE_SM)
+                                                    .color(theme.text_primary),
+                                            )
+                                            .rounding(RADIUS_PILL)
+                                            .fill(theme.input_bg)
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                Color32::from_black_alpha(26),
+                                            ));
+                                            if ui
+                                                .add(btn)
+                                                .on_hover_text(format!("Insertar {snippet}"))
+                                                .clicked()
+                                            {
+                                                app.input_text = snippet.to_string();
+                                            }
+                                        }
+                                    });
                                 },
                             );
-                            ui.add_space(SPACE_XS);
-                            ui.label(
-                                egui::RichText::new(
-                                    "Enter para ejecutar • Tab para autocompletar",
-                                )
-                                .color(txt_dim)
-                                .size(TYPE_XS),
-                            );
-                        });
-                    ui.add_space(SPACE_SM);
+                            ui.add_space(SPACE_MD);
 
-                    // Hoja de trabajo — empty state sutil y celdas con estados
-                    if app.document.cas_worksheet().is_empty() {
-                        egui::Frame::none()
-                            .fill(theme.input_bg)
-                            .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(26)))
-                            .rounding(egui::Rounding::same(RADIUS_LG))
-                            .inner_margin(egui::Margin::same(SPACE_MD))
-                            .show(ui, |ui| {
-                                ui.vertical_centered(|ui| {
+                            // Entrada destacada — frame input_bg + RADIUS_LG + borde 10% black
+                            egui::Frame::none()
+                                .fill(theme.input_bg)
+                                .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
+                                .rounding(egui::Rounding::same(RADIUS_LG))
+                                .inner_margin(egui::Margin::same(SPACE_MD))
+                                .show(ui, |ui| {
                                     ui.label(
-                                        egui::RichText::new("Sin cálculos aún")
-                                            .color(txt_col)
+                                        egui::RichText::new("Entrada CAS")
+                                            .color(theme.text_secondary)
                                             .size(TYPE_SM)
                                             .strong(),
                                     );
                                     ui.add_space(SPACE_XS);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Escribe un comando arriba y ejecutalo con Enter o ▶.",
-                                        )
-                                        .color(txt_dim)
-                                        .size(TYPE_SM),
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let mut execute_cas = false;
+                                            if action_icon_button(
+                                                ui,
+                                                Icon::Play,
+                                                accent,
+                                                "Ejecutar entrada CAS",
+                                            )
+                                            .clicked()
+                                            {
+                                                execute_cas = true;
+                                            }
+                                            let response = crate::ui::draw_command_input(
+                                                ui,
+                                                app,
+                                                "cas_panel",
+                                                [ui.available_width(), 24.0],
+                                                "Ej: Derivative[x^2, x]",
+                                                true,
+                                            );
+                                            if response.submitted {
+                                                execute_cas = true;
+                                            }
+                                            if execute_cas && !app.input_text.is_empty() {
+                                                let time = ui.ctx().input(|i| i.time);
+                                                app.submit_cas_worksheet_cell(time);
+                                            }
+                                        },
                                     );
-                                    ui.add_space(SPACE_SM);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Ej: Derivative[x^2, x]\nEj: Integral[sin(x), x]\nEj: Solve[x^2-4, x]\nEj: Limit[sin(x)/x, x, 0]",
-                                        )
-                                        .color(txt_dim)
-                                        .size(TYPE_SM)
-                                        .monospace(),
-                                    );
-                                });
-                            });
-                    } else {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Hoja de trabajo · {} celdas",
-                                app.document.cas_worksheet().len()
-                            ))
-                            .color(theme.text_secondary)
-                            .size(TYPE_SM),
-                        );
-                        ui.add_space(SPACE_XS);
-                        for (i, entry) in app.document.cas_worksheet().iter().enumerate() {
-                            let output_color = match entry.status {
-                                CasWorksheetStatus::Success => txt_col,
-                                CasWorksheetStatus::Error => theme.danger,
-                            };
-                            egui::Frame::none()
-                                .fill(theme.button_bg)
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    Color32::from_black_alpha(26),
-                                ))
-                                .rounding(egui::Rounding::same(RADIUS_MD))
-                                .inner_margin(egui::Margin::same(SPACE_SM))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("{}", i + 1))
-                                                .color(accent)
-                                                .strong()
-                                                .size(TYPE_SM),
-                                        );
-                                        ui.add_space(SPACE_XS);
-                                        ui.label(
-                                            egui::RichText::new(format!("> {}", entry.input))
-                                                .size(TYPE_SM)
-                                                .monospace()
-                                                .color(txt_col),
-                                        );
-                                    });
                                     ui.add_space(SPACE_XS);
                                     ui.label(
-                                        egui::RichText::new(&entry.output)
-                                            .size(TYPE_SM)
-                                            .color(output_color),
+                                        egui::RichText::new(
+                                            "Enter para ejecutar • Tab para autocompletar",
+                                        )
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
                                     );
                                 });
-                            ui.add_space(SPACE_XS);
-                        }
-                    }
-                    ui.add_space(SPACE_SM);
+                            ui.add_space(SPACE_MD);
+
+                            // Hoja de trabajo — empty state sutil y celdas con estados
+                            if app.document.cas_worksheet().is_empty() {
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
+                                    .rounding(egui::Rounding::same(RADIUS_LG))
+                                    .inner_margin(egui::Margin::same(SPACE_LG))
+                                    .show(ui, |ui| {
+                                        ui.vertical_centered(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("Sin cálculos aún")
+                                                    .color(txt_col)
+                                                    .size(TYPE_SM)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(SPACE_XS);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Escribe arriba y pulsa Enter.",
+                                                )
+                                                .color(txt_dim)
+                                                .size(TYPE_XS),
+                                            );
+                                            ui.add_space(SPACE_SM);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Ej: Derivative[x^2, x]  ·  Solve[x^2-4, x]",
+                                                )
+                                                .color(txt_dim)
+                                                .size(TYPE_SM)
+                                                .monospace(),
+                                            );
+                                        });
+                                    });
+                            } else {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Hoja · {}",
+                                        app.document.cas_worksheet().len()
+                                    ))
+                                    .color(theme.text_secondary)
+                                    .size(TYPE_SM),
+                                );
+                                ui.add_space(SPACE_XS);
+                                for (i, entry) in app.document.cas_worksheet().iter().enumerate() {
+                                    let output_color = match entry.status {
+                                        CasWorksheetStatus::Success => txt_col,
+                                        CasWorksheetStatus::Error => theme.danger,
+                                    };
+                                    egui::Frame::none()
+                                        .fill(theme.button_bg)
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            Color32::from_black_alpha(26),
+                                        ))
+                                        .rounding(egui::Rounding::same(RADIUS_MD))
+                                        .inner_margin(egui::Margin::same(SPACE_SM))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!("{}", i + 1))
+                                                        .color(accent)
+                                                        .strong()
+                                                        .size(TYPE_SM),
+                                                );
+                                                ui.add_space(SPACE_XS);
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "> {}",
+                                                        entry.input
+                                                    ))
+                                                    .size(TYPE_SM)
+                                                    .monospace()
+                                                    .color(txt_col),
+                                                );
+                                            });
+                                            ui.add_space(SPACE_XS);
+                                            ui.label(
+                                                egui::RichText::new(&entry.output)
+                                                    .size(TYPE_SM)
+                                                    .color(output_color),
+                                            );
+                                        });
+                                    ui.add_space(SPACE_XS);
+                                }
+                            }
+                            ui.add_space(SPACE_SM);
+                        });
                 });
         });
 }
@@ -1176,7 +1191,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let accent = theme.accent;
 
     egui::SidePanel::left("view_panel")
-        .show_separator_line(false)
+        .show_separator_line(true)
         .default_width(260.0)
         .min_width(180.0)
         .max_width((ctx.available_rect().width() * 0.45).max(240.0))
@@ -1184,10 +1199,10 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::NONE),
+                .stroke(egui::Stroke::new(1.0, theme.separator)),
         )
         .show(ctx, |ui| {
-            ui.add_space(SPACE_SM);
+            ui.add_space(SPACE_LG);
             ui.horizontal(|ui| {
                 ui.add_space(SPACE_SM);
                 ui.label(
@@ -1205,44 +1220,58 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .id_salt("view_panel_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // General — 4 toggles básicos
-                    draw_inspector_section(
-                        ui,
-                        "General",
-                        "Cuadrícula, tema y ayudas de encaje.",
-                        |ui| {
-                            ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
-                            ui.checkbox(&mut app.dark_mode, "Modo oscuro")
-                                .changed()
-                                .then(|| {
-                                    if app.dark_mode {
-                                        DARK.apply(ui.ctx());
-                                    } else {
-                                        LIGHT.apply(ui.ctx());
-                                    }
-                                });
-                            ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
-                            ui.checkbox(&mut app.exam_mode, "Modo examen");
-                        },
-                    );
-                    ui.add_space(SPACE_SM);
+                    egui::Frame::none()
+                        .inner_margin(egui::Margin {
+                            left: SPACE_SM,
+                            right: SPACE_SM,
+                            top: SPACE_SM,
+                            bottom: SPACE_SM,
+                        })
+                        .show(ui, |ui| {
+                            // General — 4 toggles básicos
+                            draw_inspector_section(ui, "General", "Cuadrícula y tema.", |ui| {
+                                ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
+                                ui.checkbox(&mut app.dark_mode, "Modo oscuro")
+                                    .changed()
+                                    .then(|| {
+                                        if app.dark_mode {
+                                            DARK.apply(ui.ctx());
+                                        } else {
+                                            LIGHT.apply(ui.ctx());
+                                        }
+                                    });
+                                ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
+                                ui.checkbox(&mut app.exam_mode, "Modo examen");
+                            });
+                            ui.add_space(SPACE_MD);
 
-                    // Ejes — escala logarítmica
-                    draw_inspector_section(ui, "Ejes", "Escalas logarítmicas por eje.", |ui| {
-                        ui.checkbox(&mut app.document.view_mut().x_log, "Eje X logarítmico");
-                        ui.checkbox(&mut app.document.view_mut().y_log, "Eje Y logarítmico");
-                    });
-                    ui.add_space(SPACE_SM);
+                            // Ejes — escala logarítmica
+                            draw_inspector_section(
+                                ui,
+                                "Ejes",
+                                "Escalas logarítmicas por eje.",
+                                |ui| {
+                                    ui.checkbox(
+                                        &mut app.document.view_mut().x_log,
+                                        "Eje X logarítmico",
+                                    );
+                                    ui.checkbox(
+                                        &mut app.document.view_mut().y_log,
+                                        "Eje Y logarítmico",
+                                    );
+                                },
+                            );
+                            ui.add_space(SPACE_MD);
 
-                    // Alta precisión — Double-Double
-                    draw_inspector_section(
-                        ui,
-                        "Alta Precisión",
-                        "Double-Double (~106 bits / 32 dígitos).",
-                        |ui| {
-                            let mut high_prec =
-                                grafito_geometry::precision::is_high_precision_mode();
-                            if ui
+                            // Alta precisión — Double-Double
+                            draw_inspector_section(
+                                ui,
+                                "Alta Precisión",
+                                "Double-Double (~106 bits / 32 dígitos).",
+                                |ui| {
+                                    let mut high_prec =
+                                        grafito_geometry::precision::is_high_precision_mode();
+                                    if ui
                                 .checkbox(&mut high_prec, "Alta Precisión (Double-Double)")
                                 .on_hover_text(
                                     "Usa aritmética Double-Double (~106 bits / 32 dígitos) \
@@ -1258,21 +1287,22 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 }
                                 app.re_evaluate_constraints(&[]);
                             }
-                        },
-                    );
-                    ui.add_space(SPACE_SM);
+                                },
+                            );
+                            ui.add_space(SPACE_SM);
 
-                    // Exportación — vectorial
-                    draw_inspector_section(
-                        ui,
-                        "Exportación",
-                        "Generá un archivo vectorial del lienzo actual.",
-                        |ui| {
-                            if ui.button("Exportar SVG").clicked() {
-                                app.export_with_dialog(crate::export::ExportFormat::Svg);
-                            }
-                        },
-                    );
+                            // Exportación — vectorial
+                            draw_inspector_section(
+                                ui,
+                                "Exportación",
+                                "Generá un archivo vectorial del lienzo actual.",
+                                |ui| {
+                                    if ui.button("Exportar SVG").clicked() {
+                                        app.export_with_dialog(crate::export::ExportFormat::Svg);
+                                    }
+                                },
+                            );
+                        });
                 });
         });
 }
@@ -1809,7 +1839,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
-                        ui.add_space(3.0);
+                        ui.add_space(SPACE_XS);
                         let response = crate::ui::draw_command_input(
                             ui,
                             app,
