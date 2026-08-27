@@ -445,10 +445,32 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ui,
                             app,
                             "algebra_panel",
-                            [180.0, 32.0],
+                            [150.0, 32.0],
                             "Añadir…",
                             false,
-                    );
+                        );
+                        ui.add_space(SPACE_XS);
+                        if action_icon_button(
+                            ui,
+                            Icon::PlusMinus,
+                            if app.keyboard_visible {
+                                accent
+                            } else {
+                                theme.text_secondary
+                            },
+                            if app.keyboard_visible {
+                                "Ocultar teclado"
+                            } else {
+                                "Mostrar teclado"
+                            },
+                        )
+                        .clicked()
+                        {
+                            app.keyboard_visible = !app.keyboard_visible;
+                            if !app.keyboard_visible {
+                                app.keyboard_expanded = false;
+                            }
+                        }
                     if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }

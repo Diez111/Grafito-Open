@@ -2095,6 +2095,7 @@ impl GrafitoApp {
     }
 
     /// Elimina la historia CAS local como una única operación deshacible.
+    #[allow(dead_code)]
     pub(crate) fn clear_cas_worksheet(&mut self, time: f64) {
         let before_document = self.document.clone();
         if !self.document.clear_cas_worksheet() {
@@ -3782,8 +3783,7 @@ impl eframe::App for GrafitoApp {
                         Perspective::Dynamics => crate::panels::draw_attractor_panel(self, ctx),
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
-                    2 => crate::panels::draw_cas_panel(self, ctx),
-                    3 => crate::panels::draw_view_panel(self, ctx),
+                    2 => crate::panels::draw_view_panel(self, ctx),
                     _ => crate::panels::draw_empty_panel(self, ctx),
                 }
             }

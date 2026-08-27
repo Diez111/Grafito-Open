@@ -294,12 +294,7 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_panels_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Paneles", |ui| {
-        for (tab, label) in [
-            (0, "Álgebra"),
-            (1, "Herramientas"),
-            (2, "CAS"),
-            (3, "Vista"),
-        ] {
+        for (tab, label) in [(0, "Álgebra"), (1, "Herramientas"), (2, "Vista")] {
             let selected = app.compact_drawer_open && app.sidebar_tab == tab;
             if ui.selectable_label(selected, label).clicked() {
                 app.sidebar_tab = tab;
@@ -524,16 +519,15 @@ pub(crate) fn draw_top_bar(
         });
     let _ = top_bar_response;
     // ── LEFT SIDEBAR (60px icon rail) ──
-    // 6 tabs armonizados: un icono representativo por panel + etiqueta corta
+    // 3 tabs armonizados: un icono representativo por panel + etiqueta corta
     // legible. Las perspectivas se cambian únicamente desde la barra superior.
     let tabs: &[(&str, Icon, &str)] = &[
-        ("Álgebra", Icon::Function, "Objetos, variables y comandos"),
+        ("Álgebra", Icon::Function, "Objetos, variables y CAS"),
         (
             "Herram.",
             Icon::Settings,
             "Herramientas de construcción y análisis",
         ),
-        ("CAS", Icon::Analyze, "Cálculo simbólico paso a paso"),
         ("Vista", Icon::Eye, "Cuadrícula, ejes y estilo"),
     ];
     if show_sidebar {

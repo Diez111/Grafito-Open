@@ -230,7 +230,7 @@ impl Perspective {
                 title: Self::title(self),
                 icon: Self::short_label(self),
                 canvas_mode: CanvasMode::D2,
-                left_panel: LeftPanelContent::Cas,
+                left_panel: LeftPanelContent::Algebra,
                 right_panel: None,
                 visible_tool_groups: &[G::Move, G::Curve, G::Analysis, G::Circle],
                 show_math_keyboard: false,
@@ -414,7 +414,8 @@ impl ShellLayout {
 pub enum LeftPanelContent {
     /// Vista de álgebra (objetos, variables, comandos).
     Algebra,
-    /// Panel CAS (cálculo simbólico).
+    /// Panel CAS (cálculo simbólico) — oculto, todo en Álgebra.
+    #[allow(dead_code)]
     Cas,
     /// Álgebra + CAS combinados (álgebra como tab por defecto).
     AlgebraAndCas,
@@ -429,8 +430,8 @@ pub enum LeftPanelContent {
 }
 
 impl LeftPanelContent {
-    /// Mapea el contenido declarado al índice del tab del sidebar (6 tabs
-    /// armonizados: 0=Álgebra, 1=Herram., 2=CAS, 3=Tabla, 4=Hoja, 5=Vista).
+    /// Mapea el contenido declarado al índice del tab del sidebar (3 tabs
+    /// armonizados: 0=Álgebra, 1=Herram., 2=Vista — CAS oculto en Álgebra).
     pub const fn default_sidebar_tab(self) -> usize {
         match self {
             LeftPanelContent::Algebra

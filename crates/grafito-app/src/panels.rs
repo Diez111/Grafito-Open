@@ -942,6 +942,7 @@ fn draw_object_cards_where(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
