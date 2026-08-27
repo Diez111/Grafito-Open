@@ -46,13 +46,9 @@ pub(crate) enum DocumentAction {
 impl DocumentAction {
     pub(crate) const fn prompt_message(self) -> &'static str {
         match self {
-            Self::New => {
-                "Hay cambios sin guardar. ¿Querés guardarlos antes de crear un documento nuevo?"
-            }
-            Self::Open => {
-                "Hay cambios sin guardar. ¿Querés guardarlos antes de abrir otro documento?"
-            }
-            Self::Exit => "Hay cambios sin guardar. ¿Querés guardarlos antes de salir?",
+            Self::New => "¿Guardar cambios?",
+            Self::Open => "¿Guardar cambios?",
+            Self::Exit => "¿Guardar cambios?",
         }
     }
 }
