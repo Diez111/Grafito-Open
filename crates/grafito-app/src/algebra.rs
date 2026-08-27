@@ -392,12 +392,12 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let txt_col = theme.text_primary;
     let _txt_dim = theme.text_tertiary;
 
-    egui::SidePanel::left("algebra_panel").show_separator_line(true)
+    egui::SidePanel::left("algebra_panel").show_separator_line(false)
     .default_width(240.0)
     .min_width(180.0)
     .max_width((ctx.available_rect().width()*0.45).max(220.0))
     .resizable(true)
-    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::new(1.0, theme.separator)))
+    .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
     .show(ctx, |ui| {
         ui.add_space(SPACE_SM);
         ui.horizontal(|ui| {
@@ -438,10 +438,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
+                        // Center the + and input
+                        let available = ui.available_width();
+                        let input_w = (available - 24.0).clamp(120.0, 180.0);
+                        let pad = ((available - input_w - 20.0) / 2.0).max(0.0);
+                        ui.add_space(pad);
                         ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
                         ui.add_space(SPACE_XS);
-                        let available = ui.available_width();
-                        let input_w = (available - 24.0).clamp(100.0, 180.0);
                         let response = crate::ui::draw_command_input(
                             ui,
                             app,
@@ -449,7 +452,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             [input_w, 28.0],
                             "Añadir…",
                             false,
-                        );
+                    );
                     if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }
@@ -707,13 +710,8 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     }
                                     ui.add_space(5.0);
 
-                                    let short_expr = if obj_expr.chars().count() > 18 {
-                                        format!("{}…", obj_expr.chars().take(18).collect::<String>())
-                                    } else {
-                                        obj_expr.clone()
-                                    };
-                                    let txt = if !short_expr.is_empty() {
-                                        format!("{}: {}", obj_label, short_expr)
+                                    let txt = if !obj_expr.is_empty() {
+                                        format!("{}: {}", obj_label, obj_expr)
                                     } else {
                                         format!("{}: {}", obj_label, obj_name)
                                     };

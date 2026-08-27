@@ -11,8 +11,8 @@ use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    RADIUS_MD, SPACE_MD, SPACE_SM, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
-    SPACING_MINIMAL_Y,
+    RADIUS_LG, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACING_BUTTON_X,
+    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -952,27 +952,28 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
     let Some(action) = app.pending_document_action() else {
         return;
     };
-
     let save_error = app.document_save_error().map(str::to_owned);
     let mut open = true;
     let mut decision = None;
+    let theme = current_theme(ctx);
     egui::Window::new("Cambios sin guardar")
         .id(egui::Id::new("unsaved_changes_dialog"))
         .collapsible(false)
         .resizable(false)
-        .default_width(420.0)
+        .default_width(380.0)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .order(egui::Order::Foreground)
         .open(&mut open)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme.panel_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator))
+                .rounding(egui::Rounding::same(RADIUS_LG)),
+        )
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(ui.ctx().screen_rect().height() * 0.6)
-                .show(ui, |ui| {
-                    ui.set_min_width(380.0);
-                    egui::Frame::none().show(ui, |ui| {
-                        dialog_contents(ui, action, save_error.as_ref(), &mut decision);
-                    });
-                });
+            ui.set_min_width(320.0);
+            ui.set_max_width(380.0);
+            dialog_contents(ui, action, save_error.as_ref(), &mut decision);
         });
     if !open && decision.is_none() {
         decision = Some(UnsavedDecision::Cancel);
@@ -988,37 +989,76 @@ fn dialog_contents(
     save_error: Option<&String>,
     decision: &mut Option<UnsavedDecision>,
 ) {
-    ui.add(egui::Label::new(
-        egui::RichText::new("Guardar cambios antes de continuar?")
-            .size(16.0)
-            .strong(),
-    ));
-    ui.add_space(6.0);
-    ui.add(egui::Label::new(egui::RichText::new(action.prompt_message()).size(13.0)).wrap());
-    if let Some(error) = save_error {
-        ui.add_space(6.0);
-        ui.colored_label(
-            current_theme(ui.ctx()).danger,
-            format!("No se pudo guardar: {error}"),
-        );
-    }
-    ui.add_space(14.0);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), 30.0),
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            if ui.button("Guardar").clicked() {
-                *decision = Some(UnsavedDecision::Save);
-            }
-            if ui.button("Descartar").clicked() {
-                *decision = Some(UnsavedDecision::Discard);
-            }
-            if ui.button("Cancelar").clicked() {
-                *decision = Some(UnsavedDecision::Cancel);
-            }
-        },
-    );
+    let theme = current_theme(ui.ctx());
+    // Scandinavian: centered chapter, 24 outer, 16 between, single concise body — no duplicate subtitle
+    egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(SPACE_LG, SPACE_MD))
+        .show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(SPACE_XS);
+                // Single body — prompt_message already contains the specific action (New/Open/Exit)
+                ui.label(
+                    egui::RichText::new(action.prompt_message())
+                        .size(TYPE_SM)
+                        .color(theme.text_primary),
+                );
+                if let Some(error) = save_error {
+                    ui.add_space(SPACE_SM);
+                    ui.label(
+                        egui::RichText::new(format!("No se pudo guardar: {error}"))
+                            .size(TYPE_XS)
+                            .color(theme.danger),
+                    );
+                }
+                ui.add_space(SPACE_LG);
+                // Buttons — centered group, primary Guardar with accent, others quiet
+                ui.horizontal(|ui| {
+                    let total_w = 3.0 * 88.0 + 2.0 * SPACE_SM;
+                    let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                    ui.add_space(pad);
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    // Cancelar — ghost
+                    let cancel = egui::Button::new(
+                        egui::RichText::new("Cancelar")
+                            .size(TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(egui::Rounding::same(RADIUS_MD))
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(88.0, 32.0), cancel).clicked() {
+                        *decision = Some(UnsavedDecision::Cancel);
+                    }
+                    // Descartar — muted, hover danger via text color only (no extra fill)
+                    let discard = egui::Button::new(
+                        egui::RichText::new("Descartar")
+                            .size(TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(egui::Rounding::same(RADIUS_MD))
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(88.0, 32.0), discard).clicked() {
+                        *decision = Some(UnsavedDecision::Discard);
+                    }
+                    // Guardar — primary accent
+                    let save = egui::Button::new(
+                        egui::RichText::new("Guardar")
+                            .size(TYPE_SM)
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .rounding(egui::Rounding::same(RADIUS_MD))
+                    .fill(theme.accent)
+                    .stroke(egui::Stroke::NONE);
+                    if ui.add_sized(egui::vec2(88.0, 32.0), save).clicked() {
+                        *decision = Some(UnsavedDecision::Save);
+                    }
+                    ui.add_space(pad);
+                });
+                ui.add_space(SPACE_XS);
+            });
+        });
 }
 
 fn draw_autocomplete_popup(

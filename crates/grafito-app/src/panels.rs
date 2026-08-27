@@ -951,7 +951,7 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     // Panel CAS — Scandinavian quiet: secciones calm con disclosure progresivo
     egui::SidePanel::left("cas_panel")
-        .show_separator_line(true)
+        .show_separator_line(false)
         .default_width(260.0)
         .min_width(180.0)
         .max_width((ctx.available_rect().width() * 0.45).max(200.0))
@@ -1037,46 +1037,42 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                             ui.add_space(SPACE_MD);
 
-                            // Entrada — Scandinavian clean, centered, compact 32h
+                            // Entrada destacada — frame input_bg + RADIUS_LG + borde 10% black
                             egui::Frame::none()
                                 .fill(theme.input_bg)
                                 .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
                                 .rounding(egui::Rounding::same(RADIUS_LG))
-                                .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+                                .inner_margin(egui::Margin::same(SPACE_MD))
                                 .show(ui, |ui| {
-                                    ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Entrada")
-                                                .color(theme.text_tertiary)
-                                                .size(TYPE_XS)
-                                                .strong(),
-                                        );
-                                        ui.add_space(SPACE_XS);
-                                        ui.horizontal(|ui| {
-                                            let available = ui.available_width();
-                                            let input_w = (available - 36.0).clamp(120.0, 200.0);
-                                            let pad = ((available - input_w - 32.0) / 2.0).max(0.0);
-                                            ui.add_space(pad);
+                                    ui.label(
+                                        egui::RichText::new("Entrada CAS")
+                                            .color(theme.text_secondary)
+                                            .size(TYPE_SM)
+                                            .strong(),
+                                    );
+                                    ui.add_space(SPACE_XS);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
                                             let mut execute_cas = false;
-                                            let response = crate::ui::draw_command_input(
-                                                ui,
-                                                app,
-                                                "cas_panel",
-                                                [input_w, 28.0],
-                                                "x^2, x",
-                                                true,
-                                            );
-                                            ui.add_space(SPACE_XS);
                                             if action_icon_button(
                                                 ui,
                                                 Icon::Play,
                                                 accent,
-                                                "Ejecutar",
+                                                "Ejecutar entrada CAS",
                                             )
                                             .clicked()
                                             {
                                                 execute_cas = true;
                                             }
+                                            let response = crate::ui::draw_command_input(
+                                                ui,
+                                                app,
+                                                "cas_panel",
+                                                [ui.available_width(), 24.0],
+                                                "x^2, x",
+                                                true,
+                                            );
                                             if response.submitted {
                                                 execute_cas = true;
                                             }
@@ -1084,15 +1080,16 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 let time = ui.ctx().input(|i| i.time);
                                                 app.submit_cas_worksheet_cell(time);
                                             }
-                                            ui.add_space(pad);
-                                        });
-                                        ui.add_space(SPACE_XS);
-                                        ui.label(
-                                            egui::RichText::new("↵ ejecutar  •  Tab completar")
-                                                .color(txt_dim)
-                                                .size(TYPE_XS),
-                                        );
-                                    });
+                                        },
+                                    );
+                                    ui.add_space(SPACE_XS);
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Enter para ejecutar • Tab para autocompletar",
+                                        )
+                                        .color(txt_dim)
+                                        .size(TYPE_XS),
+                                    );
                                 });
                             ui.add_space(SPACE_MD);
 
@@ -1194,7 +1191,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let accent = theme.accent;
 
     egui::SidePanel::left("view_panel")
-        .show_separator_line(true)
+        .show_separator_line(false)
         .default_width(260.0)
         .min_width(180.0)
         .max_width((ctx.available_rect().width() * 0.45).max(240.0))
@@ -1202,7 +1199,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator)),
+                .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
             ui.add_space(SPACE_LG);
