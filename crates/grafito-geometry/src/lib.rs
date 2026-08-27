@@ -1,3 +1,4 @@
+#![allow(unknown_lints, float_literal_f32_fallback)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(clippy::uninlined_format_args)]
 //! Grafito Geometry — Primitivas matemáticas y geometría computacional.

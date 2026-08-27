@@ -1,6 +1,6 @@
 //! Orquestación agéntica super compleja para generación de animaciones manim 3b1b.
 //!
-//! Integra https://github.com/3b1b/manim y https://github.com/3b1b/videos
+//! Integra <https://github.com/3b1b/manim> y <https://github.com/3b1b/videos>
 //! mediante `grafito-anim` (worker Python). Arquitectura multi-agente:
 //!
 //! - Planner: descompone el concepto en escenas

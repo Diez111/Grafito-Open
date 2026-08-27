@@ -991,7 +991,7 @@ impl AssistantRequest {
         if !self.conversation.len().is_multiple_of(2) {
             return Err("assistant conversation must contain complete exchanges".into());
         }
-        for pair in self.conversation.chunks_exact(2) {
+        for pair in self.conversation.as_chunks::<2>().0 {
             if !matches!(pair[0].role, ConversationRole::User)
                 || !matches!(pair[1].role, ConversationRole::Assistant)
             {

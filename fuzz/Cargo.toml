@@ -12,7 +12,7 @@ cargo-fuzz = true
 members = ["."]
 
 [workspace.package]
-version = "1.2.33-beta"
+version = "1.0.0"
 
 [dependencies]
 grafito-command = { path = "../crates/grafito-command" }

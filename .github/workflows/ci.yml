@@ -332,9 +332,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@7f38b68c3b1ad3c2c6cc1fef6122a3391ff2f8c81 # v1.7.7
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - name: Lint GitHub Actions workflows
-        run: "${RUNNER_TEMP}/bin/actionlint"
+        run: ${{ runner.temp }}/bin/actionlint
       - name: Parse and lint package scripts
         run: |
           bash -n packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh

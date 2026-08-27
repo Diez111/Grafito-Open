@@ -42,7 +42,7 @@ impl BktParams {
         Ok(candidate)
     }
 
-    /// Valida que cada parámetro esté en [0,1] y que guess/slip no sean degenerados.
+    /// Valida que cada parámetro esté en \[0,1\] y que guess/slip no sean degenerados.
     pub fn validate(&self) -> Result<(), String> {
         for (name, value) in [
             ("p_init", self.p_init),

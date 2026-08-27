@@ -1,3 +1,4 @@
+#![allow(unknown_lints, float_literal_f32_fallback)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(deprecated)]
 //! Grafito Core — Modelo de documento, objetos geométricos y restricciones.

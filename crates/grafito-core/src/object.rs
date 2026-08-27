@@ -2132,7 +2132,7 @@ impl BezierCurveObj {
         self
     }
 
-    /// Evalúa la curva de Bézier en t ∈ [0,1] usando De Casteljau.
+    /// Evalúa la curva de Bézier en t ∈ \[0,1\] usando De Casteljau.
     pub fn point_at(&self, t: f64) -> Option<Point2> {
         bezier_point(&self.control_points, t)
     }

@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    unknown_lints,
+    float_literal_f32_fallback,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
 //! Núcleo agentico de Grafito.
 //!
 //! Provee el contrato de herramientas (schema), el enrutamiento de modelos por

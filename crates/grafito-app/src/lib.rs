@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    unknown_lints,
+    float_literal_f32_fallback,
+    clippy::unwrap_used,
+    clippy::expect_used
+)]
 #![allow(deprecated)]
 #![allow(clippy::uninlined_format_args)]
 //! Aplicación de escritorio Grafito — raíz de módulos.
