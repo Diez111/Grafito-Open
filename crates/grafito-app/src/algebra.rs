@@ -439,17 +439,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
                         // Center the + and input
-                        let available = ui.available_width();
-                        let input_w = (available - 24.0).clamp(120.0, 180.0);
-                        let pad = ((available - input_w - 20.0) / 2.0).max(0.0);
-                        ui.add_space(pad);
                         ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
                         ui.add_space(SPACE_XS);
                         let response = crate::ui::draw_command_input(
                             ui,
                             app,
                             "algebra_panel",
-                            [input_w, 28.0],
+                            [180.0, 32.0],
                             "Añadir…",
                             false,
                     );

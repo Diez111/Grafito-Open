@@ -1037,42 +1037,44 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                             ui.add_space(SPACE_MD);
 
-                            // Entrada destacada — frame input_bg + RADIUS_LG + borde 10% black
-                            egui::Frame::none()
-                                .fill(theme.input_bg)
-                                .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
-                                .rounding(egui::Rounding::same(RADIUS_LG))
-                                .inner_margin(egui::Margin::same(SPACE_MD))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new("Entrada CAS")
-                                            .color(theme.text_secondary)
-                                            .size(TYPE_SM)
-                                            .strong(),
-                                    );
-                                    ui.add_space(SPACE_XS);
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
+                            // Entrada — Scandinavian centered, compact, 32h
+                            ui.vertical_centered(|ui| {
+                                egui::Frame::none()
+                                    .fill(theme.input_bg)
+                                    .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
+                                    .rounding(egui::Rounding::same(RADIUS_LG))
+                                    .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(260.0);
+                                        ui.label(
+                                            egui::RichText::new("Entrada")
+                                                .color(theme.text_tertiary)
+                                                .size(TYPE_XS)
+                                                .strong(),
+                                        );
+                                        ui.add_space(SPACE_XS);
+                                        ui.horizontal(|ui| {
                                             let mut execute_cas = false;
+                                            // Input centered, max 200, height 32
+                                            let response = crate::ui::draw_command_input(
+                                                ui,
+                                                app,
+                                                "cas_panel",
+                                                [200.0, 32.0],
+                                                "x^2, x",
+                                                true,
+                                            );
+                                            ui.add_space(SPACE_XS);
                                             if action_icon_button(
                                                 ui,
                                                 Icon::Play,
                                                 accent,
-                                                "Ejecutar entrada CAS",
+                                                "Ejecutar",
                                             )
                                             .clicked()
                                             {
                                                 execute_cas = true;
                                             }
-                                            let response = crate::ui::draw_command_input(
-                                                ui,
-                                                app,
-                                                "cas_panel",
-                                                [ui.available_width(), 24.0],
-                                                "x^2, x",
-                                                true,
-                                            );
                                             if response.submitted {
                                                 execute_cas = true;
                                             }
@@ -1080,17 +1082,15 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                                 let time = ui.ctx().input(|i| i.time);
                                                 app.submit_cas_worksheet_cell(time);
                                             }
-                                        },
-                                    );
-                                    ui.add_space(SPACE_XS);
-                                    ui.label(
-                                        egui::RichText::new(
-                                            "Enter para ejecutar • Tab para autocompletar",
-                                        )
-                                        .color(txt_dim)
-                                        .size(TYPE_XS),
-                                    );
-                                });
+                                        });
+                                        ui.add_space(SPACE_XS);
+                                        ui.label(
+                                            egui::RichText::new("↵  •  Tab")
+                                                .color(txt_dim)
+                                                .size(TYPE_XS),
+                                        );
+                                    });
+                            });
                             ui.add_space(SPACE_MD);
 
                             // Hoja de trabajo — empty state sutil y celdas con estados
