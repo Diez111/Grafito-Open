@@ -7,7 +7,8 @@ use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
-    RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_SM, SPACE_XS, TYPE_MD, TYPE_SM, TYPE_XS,
+    RADIUS_LG, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_MD, TYPE_SM,
+    TYPE_XS,
 };
 
 pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 = egui::Vec2::new(28.0, 24.0);
@@ -431,19 +432,24 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
         // donde el usuario espera tipear.
         egui::Frame::none()
             .fill(theme.input_bg)
-            .inner_margin(egui::Margin { left: SPACE_SM, right: SPACE_SM, top: SPACE_SM, bottom: SPACE_SM })
+            .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
+            .rounding(egui::Rounding::same(RADIUS_LG))
+            .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
-                    ui.add_space(SPACE_XS);
-                    let response = crate::ui::draw_command_input(
-                        ui,
-                        app,
-                        "algebra_panel",
-                        [ui.available_width(), 22.0],
-                        "Entrada...",
-                        false,
-                    );
+                ui.vertical_centered(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
+                        ui.add_space(SPACE_XS);
+                        let available = ui.available_width();
+                        let input_w = (available - 24.0).clamp(100.0, 180.0);
+                        let response = crate::ui::draw_command_input(
+                            ui,
+                            app,
+                            "algebra_panel",
+                            [input_w, 28.0],
+                            "Añadir…",
+                            false,
+                        );
                     if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }
@@ -454,6 +460,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         let time = ui.ctx().input(|i| i.time);
                         app.submit_input_text(time);
                     }
+                    });
                 });
             });
         ui.add_space(SPACE_SM);
@@ -700,8 +707,13 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     }
                                     ui.add_space(5.0);
 
-                                    let txt = if !obj_expr.is_empty() {
-                                        format!("{}: {}", obj_label, obj_expr)
+                                    let short_expr = if obj_expr.chars().count() > 18 {
+                                        format!("{}…", obj_expr.chars().take(18).collect::<String>())
+                                    } else {
+                                        obj_expr.clone()
+                                    };
+                                    let txt = if !short_expr.is_empty() {
+                                        format!("{}: {}", obj_label, short_expr)
                                     } else {
                                         format!("{}: {}", obj_label, obj_name)
                                     };
