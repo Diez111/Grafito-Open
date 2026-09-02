@@ -8,7 +8,7 @@ use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
     ICON_SM, ICON_XL, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_SM,
-    SPACE_LG, SPACE_SM, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+    SPACE_LG, SPACE_SM, SPACE_XL, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
 
 pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 =

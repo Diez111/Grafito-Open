@@ -14797,21 +14797,20 @@ fn run_double_integral_command(
         return CommandOutcome::Error("DoubleIntegral: intervalo exterior degenerado".into());
     }
 
-    let fx_expr;
-    let fy_expr;
-    if surface_area {
-        fx_expr = match symbolic_partial(&expr, &x_var) {
-            Ok(d) => d,
-            Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
-        };
-        fy_expr = match symbolic_partial(&expr, &y_var) {
-            Ok(d) => d,
-            Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
-        };
+    let (fx_expr, fy_expr) = if surface_area {
+        (
+            match symbolic_partial(&expr, &x_var) {
+                Ok(d) => d,
+                Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+            },
+            match symbolic_partial(&expr, &y_var) {
+                Ok(d) => d,
+                Err(e) => return CommandOutcome::Error(format!("SurfaceArea: {e}")),
+            },
+        )
     } else {
-        fx_expr = String::new();
-        fy_expr = String::new();
-    }
+        (String::new(), String::new())
+    };
 
     // Validación previa de singularidad interior: intervalar + muestreo 3x3
     // Mantiene presupuesto n=80 sin romper API; retorna DomainError similar a 1D.

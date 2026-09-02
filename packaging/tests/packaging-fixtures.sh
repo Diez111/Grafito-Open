@@ -124,7 +124,7 @@ for icon_size in 16 32 48 64 128 256 512; do
         echo "missing icon asset grafito-icon-${icon_size}x${icon_size}.png" >&2
         exit 1
     }
-    grep -Fq 'grafito-icon-${size}x${size}.png' "$build_deb" || {
+    grep -Fq "grafito-icon-${icon_size}x${icon_size}.png" "$build_deb" || {
         echo "build-deb.sh does not stage the ${icon_size}x${icon_size} icon" >&2
         exit 1
     }

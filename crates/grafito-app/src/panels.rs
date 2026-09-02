@@ -11,8 +11,8 @@ use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     CARD_SPACING, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_LG,
-    RADIUS_MD, RADIUS_PILL, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD,
-    TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+    RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG,
+    TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
 use std::collections::VecDeque;
 use std::fs::File;
