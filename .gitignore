@@ -14,7 +14,8 @@ target/
 .opencode/
 .commandcode/
 .megamemory/
-AGENTS.md
+# AGENTS.md is required for CI MSRV check (1.88) — do not ignore
+# AGENTS.md
 GPUCache/
 crash_log.txt
 graphify-out/
