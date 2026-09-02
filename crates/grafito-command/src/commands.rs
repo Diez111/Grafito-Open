@@ -11963,7 +11963,7 @@ fn try_intersect_3d_via_generic(
     document: &mut Document,
     a: &GeoObject,
     b: &GeoObject,
-    _input_text: &mut String,
+    _input_text: &mut str,
 ) -> Option<CommandOutcome> {
     // Plano-Esfera en cualquier orden.
     if let Some(o) = try_plane_sphere_intersection(document, a, b, "Intersect") {
@@ -12155,7 +12155,7 @@ fn run_prism_vector_command(
 fn run_net_command(
     document: &mut Document,
     args: &[String],
-    _input_text: &mut String,
+    _input_text: &mut str,
 ) -> CommandOutcome {
     let label = args[0].trim().trim_matches('"').trim_matches('\'');
     let Some(id) = find_object_by_label(document, label) else {

@@ -95,6 +95,7 @@ keyring = { version = "3.6.2", default-features = false, features = ["apple-nati
 [profile.release]
 opt-level = 3
 lto = "thin"
+strip = true
 
 [profile.dev]
 opt-level = 1
