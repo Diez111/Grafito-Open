@@ -22,7 +22,9 @@ pub(crate) fn pack_complex_constants(constants: &[f64]) -> Option<Vec<[f32; 2]>>
     }
 
     constants
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let re = pair[0] as f32;
             let im = pair[1] as f32;

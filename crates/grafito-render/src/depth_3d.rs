@@ -1831,10 +1831,7 @@ fn sort_non_depth_writing_triangles(mesh: &mut WorldMesh, camera: &Camera3D) {
         return;
     }
     let view = camera.view_matrix();
-    for triangle in mesh.wire_indices.chunks_exact(3) {
-        let &[a, b, c] = triangle else {
-            return;
-        };
+    for &[a, b, c] in mesh.wire_indices.as_chunks::<3>().0 {
         let (Some(a_vertex), Some(b_vertex), Some(c_vertex)) = (
             mesh.wire_vertices.get(a as usize),
             mesh.wire_vertices.get(b as usize),

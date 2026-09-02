@@ -490,7 +490,9 @@ impl ParametricComputePipeline {
 
         Some(
             values
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| {
                     let x = if c[0].is_finite() {
                         c[0] as f64
@@ -570,7 +572,9 @@ impl ParametricComputePipeline {
 
         Some(
             values
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| {
                     let x = if c[0].is_finite() {
                         c[0] as f64
@@ -638,7 +642,9 @@ impl ParametricComputePipeline {
 
         Some(
             values
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| {
                     let x = if c[0].is_finite() {
                         c[0] as f64
