@@ -179,6 +179,15 @@ pub struct ThinkingOrb {
     size: f32,
 }
 
+/// Intervalo de repintado del orb de pensamiento (F17).
+///
+/// Este widget vive en `grafito-ui` (capa Piel) y no puede alcanzar
+/// `GrafitoApp::request_repaint_budget` (DAG: `ui → app`). Mientras el
+/// asistente está pendiente, el scheduler unificado de `app.rs` ya repinta a
+/// 16ms (`assistant.is_pending`), subsumiendo este pedido; se mantiene como
+/// fallback para uso standalone del widget.
+pub const THINKING_ORB_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ThinkingOrbSample {
     x: f32,
@@ -229,7 +238,9 @@ impl ThinkingOrb {
                 painter.circle_filled(sample_center, 1.0, with_alpha(accent, 0));
             }
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(50));
+        // F17: subsumido por el scheduler de app.rs (16ms) cuando is_pending.
+        ui.ctx()
+            .request_repaint_after(THINKING_ORB_REPAINT_INTERVAL);
         response
     }
 

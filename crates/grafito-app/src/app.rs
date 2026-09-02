@@ -2,6 +2,13 @@
 //!
 //! Holds `GrafitoApp`, its constructor, file/undo helpers, and the top-level
 //! `eframe::App::update` loop that dispatches rendering to focused UI modules.
+//!
+//! # Presupuestos de rendimiento (Piel)
+//! - Tessellation egui: 1-2 ms/frame con 10K vértices (feature `egui/rayon`,
+//!   epaint/rayon, ver `Cargo.toml` workspace). Medir con `--features profile`
+//!   + `puffin_viewer 127.0.0.1:8585` antes de optimizar.
+//! - GPU compute: `domain_coloring_compute` 500×500 = 250k cells en un único
+//!   dispatch wgpu (grafito-render). CPU submit << GPU time ⇒ GPU-bound.
 
 use crate::utils::{load_config, save_config, AppConfig};
 use crate::{Perspective, ViewMode};
@@ -20,10 +27,16 @@ use std::time::{Duration, Instant};
 
 use grafito_command::commands::{register_gpu_function_evaluator, GpuFunctionEvaluator};
 
+/// Máximo de entradas de undo. Usa `VecDeque<Document>` con `pop_front` O(1)
+/// (antes `Vec` con `remove(0)` O(n) shift). Ver `push_history_snapshot` y
+/// `crate::controllers::DocumentController` para la evolución con contador.
 const MAX_UNDO: usize = 50;
-/// Presupuesto global de memoria para undo: 50 MB. Aunque `MAX_UNDO=50` ya es `VecDeque`,
-/// cada `Document` clonado puede pesar hasta ~10 MB (5000 objetos × 200 KB), por lo que
-/// 50 entradas = 500 MB. Este presupuesto corta la cola cuando el total estimado supera 50 MB.
+/// Presupuesto global de memoria para undo: 50 MB. Aunque `MAX_UNDO=50` ya es
+/// `VecDeque` O(1) `pop_front`, cada `Document` clonado puede pesar hasta
+/// ~10 MB (5000 objetos × 200 KB ⇒ `Document::estimated_bytes()`), por lo que
+/// 50 entradas sin cota = 500 MB. Este presupuesto corta la cola cuando el
+/// total estimado supera 50 MB. Ver `Document::estimated_bytes()` para la
+/// estimación `max(object_count*200KiB, json_len, 8KiB)`.
 const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
 const TRIG_GRAPH_LABEL: &str = "TrigGraph";
 const TRIG_VALUE_LABEL: &str = "TrigValue";
@@ -35,19 +48,77 @@ pub(crate) const MIN_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 0.25;
 pub(crate) const DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 1.0;
 pub(crate) const MAX_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 2.0;
 
+// ── F17 Repaint coalesce ─────────────────────────────────────────────────────
+// El scheduler unificado de `GrafitoApp::update` (ver `update`) es la única
+// fuente de `ctx.request_repaint_after` para el estado global (animating /
+// warmup / busy). Los widgets periféricos NO deben llamar
+// `ctx.request_repaint_after` directamente: deben pedir vía
+// `GrafitoApp::request_repaint_budget` para que `RepaintBudget` acumule la
+// necesidad mínima del frame y el scheduler la aplique una sola vez al final.
+//
+// Inventario F17 — fuentes de wake extra (todas coalescidas por el presupuesto):
+//   1. whiteboard_ui.rs:482   — 16ms  pointer/touch down (canvas pizarra)
+//   2. whiteboard_ui.rs:1188  — 16ms busy / 100ms idle (scheduler pizarra)
+//   3. teaching_ui.rs:1021    — 80ms  playback animación nativa (12fps)
+//   4. teaching_ui.rs:1057    — 48ms  pulso "Generando animación"
+//   5. grafito-ui/animation.rs:232  — 50ms orb de pensamiento (fallback standalone)
+//   6. grafito-ui/assistant.rs:3748 — 48ms pulso "Generando animación…"
+//   7. grafito-ui/assistant.rs:3800 — 40ms playback media card (GIF-like)
+//   8. app.rs:4176            — 33ms motion multidimensional (redundante con scheduler)
+// Las fuentes 5-7 viven en `grafito-ui` (capa Piel, DAG `ui → app`) y no pueden
+// alcanzar `GrafitoApp`; se mantienen como fallback local con constantes
+// nombradas y quedan subsumidas por el scheduler cuando `assistant.is_pending`
+// (el scheduler ya repinta a 16ms en ese caso).
+// TODO(F17): si `whiteboard` idle 100ms solo alimenta `ctx.animate_bool` de la
+// paleta, egui ya repinta automáticamente durante animaciones → se puede quitar.
+
+/// Presupuesto de repintado coalescido por frame (F17).
+///
+/// Acumula la necesidad mínima de repintado de los widgets del frame y la
+/// aplica una sola vez al final (`apply`). El intervalo más corto gana; el
+/// resto se descarta. egui ya coalesce múltiples `request_repaint_after` al
+/// mínimo, pero centralizar la política evita intervalos arbitrarios
+/// dispersos (16/40/48/50/80/100ms) y deja una única ruta documentada:
+/// `GrafitoApp::request_repaint_budget`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RepaintBudget {
+    needed: Option<Duration>,
+}
+
+impl RepaintBudget {
+    /// Pide repintado periódico con `delay`; conserva el mínimo acumulado.
+    pub(crate) fn request(&mut self, delay: Duration) {
+        self.needed = Some(match self.needed {
+            Some(current) => current.min(delay),
+            None => delay,
+        });
+    }
+
+    /// Aplica el presupuesto acumulado a `ctx` (una sola llamada por frame).
+    pub(crate) fn apply(self, ctx: &egui::Context) {
+        if let Some(delay) = self.needed {
+            if delay.is_zero() {
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(delay);
+            }
+        }
+    }
+}
+
 // ── F5 Scandinavian progressive disclosure — toolbar filtrado por nivel ──
-// Sin laberinto: Primary (level_value 0..=4) → 5 grupos compactos
-// [Move, Point, Line, Circle, Polygon]; Secondary (5..=10) → 8 (añade Pencil, Measure, Analysis);
-// University (11+) → todos (Constraint, Boolean, Advanced, Dynamics, ThreeD…).
+// Sin laberinto: Primary (level_value `0..=PRIMARY_MAX`=`4`) → 5 grupos compactos
+// [Move, Point, Line, Circle, Polygon]; Secondary (`5..=10`) → 8 (añade Pencil, Measure, Analysis);
+// University (`11+`) → todos (Constraint, Boolean, Advanced, Dynamics, ThreeD…).
 // Helper ligero vía `grafito_ui::toolbar::toolbar_groups_for_level_value(level_value)` o
 // tipado `toolbar_groups_for_level(PedagogicalLevel)` sin romper API existente.
+// Usa constantes `TOOLBAR_LEVEL_PRIMARY_MAX`/`SECONDARY_MAX` para evitar magia 4/10.
 // Uso: `toolbar_groups_for_level_filtered(perspective.layout().visible_tool_groups, self.profile.level)`
-// Si level_value <5, fuerza compact set aunque la perspectiva pida más — evita sobrecarga en primaria.
+// Si `level_value <= PRIMARY_MAX` fuerza compact set aunque la perspectiva pida más.
 
 /// Filtra los grupos visibles de la perspectiva por nivel pedagógico (progressive disclosure).
-/// Si `level_value <5` usa compact set (5), si <11 usa secondary (8), else university (todos).
+/// Usa `TOOLBAR_LEVEL_PRIMARY_MAX` (4) y `SECONDARY_MAX` (10) vía `filter_groups_by_level`.
 /// Intersecta con `perspective_groups` para respetar la perspectiva y no añadir grupos extra.
-#[allow(dead_code)]
 pub(crate) fn toolbar_groups_for_level_filtered(
     perspective_groups: &[grafito_ui::toolbar::ToolGroupId],
     level_value: u32,
@@ -56,7 +127,6 @@ pub(crate) fn toolbar_groups_for_level_filtered(
 }
 
 /// Variante tipada que acepta `PedagogicalLevel` directamente (convierte vía `level_value()`).
-#[allow(dead_code)]
 pub(crate) fn toolbar_groups_for_pedagogical_level(
     perspective_groups: &[grafito_ui::toolbar::ToolGroupId],
     level: grafito_pedagogy::PedagogicalLevel,
@@ -379,17 +449,29 @@ pub(crate) fn free_point_position_differs(
         )
 }
 
+/// Delegado fino a `Document::estimated_bytes()` (`max(object_count*200KiB, json_len, 8KiB)`).
+/// Mantiene compatibilidad con call-sites heredados; el presupuesto real vive en `Document`.
+/// `DocumentController` (controllers.rs) mantiene `undo_total_bytes` como running
+/// counter O(1) — este shim sólo se usa en `push_history_snapshot` (GrafitoApp).
 fn document_bytes_approx(doc: &Document) -> usize {
-    // Estimación conservadora: 200 KB por objeto (incluye geometría, caché y metadatos).
-    // Se intenta además serializar a JSON para no subestimar documentos con pocos
-    // objetos pero mucho texto (variables, spreadsheet, worksheet). El mayor de ambos gana.
-    let by_objects = doc.object_count().saturating_mul(200 * 1024);
-    let by_json = serde_json::to_vec(doc)
-        .map(|bytes| bytes.len())
-        .unwrap_or(by_objects);
-    by_objects.max(by_json).max(8 * 1024)
+    doc.estimated_bytes()
 }
 
+/// Inserta un snapshot en el historial de undo y corta la cola por presupuesto.
+///
+/// - `VecDeque::pop_front` es O(1) (corrige el antiguo `Vec::remove(0)` O(n) shift).
+/// - Dos cotas: `MAX_UNDO = 50` entradas y `MAX_UNDO_BYTES = 50 MiB` totales estimados
+///   vía `Document::estimated_bytes()`. Evita 50×10 MiB = 500 MiB en iGPU/low-RAM.
+/// - Complejidad: push O(1) + evicción O(k) pops. El cálculo de `total_bytes`
+///   itera O(n) con n≤50 (bounded) y `estimated_bytes()` ya es `max(200KiB*objs, json)`,
+///   por lo que una sola pasada basta (antes había dos: json + object_count).
+/// - `total_bytes` es un running counter O(1) en `DocumentController::undo_total_bytes`
+///   (controllers.rs): se actualiza con `saturating_add`/`saturating_sub` por push/pop
+///   sin escanear la deque. Este shim recalcula O(n≤50) sólo porque `GrafitoApp` aún
+///   no migró a `DocumentController` (ver TODO AG10).
+/// - TODO AG10: migrar a `crate::controllers::DocumentController::push_snapshot` que
+///   mantiene `undo_total_bytes: usize` running counter O(1) sin escanear la deque
+///   en cada push (ver `controllers.rs`). Esta función queda como shim para `GrafitoApp`.
 fn push_history_snapshot(
     undo_stack: &mut VecDeque<Document>,
     redo_stack: &mut VecDeque<ChangeSet>,
@@ -397,12 +479,15 @@ fn push_history_snapshot(
 ) {
     undo_stack.push_back(snapshot);
     redo_stack.clear();
-    // Límite por número de entradas.
+    // Cota por número de entradas — pop_front O(1) con VecDeque.
     while undo_stack.len() > MAX_UNDO {
         undo_stack.pop_front();
     }
-    // Límite por bytes totales estimados. Evita 10 MB × 50 = 500 MB en iGPU / low-RAM.
-    // Presupuesto: MAX_UNDO_BYTES = 50 MB; si se supera, se descartan las entradas más antiguas.
+    // Cota por bytes totales estimados — una sola pasada con Document::estimated_bytes().
+    // Antes: serde_json::to_vec por entrada (~5-10 MB) + segundo scan por object_count;
+    // ahora: estimated_bytes() = max(object_count*200KiB, json_len, 8KiB) en una iteración.
+    // n≤50 ⇒ scan O(50) despreciable frente a clonar Document; el running counter
+    // O(1) queda para DocumentController.
     let mut total_bytes: usize = undo_stack
         .iter()
         .map(document_bytes_approx)
@@ -410,21 +495,6 @@ fn push_history_snapshot(
     while total_bytes > MAX_UNDO_BYTES && undo_stack.len() > 1 {
         if let Some(front) = undo_stack.pop_front() {
             total_bytes = total_bytes.saturating_sub(document_bytes_approx(&front));
-        } else {
-            break;
-        }
-    }
-    // Fallback por si un único documento ya excede el presupuesto pero hay muchas entradas pequeñas:
-    // también se evicta por object_count*200KB como criterio independiente.
-    let object_budget_bytes = MAX_UNDO_BYTES;
-    let mut object_based_bytes: usize = undo_stack
-        .iter()
-        .map(|doc| doc.object_count().saturating_mul(200 * 1024))
-        .fold(0usize, |acc, bytes| acc.saturating_add(bytes));
-    while object_based_bytes > object_budget_bytes && undo_stack.len() > 1 {
-        if let Some(front) = undo_stack.pop_front() {
-            let front_bytes = front.object_count().saturating_mul(200 * 1024);
-            object_based_bytes = object_based_bytes.saturating_sub(front_bytes);
         } else {
             break;
         }
@@ -903,13 +973,35 @@ pub(crate) struct ActiveColorPicker {
     pub(crate) picker: grafito_ui::color_picker::HsvColorPicker,
 }
 
-// TODO: extraer DocumentController, ViewController, AssistantController como módulos delegados (ver crate::controllers)
+/// `GrafitoApp` es el compositor (God Object en migración): orquesta Piel ↔ Cerebro.
+///
+/// Descomposición incremental hacia `crate::controllers`:
+///
+/// - `DocumentController` — document + undo/redo + lifecycle (ya con `Document::estimated_bytes()` y running counter)
+/// - `ViewController` — camera/perspective/view (cache derivado)
+/// - `AssistantController` — assistant state + runtime
+///
+/// `GrafitoApp` conserva campos directos para compatibilidad pero delega lógica
+/// nueva a `controllers` cuando existe.
 pub struct GrafitoApp {
     pub document: Document,
     pub current_tool: Tool,
     pub previous_tool: Tool,
+    /// Cache derivado de `perspective.view_mode()` — **no es fuente independiente**.
+    ///
+    /// Fuente canónica: [`Perspective`]. Este campo es un cache para evitar
+    /// recomputar `view_mode()` en cada frame y se mantiene sincronizado
+    /// exclusivamente vía [`GrafitoApp::set_perspective`] /
+    /// [`GrafitoApp::sync_current_view`]. Invariante:
+    /// `debug_assert_eq!(current_view, perspective.view_mode())`.
+    /// No asignar `current_view` directamente fuera de `set_perspective` /
+    /// `sync_current_view`.
     pub current_view: ViewMode,
-    /// Perspectiva activa (estilo GeoGebra). `current_view` se deriva de ésta.
+    /// Perspectiva activa (estilo GeoGebra) — **fuente canónica única**.
+    ///
+    /// [`Perspective::canvas_mode`] y [`Perspective::view_mode`] derivan
+    /// [`crate::CanvasMode`] y [`crate::ViewMode`]. `current_view` y cualquier
+    /// uso de `CanvasMode` deben derivarse de aquí. Ver `set_perspective`.
     pub perspective: Perspective,
     pub camera: Camera3D,
     pub show_grid: bool,
@@ -984,7 +1076,12 @@ pub struct GrafitoApp {
     pub show_whiteboard_assistant: bool,
     /// Memoria pedagógica del usuario (nivel, ramas, exámenes) del tutor.
     pub profile: grafito_profile::StudentProfile,
+    /// Historial de undo acotado `MAX_UNDO=50` y `MAX_UNDO_BYTES=50MiB`.
+    /// Usa `VecDeque<Document>` con `pop_front` O(1) (corrige `Vec` O(n) shift).
+    /// Presupuesto vía `Document::estimated_bytes()`; ver `push_history_snapshot`.
+    /// Evolución running counter O(1) en `crate::controllers::DocumentController`.
     pub undo_stack: VecDeque<Document>,
+    /// Historial de redo; limpiado en cada `push_history_snapshot`.
     pub redo_stack: VecDeque<ChangeSet>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
@@ -1074,6 +1171,11 @@ pub struct GrafitoApp {
     pub config_name_error: Option<String>,
     /// Enseñanza paso a paso — burbujas, pizarra y manim.
     pub teaching_ui: crate::teaching_ui::TeachingUiState,
+    /// Presupuesto de repintado coalescido del frame (F17). Los widgets piden
+    /// vía [`GrafitoApp::request_repaint_budget`]; el scheduler unificado
+    /// aplica el mínimo al final del frame (`apply`). Se resetea al inicio de
+    /// cada `update`.
+    pub(crate) repaint_budget: RepaintBudget,
 }
 
 pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = false;
@@ -1198,6 +1300,7 @@ impl GrafitoApp {
     }
 
     pub(crate) fn set_trig_animation_visible(&mut self, visible: bool) {
+        self.assert_view_invariant();
         self.show_trig_animation = visible && trig_animation_supported(self.current_view);
         if self.show_trig_animation {
             self.right_drawer_open = true;
@@ -1465,12 +1568,18 @@ impl GrafitoApp {
         let profile = crate::utils::load_profile();
         let avatar_draft = profile.avatar.clone();
 
+        // `current_view` es cache derivado de `perspective` — fuente canónica
+        // `Perspective::view_mode()` / `Perspective::canvas_mode()`.
+        let perspective = Perspective::Geometry2D;
+        let current_view = perspective.view_mode();
+        debug_assert_eq!(current_view, ViewMode::D2);
+        debug_assert_eq!(perspective.canvas_mode(), crate::CanvasMode::D2);
         Self {
             document,
             current_tool: Tool::default(),
             previous_tool: Tool::default(),
-            current_view: ViewMode::D2,
-            perspective: Perspective::Geometry2D,
+            current_view,
+            perspective,
             camera: Camera3D::new(1280.0 / 720.0),
             show_grid: config.show_grid,
             snap_to_grid: config.snap_to_grid,
@@ -1579,7 +1688,25 @@ impl GrafitoApp {
             avatar_draft,
             config_name_error: None,
             teaching_ui: crate::teaching_ui::TeachingUiState::default(),
+            repaint_budget: RepaintBudget::default(),
         }
+    }
+
+    /// Ruta única para que los widgets pidan repintado periódico coalescido (F17).
+    ///
+    /// Los widgets de la Piel NO deben llamar `ctx.request_repaint_after`
+    /// directamente con intervalos arbitrarios: deben pasar por aquí para que
+    /// [`RepaintBudget`] acumule el mínimo del frame y el scheduler unificado
+    /// lo aplique una sola vez al final de `update`.
+    pub(crate) fn request_repaint_budget(&mut self, delay: Duration) {
+        self.repaint_budget.request(delay);
+    }
+
+    /// Aplica el presupuesto de repintado acumulado del frame (F17).
+    /// Lo invoca el scheduler unificado al final de `update` (y
+    /// `draw_whiteboard_overlay`, que hace early-return antes de ese punto).
+    pub(crate) fn apply_repaint_budget(&mut self, ctx: &egui::Context) {
+        self.repaint_budget.apply(ctx);
     }
 
     /// Persiste preferencias de interfaz; las claves del asistente viven sólo en el llavero.
@@ -1643,6 +1770,7 @@ impl GrafitoApp {
     }
 
     fn advance_multidimensional_motion(&mut self, dt: f64) -> bool {
+        self.assert_view_invariant();
         if !should_animate_multidimensional_scene(
             self.current_view,
             self.multidimensional_motion_enabled,
@@ -2436,11 +2564,58 @@ impl GrafitoApp {
         }
     }
 
+    /// Verifica el invariante `current_view == perspective.view_mode()`.
+    ///
+    /// `Perspective` es la fuente canónica; `current_view` es cache derivado.
+    /// Usar en `debug_assert!` al inicio de funciones que lean `current_view`.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn assert_view_invariant(&self) {
+        debug_assert_eq!(
+            self.current_view,
+            self.perspective.view_mode(),
+            "GrafitoApp invariant violated: current_view ({:?}) != perspective.view_mode() ({:?}) for {:?}",
+            self.current_view,
+            self.perspective.view_mode(),
+            self.perspective
+        );
+    }
+
+    /// Sincroniza el cache `current_view` desde la `perspective` canónica.
+    ///
+    /// Única vía para mutar `current_view` fuera de `set_perspective`. Mantiene
+    /// `current_view = perspective.view_mode()` y `CanvasMode` vía
+    /// `perspective.canvas_mode()` / `perspective.layout().canvas_mode`.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn sync_current_view(&mut self) {
+        self.current_view = self.perspective.view_mode();
+        debug_assert_eq!(
+            self.current_view,
+            self.perspective.view_mode(),
+            "sync_current_view post-condition failed"
+        );
+    }
+
     /// Cambia la perspectiva activa y sincroniza `current_view`, la herramienta
     /// por defecto y los paneles. La perspectiva es sólo una vista de trabajo:
     /// nunca debe borrar ni reemplazar el documento del usuario.
+    ///
+    /// `Perspective` es la fuente canónica; `current_view` se deriva
+    /// automáticamente vía `perspective.view_mode()` y `CanvasMode` vía
+    /// `perspective.canvas_mode()`. Esta es la única función que debe mutar
+    /// `perspective`; `current_view` nunca se asigna directamente fuera de aquí
+    /// (o `sync_current_view`). Garantiza
+    /// `debug_assert_eq!(current_view, perspective.view_mode())` al salir.
     pub(crate) fn set_perspective(&mut self, p: Perspective) {
         if self.perspective == p {
+            // Incluso si la perspectiva no cambia, el cache debe permanecer
+            // consistente (defensa contra mutaciones externas accidentales).
+            debug_assert_eq!(
+                self.current_view,
+                self.perspective.view_mode(),
+                "set_perspective early-return invariant violated"
+            );
             return;
         }
         // Reset de estado transitorio: la perspectiva anterior puede tener
@@ -2460,9 +2635,21 @@ impl GrafitoApp {
         self.trig_animating = false;
 
         self.perspective = p;
+        // Sincroniza el cache derivado: `current_view = perspective.view_mode()`.
+        // `CanvasMode` se deriva análogamente vía `p.canvas_mode()` / `layout.canvas_mode`.
         let layout = p.layout();
-        let target_view = p.view_mode();
-        self.current_view = target_view;
+        debug_assert_eq!(
+            layout.canvas_mode,
+            p.canvas_mode(),
+            "PerspectiveLayout canvas_mode must match Perspective::canvas_mode() for {:?}",
+            p
+        );
+        self.current_view = p.view_mode();
+        debug_assert_eq!(
+            self.current_view,
+            self.perspective.view_mode(),
+            "set_perspective post-condition: current_view must equal perspective.view_mode()"
+        );
         self.current_tool = layout.default_tool;
         self.previous_tool = layout.default_tool;
         self.reset_tool_input();
@@ -2495,6 +2682,17 @@ impl GrafitoApp {
         self.exam_mode = matches!(p, Perspective::Exam);
         // Siempre bump_version para invalidar caches GPU.
         self.document.bump_version();
+        self.assert_view_invariant();
+    }
+
+    /// Grupos visibles ya filtrados por el nivel del perfil del estudiante (progressive disclosure).
+    /// Combina `PerspectiveLayout::visible_tool_groups` con `profile.level` vía constants
+    /// `TOOLBAR_LEVEL_PRIMARY_MAX` / `SECONDARY_MAX` (sin magia 4/10).
+    pub(crate) fn filtered_visible_tool_groups(&self) -> Vec<grafito_ui::toolbar::ToolGroupId> {
+        toolbar_groups_for_level_filtered(
+            self.perspective.layout().visible_tool_groups,
+            self.profile.level,
+        )
     }
 
     /// Opens the Assistant in the contextual Geometry 3D host when applicable.
@@ -3468,6 +3666,9 @@ impl eframe::App for GrafitoApp {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("app_update");
 
+        // F17: reset del presupuesto de repintado coalescido del frame.
+        self.repaint_budget = RepaintBudget::default();
+
         if self.whiteboard_open {
             crate::whiteboard_ui::draw_whiteboard_overlay(self, ctx);
             return;
@@ -3752,6 +3953,19 @@ impl eframe::App for GrafitoApp {
                 initial_shell.show_right_drawer || initial_geometry_utility_available,
             );
             self.sync_pending_action_with_tool();
+            // Progressive disclosure wiring — filter perspective's visible groups by profile.level
+            // Uses TOOLBAR_LEVEL_PRIMARY_MAX/SECONDARY_MAX constants (no magic 4/10) via helpers.
+            let _visible_tool_groups = self.filtered_visible_tool_groups();
+            // Keep typed variant exercised to avoid dead helper (covers PedagogicalLevel mapping)
+            let _typed_visible = toolbar_groups_for_pedagogical_level(
+                self.perspective.layout().visible_tool_groups,
+                grafito_pedagogy::PedagogicalLevel::from_level_value(self.profile.level),
+            );
+            debug_assert_eq!(
+                _visible_tool_groups.len(),
+                _typed_visible.len(),
+                "lightweight and typed filtering must agree"
+            );
             let right_panel = self.active_right_panel();
             let shell = crate::ShellLayout::for_viewport(
                 viewport_width,
@@ -4056,7 +4270,9 @@ impl eframe::App for GrafitoApp {
                     }
                     let automatic_motion_active = self.advance_multidimensional_motion(dt);
                     if automatic_motion_active {
-                        ctx.request_repaint_after(MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL);
+                        // F17: redundante con el scheduler unificado (animating),
+                        // se mantiene explícito pero coalescido vía presupuesto.
+                        self.request_repaint_budget(MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL);
                     }
                     let typed_four_d_phase =
                         typed_four_d_motion_phase(self.transient_render_state.four_d_phase());
@@ -4309,7 +4525,11 @@ impl eframe::App for GrafitoApp {
         {
             let now = std::time::Instant::now();
             self.teaching_ui.tick(now);
-            crate::teaching_ui::draw_teaching_overlay(&mut self.teaching_ui, ctx);
+            crate::teaching_ui::draw_teaching_overlay(
+                &mut self.teaching_ui,
+                ctx,
+                &mut self.repaint_budget,
+            );
         }
 
         // File actions and decisions run only after every editor has consumed
@@ -4323,6 +4543,11 @@ impl eframe::App for GrafitoApp {
                 let time = ui.ctx().input(|i| i.time);
                 self.toasts.draw(ui, time);
             });
+
+        // F17: aplicar el presupuesto de repintado coalescido de los widgets
+        // (orb, pulso, media, teaching, whiteboard). El mínimo del frame gana;
+        // egui lo coalesce con el pedido del scheduler unificado de arriba.
+        self.apply_repaint_budget(ctx);
     }
 }
 
@@ -4722,5 +4947,134 @@ mod canvas_resize_preview_tests {
         assert!(axes[y_axis..numeric_guard].contains("painter.line_segment("));
         assert!(numeric_guard < numeric_ticks);
         assert!(axes[numeric_guard..numeric_ticks].contains("return;"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn dummy_grafito_app() -> GrafitoApp {
+    dummy_grafito_app_with_perspective(Perspective::Geometry2D)
+}
+
+#[cfg(test)]
+pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> GrafitoApp {
+    let document = initial_document();
+    let current_view = perspective.view_mode();
+    let camera = grafito_geometry::Camera3D::new(1280.0 / 720.0);
+    let snapshot_version = document.version;
+    let snapshot_render_quality = document.render_quality;
+    let document_snapshot = std::sync::Arc::new(document.clone());
+    GrafitoApp {
+        document,
+        current_tool: grafito_ui::Tool::default(),
+        previous_tool: grafito_ui::Tool::default(),
+        current_view,
+        perspective,
+        camera,
+        show_grid: true,
+        snap_to_grid: true,
+        snap_config: crate::snap::SnapConfig::default(),
+        exam_mode: false,
+        dark_mode: false,
+        pending_points: Vec::new(),
+        pending_points_3d: Vec::new(),
+        last_mouse_pos: None,
+        canvas_origin: None,
+        canvas_drag_start: None,
+        canvas_is_panning: false,
+        point_drag_has_mutated: false,
+        eraser_stroke_has_mutated: false,
+        select_drag_object: None,
+        point_drag_error_reported: false,
+        selected_object: None,
+        preview_object: None,
+        input_text: String::new(),
+        command_input_focus_requested: false,
+        cas_result: String::new(),
+        keyboard_tab: 0,
+        keyboard_visible: false,
+        keyboard_expanded: false,
+        table_func_idx: 0,
+        table_x_min: "-5".to_string(),
+        table_x_max: "5".to_string(),
+        table_step: "1.0".to_string(),
+        cas_history: VecDeque::new(),
+        sidebar_tab: 0,
+        recent_files: VecDeque::new(),
+        document_lifecycle: DocumentLifecycle::new(&document_snapshot),
+        deferred_file_actions: DeferredFileActions::default(),
+        splash_start: None,
+        splash_logo: None,
+        mora_texture: None,
+        mora_texture_load_attempted: false,
+        plugin_registry: None,
+        plugins_loaded: false,
+        assistant_blocks_cache: grafito_ui::assistant::AssistantBlocksCache::default(),
+        whiteboard_open: false,
+        whiteboard: crate::whiteboard_ui::WhiteboardSession::default(),
+        whiteboard_book: crate::whiteboard_ui::WhiteboardBook::default(),
+        whiteboard_left_pinned: false,
+        show_whiteboard_assistant: true,
+        profile: grafito_profile::StudentProfile::default(),
+        undo_stack: VecDeque::new(),
+        redo_stack: VecDeque::new(),
+        attractor_cache: std::collections::HashMap::new(),
+        fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
+        active_color_picker: None,
+        color_favorites: [
+            grafito_geometry::Color::new(0.9, 0.1, 0.1, 1.0),
+            grafito_geometry::Color::new(0.1, 0.6, 0.1, 1.0),
+            grafito_geometry::Color::new(0.1, 0.3, 0.9, 1.0),
+            grafito_geometry::Color::new(0.9, 0.6, 0.1, 1.0),
+            grafito_geometry::Color::new(0.5, 0.1, 0.9, 1.0),
+        ],
+        tool_ghost: None,
+        tool_state: crate::tool_dispatcher::ToolState::default(),
+        gpu_renderer: None,
+        gpu_scene_readiness: None,
+        transient_render_state: TransientRenderState::default(),
+        multidimensional_motion_enabled: true,
+        multidimensional_motion_speed: DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
+        use_gpu: false,
+        last_interaction_time: Instant::now(),
+        is_view_changing: false,
+        last_canvas_resize_at: None,
+        pending_action: PendingAction::None,
+        toasts: grafito_ui::toast::ToastManager::default(),
+        hovered_analysis: None,
+        hover_candidate_pos: None,
+        hover_candidate_time: 0.0,
+        hover_cached_analysis: None,
+        document_snapshot,
+        snapshot_version,
+        snapshot_render_quality,
+        command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
+        assistant: grafito_ui::assistant::AssistantPanelState::default(),
+        assistant_runtime: crate::assistant::AssistantRuntime::default(),
+        right_drawer_open: true,
+        workspace_dock_tab: crate::WorkspaceDockTab::Inspector,
+        compact_geometry_utility_open: false,
+        left_drawer_open: true,
+        compact_drawer_open: false,
+        assistant_visible: true,
+        ui_time: 0.0,
+        construction_log: Vec::new(),
+        show_construction_protocol: DEFAULT_CONSTRUCTION_PROTOCOL_VISIBLE,
+        statistics_data: Vec::new(),
+        statistics_input_buf: String::new(),
+        statistics_input_error: None,
+        autocomplete: InputAutocomplete::default(),
+        show_about: false,
+        show_trig_animation: false,
+        trig_angle: 0.0,
+        trig_animating: false,
+        trig_speed: 0.5,
+        trig_function: 0,
+        trig_view_mode: TrigViewMode::Didactic,
+        trig_graph_cache: std::sync::RwLock::new(None),
+        show_mascot_config: false,
+        avatar_draft: grafito_profile::AvatarConfig::default(),
+        config_name_error: None,
+        teaching_ui: crate::teaching_ui::TeachingUiState::default(),
+        repaint_budget: RepaintBudget::default(),
     }
 }

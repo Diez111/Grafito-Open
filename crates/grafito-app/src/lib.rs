@@ -1,9 +1,5 @@
-#![allow(
-    unknown_lints,
-    float_literal_f32_fallback,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
+#![allow(unknown_lints, float_literal_f32_fallback)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(deprecated)]
 #![allow(clippy::uninlined_format_args)]
 //! Aplicación de escritorio Grafito — raíz de módulos.
@@ -25,7 +21,7 @@ pub(crate) mod assistant;
 pub(crate) mod assistant_credentials;
 pub(crate) mod canvas;
 pub(crate) mod commands;
-pub(crate) mod controllers;
+pub mod controllers;
 pub(crate) mod export;
 pub(crate) mod input;
 pub(crate) mod keyboard;
@@ -48,22 +44,44 @@ mod tests;
 /// Cantidad de muestras MSAA usada por el renderizador GPU y la superficie de eframe.
 pub const MSAA_SAMPLES: u16 = 4;
 
-/// Modo de vista 2D/3D actual.
+/// Modo de vista 2D/3D actual — **valor derivado, no fuente canónica**.
 ///
-/// Se conserva por compatibilidad con el código existente. Ahora se deriva
-/// automáticamente de la [`Perspective`] activa mediante
-/// [`Perspective::view_mode`].
+/// Se conserva por compatibilidad con el código existente. La fuente canónica
+/// es [`Perspective`]; este enum es un cache derivado vía
+/// [`Perspective::view_mode`] / [`Perspective::canvas_mode`]. En
+/// `GrafitoApp` el campo `current_view` se sincroniza automáticamente en
+/// `GrafitoApp::set_perspective` (`current_view = perspective.view_mode()`)
+/// y se verifica con `debug_assert_eq!(current_view, perspective.view_mode())`.
+/// No almacenar `ViewMode` de forma independiente: derivar siempre de la
+/// `Perspective` activa cuando sea posible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     D2,
     D3,
 }
 
+impl ViewMode {
+    /// Deriva el modo de vista desde la perspectiva canónica.
+    ///
+    /// Equivalente a `perspective.view_mode()` — atajo para la consolidación
+    /// ViewMode/CanvasMode/Perspective donde `Perspective` es la única fuente.
+    pub const fn from_perspective(perspective: Perspective) -> Self {
+        perspective.view_mode()
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Sistema de Perspectivas (estilo GeoGebra Perspectives)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Las once perspectivas de Grafito, análogas a las *Perspectives* de GeoGebra.
+/// Perspectivas de Grafito — **fuente canónica única** para el modo de vista.
+///
+/// Análogas a las *Perspectives* de GeoGebra. `Perspective` es la única fuente
+/// de verdad para el estado de vista: [`Perspective::canvas_mode`] y
+/// [`Perspective::view_mode`] derivan [`CanvasMode`] y [`ViewMode`]. No
+/// almacenar `ViewMode`/`CanvasMode` de forma independiente; en `GrafitoApp`
+/// `current_view` es un cache sincronizado por `set_perspective` con
+/// `debug_assert_eq!(current_view, perspective.view_mode())`.
 ///
 /// Cada perspectiva define un `layout` que controla el modo del canvas, los
 /// paneles visibles, los grupos de herramientas de la toolbar, el teclado
@@ -157,6 +175,9 @@ impl Perspective {
     }
 
     /// Modo del canvas (2D, 3D o 2D reducido) asociado a la perspectiva.
+    ///
+    /// Fuente canónica para [`CanvasMode`]; [`Perspective::view_mode`] colapsa
+    /// este valor a [`ViewMode`]. No duplicar como campo independiente.
     pub const fn canvas_mode(&self) -> CanvasMode {
         match self {
             Perspective::Geometry2D => CanvasMode::D2,
@@ -173,11 +194,13 @@ impl Perspective {
     }
 
     /// Deriva el `ViewMode` (D2/D3) usado por el resto de la aplicación.
+    ///
+    /// Fuente canónica para [`ViewMode`]; `GrafitoApp::current_view` debe ser
+    /// idéntico a este valor y se sincroniza en `GrafitoApp::set_perspective`.
+    /// Delegado a `self.canvas_mode().view_mode()` para que `CanvasMode` sea la
+    /// única definición del colapso `SmallD2 → D2`.
     pub const fn view_mode(&self) -> ViewMode {
-        match self.canvas_mode() {
-            CanvasMode::D2 | CanvasMode::SmallD2 => ViewMode::D2,
-            CanvasMode::D3 => ViewMode::D3,
-        }
+        self.canvas_mode().view_mode()
     }
 
     /// Construye el [`PerspectiveLayout`] que define qué mostrar para esta
@@ -312,7 +335,13 @@ impl Perspective {
     }
 }
 
-/// Modo del canvas asociado a una perspectiva.
+/// Modo del canvas asociado a una perspectiva — **valor derivado, no fuente canónica**.
+///
+/// Derivado exclusivamente de [`Perspective::canvas_mode`]. No almacenar de
+/// forma independiente: `Perspective` es la única fuente de verdad. `ViewMode`
+/// a su vez se deriva de este valor vía [`Perspective::view_mode`]
+/// (`D2|SmallD2 → D2`, `D3 → D3`). `Perspective::layout().canvas_mode` ya
+/// coincide con `Perspective::canvas_mode()` para cada variante.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasMode {
     /// Canvas 2D a pantalla completa.
@@ -321,6 +350,21 @@ pub enum CanvasMode {
     D3,
     /// Canvas 2D reducido (comparte espacio con paneles, p.ej. Álgebra/CAS).
     SmallD2,
+}
+
+impl CanvasMode {
+    /// Deriva el modo de canvas desde la perspectiva canónica.
+    pub const fn from_perspective(perspective: Perspective) -> Self {
+        perspective.canvas_mode()
+    }
+
+    /// Colapsa el modo de canvas a la vista binaria 2D/3D.
+    pub const fn view_mode(self) -> ViewMode {
+        match self {
+            CanvasMode::D2 | CanvasMode::SmallD2 => ViewMode::D2,
+            CanvasMode::D3 => ViewMode::D3,
+        }
+    }
 }
 
 /// Rango de ancho disponible para el shell de escritorio.

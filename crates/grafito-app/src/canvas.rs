@@ -330,10 +330,19 @@ const GPU_3D_CURVE_STEPS: usize = 4_000;
 const GPU_3D_MAX_ATTRACTORS: usize = 8;
 const GPU_3D_MAX_ATTRACTOR_STEPS: usize = 16_000;
 const GPU_2D_CURVE_STEPS: usize = 4_000;
-// All current compute APIs synchronously map their readback buffers. Limit a
+// All current compute APIs synchronously map their readback buffers: each
+// pipeline (`implicit_compute`, `parametric_compute`, `function_compute`,
+// `vector_compute`, ...) calls `device.poll(wgpu::Maintain::Wait)` internally
+// on its readback path (see `grafito-render/src/*_compute.rs`). Limit a
 // callback to one such attempt until the pipelines can share an async batch.
-// Verificado: `take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)` en prepare() 2D y 3D
-// garantiza 1 Wait bloqueante como máximo por frame (TODO P1: mover a spawn_blocking).
+//
+// Verificado: `take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)` en prepare() 2D
+// y 3D garantiza 1 `device.poll(Wait)` bloqueante como máximo por frame: los
+// callbacks 2D (`CanvasCallback`) y 3D (`Canvas3DCallback`) son mutuamente
+// excluyentes (match `ViewMode::D2`/`ViewMode::D3` en app.rs), por lo que el
+// `.take(1)` de cada rama acota el Wait global a 1 por frame.
+// TODO P1: mover a spawn_blocking — el Wait bloquea el hilo de prepare de egui
+// (ver también los TODO P1 en `grafito-render/src/*_compute.rs`).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Selects only visible 2D GPU cache evaluations that fit the same per-frame

@@ -11,8 +11,9 @@ use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    RADIUS_LG, RADIUS_MD, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACING_BUTTON_X,
-    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_SM, TYPE_XS,
+    BREAKPOINT_COMPACT, ICON_MD, RADIUS_LG, RADIUS_MD, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM,
+    SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS,
+    TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -24,7 +25,7 @@ pub(crate) struct CommandInputResponse {
 
 /// The native minimum is 960 logical points; this also covers HiDPI windows
 /// whose physical captures look much narrower than their egui width.
-pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = 1_360.0;
+pub(crate) const COMPACT_TOP_CHROME_MAX_WIDTH: f32 = BREAKPOINT_COMPACT;
 
 pub(crate) fn top_chrome_uses_overflow(viewport_width: f32) -> bool {
     viewport_width <= COMPACT_TOP_CHROME_MAX_WIDTH
@@ -115,8 +116,8 @@ fn draw_theme_toggle_switch(ui: &mut egui::Ui, is_dark: bool) -> bool {
             rect.min.x + 8.5
         };
         let knob_center = egui::pos2(knob_x, rect.center().y);
-        let knob_radius = 7.0;
-        // Sombra suave
+        let knob_radius = 7.0; // 7px pill knob — intentional geometric fit for 36×20 toggle (non-token, documented)
+                               // Sombra suave
         ui.painter().circle_filled(
             knob_center + egui::vec2(0.0, 1.0),
             knob_radius,
@@ -286,7 +287,7 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             ui.label(
                 egui::RichText::new("Disponible en vistas 2D.")
                     .color(current_theme(ui.ctx()).text_tertiary)
-                    .size(11.0),
+                    .size(TYPE_XS),
             );
         }
     });
@@ -384,6 +385,7 @@ pub(crate) fn draw_top_bar(
             ui.spacing_mut().button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
             egui::menu::bar(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_SM);
+                // Compact top-chrome dense menu bar: SPACING_BUTTON (16×8) reduced to 10×4 for single-bar Scandinavian fit
                 ui.spacing_mut().button_padding = egui::vec2(10.0, 4.0);
                 let compact_top_chrome = top_chrome_uses_overflow(ctx.screen_rect().width());
                 if compact_top_chrome {
@@ -532,7 +534,7 @@ pub(crate) fn draw_top_bar(
     ];
     if show_sidebar {
         egui::SidePanel::left("icon_bar")
-            .exact_width(60.0)
+            .exact_width(RAIL_WIDTH)
             .resizable(false)
             .show_separator_line(false)
             .frame(
@@ -547,7 +549,7 @@ pub(crate) fn draw_top_bar(
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(8.0);
+                            ui.add_space(SPACE_SM);
 
                             // ── Tabs del sidebar (6, uno por panel izquierdo) ──
                             for (i, (label, icon, tip)) in tabs.iter().enumerate() {
@@ -564,7 +566,7 @@ pub(crate) fn draw_top_bar(
                                 };
 
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(50.0, 52.0),
+                                    egui::vec2(RAIL_WIDTH, 52.0),
                                     egui::Sense::click(),
                                 );
                                 let resp = resp.on_hover_text(*tip);
@@ -605,14 +607,14 @@ pub(crate) fn draw_top_bar(
                                     }
                                     let icon_rect = egui::Rect::from_center_size(
                                         rect.center() - egui::vec2(0.0, 7.0),
-                                        egui::vec2(21.0, 21.0),
+                                        egui::vec2(ICON_MD, ICON_MD),
                                     );
                                     draw_icon(ui.painter(), icon_rect, *icon, ic_color);
                                     ui.painter().text(
                                         rect.center() + egui::vec2(0.0, 14.0),
                                         Align2::CENTER_CENTER,
                                         *label,
-                                        egui::FontId::proportional(10.0),
+                                        egui::FontId::proportional(TYPE_2XS),
                                         ic_color,
                                     );
                                 }
@@ -623,18 +625,20 @@ pub(crate) fn draw_top_bar(
                                 if resp.clicked() {
                                     if active {
                                         app.left_drawer_open = !app.left_drawer_open;
+                                        app.compact_drawer_open = !app.compact_drawer_open;
                                     } else {
                                         app.sidebar_tab = i;
                                         app.left_drawer_open = true;
+                                        app.compact_drawer_open = true;
                                     }
                                 }
-                                ui.add_space(3.0);
+                                ui.add_space(SPACE_XS);
                             }
 
-                            ui.add_space(8.0);
+                            ui.add_space(SPACE_SM);
                         });
                     });
-                ui.add_space(8.0);
+                ui.add_space(SPACE_SM);
             });
     }
 }
@@ -648,7 +652,7 @@ fn draw_geometry_utility_contents(
     let theme = current_theme(ctx);
     let mut close_requested = false;
 
-    ui.add_space(8.0);
+    ui.add_space(SPACE_SM);
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new("Espacio de trabajo")
@@ -666,7 +670,7 @@ fn draw_geometry_utility_contents(
             .clicked();
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
     ui.horizontal(|ui| {
         let inspector_selected = app.workspace_dock_tab == WorkspaceDockTab::Inspector;
         if ui
@@ -690,9 +694,9 @@ fn draw_geometry_utility_contents(
             app.open_assistant_workspace();
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(SPACE_XS);
 
     match app.workspace_dock_tab {
         WorkspaceDockTab::Inspector => crate::panels::draw_right_properties_contents(app, ui),
@@ -822,8 +826,8 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                 } else {
                     "x: ---, y: ---".to_string()
                 };
-                ui.label(egui::RichText::new(coord_text).size(11.0).color(txt_dim));
-                ui.add_space(16.0);
+                ui.label(egui::RichText::new(coord_text).size(TYPE_XS).color(txt_dim));
+                ui.add_space(SPACE_LG);
                 let hint = if let Some(h) = app.pending_action_hint() {
                     h.to_string()
                 } else {
@@ -834,14 +838,14 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
                 };
                 if !hint.is_empty() {
                     ui.add(
-                        egui::Label::new(egui::RichText::new(hint).size(11.0).color(txt_dim))
+                        egui::Label::new(egui::RichText::new(hint).size(TYPE_XS).color(txt_dim))
                             .truncate(),
                     );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(format!("{} objetos", app.document.object_count()))
-                            .size(11.0)
+                            .size(TYPE_XS)
                             .color(txt_dim),
                     );
                 });
@@ -1305,11 +1309,11 @@ pub(crate) fn draw_color_picker(app: &mut GrafitoApp, ctx: &egui::Context) {
         .open(&mut keep_open)
         .show(ctx, |ui| {
             outcome = picker.show(ui, &mut app.color_favorites);
-            ui.add_space(8.0);
+            ui.add_space(SPACE_SM);
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new("Los cambios se aplican al instante")
-                        .size(11.0)
+                        .size(TYPE_XS)
                         .color(theme.text_tertiary)
                         .weak()
                         .italics(),

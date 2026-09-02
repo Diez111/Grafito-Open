@@ -742,7 +742,15 @@ for line in sys.stdin:
     }
 
     fn stub_engine() -> (TempDirGuard, EngineConfig) {
-        let dir = std::env::temp_dir().join(format!("grafito_anim_stub_{}", std::process::id()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito_anim_stub_{}_{}_{:?}",
+            std::process::id(),
+            id,
+            std::thread::current().id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let stub_path = dir.join("stub_engine.py");
         fs::write(&stub_path, STUB).unwrap();

@@ -10,8 +10,9 @@ use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    RADIUS_LG, RADIUS_MD, RADIUS_PILL, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_MD,
-    TYPE_SM, TYPE_XS,
+    CARD_SPACING, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_LG,
+    RADIUS_MD, RADIUS_PILL, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD,
+    TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
 use std::collections::VecDeque;
 use std::fs::File;
@@ -691,13 +692,15 @@ fn draw_inspector_section(
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.panel_bg)
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(18)))
-        .rounding(egui::Rounding::same(RADIUS_LG))
-        .inner_margin(egui::Margin::symmetric(SPACE_LG, SPACE_MD))
+        .stroke(theme.hairline_stroke())
+        .rounding(egui::Rounding::same(RADIUS_SM))
+        .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.label(
                 egui::RichText::new(title)
-                    .color(theme.text_primary)
+                    .color(theme.text_secondary)
                     .size(TYPE_SM)
                     .strong(),
             );
@@ -710,6 +713,8 @@ fn draw_inspector_section(
                 );
             }
             ui.add_space(SPACE_SM);
+            ui.spacing_mut().item_spacing.y = SPACE_SM;
+            ui.spacing_mut().interact_size.y = ZOOM_ICON_HIT;
             contents(ui);
         });
 }
@@ -1193,9 +1198,12 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     egui::SidePanel::left("view_panel")
         .show_separator_line(false)
-        .default_width(260.0)
-        .min_width(180.0)
-        .max_width((ctx.available_rect().width() * 0.45).max(240.0))
+        .default_width(PANEL_LEFT_DEFAULT)
+        .min_width(PANEL_LEFT_MIN)
+        .max_width(
+            (ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION)
+                .max(PANEL_LEFT_DEFAULT - 40.0),
+        )
         .resizable(true)
         .frame(
             egui::Frame::none()
@@ -1203,18 +1211,39 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .stroke(egui::Stroke::NONE),
         )
         .show(ctx, |ui| {
-            ui.add_space(SPACE_LG);
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                ui.add_space(SPACE_SM);
+                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                ui.add_space(SPACE_XS);
                 ui.label(
                     egui::RichText::new("Vista")
                         .color(accent)
                         .strong()
-                        .size(TYPE_MD),
+                        .size(TYPE_LG),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(SPACE_SM);
+                    if action_icon_button(
+                        ui,
+                        Icon::Close,
+                        theme.text_secondary,
+                        "Ocultar panel Vista",
+                    )
+                    .clicked()
+                    {
+                        app.left_drawer_open = false;
+                        app.compact_drawer_open = false;
+                    }
+                });
             });
-            ui.add_space(SPACE_XS);
-            ui.separator();
+            ui.add_space(SPACE_SM);
+            ui.painter().line_segment(
+                [
+                    ui.cursor().min,
+                    ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+                ],
+                theme.hairline_stroke(),
+            );
             ui.add_space(SPACE_SM);
 
             egui::ScrollArea::vertical()
@@ -1244,7 +1273,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 ui.checkbox(&mut app.snap_to_grid, "Ajustar a cuadrícula");
                                 ui.checkbox(&mut app.exam_mode, "Modo examen");
                             });
-                            ui.add_space(SPACE_MD);
+                            ui.add_space(CARD_SPACING);
 
                             // Ejes — escala logarítmica
                             draw_inspector_section(
@@ -1262,7 +1291,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     );
                                 },
                             );
-                            ui.add_space(SPACE_MD);
+                            ui.add_space(CARD_SPACING);
 
                             // Alta precisión — Double-Double
                             draw_inspector_section(
@@ -1272,33 +1301,51 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 |ui| {
                                     let mut high_prec =
                                         grafito_geometry::precision::is_high_precision_mode();
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                     if ui
-                                .checkbox(&mut high_prec, "Alta Precisión (Double-Double)")
-                                .on_hover_text(
-                                    "Usa aritmética Double-Double (~106 bits / 32 dígitos) \
-                                     para evaluar expresiones simbólicas sin pérdida de precisión.",
-                                )
-                                .changed()
-                            {
-                                grafito_geometry::precision::set_high_precision_mode(high_prec);
-                                app.document.invalidate_all_caches();
-                                app.document.bump_version();
-                                if let Ok(mut cache) = app.trig_graph_cache.write() {
-                                    *cache = None;
-                                }
-                                app.re_evaluate_constraints(&[]);
-                            }
+                                        .add(egui::Checkbox::new(
+                                            &mut high_prec,
+                                            egui::RichText::new("Alta Precisión (Double-Double)")
+                                                .size(TYPE_SM),
+                                        ))
+                                        .on_hover_text(
+                                            "Usa aritmética Double-Double (~106 bits / 32 dígitos) \
+                                             para evaluar expresiones simbólicas sin pérdida de precisión.",
+                                        )
+                                        .changed()
+                                    {
+                                        grafito_geometry::precision::set_high_precision_mode(high_prec);
+                                        app.document.invalidate_all_caches();
+                                        app.document.bump_version();
+                                        if let Ok(mut cache) = app.trig_graph_cache.write() {
+                                            *cache = None;
+                                        }
+                                        app.re_evaluate_constraints(&[]);
+                                    }
                                 },
                             );
-                            ui.add_space(SPACE_SM);
+                            ui.add_space(CARD_SPACING);
 
-                            // Exportación — vectorial
+                            // Exportación — vectorial pill centered
                             draw_inspector_section(
                                 ui,
                                 "Exportación",
                                 "Generá un archivo vectorial del lienzo actual.",
                                 |ui| {
-                                    if ui.button("Exportar SVG").clicked() {
+                                    let theme = current_theme(ui.ctx());
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new("Exportar SVG")
+                                            .size(TYPE_SM)
+                                            .strong()
+                                            .color(theme.keyboard_enter_text),
+                                    )
+                                    .fill(theme.keyboard_enter_bg)
+                                    .stroke(egui::Stroke::NONE)
+                                    .rounding(RADIUS_PILL);
+                                    if ui
+                                        .add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
+                                        .clicked()
+                                    {
                                         app.export_with_dialog(crate::export::ExportFormat::Svg);
                                     }
                                 },

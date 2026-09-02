@@ -1,9 +1,5 @@
-#![allow(
-    unknown_lints,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    float_literal_f32_fallback
-)]
+#![allow(unknown_lints, float_literal_f32_fallback)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! Grafito UI — Componentes y paneles de interfaz construidos con egui.
 //!
 //! Provee la toolbar, la paleta de comandos, el panel de álgebra, el selector

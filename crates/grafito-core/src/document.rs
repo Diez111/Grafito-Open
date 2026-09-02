@@ -4545,6 +4545,26 @@ impl Document {
     pub fn object_count(&self) -> usize {
         self.objects.len()
     }
+
+    /// Estimación de memoria/peso serializado del documento.
+    ///
+    /// Usa `object_count * 200 KiB` como cota conservadora por objeto
+    /// (geometría + caché + metadatos) y `serde_json::to_vec` para no
+    /// subestimar documentos con pocos objetos pero mucho texto
+    /// (variables, spreadsheet, whiteboard). Gana el mayor de ambos,
+    /// con mínimo 8 KiB.
+    ///
+    /// Útil para presupuestar undo (`MAX_UNDO_BYTES 50 MiB`): evita
+    /// 50 entradas × 10 MiB = 500 MiB en iGPU/low-RAM.
+    pub fn estimated_bytes(&self) -> usize {
+        const BYTES_PER_OBJECT: usize = 200 * 1024;
+        const MIN_BYTES: usize = 8 * 1024;
+        let by_objects = self.object_count().saturating_mul(BYTES_PER_OBJECT);
+        let by_json = serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .unwrap_or(by_objects);
+        by_objects.max(by_json).max(MIN_BYTES)
+    }
 }
 
 fn distance_point_to_polygon(p: Point2, vertices: &[Point2]) -> f64 {

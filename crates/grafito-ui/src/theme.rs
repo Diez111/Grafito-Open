@@ -13,10 +13,10 @@
 //! LIGHT secondary/tertiary más oscuros por contraste sobre #FAFAF9, pero mantienen ratio calm.
 
 use crate::tokens::{
-    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_XL, SHADOW_ALPHA, SHADOW_POPUP_BLUR,
-    SHADOW_POPUP_OFFSET_Y, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACING_BUTTON_X,
-    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM,
-    TYPE_XL, TYPE_XS, TYPE_XXL,
+    ANIM_MICRO, FONT_SF_TEXT, RADIUS_2XL, RADIUS_LG, RADIUS_MD, RADIUS_XL, SHADOW_ALPHA,
+    SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y, SHADOW_WINDOW_BLUR, SHADOW_WINDOW_OFFSET_Y, SPACE_LG,
+    SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
+    SPACING_MINIMAL_Y, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XL, TYPE_XS, TYPE_XXL,
 };
 use egui::{Color32, Context};
 
@@ -155,6 +155,22 @@ impl Theme {
         }
     }
 
+    /// Hairline 1 px at 10 % separator — Scandinavian quiet border.
+    /// Used for card and composer dividers (`separator.gamma_multiply(0.10)`).
+    pub fn hairline_stroke(&self) -> egui::Stroke {
+        egui::Stroke::new(1.0, self.separator.gamma_multiply(0.10))
+    }
+
+    /// Card frame Scandinavian: `RADIUS_MD` rounding + hairline border.
+    /// For use in panels / cards (algebra, inspector, assistant).
+    pub fn card_frame(&self) -> egui::Frame {
+        egui::Frame::none()
+            .rounding(egui::Rounding::same(RADIUS_MD))
+            .stroke(self.hairline_stroke())
+            .fill(self.panel_bg)
+            .inner_margin(egui::Margin::same(SPACE_MD))
+    }
+
     pub fn apply(&self, ctx: &Context) {
         let is_dark = self.canvas_bg.r() < 100;
         let mut visuals = if is_dark {
@@ -216,10 +232,15 @@ impl Theme {
             // Scandinavian: item_spacing 16, button_padding 16×8 — aire y calma.
             s.spacing.item_spacing = egui::vec2(SPACING_MINIMAL_X, SPACING_MINIMAL_Y);
             s.spacing.button_padding = egui::vec2(SPACING_BUTTON_X, SPACING_BUTTON_Y);
-            s.spacing.menu_margin = egui::Margin::same(8.0);
-            s.spacing.window_margin = egui::Margin::same(12.0);
-            s.spacing.indent = 20.0;
-            s.spacing.interact_size = egui::vec2(38.0, 26.0);
+            s.spacing.menu_margin = egui::Margin::same(SPACE_SM); // 8 = SPACE_SM
+            s.spacing.window_margin = egui::Margin::same(SPACE_MD); // 12 = SPACE_MD
+            s.spacing.indent = SPACE_LG + SPACE_XS; // 20 = SPACE_LG(16) + SPACE_XS(4) == SPACE_XL - 4.0 derived
+
+            // interact_size 38x26 derived: 38 = SPACE_XL(24)+SPACE_LG(16)-SPACE_XS/2(2), 26 = SPACE_XL(24)+SPACE_XS/2(2)
+            s.spacing.interact_size = egui::vec2(
+                SPACE_XL + SPACE_LG - SPACE_XS / 2.0,
+                SPACE_XL + SPACE_XS / 2.0,
+            );
             // Tipografía Inter — escala Scandinavian 12/15/19
             s.text_styles = [
                 (
@@ -358,7 +379,7 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     separator: Color32::from_rgb(0xE8, 0xE8, 0xE6),
     input_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
     input_text: Color32::from_rgb(0x2B, 0x2E, 0x2D),
-    button_bg: Color32::from_rgb(0xFA, 0xFA, 0xF9),
+    button_bg: Color32::from_rgb(0xF0, 0xF0, 0xEE),
     button_hover: Color32::from_rgb(0xEB, 0xED, 0xEA),
 
     keyboard_tab_active_bg: Color32::from_rgb(0x6B, 0x7A, 0x6F),

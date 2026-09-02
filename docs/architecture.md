@@ -21,7 +21,7 @@ grafito-profile / pedagogy / plugins / assistant-types / agent
 - **Cerebro puro** (sin egui, sin wgpu): core, geometry, command, complex, whiteboard, profile, pedagogy, plugins, assistant, assistant-types, agent
 - **Puente**: anim (IPC stdio JSON v1)
 - **Piel**: ui (tokens, theme, toolbar, assistant, animation), app (app.rs, panels.rs, canvas.rs, render_2d, anim_native/ui)
-- **Infra**: packaging/deb, .github/workflows/ci.yml (8 jobs)
+- **Infra**: packaging/deb, .github/workflows/ci.yml (14 jobs)
 
 ## 3. Principios (Slash Commands)
 
@@ -119,25 +119,50 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Anim | diagnostics cap | 64 lineas | engine.rs |
 | Assistant | RequestBudget max_input | 4096 | assistant-types |
 | Assistant | AttachmentLimits max_bytes | 5M | assistant-types |
-| UI | ASSISTANT_PANEL width | 340..460 | assistant.rs |
-| App | MAX_UNDO | 50 | app.rs |
-| App | MAX_UNDO_BYTES | 50 MiB (VecDeque, pop_front O(1)) | app.rs |
-| App | undo_stack | VecDeque<Document> | app.rs + controllers.rs |
+| UI | BREAKPOINT_COMPACT | 1360 | tokens.rs (is_compact_viewport) |
+| UI | PANEL_LEFT_DEFAULT | 260 (min 180, max 45% viewport via PANEL_LEFT_MAX_FRACTION) | tokens.rs + panels.rs/algebra.rs |
+| UI | PANEL_LEFT_MIN | 180 | tokens.rs |
+| UI | PANEL_LEFT_MAX_FRACTION | 0.45 (clamp + panel_left_max_width) | tokens.rs |
+| UI | DRAWER_RIGHT_DEFAULT | 344 (min 292, max 440) | tokens.rs |
+| UI | DRAWER_RIGHT_MIN | 292 | tokens.rs |
+| UI | DRAWER_RIGHT_MAX | 440 | tokens.rs |
+| UI | RAIL_WIDTH | 60 | tokens.rs + ui.rs |
+| UI | TOP_BAR_HEIGHT | 48 | tokens.rs |
+| UI | SPLASH_LOGO_SIZE | 128 | tokens.rs |
+| UI | ASSISTANT_PANEL width | 340..460 (default 400) | assistant.rs (ASSISTANT_PANEL_MIN/MAX) |
+| UI | Tessellation egui (rayon) | 1-2 ms/frame, 10K verts (egui/rayon tessellation paralela) | Cargo.toml `egui = { features = ["rayon"] }` + app.rs:6 presupuestos |
+| GPU | domain_coloring_compute | 250k cells/dispatch (500×500, MAX_CELLS 250k) | grafito-render/domain_coloring_compute.rs:13 + lib.rs |
+| App | MAX_UNDO | 50 (VecDeque pop_front O(1)) | app.rs:33 + controllers.rs:19 |
+| App | MAX_UNDO_BYTES | 50 MiB (VecDeque, pop_front O(1), Document::estimated_bytes) | app.rs:40 + controllers.rs:21 |
+| App | undo_stack | VecDeque<Document> + VecDeque\<ChangeSet\> (pop_front O(1), fix Vec::remove(0) O(n)) | app.rs + controllers.rs |
 | Core | ValidatedDocument | fail-closed wrapper try_new | validation.rs:40 |
+| Assets | mora.png / mora.svg | <32 KiB PNG embebido via include_bytes! (fallback dibujado si falla) | assets/mora.png, assets/mora.svg, app.rs:4707 |
 
-## 9. Verificacion CI (8 jobs)
+## 9. Verificacion CI (14 jobs) — .github/workflows/ci.yml
 
-1. cargo check --workspace --locked
-2. cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked
-3. cargo test --workspace --locked
-4. cargo test -p grafito-render --test gpu_compute --locked (WGPU_BACKEND=gl headless)
-5. cargo check --workspace --examples/benches --locked
-6. cargo doc --workspace --no-deps --locked (RUSTDOCFLAGS -D warnings)
-7. cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-8. cargo fmt --all -- --check
-+ packaging: build-deb.sh + packaging-fixtures.sh
+MSRV 1.88 (`rust-version.workspace = "1.88"`) verificada en matriz `toolchain: ['1.88', stable]` para `check`, `test`, `lint`; `cargo metadata --locked` con 1.88 valida lockfile completo; docs advierten 1.88 en `Cargo.toml`, `ci.yml`, `CONTRIBUTING.md`, `AGENTS.md`, `README*.md`, `packaging/README.md` ( packaging-fixtures.sh lo exige).
 
-Baseline 2026-08-20: 7/8 PASS, gpu_compute SKIP headless, release-build SKIP 45m.
+| # | Job | Comando / descripcion | Runner / notas |
+|---|-----|------------------------|----------------|
+| 1 | `check` | `cargo check --workspace --locked` + `cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked` (solo 1.88) | matrix 1.88 + stable, apt cache libgmp/mpfr/mpc/dbus, mingw-w64 para 1.88 |
+| 2 | `test` | `cargo test --workspace --locked` | matrix 1.88 + stable |
+| 3 | `gpu-compute` | `cargo test -p grafito-render --test gpu_compute --locked` **required** | `WGPU_BACKEND=vulkan`, `GRAFITO_REQUIRE_GPU_TESTS=1`, `mesa-vulkan-drivers` + `libvulkan1`, no longer `WGPU_BACKEND=gl headless` ni SKIP; falla si GPU no disponible |
+| 4 | `examples` | `cargo check --workspace --examples --locked` | stable |
+| 5 | `benches` | `cargo check --workspace --benches --locked` | stable (separado de examples desde 14-job split) |
+| 6 | `docs` | `cargo doc --workspace --no-deps --locked` con `RUSTDOCFLAGS=-D warnings` | stable |
+| 7 | `lint` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | matrix 1.88 + stable, components clippy |
+| 8 | `release-build` | `cargo build --workspace --release --locked` | solo push main, ubuntu-22.04 |
+| 9 | `fmt` | `cargo fmt --all -- --check` | stable, rustfmt |
+| 10 | `all-targets` | `cargo check --workspace --all-targets --all-features --locked` | stable |
+| 11 | `cross-platform-smoke` | `cargo test -p grafito-app --test app_smoke --locked` | matrix os: ubuntu/windows/macos, fail-fast false |
+| 12 | `supply-chain` | `cargo audit 0.22.2` + `cargo deny 0.20.2` + `verify_advisory_exceptions.py` | cache cargo-tools |
+| 13 | `workflow-lint` | `actionlint 1.7.7` + `shellcheck` + `bash -n` + `bash packaging/tests/packaging-fixtures.sh` + Debian version mapping (`1.2.20~beta < 1.2.20`) | valida packaging fixtures como gate |
+| 14 | `package-debian` | `desktop-file-validate` + `packaging/build-deb.sh` + `dpkg-deb --info/--ctrl-tarfile` ownership `root:root`, permisos, `lintian --fail-on error`, `dpkg --install` + `/usr/bin/grafito --help` + purge | ubuntu-22.04, Needs `dpkg-dev lintian desktop-file-utils` |
+
+Notas:
+- `gpu-compute` ahora **requerido** con `WGPU_BACKEND=vulkan` (antes `gl` headless SKIP); `GRAFITO_REQUIRE_GPU_TESTS=1` hace fail-closed si el adapter no esta disponible.
+- Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.88 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
+- Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking.
 
 ## 10. Novedades v1.2.35 — supera GeoGebra (2026-08-26)
 

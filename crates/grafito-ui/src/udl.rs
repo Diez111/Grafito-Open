@@ -9,17 +9,25 @@
 //! único punto de contacto (feature-gated). Actualmente `grafito-ui` sí
 //! depende de `pedagogy`, pero se mantiene el helper ligero por compat.
 
-use crate::toolbar::{filter_groups_by_level, toolbar_groups_for_level_value, ToolGroupId};
+use crate::toolbar::{
+    filter_groups_by_level, toolbar_groups_for_level_value, ToolGroupId, TOOLBAR_LEVEL_PRIMARY_MAX,
+    TOOLBAR_LEVEL_SECONDARY_MAX,
+};
 
 /// Etiqueta UDL para `level_value` sin necesidad de `PedagogicalLevel`.
 pub fn udl_label_for_level_value(level_value: u32) -> &'static str {
-    match level_value {
-        0..=4 => "Primaria",
-        5..=10 => "Secundaria",
-        11..=12 => "UTN AM1",
-        13 => "UTN Álgebra",
-        14 => "UTN AM2/Prob.",
-        _ => "Universidad",
+    if level_value <= TOOLBAR_LEVEL_PRIMARY_MAX {
+        "Primaria"
+    } else if level_value <= TOOLBAR_LEVEL_SECONDARY_MAX {
+        "Secundaria"
+    } else if level_value <= 12 {
+        "UTN AM1"
+    } else if level_value == 13 {
+        "UTN Álgebra"
+    } else if level_value == 14 {
+        "UTN AM2/Prob."
+    } else {
+        "Universidad"
     }
 }
 

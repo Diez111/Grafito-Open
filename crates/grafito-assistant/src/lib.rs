@@ -1,9 +1,5 @@
-#![allow(
-    unknown_lints,
-    float_literal_f32_fallback,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
+#![allow(unknown_lints, float_literal_f32_fallback)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! Resolución local y transporte remoto explícitamente opt-in del asistente.
 //!
 //! La resolución local es determinista. El transporte remoto sólo construye y

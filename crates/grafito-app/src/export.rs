@@ -1295,7 +1295,10 @@ fn clip_polygon_to_canvas(
             break;
         }
         let input = std::mem::take(&mut polygon);
-        let mut previous = *input.last().expect("non-empty polygon");
+        let Some(last) = input.last().copied() else {
+            continue;
+        };
+        let mut previous = last;
         let mut previous_inside = inside(previous, edge, width, height);
         for current in input {
             let current_inside = inside(current, edge, width, height);
@@ -1806,9 +1809,13 @@ impl SceneBuilder<'_> {
                 })?
                 .y;
             for run in &runs {
+                let Some(&first) = run.first() else {
+                    continue;
+                };
+                let Some(&last) = run.last() else {
+                    continue;
+                };
                 let mut polygon = run.clone();
-                let first = *run.first().expect("run has at least two points");
-                let last = *run.last().expect("run has at least two points");
                 polygon.push(ScreenPoint::new(last.x, baseline));
                 polygon.push(ScreenPoint::new(first.x, baseline));
                 let polygon = clip_polygon_to_canvas(polygon, self.view.width, self.view.height);
@@ -2423,19 +2430,19 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
         scene.width, scene.height, scene.width, scene.height
     )
-    .expect("writing to String cannot fail");
+    .ok();
     writeln!(
         svg,
         "<defs><clipPath id=\"grafito-export-clip\"><rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
         scene.width, scene.height
     )
-    .expect("writing to String cannot fail");
+    .ok();
     writeln!(
         svg,
         "<rect width=\"{}\" height=\"{}\" fill=\"white\"/>",
         scene.width, scene.height
     )
-    .expect("writing to String cannot fail");
+    .ok();
     svg.push_str("<g clip-path=\"url(#grafito-export-clip)\">\n");
 
     for object in &scene.objects {
@@ -2446,7 +2453,7 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
             escape_xml(&object.item.label),
             escape_xml(&object.item.object_id)
         )
-        .expect("writing to String cannot fail");
+        .ok();
         for primitive in &object.primitives {
             match primitive {
                 ScenePrimitive::Path {
@@ -2467,12 +2474,12 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
                             point.x,
                             point.y
                         )
-                        .expect("writing to String cannot fail");
+                        .ok();
                     }
                     if *closed {
                         data.push_str(" Z");
                     }
-                    write!(svg, "<path d=\"{data}\"").expect("writing to String cannot fail");
+                    write!(svg, "<path d=\"{data}\"").ok();
                     if let Some(stroke) = stroke {
                         write!(
                             svg,
@@ -2481,7 +2488,7 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
                             stroke.color.a,
                             stroke.width
                         )
-                        .expect("writing to String cannot fail");
+                        .ok();
                     } else {
                         svg.push_str(" stroke=\"none\"");
                     }
@@ -2492,7 +2499,7 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
                             svg_color(*fill),
                             fill.a
                         )
-                        .expect("writing to String cannot fail");
+                        .ok();
                     } else {
                         svg.push_str(" fill=\"none\"");
                     }
@@ -2514,7 +2521,7 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
                         font_size,
                         escape_xml(content)
                     )
-                    .expect("writing to String cannot fail");
+                    .ok();
                 }
             }
         }
@@ -2570,13 +2577,13 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
         "\\path[fill=white] (0,0) rectangle ({},{});",
         scene.width, scene.height
     )
-    .expect("writing to String cannot fail");
+    .ok();
     writeln!(
         tex,
         "\\clip (0,0) rectangle ({},{});",
         scene.width, scene.height
     )
-    .expect("writing to String cannot fail");
+    .ok();
 
     for object in &scene.objects {
         writeln!(
@@ -2586,7 +2593,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
             object.item.label.replace(['\n', '\r'], " "),
             object.item.object_id
         )
-        .expect("writing to String cannot fail");
+        .ok();
         for primitive in &object.primitives {
             match primitive {
                 ScenePrimitive::Path {
@@ -2609,8 +2616,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                     } else {
                         options.push("fill=none".to_string());
                     }
-                    write!(tex, "\\path[{}] ", options.join(","))
-                        .expect("writing to String cannot fail");
+                    write!(tex, "\\path[{}] ", options.join(",")).ok();
                     for (index, point) in points.iter().enumerate() {
                         if index > 0 {
                             tex.push_str(" -- ");
@@ -2621,7 +2627,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                             point.x,
                             f64::from(scene.height) - point.y
                         )
-                        .expect("writing to String cannot fail");
+                        .ok();
                     }
                     if *closed {
                         tex.push_str(" -- cycle");
@@ -2645,7 +2651,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                         f64::from(scene.height) - position.y,
                         escape_tikz(content)
                     )
-                    .expect("writing to String cannot fail");
+                    .ok();
                 }
             }
         }
@@ -2655,8 +2661,12 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
 }
 
 fn tiny_skia_color(color: Color) -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba(color.r, color.g, color.b, color.a)
-        .expect("scene colors were validated")
+    if let Some(valid) = tiny_skia::Color::from_rgba(color.r, color.g, color.b, color.a) {
+        valid
+    } else {
+        debug_assert!(false, "scene colors were validated");
+        tiny_skia::Color::BLACK
+    }
 }
 
 fn tiny_skia_path(points: &[ScreenPoint], closed: bool) -> Option<tiny_skia::Path> {
@@ -2840,13 +2850,15 @@ fn blend_opaque_pixel(pixmap: &mut tiny_skia::Pixmap, x: u32, y: u32, color: Col
             .round()
             .clamp(0.0, 255.0) as u8
     };
-    let pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+    let Some(pixel) = tiny_skia::PremultipliedColorU8::from_rgba(
         blend(color.r * 255.0, destination.red()),
         blend(color.g * 255.0, destination.green()),
         blend(color.b * 255.0, destination.blue()),
         255,
-    )
-    .expect("opaque RGB is premultiplied");
+    ) else {
+        debug_assert!(false, "opaque RGB is premultiplied");
+        return;
+    };
     pixmap.pixels_mut()[index] = pixel;
 }
 

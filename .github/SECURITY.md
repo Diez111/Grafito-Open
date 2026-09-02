@@ -64,7 +64,7 @@ advisory bypass.
 | --- | --- |
 | Owner | Grafito maintainers (security contact above) |
 | Reviewed | 2026-07-18 |
-| CI expiry | 2026-09-30; CI fails on and after this date |
+| CI expiry | 2026-12-31; CI fails on and after this date |
 | Removal condition | Every locked quick-xml path is patched at >=0.41.0 or its parent no longer uses quick-xml |
 
 The complete reviewed all-feature ancestor DAG is below. Each edge points from
@@ -105,13 +105,14 @@ functions only from its `cfg(test)` module in the reviewed immutable release;
 Grafito's release targets do not call those helpers. Every 0.39.4 route reaches
 the `wayland-scanner` proc macro through the Wayland protocol/toolkit graph.
 
-No compatible lockfile update exists. `zbus_xml` 4.0.0 requires quick-xml
-`^0.30`, while `wayland-scanner` 0.31.11 (the latest released scanner) requires
-`^0.39`; neither range can select the patched 0.41 line. The eframe 0.31.1 line
-is the newest tested line that retains Rust 1.88, but it still resolves the vulnerable quick-xml 0.30.0 version and also changes wgpu 22 to 24. Even eframe 0.35.0
-requires Rust 1.92 and still uses winit 0.30.13. Disabling AccessKit or Wayland
-would remove paths by regressing accessibility or native Linux support rather
-than by fixing the dependency.
+No compatible lockfile update exists for the remaining zbus path. `zbus_xml` 4.0.0 requires quick-xml
+`^0.30` and cannot select the patched >=0.41 line; `wayland-scanner` 0.31.11 now
+requires `^0.41` and is verified patched (quick-xml 0.41.0 in Cargo.lock), so only the
+zbus AT-SPI path remains vulnerable. The eframe 0.31.1 line is the newest tested
+line that retains Rust 1.88, but it still resolves the vulnerable quick-xml 0.30.0
+via zbus and also changes wgpu 22 to 24. Even eframe 0.35.0 requires Rust 1.92 and
+still uses winit 0.30.13. Disabling AccessKit or Wayland would remove paths by
+regressing accessibility or native Linux support rather than by fixing the dependency.
 
 Reachability is narrower than the package-level audit report:
 

@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use crate::animation::interpolate_color;
 use crate::icons::{draw_icon, Icon};
 use crate::theme::current_theme;
-use crate::tokens::RADIUS_MD;
+use crate::tokens::{BREAKPOINT_COMPACT, RADIUS_MD};
 use crate::Tool;
 
 /// Una entrada de la toolbar: `(Tool, etiqueta, atajo)`.
@@ -18,7 +18,7 @@ const TOOL_MENU_PREFERRED_WIDTH: f32 = 220.0;
 const TOOL_MENU_ITEM_HEIGHT: f32 = 30.0;
 const TOOL_MENU_SCREEN_MARGIN: f32 = 16.0;
 const TOOL_MENU_VERTICAL_RESERVE: f32 = 72.0;
-pub const COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_360.0;
+pub const COMPACT_TOOLBAR_MAX_WIDTH: f32 = BREAKPOINT_COMPACT;
 /// Lado reservado para cada selector de grupo de herramientas.
 pub const TOOLBAR_BUTTON_SIZE: f32 = 36.0;
 /// Espacio vertical que rodea la única fila de herramientas.
@@ -252,7 +252,12 @@ pub const ALL_GROUPS: &[ToolGroupId] = &[
 // Se proveen helpers tanto tipados (PedagogicalLevel) como ligeros (u32) para
 // no acoplar toolbar a pedagogy si hiciera falta (feature/udl.rs).
 
-/// Primary (level_value 0..=4): 5 grupos esenciales — Mover, Punto, Recta, Círculo, Polígono.
+/// Límite superior inclusivo de `level_value` para Primary (5 grupos).
+pub const TOOLBAR_LEVEL_PRIMARY_MAX: u32 = 4;
+/// Límite superior inclusivo de `level_value` para Secondary (8 grupos).
+pub const TOOLBAR_LEVEL_SECONDARY_MAX: u32 = 10;
+
+/// Primary (level_value `0..=TOOLBAR_LEVEL_PRIMARY_MAX`): 5 grupos esenciales — Mover, Punto, Recta, Círculo, Polígono.
 pub const PRIMARY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -261,7 +266,7 @@ pub const PRIMARY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Polygon,
 ];
 
-/// Secondary (5..=10): Primary + Lápiz, Medición, Análisis = 8 grupos.
+/// Secondary (`TOOLBAR_LEVEL_PRIMARY_MAX+1..=TOOLBAR_LEVEL_SECONDARY_MAX`): Primary + Lápiz, Medición, Análisis = 8 grupos.
 pub const SECONDARY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -273,7 +278,7 @@ pub const SECONDARY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Analysis,
 ];
 
-/// University (11+): todos los grupos — Secondary + Constraint, Boolean, Advanced, Dynamics, ThreeD/FourD, Eraser, Conic, Curve.
+/// University (`>TOOLBAR_LEVEL_SECONDARY_MAX`): todos los grupos — Secondary + Constraint, Boolean, Advanced, Dynamics, ThreeD/FourD, Eraser, Conic, Curve.
 pub const UNIVERSITY_TOOL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -295,13 +300,15 @@ pub const UNIVERSITY_TOOL_GROUPS: &[ToolGroupId] = &[
 ];
 
 /// Helper ligero sin dependencia de `grafito-pedagogy`: filtra por `level_value` (u32).
-/// 0..=4 → Primary (5), 5..=10 → Secondary (8), 11+ → University (todos).
+/// `0..=PRIMARY_MAX` → Primary (5), `PRIMARY_MAX+1..=SECONDARY_MAX` → Secondary (8), `>SECONDARY_MAX` → University.
 /// No rompe API — devuelve `&'static` sin asignación.
 pub fn toolbar_groups_for_level_value(level_value: u32) -> &'static [ToolGroupId] {
-    match level_value {
-        0..=4 => PRIMARY_TOOL_GROUPS,
-        5..=10 => SECONDARY_TOOL_GROUPS,
-        _ => UNIVERSITY_TOOL_GROUPS,
+    if level_value <= TOOLBAR_LEVEL_PRIMARY_MAX {
+        PRIMARY_TOOL_GROUPS
+    } else if level_value <= TOOLBAR_LEVEL_SECONDARY_MAX {
+        SECONDARY_TOOL_GROUPS
+    } else {
+        UNIVERSITY_TOOL_GROUPS
     }
 }
 
@@ -1301,5 +1308,93 @@ mod tests {
     fn locus_is_reachable_from_the_curve_group_used_by_analytic_perspectives() {
         let (_, curve_tools) = ToolGroupId::Curve.def();
         assert!(curve_tools.iter().any(|(tool, _, _)| *tool == Tool::Locus));
+    }
+
+    #[test]
+    fn primary_secondary_university_counts_via_level_value_constants() {
+        assert_eq!(PRIMARY_TOOL_GROUPS.len(), 5);
+        assert_eq!(SECONDARY_TOOL_GROUPS.len(), 8);
+        assert_eq!(UNIVERSITY_TOOL_GROUPS.len(), 17);
+        assert_eq!(
+            TOOLBAR_LEVEL_PRIMARY_MAX, 4,
+            "primary bound must remain 4 for progressive disclosure"
+        );
+        assert_eq!(
+            TOOLBAR_LEVEL_SECONDARY_MAX, 10,
+            "secondary bound must remain 10"
+        );
+    }
+
+    #[test]
+    fn toolbar_groups_for_level_value_maps_via_pedagogical_level_bounds() {
+        // Primary: 0..=PRIMARY_MAX — sampled at 0, 2, 4
+        for lv in [0, 2, TOOLBAR_LEVEL_PRIMARY_MAX] {
+            assert_eq!(
+                toolbar_groups_for_level_value(lv),
+                PRIMARY_TOOL_GROUPS,
+                "level {lv} should map to primary"
+            );
+        }
+        // Secondary: PRIMARY_MAX+1 ..= SECONDARY_MAX — sampled at 5, 8, 10
+        for lv in [
+            TOOLBAR_LEVEL_PRIMARY_MAX + 1,
+            8,
+            TOOLBAR_LEVEL_SECONDARY_MAX,
+        ] {
+            assert_eq!(
+                toolbar_groups_for_level_value(lv),
+                SECONDARY_TOOL_GROUPS,
+                "level {lv} should map to secondary"
+            );
+        }
+        // University: > SECONDARY_MAX — sampled at 11, 12, 15, 100
+        for lv in [TOOLBAR_LEVEL_SECONDARY_MAX + 1, 12, 15, 100] {
+            assert_eq!(
+                toolbar_groups_for_level_value(lv),
+                UNIVERSITY_TOOL_GROUPS,
+                "level {lv} should map to university"
+            );
+        }
+        // Cross-check typed helper stays in sync (Single source via level_value())
+        for (lvl, expected) in [
+            (
+                grafito_pedagogy::PedagogicalLevel::Primary,
+                PRIMARY_TOOL_GROUPS,
+            ),
+            (
+                grafito_pedagogy::PedagogicalLevel::Secondary,
+                SECONDARY_TOOL_GROUPS,
+            ),
+            (
+                grafito_pedagogy::PedagogicalLevel::University,
+                UNIVERSITY_TOOL_GROUPS,
+            ),
+            (
+                grafito_pedagogy::PedagogicalLevel::UTN(grafito_pedagogy::UTNProgram::AM1),
+                UNIVERSITY_TOOL_GROUPS,
+            ),
+        ] {
+            assert_eq!(toolbar_groups_for_level(lvl), expected);
+            assert_eq!(toolbar_groups_for_level_value(lvl.level_value()), expected);
+        }
+    }
+
+    #[test]
+    fn filter_groups_by_level_respects_progressive_disclosure() {
+        let perspective = [
+            ToolGroupId::Move,
+            ToolGroupId::Point,
+            ToolGroupId::Advanced,
+            ToolGroupId::Constraint,
+        ];
+        // Primary (level 2) only allows Move/Point among these
+        let primary = filter_groups_by_level(&perspective, 2);
+        assert_eq!(primary, vec![ToolGroupId::Move, ToolGroupId::Point]);
+        // Secondary (level 8) still filters out Advanced/Constraint
+        let secondary = filter_groups_by_level(&perspective, 8);
+        assert_eq!(secondary, vec![ToolGroupId::Move, ToolGroupId::Point]);
+        // University (level 15) passes all
+        let uni = filter_groups_by_level(&perspective, 15);
+        assert_eq!(uni, perspective.to_vec());
     }
 }

@@ -125,7 +125,7 @@ fi
 
 # Copy control files
 echo "Copying control files..."
-SHLIBS_SUBSTVAR="$(dpkg-shlibdeps --package="$PKG_NAME" -O "$BUILD_DIR/usr/bin/grafito")"
+SHLIBS_SUBSTVAR="$(dpkg-shlibdeps -O "$BUILD_DIR/usr/bin/grafito")"
 case "$SHLIBS_SUBSTVAR" in
     shlibs:Depends=*) RUNTIME_DEPENDS="${SHLIBS_SUBSTVAR#shlibs:Depends=}" ;;
     *) echo "ERROR: dpkg-shlibdeps did not produce shlibs:Depends." >&2; exit 1 ;;

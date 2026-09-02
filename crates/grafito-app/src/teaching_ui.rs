@@ -45,7 +45,9 @@ impl Default for TeachingUiState {
     }
 }
 
-fn whiteboard_elements_for_hint(hint: &str) -> Vec<grafito_whiteboard::WhiteboardElement> {
+pub(crate) fn whiteboard_elements_for_hint(
+    hint: &str,
+) -> Vec<grafito_whiteboard::WhiteboardElement> {
     use grafito_whiteboard::WhiteboardElement;
     let lower = hint.to_lowercase();
     let mut elems = Vec::new();
@@ -772,7 +774,11 @@ impl TeachingUiState {
 }
 
 /// Dibuja la enseñanza si hay sesión activa. Retorna true si se cerró.
-pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -> bool {
+pub fn draw_teaching_overlay(
+    state: &mut TeachingUiState,
+    ctx: &egui::Context,
+    budget: &mut crate::app::RepaintBudget,
+) -> bool {
     if state.session.is_none() {
         return false;
     }
@@ -970,7 +976,7 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                     // Dibujar pizarra vectorial real (trazo, rectángulos, flechas)
                                     state.whiteboard.draw(ui, wb_rect);
                                     // Permitir dibujar encima (pencil) dentro del overlay
-                                    state.whiteboard.handle_canvas_input(wb_rect, ui);
+                                    state.whiteboard.handle_canvas_input(wb_rect, ui, budget);
                                     if ui.is_rect_visible(wb_rect) {
                                         // Borde sutil por encima del draw para definición
                                         ui.painter().rect_stroke(
@@ -1018,7 +1024,8 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                 grafito_ui::tokens::RADIUS_MD,
                                 Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
                             );
-                            ui.ctx().request_repaint_after(Duration::from_millis(80));
+                            // F17: playback 12fps vía presupuesto coalescido.
+                            budget.request(Duration::from_millis(80));
                             ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
                                 egui::RichText::new(format!(
@@ -1054,7 +1061,8 @@ pub fn draw_teaching_overlay(state: &mut TeachingUiState, ctx: &egui::Context) -
                                         .color(theme.text_secondary),
                                 );
                             });
-                            ui.ctx().request_repaint_after(Duration::from_millis(48));
+                            // F17: pulso "Generando animación" vía presupuesto coalescido.
+                            budget.request(Duration::from_millis(48));
                         }
                         // Ledger colapsable — no ocupa altura si no se necesita
                         if let Some(ledger) = &ledger {

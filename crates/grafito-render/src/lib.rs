@@ -1,9 +1,5 @@
-#![allow(
-    unknown_lints,
-    float_literal_f32_fallback,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
+#![allow(unknown_lints, float_literal_f32_fallback)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(deprecated)]
 //! Grafito Render — Renderizador 2D/3D acelerado por GPU con wgpu.
 //!

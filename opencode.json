@@ -1,0 +1,36 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode-go/muse-spark-1.2-contributor",
+  "small_model": "opencode-go/deepseek-v4-flash",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 12000
+  },
+  "watcher": {
+    "ignore": ["target/**", "node_modules/**", ".git/**", "dist/**", "packaging/deb/**"]
+  },
+  "permission": "allow",
+  "instructions": ["AGENTS.md", "docs/architecture.md", "Plans.md", "Tasks.md", ".jspace/WORKSPACE.md"],
+  "agent": {
+    "cerebro-audit": {
+      "description": "Auditor cerebro puro Rust: core/geometry/command sin egui/wgpu, invariants type-safety",
+      "mode": "subagent",
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "temperature": 0.1,
+      "permission": "allow"
+    },
+    "piel-ui": {
+      "description": "Especialista egui/wgpu Piel: render &Estado sin I/O, tokens, performance",
+      "mode": "subagent",
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "temperature": 0.2
+    },
+    "perf-profiler": {
+      "description": "Profiler Rust: puffin, rayon, wgpu, lyon, spade. Mide antes de optimizar",
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4-flash",
+      "temperature": 0.15
+    }
+  }
+}

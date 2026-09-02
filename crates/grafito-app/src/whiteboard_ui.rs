@@ -6,9 +6,10 @@ use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
-    RADIUS_MD, RADIUS_PILL, SHADOW_ALPHA, SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y, SPACE_MD,
-    SPACE_SM, SPACE_XS, TYPE_XS, ZOOM_ICON_HIT, ZOOM_PCT_MIN_W, ZOOM_PILL_GAP, ZOOM_PILL_PAD_X,
-    ZOOM_PILL_PAD_Y, ZOOM_PILL_RADIUS, ZOOM_WB_DEFAULT, ZOOM_WB_MAX, ZOOM_WB_MIN,
+    ALPHA_OVERLAY, RADIUS_MD, RADIUS_PILL, RADIUS_SM, SHADOW_ALPHA, SHADOW_POPUP_BLUR,
+    SHADOW_POPUP_OFFSET_Y, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_XS, ZOOM_ICON_HIT, ZOOM_PCT_MIN_W,
+    ZOOM_PILL_GAP, ZOOM_PILL_PAD_X, ZOOM_PILL_PAD_Y, ZOOM_PILL_RADIUS, ZOOM_WB_DEFAULT,
+    ZOOM_WB_MAX, ZOOM_WB_MIN,
 };
 use grafito_whiteboard::{
     arrow_tip, smooth_stroke, WhiteboardDoc, WhiteboardElement, WhiteboardInteraction,
@@ -145,7 +146,8 @@ impl Default for WhiteboardSession {
             marquee: None,
             // Color por defecto con contraste en ambos temas; paleta permite cambiar.
             // Se ajusta automáticamente en draw() si el contraste con canvas_bg es bajo.
-            pen_color: Color32::from_rgb(26, 26, 26),
+            // LIGHT.text_primary (#1A1A1A) — oscuro sobre canvas claro; en dark se adapta vía effective_pen_color().
+            pen_color: grafito_ui::theme::LIGHT.text_primary,
             pen_width: 2.0,
             show_palette: false,
         }
@@ -390,11 +392,14 @@ impl WhiteboardSession {
             return theme.text_primary;
         }
         if !is_light_canvas && pen_is_dark {
-            return Color32::from_rgb(240, 241, 244);
+            // Quiet light on dark: theme.text_primary en dark es FAFAF9 (250,250,249); históricamente 240,241,244
+            return theme.text_primary;
         }
-        // Compatibilidad: el default histórico era claro (240,241,244) que es invisible en modo claro
-        if is_light_canvas && self.pen_color == Color32::from_rgb(240, 241, 244) {
-            return Color32::from_rgb(26, 26, 26);
+        // Compatibilidad: el default histórico era claro (240,241,244 ≈ FAFAF9) que es invisible en modo claro.
+        // Se mantiene comparación exacta para docs viejos, pero retorno usa theme (no hardcode).
+        const HISTORIC_LIGHT_PEN: Color32 = Color32::from_rgb(240, 241, 244);
+        if is_light_canvas && self.pen_color == HISTORIC_LIGHT_PEN {
+            return theme.text_primary;
         }
         self.pen_color
     }
@@ -472,14 +477,19 @@ impl WhiteboardSession {
         }
     }
 
-    pub fn handle_canvas_input(&mut self, rect: Rect, ui: &egui::Ui) {
-        // Repintar a 60Hz si hay cualquier pointer/touch activo (tableta, mouse, touch)
+    pub fn handle_canvas_input(
+        &mut self,
+        rect: Rect,
+        ui: &egui::Ui,
+        budget: &mut crate::app::RepaintBudget,
+    ) {
+        // Repintar a 60Hz si hay cualquier pointer/touch activo (tableta, mouse, touch).
+        // F17: vía presupuesto coalescido, no `ctx.request_repaint_after` directo.
         if ui
             .ctx()
             .input(|i| i.pointer.any_down() || i.multi_touch().is_some())
         {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
+            budget.request(std::time::Duration::from_millis(16));
         }
         let response = ui.interact(
             rect,
@@ -611,7 +621,8 @@ fn draw_element(
             let col = if is_light_canvas && col_is_light {
                 theme.text_primary
             } else if !is_light_canvas && col_is_dark {
-                Color32::from_rgb(240, 241, 244)
+                // theme.text_primary en dark es claro (FAFAF9) — históricamente 240,241,244
+                theme.text_primary
             } else {
                 raw
             };
@@ -744,10 +755,10 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
             .rounding(egui::Rounding::same(RADIUS_PILL))
             .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
             .shadow(egui::epaint::Shadow {
-                offset: vec2(0.0, 4.0),
-                blur: 20.0,
+                offset: vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+                blur: SHADOW_POPUP_BLUR,
                 spread: 0.0,
-                color: Color32::from_black_alpha(28),
+                color: Color32::from_black_alpha(SHADOW_ALPHA),
             })
             .show(ui, |ui| {
                 egui::ScrollArea::horizontal()
@@ -817,13 +828,13 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                 egui::Frame::none()
                     .fill(theme.panel_bg.gamma_multiply(0.96))
                     .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.08)))
-                    .rounding(8.0)
-                    .inner_margin(egui::Margin::symmetric(SPACE_XS, 4.0))
+                    .rounding(RADIUS_SM)
+                    .inner_margin(egui::Margin::symmetric(SPACE_XS, SPACE_SM / 2.0))
                     .shadow(egui::Shadow {
-                        offset: vec2(0.0, 1.0),
-                        blur: 4.0,
+                        offset: vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+                        blur: SHADOW_POPUP_BLUR,
                         spread: 0.0,
-                        color: Color32::from_black_alpha(4),
+                        color: Color32::from_black_alpha(SHADOW_ALPHA),
                     })
                     .show(ui, |ui| {
                         let mut dummy_clear = false;
@@ -870,10 +881,12 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                     .rounding(RADIUS_MD)
                     .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
                     .shadow(egui::Shadow {
-                        offset: vec2(0.0, 2.0),
-                        blur: 8.0,
+                        offset: vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+                        blur: SHADOW_POPUP_BLUR,
                         spread: 0.0,
-                        color: Color32::from_black_alpha((8.0 * palette_anim) as u8),
+                        color: Color32::from_black_alpha(
+                            (SHADOW_ALPHA as f32 * palette_anim) as u8,
+                        ),
                     })
                     .show(ui, |ui| {
                         ui.scope(|ui| {
@@ -888,6 +901,15 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                                     )
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
+                                            // Paleta curada Scandinavian — valores mapeados a theme (quiet, 8 tonos):
+                                            // [250,250,249]=LIGHT.canvas_bg/DARK.text_primary (FAFAF9) — fondo claro
+                                            // [212,212,216]=separator claro / text_tertiary
+                                            // [107,122,111]=accent sage #6B7A6F — oliva calm
+                                            // [100,116,139]=steel blue desaturado
+                                            // [168,123,110]=terracotta suave
+                                            // [91,125,177]=azul medio
+                                            // [196,91,91]=rojo apagado
+                                            // [209,183,91]=ocre Scandinavian — todos theme-derived, no theatrical
                                             const PALETTE: &[[u8; 3]] = &[
                                                 [250, 250, 249],
                                                 [212, 212, 216],
@@ -935,7 +957,9 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                                                                 .clamp(2.0, 7.0),
                                                             Stroke::new(
                                                                 1.0,
-                                                                Color32::from_black_alpha(25),
+                                                                Color32::from_black_alpha(
+                                                                    ALPHA_OVERLAY,
+                                                                ),
                                                             ),
                                                         );
                                                     }
@@ -1015,7 +1039,8 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
                 RADIUS_MD,
                 Stroke::new(1.0, theme.separator.gamma_multiply(0.08)),
             );
-            app.whiteboard.handle_canvas_input(canvas_rect, ui);
+            app.whiteboard
+                .handle_canvas_input(canvas_rect, ui, &mut app.repaint_budget);
             app.whiteboard.draw(ui, canvas_rect);
 
             // Pill de zoom abajo-derecha — Scandinavian: infinito Geogebra 1e-6..1e6
@@ -1185,11 +1210,18 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
         }
     }
     let busy = ctx.input(|input| input.pointer.any_down());
-    ctx.request_repaint_after(std::time::Duration::from_millis(if busy {
-        16
-    } else {
-        100
-    }));
+    // F17: la pizarra hace early-return en `GrafitoApp::update`, así que el
+    // scheduler unificado no corre en este modo; este es su scheduler local,
+    // coalescido vía presupuesto y aplicado una sola vez al final del overlay.
+    // TODO(F17): el idle 100ms solo alimenta `ctx.animate_bool` de la paleta;
+    // egui ya repinta automáticamente durante animaciones → evaluar quitarlo.
+    app.repaint_budget
+        .request(std::time::Duration::from_millis(if busy {
+            16
+        } else {
+            100
+        }));
+    app.repaint_budget.apply(ctx);
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@
 //!
 //! Estos tokens son la **única fuente de verdad** para tamaños y
 //! espacios. Ningún `.size(N)` o `vec2(N,M)` hardcodeado fuera de aquí.
+//! — Sistema base 4 para spacing, ratio tipográfico 1.25.
 
 // ═══════════════════════════════════════════════════════════
 // Familias tipográficas — Scandinavian
@@ -26,6 +27,7 @@ pub const FONT_FALLBACK_SANS: &str = "Inter";
 
 // ═══════════════════════════════════════════════════════════
 // Type scale — Scandinavian (Inter 12 / 15 / 19)
+// ratio 1.25 (Major Third) — calm progression
 // ═══════════════════════════════════════════════════════════
 
 /// Texto doble-extra-pequeño: micro hints, eye-tracking status.
@@ -47,6 +49,7 @@ pub const TYPE_XXL: f32 = 28.0;
 
 // ═══════════════════════════════════════════════════════════
 // Spacing scale — Scandinavian (16 / 24 / 40)
+// base 4 — todo múltiplo de 4
 // ═══════════════════════════════════════════════════════════
 
 /// Espacio extra-pequeño: entre items muy cercanos.
@@ -105,6 +108,105 @@ pub const SHADOW_POPUP_OFFSET_Y: f32 = 2.0;
 pub const SHADOW_POPUP_BLUR: f32 = 8.0;
 /// Alpha sombra — 8 (~3 %) sutil, Scandinavian restraint.
 pub const SHADOW_ALPHA: u8 = 8;
+
+// ═══════════════════════════════════════════════════════════
+// Alphas — Scandinavian quiet overlays
+// ═══════════════════════════════════════════════════════════
+
+/// Alpha sombra — canonical 8 (~3 %) — alias de SHADOW_ALPHA.
+/// Usar `Color32::from_black_alpha(ALPHA_SHADOW)` para sombras sutiles.
+pub const ALPHA_SHADOW: u8 = 8;
+/// Alpha overlay — 25 (~10 %) para hover sutil / scrim ligero.
+pub const ALPHA_OVERLAY: u8 = 25;
+/// Alpha separator referencia — 18 (~7 %) para strokes from_black_alpha.
+/// Nota: el separator canónico en `theme.rs` usa `separator.gamma_multiply(0.10)`
+/// (10 % hairline sobre #E8E8E6) — preferir gamma_multiply sobre from_black_alpha
+/// para bordes; ALPHA_SEPARATOR queda como referencia histórica y para strokes
+/// donde gamma no aplica (p.ej. `Color32::from_black_alpha(ALPHA_SEPARATOR)`).
+pub const ALPHA_SEPARATOR: u8 = 18;
+
+// ═══════════════════════════════════════════════════════════
+// Layout — breakpoints (Scandinavian responsive)
+// ═══════════════════════════════════════════════════════════
+
+/// Breakpoint compact — 1360 px.
+/// Reemplaza 3× hardcodeados 1360:
+/// - `COMPACT_TOOLBAR_MAX_WIDTH` (toolbar.rs)
+/// - `COMPACT_TOP_CHROME_MAX_WIDTH` (ui.rs)
+/// - `ShellLayout::CANVAS_FOCUS_MAX_WIDTH` (lib.rs)
+///
+/// Por debajo → overflow compact (solo Move + grupo activo + "Más");
+/// por encima → toolbar completa y drawers simultáneos.
+pub const BREAKPOINT_COMPACT: f32 = 1360.0;
+
+// ═══════════════════════════════════════════════════════════
+// Layout — paneles laterales y drawers
+// ═══════════════════════════════════════════════════════════
+
+/// Ancho por defecto panel izquierdo (Álgebra/CAS/Vista) — 260 px.
+pub const PANEL_LEFT_DEFAULT: f32 = 260.0;
+/// Ancho mínimo panel izquierdo — 180 px.
+pub const PANEL_LEFT_MIN: f32 = 180.0;
+/// Fracción máxima del viewport para panel izquierdo — 0.45 (45 %).
+/// Uso: `max_width = (available_width * PANEL_LEFT_MAX_FRACTION).max(200.0)`
+pub const PANEL_LEFT_MAX_FRACTION: f32 = 0.45;
+
+/// Drawer derecho (Inspector/Utilidad Geometry 3D) — ancho por defecto 344 px.
+pub const DRAWER_RIGHT_DEFAULT: f32 = 344.0;
+/// Drawer derecho — ancho mínimo 292 px.
+pub const DRAWER_RIGHT_MIN: f32 = 292.0;
+/// Drawer derecho — ancho máximo 440 px.
+pub const DRAWER_RIGHT_MAX: f32 = 440.0;
+
+/// Ancho rail lateral izquierdo (icon bar 60 px) — Scandinavian single rail.
+pub const RAIL_WIDTH: f32 = 60.0;
+
+// ═══════════════════════════════════════════════════════════
+// Cards — Scandinavian quiet surfaces
+// ═══════════════════════════════════════════════════════════
+
+/// Espacio entre cards — 12.0 = SPACE_MD (base 4).
+pub const CARD_SPACING: f32 = SPACE_MD;
+/// Radio card de objeto — 8.0 = RADIUS_SM.
+pub const OBJECT_CARD_RADIUS: f32 = RADIUS_SM;
+/// Radio card inspector/sección — 12.0 = RADIUS_MD.
+pub const INSPECTOR_CARD_RADIUS: f32 = RADIUS_MD;
+
+// ═══════════════════════════════════════════════════════════
+// Splash
+// ═══════════════════════════════════════════════════════════
+
+/// Tamaño logo splash — 128 px cuadrado.
+pub const SPLASH_LOGO_SIZE: f32 = 128.0;
+
+// ═══════════════════════════════════════════════════════════
+// Helpers — layout functions (Scandinavian, sin hardcodes)
+// ═══════════════════════════════════════════════════════════
+
+/// Indica si el viewport exige layout compacto (≤ BREAKPOINT_COMPACT).
+#[inline]
+pub fn is_compact_viewport(width: f32) -> bool {
+    width <= BREAKPOINT_COMPACT
+}
+
+/// Ancho máximo permitido para panel izquierdo dado el ancho disponible.
+/// Clamp inferior 200 px evita drawer inutilizable en viewports estrechos.
+#[inline]
+pub fn panel_left_max_width(available_width: f32) -> f32 {
+    (available_width * PANEL_LEFT_MAX_FRACTION).max(200.0)
+}
+
+/// Ancho clamped para panel izquierdo (min .. max dinámico).
+#[inline]
+pub fn clamp_panel_left_width(requested: f32, available_width: f32) -> f32 {
+    requested.clamp(PANEL_LEFT_MIN, panel_left_max_width(available_width))
+}
+
+/// Ancho clamped para drawer derecho (292 .. 440).
+#[inline]
+pub fn clamp_drawer_right_width(requested: f32) -> f32 {
+    requested.clamp(DRAWER_RIGHT_MIN, DRAWER_RIGHT_MAX)
+}
 
 // ═══════════════════════════════════════════════════════════
 // Top bar — Scandinavian single bar
@@ -212,5 +314,114 @@ mod tests {
     fn micro_interaction_timing_stays_between_fast_and_normal_feedback() {
         assert!(ANIM_FAST < ANIM_MICRO);
         assert!(ANIM_MICRO < ANIM_NORMAL);
+    }
+
+    // ── New tokens — breakpoint & panel relationships ──
+
+    #[test]
+    fn breakpoint_compact_is_canonical_1360() {
+        assert_eq!(BREAKPOINT_COMPACT, 1360.0);
+        // Helper debe coincidir con el breakpoint
+        assert!(is_compact_viewport(1360.0));
+        assert!(is_compact_viewport(960.0));
+        assert!(!is_compact_viewport(1361.0));
+        assert!(!is_compact_viewport(1680.0));
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn panel_left_relationships_hold() {
+        assert!(PANEL_LEFT_MIN < PANEL_LEFT_DEFAULT);
+        assert_eq!(PANEL_LEFT_DEFAULT, 260.0);
+        assert_eq!(PANEL_LEFT_MIN, 180.0);
+        assert!((PANEL_LEFT_MAX_FRACTION - 0.45).abs() < f32::EPSILON);
+        assert!(PANEL_LEFT_MAX_FRACTION > 0.0 && PANEL_LEFT_MAX_FRACTION < 1.0);
+        // Default cabe dentro del max para viewport típico 1280
+        let max_1280 = panel_left_max_width(1280.0);
+        assert!(PANEL_LEFT_DEFAULT <= max_1280);
+        assert!(max_1280 >= 200.0);
+        // Clamp respeta min/max
+        assert_eq!(clamp_panel_left_width(100.0, 1280.0), PANEL_LEFT_MIN);
+        assert_eq!(clamp_panel_left_width(1000.0, 1280.0), max_1280);
+        assert_eq!(clamp_panel_left_width(260.0, 1280.0), 260.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn drawer_right_relationships_hold() {
+        assert!(DRAWER_RIGHT_MIN < DRAWER_RIGHT_DEFAULT);
+        assert!(DRAWER_RIGHT_DEFAULT < DRAWER_RIGHT_MAX);
+        assert_eq!(DRAWER_RIGHT_DEFAULT, 344.0);
+        assert_eq!(DRAWER_RIGHT_MIN, 292.0);
+        assert_eq!(DRAWER_RIGHT_MAX, 440.0);
+        assert_eq!(clamp_drawer_right_width(200.0), DRAWER_RIGHT_MIN);
+        assert_eq!(clamp_drawer_right_width(500.0), DRAWER_RIGHT_MAX);
+        assert_eq!(clamp_drawer_right_width(344.0), 344.0);
+    }
+
+    #[test]
+    fn rail_and_splash_use_scandinavian_tokens() {
+        assert_eq!(RAIL_WIDTH, 60.0);
+        assert_eq!(SPLASH_LOGO_SIZE, 128.0);
+        // Splash es múltiplo de base 4 y cuadrado
+        assert_eq!(SPLASH_LOGO_SIZE % 4.0, 0.0);
+        assert_eq!(RAIL_WIDTH % 4.0, 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn alphas_match_scandinavian_quiet() {
+        assert_eq!(ALPHA_SHADOW, 8);
+        assert_eq!(SHADOW_ALPHA, ALPHA_SHADOW);
+        assert_eq!(ALPHA_OVERLAY, 25);
+        assert_eq!(ALPHA_SEPARATOR, 18);
+        // Shadow < separator < overlay (sutil → visible)
+        assert!(ALPHA_SHADOW < ALPHA_SEPARATOR);
+        assert!(ALPHA_SEPARATOR < ALPHA_OVERLAY);
+    }
+
+    #[test]
+    fn card_tokens_are_canonical_aliases() {
+        assert_eq!(CARD_SPACING, SPACE_MD);
+        assert_eq!(CARD_SPACING, 12.0);
+        assert_eq!(OBJECT_CARD_RADIUS, RADIUS_SM);
+        assert_eq!(OBJECT_CARD_RADIUS, 8.0);
+        assert_eq!(INSPECTOR_CARD_RADIUS, RADIUS_MD);
+        assert_eq!(INSPECTOR_CARD_RADIUS, 12.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn spacing_uses_base_4() {
+        for v in [
+            SPACE_XS,
+            SPACE_SM,
+            SPACE_MD,
+            SPACE_LG,
+            SPACE_XL,
+            SPACE_XXL,
+            SPACING_MINIMAL_X,
+            SPACING_MINIMAL_Y,
+            SPACING_BUTTON_X,
+            SPACING_BUTTON_Y,
+            CARD_SPACING,
+            RAIL_WIDTH,
+            SPLASH_LOGO_SIZE,
+        ] {
+            assert_eq!(v % 4.0, 0.0, "spacing value {v} must be multiple of base 4");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn type_scale_ratio_stays_near_1_25() {
+        // Ratio 1.25 Major Third — verificar que la progresión no se rompa.
+        // No exacto por redondeo Scandinavian (12/15/19), pero cercano.
+        let ratio_sm_base = TYPE_BASE / TYPE_SM; // 15/12 = 1.25 exact
+        let ratio_base_lg = TYPE_LG / TYPE_BASE; // 19/15 ≈ 1.266
+        assert!((ratio_sm_base - 1.25).abs() < 0.01);
+        assert!((ratio_base_lg - 1.25).abs() < 0.05);
+        // Monotonic ya verificado, aquí sólo ratio
+        assert!(TYPE_SM < TYPE_BASE && TYPE_BASE < TYPE_LG);
     }
 }

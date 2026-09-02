@@ -3429,7 +3429,9 @@ fn preflight_homogeneous_assistant_scene(
         }
     }
 
-    let capability = capability.expect("a bounded nonempty scene has a capability");
+    let Some(capability) = capability else {
+        return Err("La escena vacía no tiene capacidad.".into());
+    };
     let mut inspection = staged.detached_clone_for_staging();
     for id in existing_ids {
         if let Some(object) = inspection.get_object_mut(id) {

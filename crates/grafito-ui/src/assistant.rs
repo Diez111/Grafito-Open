@@ -17,6 +17,22 @@ use grafito_assistant_types::{
 };
 pub use grafito_command::assistant_proposals::{AssistantParameterAssignment, AssistantProposal};
 
+// ── F17 Repaint coalesce ─────────────────────────────────────────────────────
+// Estos widgets viven en `grafito-ui` (capa Piel) y no pueden alcanzar
+// `GrafitoApp::request_repaint_budget` (DAG: `ui → app`). Se mantienen como
+// wake sources locales con constantes nombradas; quedan subsumidas por el
+// scheduler unificado de `app.rs` (16ms) mientras `is_pending`.
+
+/// Intervalo de repintado del pulso "Generando animación…" (F17).
+/// Subsumido por el scheduler de `app.rs` (16ms) mientras `is_pending`.
+pub const ANIMATION_PROGRESS_REPAINT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(48);
+/// Intervalo de repintado del playback de media (GIF-like) (F17).
+/// No cubierto por `is_pending` (la media se reproduce tras completar el job);
+/// wake source local del widget.
+pub const MEDIA_PLAYBACK_REPAINT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(40);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Statem del asistente — hace imposibles los estados inválidos (rust-design)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3744,8 +3760,9 @@ fn draw_animation_progress(
                 ));
             });
         });
+    // F17: subsumido por el scheduler de app.rs (16ms) mientras is_pending.
     ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(48));
+        .request_repaint_after(ANIMATION_PROGRESS_REPAINT_INTERVAL);
     let _ = state;
 }
 
@@ -3796,8 +3813,9 @@ fn draw_media_card(ui: &mut egui::Ui, media: &AssistantMedia, state: &AssistantP
                     egui::Color32::WHITE,
                 );
             });
+        // F17: playback media card — wake source local (no cubierto por is_pending).
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(40));
+            .request_repaint_after(MEDIA_PLAYBACK_REPAINT_INTERVAL);
     } else {
         ui.label(
             egui::RichText::new("Preparando animación…")

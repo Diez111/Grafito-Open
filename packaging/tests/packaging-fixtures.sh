@@ -151,4 +151,29 @@ grep -Fq 'usr/share/grafito/plugins' "$build_deb" || {
     exit 1
 }
 
+# Mora avatar must exist and stay small (<32 KiB) as embedded via include_bytes! (see architecture §8).
+[[ -f "$PROJECT_ROOT/assets/mora.png" ]] || {
+    echo "missing avatar asset mora.png" >&2
+    exit 1
+}
+[[ -f "$PROJECT_ROOT/assets/mora.svg" ]] || {
+    echo "missing avatar asset mora.svg" >&2
+    exit 1
+}
+mora_bytes="$(wc -c < "$PROJECT_ROOT/assets/mora.png")"
+# Trim whitespace from wc output
+mora_bytes="$(echo "$mora_bytes" | tr -d '[:space:]')"
+if ! [[ "$mora_bytes" =~ ^[0-9]+$ ]] || (( mora_bytes >= 32768 )); then
+    echo "mora.png exceeds 32 KiB embedded budget: ${mora_bytes:-unknown} bytes" >&2
+    exit 1
+fi
+grep -Fq 'assets/mora.png' "$PROJECT_ROOT/crates/grafito-app/src/app.rs" || {
+    echo "mora.png not embedded via include_bytes! in app.rs" >&2
+    exit 1
+}
+grep -Fq 'assets/mora.png' "$PROJECT_ROOT/crates/grafito-app/src/assistant.rs" || {
+    echo "mora.png not embedded via include_bytes! in assistant.rs" >&2
+    exit 1
+}
+
 echo "Packaging fixtures passed."

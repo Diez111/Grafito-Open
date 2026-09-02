@@ -1462,6 +1462,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "puffin",
+ "rayon",
 ]
 
 [[package]]

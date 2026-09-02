@@ -1,6 +1,11 @@
 use crate::GrafitoApp;
 use egui::Ui;
+use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
+use grafito_ui::tokens::{
+    CARD_SPACING, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_SM, SPACE_SM,
+    SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+};
 use grafito_ui::toolbar::draw_tool_icon;
 use grafito_ui::Tool;
 
@@ -10,27 +15,45 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
     egui::SidePanel::left("tools_panel")
         .show_separator_line(false)
-        .default_width(320.0)
-        .frame(egui::Frame::none().fill(panel_fill).inner_margin(12.0))
+        .default_width(PANEL_LEFT_DEFAULT)
+        .min_width(PANEL_LEFT_MIN)
+        .max_width((ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION).max(PANEL_LEFT_DEFAULT - 40.0))
+        .resizable(true)
+        .frame(egui::Frame::none().fill(panel_fill).inner_margin(egui::Margin::same(SPACE_SM)))
         .show(ctx, |ui| {
+            ui.add_space(SPACE_SM);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Herramientas").strong().size(18.0));
+                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("Herramientas")
+                        .strong()
+                        .size(TYPE_LG)
+                        .color(theme.accent),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("X").clicked() {
+                    ui.add_space(SPACE_SM);
+                    if action_icon_button(
+                        ui,
+                        Icon::Close,
+                        theme.text_secondary,
+                        "Cerrar panel de Herramientas",
+                    )
+                    .clicked()
+                    {
                         app.sidebar_tab = 0; // Return to Algebra
                     }
                 });
             });
-            ui.add_space(8.0);
-
+            ui.add_space(SPACE_SM);
             ui.painter().line_segment(
                 [
                     ui.cursor().min,
                     ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
                 ],
-                egui::Stroke::new(1.0, theme.separator),
+                theme.hairline_stroke(),
             );
-            ui.add_space(12.0);
+            ui.add_space(SPACE_SM);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let is_3d = app.current_view == crate::ViewMode::D3;
@@ -353,11 +376,11 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         egui::RichText::new(
                             "Financiera · CAS · Probabilidad vía paleta (Ctrl+K): Rate[], Derivative[], Normal[]…",
                         )
-                        .size(11.0)
+                        .size(TYPE_XS)
                         .color(theme.text_tertiary)
                         .italics(),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(SPACE_SM);
                 }
             });
         });
@@ -368,16 +391,16 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
     ui.label(
         egui::RichText::new(title)
             .strong()
-            .size(14.0)
+            .size(TYPE_SM)
             .color(theme.text_secondary),
     );
-    ui.add_space(8.0);
+    ui.add_space(SPACE_SM);
 
     // We will use a grid to lay them out in 2 columns
     let num_cols = 2;
     egui::Grid::new(title)
         .num_columns(num_cols)
-        .spacing(egui::vec2(8.0, 8.0))
+        .spacing(egui::vec2(SPACE_SM, SPACE_SM))
         .show(ui, |ui| {
             for (i, (tool, name, desc)) in tools.iter().enumerate() {
                 let is_selected = app.current_tool == *tool;
@@ -395,7 +418,7 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                 };
 
                 let (rect, resp) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width().max(140.0), 38.0),
+                    egui::vec2(ui.available_width().max(140.0), ZOOM_ICON_HIT),
                     egui::Sense::click(),
                 );
 
@@ -403,14 +426,14 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                     let painter = ui.painter();
                     painter.rect_filled(
                         rect,
-                        6.0,
+                        RADIUS_SM,
                         if resp.hovered() && !is_selected {
                             theme.button_hover
                         } else {
                             btn_fill
                         },
                     );
-                    painter.rect_stroke(rect, 6.0, border);
+                    painter.rect_stroke(rect, RADIUS_SM, border);
 
                     let icon_rect = egui::Rect::from_center_size(
                         rect.left_center() + egui::vec2(20.0, 0.0),
@@ -434,7 +457,7 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                         rect.left_center() + egui::vec2(44.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         *name,
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::proportional(TYPE_SM),
                         theme.text_primary,
                     );
                 }
@@ -460,5 +483,5 @@ fn draw_tool_group(ui: &mut Ui, app: &mut GrafitoApp, title: &str, tools: &[(Too
                 }
             }
         });
-    ui.add_space(16.0);
+    ui.add_space(CARD_SPACING);
 }

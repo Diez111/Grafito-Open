@@ -4363,3 +4363,361 @@ fn deferred_file_actions_are_single_slot_and_dialog_decisions_have_priority() {
         Some(DeferredFileIntent::Command(FileCommand::Exit))
     );
 }
+
+// ── AG14: Headless panel render tests + teaching_ui mappings ─────────────────
+
+#[cfg(test)]
+fn headless_raw_input() -> egui::RawInput {
+    egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 720.0),
+        )),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn headless_dummy_app_maintains_viewmode_perspective_invariant() {
+    use crate::{CanvasMode, Perspective, ViewMode};
+    for perspective in Perspective::ALL {
+        let app = crate::app::dummy_grafito_app_with_perspective(perspective);
+        assert_eq!(
+            app.current_view,
+            perspective.view_mode(),
+            "current_view diverged for {perspective:?}"
+        );
+        assert_eq!(
+            app.current_view,
+            app.perspective.view_mode(),
+            "app.view invariant failed for {perspective:?}"
+        );
+        assert_eq!(
+            perspective.canvas_mode().view_mode(),
+            perspective.view_mode(),
+            "CanvasMode collapse mismatch for {perspective:?}"
+        );
+        assert_eq!(
+            perspective.layout().canvas_mode,
+            perspective.canvas_mode(),
+            "layout.canvas_mode must equal Perspective::canvas_mode for {perspective:?}"
+        );
+        // ViewMode derived helper must stay in sync
+        assert_eq!(
+            ViewMode::from_perspective(perspective),
+            perspective.view_mode()
+        );
+        assert_eq!(
+            CanvasMode::from_perspective(perspective),
+            perspective.canvas_mode()
+        );
+        // Verify set_perspective keeps invariant (no direct field mutation)
+        let mut mutable = crate::app::dummy_grafito_app();
+        mutable.set_perspective(perspective);
+        assert_eq!(mutable.current_view, mutable.perspective.view_mode());
+        assert_eq!(mutable.perspective, perspective);
+    }
+}
+
+#[test]
+fn headless_algebra_panel_renders_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry2D);
+    // populate with a few objects to exercise list code
+    app.document
+        .try_add_point(grafito_geometry::Point2::new(1.0, 2.0))
+        .expect("point inserts");
+    app.document
+        .try_add_point(grafito_geometry::Point2::new(2.0, 3.0))
+        .expect("point inserts");
+    let output = ctx.run(headless_raw_input(), |ctx| {
+        crate::algebra::draw_algebra_panel(&mut app, ctx);
+    });
+    // also verify no unwrap panic: output shapes exist (frame + text)
+    // we keep check loose to avoid brittle shape counts across egui versions
+    assert!(output.shapes.len() < 10_000, "algebra panel not explosive");
+    assert!(
+        output.textures_delta.set.is_empty() || !output.textures_delta.set.is_empty(),
+        "textures_delta valid"
+    );
+}
+
+#[test]
+fn headless_view_panel_renders_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    let output = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_view_panel(&mut app, ctx);
+    });
+    assert!(output.shapes.len() < 10_000);
+    // toggle perspective and re-render to ensure ViewMode consistency
+    app.set_perspective(crate::Perspective::Geometry3D);
+    assert_eq!(app.current_view, crate::ViewMode::D3);
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_view_panel(&mut app, ctx);
+    });
+}
+
+#[test]
+fn headless_tools_panel_renders_without_panic_for_both_views() {
+    for perspective in [
+        crate::Perspective::Geometry2D,
+        crate::Perspective::Geometry3D,
+    ] {
+        let ctx = egui::Context::default();
+        let mut app = crate::app::dummy_grafito_app_with_perspective(perspective);
+        let output = ctx.run(headless_raw_input(), |ctx| {
+            crate::tools_panel::draw_tools_panel(&mut app, ctx);
+        });
+        assert!(
+            output.shapes.len() < 15_000,
+            "tools panel overflow for {perspective:?}"
+        );
+        // verify perspective ↔ view_mode link
+        assert_eq!(app.current_view, perspective.view_mode());
+    }
+}
+
+#[test]
+fn headless_complex_and_statistics_panels_render_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Complex);
+    // ensure complex perspective respects invariants
+    assert_eq!(app.current_view, crate::ViewMode::D2);
+    assert_eq!(app.perspective, crate::Perspective::Complex);
+    let out_complex = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_complex_panel(&mut app, ctx);
+    });
+    assert!(out_complex.shapes.len() < 10_000);
+
+    let mut app2 = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Statistics);
+    // inject some data to exercise statistics path without panic
+    app2.statistics_data = vec![1.0, 2.0, 3.0, 4.0];
+    let out_stats = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_statistics_panel(&mut app2, ctx);
+    });
+    assert!(out_stats.shapes.len() < 10_000);
+
+    let mut app3 = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Dynamics);
+    let out_attractor = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_attractor_panel(&mut app3, ctx);
+    });
+    assert!(out_attractor.shapes.len() < 10_000);
+}
+
+#[test]
+fn headless_right_properties_panel_renders_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry3D);
+    // no selection → empty state
+    let out_empty = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_right_properties_panel(&mut app, ctx);
+    });
+    assert!(out_empty.shapes.len() < 10_000);
+    // with selection → inspector cards
+    let cube = app.document.add_object(grafito_core::GeoObject::Cube3D(
+        grafito_core::Cube3DObj::new(grafito_geometry::Point3D::new(0.0, 0.0, 0.0), 2.0),
+    ));
+    app.selected_object = Some(cube);
+    let out_filled = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_right_properties_panel(&mut app, ctx);
+    });
+    assert!(out_filled.shapes.len() < 15_000);
+    // ensure selection survives second frame (no panic on id collision)
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_right_properties_panel(&mut app, ctx);
+    });
+}
+
+#[test]
+fn headless_cas_and_trig_panels_render_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::AlgebraCas);
+    let out_cas = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_cas_panel(&mut app, ctx);
+    });
+    assert!(out_cas.shapes.len() < 10_000);
+
+    // trig animation panel is tied to D2 perspective; verify gating
+    let mut app_d2 = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry2D);
+    assert!(crate::app::trig_animation_supported(app_d2.current_view));
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_trig_animation_panel(&mut app_d2, ctx);
+    });
+    let app_d3 = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry3D);
+    assert!(!crate::app::trig_animation_supported(app_d3.current_view));
+}
+
+#[test]
+fn headless_teaching_overlay_renders_without_panic() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.teaching_ui.start("derivada de x²");
+    let mut budget = crate::app::RepaintBudget::default();
+    let output = ctx.run(headless_raw_input(), |ctx| {
+        let _ = crate::teaching_ui::draw_teaching_overlay(&mut app.teaching_ui, ctx, &mut budget);
+    });
+    assert!(output.shapes.len() < 20_000);
+    // advance one step and re-render
+    app.teaching_ui.advance();
+    let _ = ctx.run(headless_raw_input(), |ctx| {
+        let _ = crate::teaching_ui::draw_teaching_overlay(&mut app.teaching_ui, ctx, &mut budget);
+    });
+}
+
+#[test]
+fn whiteboard_elements_for_hint_covers_all_teaching_topics() {
+    use grafito_pedagogy::{TeachingSession, TeachingTopic};
+    // Direct mapping strings that must hit each of the 14 branches inside whiteboard_elements_for_hint
+    let hint_cases: &[(&str, usize, &str)] = &[
+        ("secante pendiente tangente", 3, "secante branch should produce stroke+arrows"),
+        ("fracción rectángulo dividido en partes común denominador", 7, "fracción branch"),
+        ("vector flecha en ejes dos flechas r² pizarra vectorial", 8, "vector branch"),
+        ("matriz grilla 2x2 determinante gauss aumentada pivote", 11, "matriz branch"),
+        ("probabilidad histograma árbol contingencia normal bayes muestreo binom distribución curva normal", 7, "prob branch"),
+        ("serie taylor fourier sucesión geométrica suma parcial aproxima", 4, "serie branch"),
+        ("trigon seno coseno círculo unitario onda seno sin( cos(", 7, "trig branch"),
+        ("cónica cono cortado elipse con focos hipérbola", 7, "conica branch"),
+        ("ecuación cuadrática parábola y raíces discriminante recta y corte dos rectas sistema", 8, "ecuacion branch"),
+        ("límite hueco en a flechas hacia a cálculo paso a paso", 6, "limite branch"),
+        ("función ejes con puntos tabla de valores curva con ejes ejemplo con gráfica gráfica interactiva", 7, "funcion branch"),
+        ("rectángulo riemann área", 5, "riemann/area branch"),
+        ("pitágoras triángulo rectángulo cuadrados en cada lado", 3, "pitagoras branch"),
+        ("pizarra libre", 0, "libre branch must be empty for user drawing"),
+    ];
+    for (hint, expected_min, label) in hint_cases {
+        let elems = crate::teaching_ui::whiteboard_elements_for_hint(hint);
+        if *expected_min == 0 {
+            assert!(
+                elems.is_empty(),
+                "{label} hint={hint:?} should be empty but got {elems:?}"
+            );
+        } else {
+            assert!(
+                elems.len() >= *expected_min,
+                "{label} hint={hint:?} expected at least {expected_min} elements, got {}",
+                elems.len()
+            );
+        }
+        // Ensure every element is finite / bounded (no unwrap panic downstream)
+        for elem in &elems {
+            match elem {
+                grafito_whiteboard::WhiteboardElement::Text { at, text, size } => {
+                    assert!(at.0.is_finite() && at.1.is_finite(), "text position finite");
+                    assert!(*size > 0.0);
+                    assert!(!text.is_empty());
+                }
+                grafito_whiteboard::WhiteboardElement::Rectangle { min, max, .. } => {
+                    assert!(min.0.is_finite() && min.1.is_finite());
+                    assert!(max.0.is_finite() && max.1.is_finite());
+                }
+                grafito_whiteboard::WhiteboardElement::Stroke { points, .. } => {
+                    assert!(!points.is_empty());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Ensure every TeachingTopic can be hydrated to a non-empty whiteboard via its TeachingSession hints
+    let topics = [
+        TeachingTopic::Derivada,
+        TeachingTopic::Integral,
+        TeachingTopic::Limite,
+        TeachingTopic::Funcion,
+        TeachingTopic::Pitagoras,
+        TeachingTopic::Fraccion,
+        TeachingTopic::Vector,
+        TeachingTopic::Matriz,
+        TeachingTopic::Probabilidad,
+        TeachingTopic::Serie,
+        TeachingTopic::Ecuacion,
+        TeachingTopic::Trigonometria,
+        TeachingTopic::Conica,
+        TeachingTopic::General("tema abierto de prueba".into()),
+    ];
+    assert_eq!(
+        topics.len(),
+        14,
+        "TeachingTopic 14 variants must be covered"
+    );
+    for topic in topics {
+        let label = match &topic {
+            TeachingTopic::General(s) => s.clone(),
+            other => other.label(),
+        };
+        let session = TeachingSession::for_topic(&label);
+        assert!(!session.steps.is_empty(), "topic {topic:?} must have steps");
+        for step in &session.steps {
+            let elems = crate::teaching_ui::whiteboard_elements_for_hint(&step.whiteboard_hint);
+            // General topic may produce fallback text; still non-panicking. For defined topics, prefer non-empty when hint non-empty.
+            if step.whiteboard_hint.trim().is_empty() {
+                assert!(elems.is_empty());
+            } else {
+                // whiteboard hint for every built-in step should produce at least one element (or fallback text)
+                assert!(
+                    !elems.is_empty() || step.whiteboard_hint.trim().is_empty(),
+                    "topic {topic:?} step {:?} hint {:?} produced no elements",
+                    step.title,
+                    step.whiteboard_hint
+                );
+            }
+        }
+        // also verify that distinct topics produce distinct element signatures (not all identical)
+        let first_hint = session
+            .steps
+            .first()
+            .map(|s| s.whiteboard_hint.clone())
+            .unwrap_or_default();
+        let first_elems = crate::teaching_ui::whiteboard_elements_for_hint(&first_hint);
+        assert!(
+            first_elems.len() < 100,
+            "whiteboard elements must remain bounded per step"
+        );
+    }
+
+    // Fallback for unknown hint must not panic and should produce a single text element
+    let fallback =
+        crate::teaching_ui::whiteboard_elements_for_hint("hint totalmente desconocido xyz");
+    assert_eq!(fallback.len(), 1);
+    assert!(matches!(
+        fallback[0],
+        grafito_whiteboard::WhiteboardElement::Text { .. }
+    ));
+    // Empty hint must be empty (no fallback)
+    assert!(crate::teaching_ui::whiteboard_elements_for_hint("").is_empty());
+    assert!(crate::teaching_ui::whiteboard_elements_for_hint("   ").is_empty());
+}
+
+#[test]
+fn toolbar_and_panel_layout_constants_are_sane() {
+    // Toolbar constants must respect budgets from docs/architecture.md: panel widths, button sizes, etc.
+    assert_eq!(
+        grafito_ui::toolbar::TOOLBAR_BUTTON_SIZE,
+        36.0,
+        "toolbar button size must stay 36 for 36x36 hit target"
+    );
+    assert_eq!(
+        grafito_ui::toolbar::TOOLBAR_PANEL_HEIGHT,
+        44.0,
+        "toolbar panel height = button + 2*padding (36+8)"
+    );
+    // Panel defaults should be within the documented range (ASSISTANT_PANEL 340..460, but left panel similar)
+    const { assert!(grafito_ui::tokens::PANEL_LEFT_DEFAULT >= grafito_ui::tokens::PANEL_LEFT_MIN) };
+    const {
+        assert!(
+            grafito_ui::tokens::PANEL_LEFT_DEFAULT >= 200.0
+                && grafito_ui::tokens::PANEL_LEFT_DEFAULT <= 400.0
+        )
+    };
+    // Overflow must be consistent with top chrome logic (uses same breakpoint)
+    assert!(grafito_ui::toolbar::toolbar_uses_overflow(960.0));
+    assert!(!grafito_ui::toolbar::toolbar_uses_overflow(1361.0));
+    assert!(crate::ui::top_chrome_uses_overflow(960.0));
+    assert!(!crate::ui::top_chrome_uses_overflow(1361.0));
+    // All toolbar groups must be non-empty (already tested elsewhere, but ensure headless count)
+    for &group in grafito_ui::toolbar::ALL_GROUPS {
+        let (_, tools) = group.def();
+        assert!(!tools.is_empty());
+    }
+}

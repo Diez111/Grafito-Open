@@ -1,9 +1,5 @@
-#![allow(
-    unknown_lints,
-    float_literal_f32_fallback,
-    clippy::unwrap_used,
-    clippy::expect_used
-)]
+#![allow(unknown_lints, float_literal_f32_fallback)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![allow(clippy::uninlined_format_args)]
 //! Pizarra de dibujo libre (inspirada en Excalidraw) como modelo puro y
 //! headless: trazos suavizados, formas, flechas, texto, borrado y selección.

@@ -7,11 +7,14 @@ use grafito_core::{GeoObject, ObjectId};
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
-    RADIUS_LG, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_MD, TYPE_SM,
-    TYPE_XS,
+    ICON_SM, ICON_XL, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_SM,
+    SPACE_LG, SPACE_SM, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
 
-pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 = egui::Vec2::new(28.0, 24.0);
+pub(crate) const OBJECT_COLOR_TARGET_SIZE: egui::Vec2 =
+    egui::Vec2::new(ZOOM_ICON_HIT, ZOOM_ICON_HIT);
+
+const _ASSERT_HIT_SQUARE_32: () = assert!(ICON_XL == ZOOM_ICON_HIT && ZOOM_ICON_HIT == 32.0);
 
 pub(crate) fn variable_meta_for_display(
     document: &grafito_core::Document,
@@ -246,7 +249,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     let border = if is_sel {
         egui::Stroke::new(1.0, theme.accent)
     } else {
-        egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+        theme.hairline_stroke()
     };
 
     let mut row_clicked = false;
@@ -254,15 +257,17 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
     ui.add_space(SPACE_XS);
     egui::Frame::none()
         .fill(frame_fill)
-        .rounding(RADIUS_MD)
+        .rounding(RADIUS_SM)
         .stroke(border)
         .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (del_rect, del_resp) =
-                        ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                    let (del_rect, del_resp) = ui.allocate_exact_size(
+                        egui::vec2(ZOOM_ICON_HIT, ZOOM_ICON_HIT),
+                        egui::Sense::click(),
+                    );
                     del_resp.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Eliminar objeto")
                     });
@@ -279,8 +284,10 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                     }
 
                     if obj_supports_visibility {
-                        let (eye_rect, eye_resp) =
-                            ui.allocate_exact_size(egui::vec2(28.0, 24.0), egui::Sense::click());
+                        let (eye_rect, eye_resp) = ui.allocate_exact_size(
+                            egui::vec2(ZOOM_ICON_HIT, ZOOM_ICON_HIT),
+                            egui::Sense::click(),
+                        );
                         eye_resp.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
@@ -304,7 +311,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                             }
                         }
                     } else {
-                        ui.add_space(28.0);
+                        ui.add_space(ZOOM_ICON_HIT);
                     }
 
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -340,7 +347,7 @@ pub(crate) fn draw_object_card(ui: &mut egui::Ui, app: &mut GrafitoApp, oid: Obj
                             app.open_object_color_picker(oid);
                             row_clicked = true;
                         }
-                        ui.add_space(5.0);
+                        ui.add_space(SPACE_XS);
 
                         let txt = if !obj_expr.is_empty() {
                             format!("{}: {}", obj_label, obj_expr)
@@ -393,26 +400,31 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let _txt_dim = theme.text_tertiary;
 
     egui::SidePanel::left("algebra_panel").show_separator_line(false)
-    .default_width(240.0)
-    .min_width(180.0)
-    .max_width((ctx.available_rect().width()*0.45).max(220.0))
+    .default_width(PANEL_LEFT_DEFAULT)
+    .min_width(PANEL_LEFT_MIN)
+    .max_width((ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION).max(PANEL_LEFT_DEFAULT - 40.0))
     .resizable(true)
     .frame(egui::Frame::none().fill(alg_fill).stroke(egui::Stroke::NONE))
     .show(ctx, |ui| {
+        // Header — harmonized with Vista/Herramientas: aire 8, item_spacing 8, left XS, TYPE_LG, XS gap to count, Close with right padding
         ui.add_space(SPACE_SM);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
+            ui.add_space(SPACE_XS);
             ui.label(
                 egui::RichText::new("Álgebra")
                     .color(accent)
-                    .size(TYPE_MD)
+                    .size(TYPE_LG)
                     .strong(),
             );
+            ui.add_space(SPACE_XS);
             ui.label(
                 egui::RichText::new(format!("{} objetos", app.document.object_count()))
                     .color(theme.text_tertiary)
                     .size(TYPE_XS),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(SPACE_SM);
                 if action_icon_button(
                     ui,
                     Icon::Close,
@@ -422,55 +434,65 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 .clicked()
                 {
                     app.left_drawer_open = false;
+                    app.compact_drawer_open = false;
                 }
             });
         });
         ui.add_space(SPACE_SM);
-        // Input row in-panel: es la affordance principal para "agregar cosas"
-        // en el panel de Álgebra. Editar aquí equivale a la barra inferior
-        // (ambas usan `app.input_text`); lo dejamos visible acá porque es
-        // donde el usuario espera tipear.
+        ui.painter().line_segment(
+            [
+                ui.cursor().min,
+                ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+            ],
+            theme.hairline_stroke(),
+        );
+        ui.add_space(SPACE_SM);
+        // Input row — cuadrado RADIUS_SM 8 (no pill), aire 8, gap 8 entre +/input/botón, sin espacio vacío a la derecha
         egui::Frame::none()
             .fill(theme.input_bg)
-            .stroke(egui::Stroke::new(1.0, Color32::from_black_alpha(18)))
-            .rounding(egui::Rounding::same(RADIUS_LG))
-            .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM))
+            .stroke(theme.hairline_stroke())
+            .rounding(egui::Rounding::same(RADIUS_SM))
+            .inner_margin(egui::Margin::symmetric(SPACE_SM, SPACE_SM))
             .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.horizontal(|ui| {
-                        // Center the + and input
-                        ui.label(egui::RichText::new("+").color(accent).size(TYPE_MD).strong());
-                        ui.add_space(SPACE_XS);
-                        let response = crate::ui::draw_command_input(
-                            ui,
-                            app,
-                            "algebra_panel",
-                            [150.0, 32.0],
-                            "Añadir…",
-                            false,
-                        );
-                        ui.add_space(SPACE_XS);
-                        if action_icon_button(
-                            ui,
-                            Icon::PlusMinus,
-                            if app.keyboard_visible {
-                                accent
-                            } else {
-                                theme.text_secondary
-                            },
-                            if app.keyboard_visible {
-                                "Ocultar teclado"
-                            } else {
-                                "Mostrar teclado"
-                            },
-                        )
-                        .clicked()
-                        {
-                            app.keyboard_visible = !app.keyboard_visible;
-                            if !app.keyboard_visible {
-                                app.keyboard_expanded = false;
-                            }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    let (plus_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(ICON_SM, ICON_SM), egui::Sense::hover());
+                    if ui.is_rect_visible(plus_rect) {
+                        draw_icon(ui.painter(), plus_rect, Icon::Plus, accent);
+                    }
+                    // Input ocupa todo el ancho disponible entre + y botón — sin hueco a la derecha
+                    let button_w = SPACE_XL + SPACE_XS / 2.0;
+                    let input_width = (ui.available_width() - button_w - SPACE_SM).max(80.0);
+                    let response = crate::ui::draw_command_input(
+                        ui,
+                        app,
+                        "algebra_panel",
+                        [input_width, ZOOM_ICON_HIT],
+                        "Añadir…",
+                        false,
+                    );
+                    if action_icon_button(
+                        ui,
+                        Icon::Grid,
+                        if app.keyboard_visible {
+                            accent
+                        } else {
+                            theme.text_secondary
+                        },
+                        if app.keyboard_visible {
+                            "Ocultar teclado"
+                        } else {
+                            "Mostrar teclado"
+                        },
+                    )
+                    .clicked()
+                    {
+                        app.keyboard_visible = !app.keyboard_visible;
+                        if !app.keyboard_visible {
+                            app.keyboard_expanded = false;
                         }
+                    }
                     if response.changed {
                         app.preview_object = commands::parse_preview(&app.input_text);
                     }
@@ -481,11 +503,16 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         let time = ui.ctx().input(|i| i.time);
                         app.submit_input_text(time);
                     }
-                    });
                 });
             });
         ui.add_space(SPACE_SM);
-        ui.add(egui::Separator::default().spacing(0.0));
+        ui.painter().line_segment(
+            [
+                ui.cursor().min,
+                ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+            ],
+            theme.hairline_stroke(),
+        );
         ui.add_space(SPACE_SM);
 
         // ── Object list — compact, 1 line each ──────────────────────
@@ -641,12 +668,12 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 let frame_fill = if is_sel {
                     theme.accent_muted
                 } else {
-                    theme.panel_bg
+                    theme.button_bg
                 };
                 let border = if is_sel {
                     egui::Stroke::new(1.0, theme.accent)
                 } else {
-                    egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10))
+                    theme.hairline_stroke()
                 };
 
                 let mut row_clicked = false;
@@ -662,7 +689,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             // Right-side controls drawn first
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let (del_rect, del_resp) = ui.allocate_exact_size(
-                                    egui::vec2(28.0, 24.0),
+                                    egui::vec2(ZOOM_ICON_HIT, ZOOM_ICON_HIT),
                                     egui::Sense::click(),
                                 );
                                 del_resp.widget_info(|| {
@@ -679,7 +706,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     delete_id = Some(oid);
                                 }
                                 let (eye_rect, eye_resp) = ui.allocate_exact_size(
-                                    egui::vec2(28.0, 24.0),
+                                    egui::vec2(ZOOM_ICON_HIT, ZOOM_ICON_HIT),
                                     egui::Sense::click(),
                                 );
                                 eye_resp.widget_info(|| {
@@ -726,7 +753,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         app.open_object_color_picker(oid);
                                         row_clicked = true;
                                     }
-                                    ui.add_space(5.0);
+                                    ui.add_space(SPACE_XS);
 
                                     let txt = if !obj_expr.is_empty() {
                                         format!("{}: {}", obj_label, obj_expr)

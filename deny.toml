@@ -16,13 +16,13 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "simba 0.9.1 requires paste 1.0.15, the latest 1.x release; nalgebra 0.34 requires Rust 1.87, above the workspace MSRV 1.88." },
     { id = "RUSTSEC-2026-0192", reason = "eframe 0.29.1 pins owned_ttf_parser 0.25.1 and ttf-parser 0.25.1; remediation requires a coordinated eframe/wgpu framework migration." },
     { id = "RUSTSEC-2025-0165", reason = "geo 0.29.3 restricts i_overlay to <1.10, whose latest 1.9.4 requires i_tree ~0.8.3; geo 0.30 is a semver API migration requiring separate review." },
-    { id = "RUSTSEC-2026-0194", reason = "Temporary through 2026-09-30; owner: Grafito maintainers. Affected attribute iteration is reached only when proc macros parse crate-shipped AT-SPI/Wayland XML at build time; zbus_xml 4 requires quick-xml ^0.30 and wayland-scanner 0.31.10 requires ^0.39, excluding fixed >=0.41. Remove on a compatible parent release or any reachability change; see .github/SECURITY.md." },
-    { id = "RUSTSEC-2026-0195", reason = "Temporary through 2026-09-30; owner: Grafito maintainers. Neither reviewed consumer invokes NsReader (zbus_xml 4 deserialization and wayland-scanner use Reader), so the vulnerable namespace allocation is not reachable; the same parent constraints block fixed >=0.41. Remove on a compatible parent release or any reachability change; see .github/SECURITY.md." },
+    { id = "RUSTSEC-2026-0194", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. Affected attribute iteration is reached only when proc macros parse crate-shipped AT-SPI XML at build time; zbus_xml 4 requires quick-xml ^0.30 and wayland-scanner 0.31.11 now uses patched ^0.41, leaving the zbus path blocked for fixed >=0.41. Remove on a compatible zbus_xml release or any reachability change; see .github/SECURITY.md." },
+    { id = "RUSTSEC-2026-0195", reason = "Temporary through 2026-12-31; owner: Grafito maintainers. Neither reviewed consumer invokes NsReader (zbus_xml 4 deserialization uses Reader; wayland-scanner 0.31.11 now uses patched quick-xml 0.41.0), so the vulnerable namespace allocation is not reachable; the zbus path still blocks fixed >=0.41. Remove on a compatible zbus_xml release or any reachability change; see .github/SECURITY.md." },
 ]
 
 [bans]
 # multiple-versions downgraded to warn while quick-xml 0.30/0.41 coexist (RUSTSEC-2026-0194/0195).
-# zbus_xml 4 → quick-xml ^0.30 and wayland-scanner 0.31.10 → ^0.39 block fixed >=0.41; see .github/SECURITY.md.
+# zbus_xml 4 → quick-xml ^0.30 blocks fixed >=0.41 (wayland-scanner 0.31.11 now patched ^0.41); see .github/SECURITY.md.
 # windows-sys, syn, calloop have legitimate multi-major duplicates via windows/wayland/egui ecosystem.
 multiple-versions = "warn"
 skip = [
