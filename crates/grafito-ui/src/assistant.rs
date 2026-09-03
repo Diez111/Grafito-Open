@@ -138,6 +138,11 @@ const OPENCODE_MODELS: &[&str] = &[
     "mimo-2.5-vl",
     "fusion",
     "glm-5.2",
+    // Verificados 2026-09-03 contra /chat/completions (200 en ~1-4s):
+    "qwen3.8-max",
+    "kimi-k3",
+    // Anunciados por /models pero con 500 del proveedor (verificado 2026-09-03):
+    // el fallback de sesión reintenta con deepseek sin tocar tu preferencia.
     "muse-spark-1.3-contributor",
     "muse-spark-1.2-contributor",
     "muse-spark-1.2",
@@ -3133,7 +3138,7 @@ fn draw_assistant_settings_contents(
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go disponibles: deepseek-v4-flash, mimo-2.5-vl, muse-spark-1.3-contributor, muse-spark-1.2-contributor, glm-5.2, fusion")
+            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, fusion (+ 17 más por descubrimiento). Muse Spark 1.2/1.3 con 500 del proveedor: el fallback responde con DeepSeek sin cambiar tu modelo.")
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
@@ -6828,6 +6833,8 @@ mod tests {
         assert!(choices.contains(&"mimo-2.5-vl".to_string()));
         assert!(choices.contains(&"fusion".to_string()));
         assert!(choices.contains(&"muse-spark-1.3-contributor".to_string()));
+        assert!(choices.contains(&"qwen3.8-max".to_string()));
+        assert!(choices.contains(&"kimi-k3".to_string()));
         // OpenCode Go ahora acepta todos los modelos visibles; kimi ya no se filtra
         assert!(choices.iter().any(|model| model.contains("kimi")));
         assert!(choices.iter().any(|model| model.contains("mimo"))); // MiMo 2.5-VL (visión)

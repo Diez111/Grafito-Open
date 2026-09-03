@@ -97,6 +97,10 @@ fn apply_local_assistant_plan(
 #[derive(Default)]
 pub(crate) struct AssistantRuntime {
     next_request_id: u64,
+    /// Modelo de fallback solo-sesión (p.ej. deepseek tras caída de spark).
+    /// No se persiste: la preferencia del usuario queda intacta y el próximo
+    /// pedido reintenta el modelo elegido (auto-recupera si el proveedor vuelve).
+    fallback_model: Option<String>,
     remote_job: Option<AssistantRemoteJob>,
     proposal_job: Option<AssistantProposalJob>,
     model_job: Option<AssistantModelJob>,
@@ -134,6 +138,12 @@ impl Drop for SessionApiKey {
 }
 
 impl AssistantRuntime {
+    /// Modelo que deben traer los resultados en vuelo: el fallback si hay un
+    /// reintento activo, si no el configurado por el usuario.
+    fn expected_model<'a>(&'a self, current: &'a str) -> &'a str {
+        self.fallback_model.as_deref().unwrap_or(current)
+    }
+
     fn key_for(&self, provider: ProviderProfile) -> Option<String> {
         self.session_api_key
             .as_ref()
@@ -819,11 +829,13 @@ impl GrafitoApp {
             AssistantUiAction::ClearApiKey => self.clear_assistant_api_key(),
             AssistantUiAction::ProviderChanged => {
                 self.assistant_runtime.forget_key();
+                self.assistant_runtime.fallback_model = None;
                 self.cancel_stale_remote_request();
                 self.cancel_stale_model_request();
                 self.save_app_config();
             }
             AssistantUiAction::ModelChanged => {
+                self.assistant_runtime.fallback_model = None;
                 self.cancel_stale_remote_request();
                 self.save_app_config();
             }
@@ -2087,7 +2099,7 @@ impl GrafitoApp {
             LocalAssistantDisposition::NeedsRemoteAuthorization(reason) => {
                 if self.assistant.full_permission {
                     if self.remote_provider_ready() {
-                        self.start_remote_assistant_for(ctx, question);
+                        self.start_remote_assistant_for(ctx, question, None);
                     } else {
                         let message =
                             "Configurá un proveedor (Ajustes del asistente) para respuestas en línea automáticas.";
@@ -2119,14 +2131,20 @@ impl GrafitoApp {
             return;
         };
         self.assistant.begin_authorized_remote_request();
-        self.start_remote_assistant_for(ctx, question);
+        self.start_remote_assistant_for(ctx, question, None);
     }
 
     /// Lanza la consulta remota con la pregunta dada, sin depender del cartel.
     ///
     /// Con permiso completo, el consentimiento de imágenes se otorga automático;
     /// la capacidad de visión del modelo sigue siendo un requisito real.
-    fn start_remote_assistant_for(&mut self, ctx: &egui::Context, question: String) {
+    /// `model_override` sólo-sesión: no toca la preferencia guardada.
+    fn start_remote_assistant_for(
+        &mut self,
+        ctx: &egui::Context,
+        question: String,
+        model_override: Option<&str>,
+    ) {
         if !self.assistant_runtime.remote_request_slot_is_free() {
             return;
         }
@@ -2147,7 +2165,17 @@ impl GrafitoApp {
                 return;
             }
         }
-        let settings = match self.assistant_provider_settings() {
+        let effective_model = model_override
+            .unwrap_or(&self.assistant.model)
+            .trim()
+            .to_owned();
+        if effective_model.is_empty() {
+            self.show_assistant_error(
+                "Completá la configuración avanzada antes de consultar remotamente.",
+            );
+            return;
+        }
+        let settings = match self.assistant_provider_settings_for(&effective_model) {
             Ok(settings) => settings,
             Err(error) => {
                 self.show_assistant_error(error);
@@ -2183,12 +2211,19 @@ impl GrafitoApp {
             }
         };
 
+        // Fallback sólo-sesión: se recuerda para aceptar el resultado en vuelo
+        // sin tocar la preferencia guardada del usuario.
+        if model_override.is_some() {
+            self.assistant_runtime.fallback_model = Some(effective_model.clone());
+        } else {
+            self.assistant_runtime.fallback_model = None;
+        }
         let launch = AssistantRemoteLaunch {
             settings,
             request,
             api_key,
             provider: self.assistant.provider,
-            model: self.assistant.model.clone(),
+            model: effective_model,
             route: AssistantRemoteRoute::SelectedModel,
             fusion_fallback_allowed: self.assistant.allow_fusion_fallback,
             question: question.clone(),
@@ -2373,12 +2408,16 @@ impl GrafitoApp {
     }
 
     fn cancel_stale_remote_request(&mut self) {
+        let expected = self
+            .assistant_runtime
+            .expected_model(&self.assistant.model)
+            .to_owned();
         if self
             .assistant_runtime
-            .cancel_stale_remote_job(self.assistant.provider, &self.assistant.model)
+            .cancel_stale_remote_job(self.assistant.provider, &expected)
             || self
                 .assistant_runtime
-                .cancel_stale_agent_job(self.assistant.provider, &self.assistant.model)
+                .cancel_stale_agent_job(self.assistant.provider, &expected)
         {
             self.begin_cancelling_remote_request();
         }
@@ -2471,7 +2510,7 @@ impl GrafitoApp {
             if cancelled
                 || !accepts_remote_result(
                     self.assistant.provider,
-                    &self.assistant.model,
+                    self.assistant_runtime.expected_model(&self.assistant.model),
                     provider,
                     &model,
                 )
@@ -2532,23 +2571,27 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
-                            // Compatibilidad total: si muse-spark falla con 500 o timeout en OpenCodeGo,
-                            // reintentar automáticamente con deepseek sin molestar al usuario con error
+                            // Compatibilidad total SÓLO-SESIÓN: si muse-spark falla con 500 o timeout
+                            // en OpenCodeGo (caída del proveedor, verificada: 500 en ~0.5s con
+                            // cualquier payload), se reintenta con deepseek SIN tocar la preferencia
+                            // guardada. El próximo pedido reintenta spark (auto-recupera si vuelve).
                             let slow_or_down = error.contains("500") || error.contains("timed out");
                             if slow_or_down
                                 && self.assistant.model.contains("muse-spark")
                                 && self.assistant.provider == ProviderProfile::OpenCodeGo
                                 && correction_attempt == 0
                             {
-                                eprintln!("grafito: auto-fallback muse-spark {error} -> deepseek-v4-flash + retry");
-                                self.assistant.model = "deepseek-v4-flash".to_string();
-                                self.save_app_config();
+                                eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                 self.notify(
-                                    "Muse Spark no respondió a tiempo, reintentando con DeepSeek Flash...",
+                                    "Muse Spark está caído del lado del proveedor (500). Respondiendo con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
                                     ToastKind::Info,
                                 );
-                                // Reintentar la misma pregunta con el nuevo modelo, sin mostrar error
-                                self.start_remote_assistant_for(ctx, question.clone());
+                                // Reintentar la misma pregunta con el fallback, sin mostrar error
+                                self.start_remote_assistant_for(
+                                    ctx,
+                                    question.clone(),
+                                    Some("deepseek-v4-flash"),
+                                );
                                 return;
                             }
                             if correction_attempt > 0 {
@@ -2583,7 +2626,7 @@ impl GrafitoApp {
             if cancelled
                 || !accepts_remote_result(
                     self.assistant.provider,
-                    &self.assistant.model,
+                    self.assistant_runtime.expected_model(&self.assistant.model),
                     provider,
                     &model,
                 )
@@ -2753,7 +2796,12 @@ impl GrafitoApp {
     }
 
     fn assistant_provider_settings(&self) -> Result<ProviderSettings, String> {
-        if self.assistant.model.trim().is_empty() {
+        self.assistant_provider_settings_for(&self.assistant.model.clone())
+    }
+
+    fn assistant_provider_settings_for(&self, model: &str) -> Result<ProviderSettings, String> {
+        let model = model.trim();
+        if model.is_empty() {
             return Err(
                 "Completá la configuración avanzada antes de consultar remotamente.".into(),
             );
@@ -2763,13 +2811,13 @@ impl GrafitoApp {
             // Si no hay clave Custom configurada, retorna Err en lugar de fallback silencioso.
             ProviderSettings::custom_openai_compatible(
                 "https://opencode.ai/zen/go/v1",
-                self.assistant.model.trim(),
+                model,
                 "GRAFITO_ASSISTANT_CUSTOM_OPENCODE_API_KEY",
             )
             .or_else(|_| {
                 ProviderSettings::custom_openai_compatible(
                     "https://opencode.ai/zen/go/v1",
-                    self.assistant.model.trim(),
+                    model,
                     "GRAFITO_ASSISTANT_CUSTOM_API_KEY",
                 )
             })
@@ -2779,7 +2827,7 @@ impl GrafitoApp {
                 )
             })?
         } else {
-            ProviderSettings::for_profile(self.assistant.provider, self.assistant.model.trim())
+            ProviderSettings::for_profile(self.assistant.provider, model)
         };
         if self.assistant.vision_enabled {
             let capabilities = ProviderCapabilities {
@@ -2858,13 +2906,10 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
     } else if error.contains("500") {
         if current_model.contains("muse-spark") {
-            format!(
-                "Error temporal del proveedor (500) con modelo '{}'. Reintentando con 'deepseek-v4-flash'...",
-                current_model
-            )
+            "Muse Spark está caído del lado del proveedor (500 en ~0.5s con cualquier pedido, verificado 2026-09-03). Cambiá a deepseek-v4-flash, qwen3.8-max o kimi-k3 en Configuración → Modelo.".to_string()
         } else {
             format!(
-                "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos.",
+                "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos o cambiá de modelo.",
                 current_model
             )
         }
@@ -4503,6 +4548,35 @@ mod tests {
             Some("session-key")
         );
         assert!(runtime.key_for(ProviderProfile::DeepSeek).is_none());
+    }
+
+    #[test]
+    fn session_fallback_model_overrides_expected_without_touching_preference() {
+        let mut runtime = AssistantRuntime::default();
+        // Sin fallback: se espera el modelo configurado.
+        assert_eq!(
+            runtime.expected_model("muse-spark-1.3-contributor"),
+            "muse-spark-1.3-contributor"
+        );
+        // Con fallback activo: el resultado en vuelo trae el fallback...
+        runtime.fallback_model = Some("deepseek-v4-flash".into());
+        assert_eq!(
+            runtime.expected_model("muse-spark-1.3-contributor"),
+            "deepseek-v4-flash"
+        );
+        assert!(accepts_remote_result(
+            ProviderProfile::OpenCodeGo,
+            runtime.expected_model("muse-spark-1.3-contributor"),
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+        ));
+        // ...y el viejo modelo ya no se acepta mientras dura el fallback.
+        assert!(!accepts_remote_result(
+            ProviderProfile::OpenCodeGo,
+            runtime.expected_model("muse-spark-1.3-contributor"),
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
     }
 
     #[test]
