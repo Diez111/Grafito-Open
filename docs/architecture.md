@@ -58,7 +58,7 @@ Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 ```
 Idle -> Thinking -> Verifying -> Animating{job_id} -> Done | Failed | Cancelled
 ```
-- Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input 8192, max_steps 8, timeout 15s).
+- Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input 8192, max_steps 8, timeout 60s).
 - I/O nunca en UI thread; UI solo renderiza &AssistantState.
 
 ### 4.4 Interval/ExprEval (grafito-geometry)
@@ -119,7 +119,7 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Anim | diagnostics cap | 64 lineas | engine.rs |
 | Assistant | RequestBudget max_input | 8192 | assistant-types |
 | Assistant | RequestBudget max_steps | 8 | assistant-types |
-| Assistant | RequestBudget timeout | 15s | assistant-types |
+| Assistant | RequestBudget timeout | 60s | assistant-types |
 | Assistant | AttachmentLimits max_bytes | 512 KiB | assistant-types |
 | Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs (is_compact_viewport) |

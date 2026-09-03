@@ -201,7 +201,9 @@ impl Default for RequestBudget {
             max_input_chars: 8_192,
             max_output_chars: 2_048,
             max_steps: 8,
-            timeout_ms: 15_000,
+            // 60s: los modelos de razonamiento (muse-spark, deepseek-pro)
+            // superan 15s con frecuencia; el cap absoluto sigue en 120s.
+            timeout_ms: 60_000,
         }
     }
 }

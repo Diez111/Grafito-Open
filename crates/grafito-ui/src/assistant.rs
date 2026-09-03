@@ -138,6 +138,7 @@ const OPENCODE_MODELS: &[&str] = &[
     "mimo-2.5-vl",
     "fusion",
     "glm-5.2",
+    "muse-spark-1.3-contributor",
     "muse-spark-1.2-contributor",
     "muse-spark-1.2",
 ];
@@ -3132,7 +3133,7 @@ fn draw_assistant_settings_contents(
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go disponibles: deepseek-v4-flash, mimo-2.5-vl, muse-spark-1.2-contributor, glm-5.2, fusion")
+            egui::RichText::new("Modelos OpenCode Go disponibles: deepseek-v4-flash, mimo-2.5-vl, muse-spark-1.3-contributor, muse-spark-1.2-contributor, glm-5.2, fusion")
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
@@ -6826,6 +6827,7 @@ mod tests {
         assert!(choices.contains(&"deepseek-v4-pro".to_string()));
         assert!(choices.contains(&"mimo-2.5-vl".to_string()));
         assert!(choices.contains(&"fusion".to_string()));
+        assert!(choices.contains(&"muse-spark-1.3-contributor".to_string()));
         // OpenCode Go ahora acepta todos los modelos visibles; kimi ya no se filtra
         assert!(choices.iter().any(|model| model.contains("kimi")));
         assert!(choices.iter().any(|model| model.contains("mimo"))); // MiMo 2.5-VL (visión)

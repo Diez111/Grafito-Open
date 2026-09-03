@@ -1476,9 +1476,13 @@ pub fn request_remote_models_with_api_key_on_worker(
             }
             call = call.bearer_auth(key);
         }
-        let response = call
-            .send()
-            .map_err(|_| "remote model request failed or timed out".to_string())?;
+        let response = call.send().map_err(|error| {
+            transport_error(
+                "remote model request",
+                &error,
+                Some(Duration::from_secs(15)),
+            )
+        })?;
         if cancellation.is_cancelled() {
             return Err("remote model request was cancelled".into());
         }
@@ -1613,6 +1617,12 @@ fn remote_error_category(error: &str) -> &'static str {
         "privacy"
     } else if error.contains("failed or timed out") {
         "transport"
+    } else if error.contains("timed out") {
+        "timeout"
+    } else if error.contains("could not connect") {
+        "connect"
+    } else if error.contains("request failed") {
+        "transport"
     } else {
         "configuration"
     }
@@ -1706,7 +1716,7 @@ fn request_openai_completion(
         }
         call = call.bearer_auth(key);
     }
-    send_openai_request(call, cancellation, max_output_chars)
+    send_openai_request(call, cancellation, max_output_chars, Some(timeout))
 }
 
 fn request_anthropic_completion(
@@ -1732,7 +1742,7 @@ fn request_anthropic_completion(
     }
     let response = call
         .send()
-        .map_err(|_| "remote assistant request failed or timed out".to_string())?;
+        .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
@@ -1754,17 +1764,43 @@ fn request_anthropic_completion(
     completion_from_text(&text, max_output_chars, truncated)
 }
 
+/// Clasifica un error de transporte sin exponer detalles sensibles (sin URL ni
+/// clave): timeout lleva "timed out", fallo de conexión/DNS/TLS lleva
+/// "could not connect", el resto lleva "request failed". La UI mapea cada
+/// caso a un mensaje distinto en criollo.
+pub(crate) fn transport_error(
+    context: &str,
+    error: &reqwest::Error,
+    timeout: Option<Duration>,
+) -> String {
+    if error.is_timeout() {
+        match timeout {
+            Some(timeout) => format!("{context} timed out after {}s", timeout.as_secs().max(1)),
+            None => format!("{context} timed out"),
+        }
+    } else if error.is_connect() {
+        format!("{context} could not connect to the provider (red o DNS)")
+    } else if error.is_body() || error.is_decode() {
+        format!("{context} request failed while sending or reading the body")
+    } else if error.is_builder() {
+        format!("{context} request could not be built")
+    } else {
+        format!("{context} request failed (error de transporte)")
+    }
+}
+
 fn send_openai_request(
     call: reqwest::blocking::RequestBuilder,
     cancellation: &CancellationToken,
     max_output_chars: usize,
+    timeout: Option<Duration>,
 ) -> Result<RemoteCompletion, String> {
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }
     let response = call
         .send()
-        .map_err(|_| "remote assistant request failed or timed out".to_string())?;
+        .map_err(|error| transport_error("remote assistant", &error, timeout))?;
     if cancellation.is_cancelled() {
         return Err("remote assistant request was cancelled".into());
     }

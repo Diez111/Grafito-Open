@@ -2526,17 +2526,19 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
-                            // Compatibilidad total: si muse-spark falla con 500 en OpenCodeGo, reintentar automáticamente con deepseek sin molestar al usuario con error
-                            if error.contains("500")
+                            // Compatibilidad total: si muse-spark falla con 500 o timeout en OpenCodeGo,
+                            // reintentar automáticamente con deepseek sin molestar al usuario con error
+                            let slow_or_down = error.contains("500") || error.contains("timed out");
+                            if slow_or_down
                                 && self.assistant.model.contains("muse-spark")
                                 && self.assistant.provider == ProviderProfile::OpenCodeGo
                                 && correction_attempt == 0
                             {
-                                eprintln!("grafito: auto-fallback muse-spark 500 -> deepseek-v4-flash + retry");
+                                eprintln!("grafito: auto-fallback muse-spark {error} -> deepseek-v4-flash + retry");
                                 self.assistant.model = "deepseek-v4-flash".to_string();
                                 self.save_app_config();
                                 self.notify(
-                                    "Muse Spark no respondió (500), reintentando con DeepSeek Flash...",
+                                    "Muse Spark no respondió a tiempo, reintentando con DeepSeek Flash...",
                                     ToastKind::Info,
                                 );
                                 // Reintentar la misma pregunta con el nuevo modelo, sin mostrar error

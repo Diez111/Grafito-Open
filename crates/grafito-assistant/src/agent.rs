@@ -897,7 +897,7 @@ fn request_agent_completion(
     }
     let response = call
         .send()
-        .map_err(|_| "assistant agent request failed or timed out".to_string())?;
+        .map_err(|error| crate::transport_error("assistant agent", &error, Some(timeout)))?;
     if cancellation.is_cancelled() {
         return Err("assistant agent request was cancelled".into());
     }
