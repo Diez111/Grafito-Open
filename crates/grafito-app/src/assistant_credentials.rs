@@ -29,10 +29,12 @@ fn entry(profile: ProviderProfile) -> Result<keyring::Entry, String> {
 }
 
 /// Lee una clave existente sin exponer detalles del llavero al usuario.
+/// Recorta espacios/saltos pegados al copiar para que claves viejas sucias
+/// sigan funcionando sin reingreso.
 pub(crate) fn load(profile: ProviderProfile) -> Result<Option<String>, String> {
     let entry = entry(profile)?;
     match entry.get_password() {
-        Ok(key) if !key.trim().is_empty() => Ok(Some(key)),
+        Ok(key) if !key.trim().is_empty() => Ok(Some(key.trim().to_owned())),
         Ok(_) => Ok(None),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err("the system credential store is unavailable".into()),
@@ -40,12 +42,14 @@ pub(crate) fn load(profile: ProviderProfile) -> Result<Option<String>, String> {
 }
 
 /// Guarda una clave en el llavero del sistema, nunca en configuración plana.
+/// Recorta antes de guardar para que nunca persista con `\n` final.
 pub(crate) fn store(profile: ProviderProfile, key: &str) -> Result<(), String> {
-    if key.trim().is_empty() {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
         return Err("the API key cannot be empty".into());
     }
     entry(profile)?
-        .set_password(key)
+        .set_password(trimmed)
         .map_err(|_| "the system credential store could not save the API key".to_string())
 }
 

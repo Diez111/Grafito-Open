@@ -142,7 +142,12 @@ impl AssistantRuntime {
     }
 
     fn remember_key(&mut self, provider: ProviderProfile, key: String) {
-        self.session_api_key = Some(SessionApiKey { provider, key });
+        // Punto único de saneado: nunca queda en memoria una clave con
+        // espacios/saltos pegados al copiar.
+        self.session_api_key = Some(SessionApiKey {
+            provider,
+            key: key.trim().to_owned(),
+        });
     }
 
     fn forget_key(&mut self) {
@@ -1307,22 +1312,23 @@ impl GrafitoApp {
 
     fn save_assistant_api_key(&mut self) {
         let key = std::mem::take(&mut self.assistant.api_key_draft);
-        if key.trim().is_empty() {
+        let trimmed = key.trim().to_owned();
+        if trimmed.is_empty() {
             self.show_assistant_error("Ingresá una API key antes de guardarla.");
             return;
         }
-        match assistant_credentials::store(self.assistant.provider, &key) {
+        match assistant_credentials::store(self.assistant.provider, &trimmed) {
             Ok(()) => {
                 // Una relectura posterior del llavero no debe invalidar la
                 // consulta durante la misma sesión en que se guardó la clave.
                 self.assistant_runtime
-                    .remember_key(self.assistant.provider, key);
+                    .remember_key(self.assistant.provider, trimmed);
                 self.assistant.key_available = true;
                 self.assistant.key_status_checked = true;
             }
             Err(_) => {
                 self.assistant_runtime
-                    .remember_key(self.assistant.provider, key);
+                    .remember_key(self.assistant.provider, trimmed);
                 self.assistant.key_available = true;
                 self.assistant.key_status_checked = true;
             }
@@ -2837,6 +2843,8 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     );
     if error.contains("llavero") || error.contains("API key") {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
+    } else if error.contains("could not be built") {
+        "No se pudo armar la consulta: la API key o el endpoint tienen caracteres inválidos. Reingresá la clave en Configuración avanzada (sin espacios ni saltos de línea).".into()
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {

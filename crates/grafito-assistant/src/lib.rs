@@ -1471,10 +1471,7 @@ pub fn request_remote_models_with_api_key_on_worker(
         let client = shared_http_client()?;
         let mut call = client.get(endpoint).timeout(Duration::from_secs(15));
         if let Some(key) = api_key {
-            if key.trim().is_empty() {
-                return Err("remote assistant API key is unavailable".into());
-            }
-            call = call.bearer_auth(key);
+            call = call.bearer_auth(sanitize_api_key(&key)?);
         }
         let response = call.send().map_err(|error| {
             transport_error(
@@ -1711,10 +1708,7 @@ fn request_openai_completion(
     let client = shared_http_client()?;
     let mut call = client.post(endpoint).json(&payload).timeout(timeout);
     if let Some(key) = api_key {
-        if key.trim().is_empty() {
-            return Err("remote assistant API key is unavailable".into());
-        }
-        call = call.bearer_auth(key);
+        call = call.bearer_auth(sanitize_api_key(key)?);
     }
     send_openai_request(call, cancellation, max_output_chars, Some(timeout))
 }
@@ -1728,7 +1722,9 @@ fn request_anthropic_completion(
     max_output_chars: usize,
 ) -> Result<RemoteCompletion, String> {
     let key = api_key
-        .filter(|key| !key.trim().is_empty())
+        .map(sanitize_api_key)
+        .transpose()?
+        .filter(|key| !key.is_empty())
         .ok_or_else(|| "remote assistant API key is unavailable".to_string())?;
     let client = shared_http_client()?;
     let call = client
@@ -1783,10 +1779,25 @@ pub(crate) fn transport_error(
     } else if error.is_body() || error.is_decode() {
         format!("{context} request failed while sending or reading the body")
     } else if error.is_builder() {
-        format!("{context} request could not be built")
+        format!("{context} request could not be built (la clave o el endpoint tienen caracteres inválidos)")
     } else {
         format!("{context} request failed (error de transporte)")
     }
+}
+
+/// Sanea una clave para el header Authorization: recorta espacios y saltos
+/// de línea pegados al copiar y rechaza caracteres de control o no-ASCII
+/// que reqwest no puede poner en un header (antes fallaba como builder
+/// error "request could not be built" sin decir la causa).
+pub(crate) fn sanitize_api_key(key: &str) -> Result<String, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("remote assistant API key is unavailable".into());
+    }
+    if !trimmed.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err("remote assistant API key contains invalid characters (revisá espacios o saltos de línea al copiar la clave)".into());
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn send_openai_request(
@@ -2374,6 +2385,28 @@ mod tests {
         let first = shared_http_client().expect("shared client builds");
         let second = shared_http_client().expect("shared client returns the cached instance");
         assert!(std::ptr::eq(first, second));
+    }
+
+    #[test]
+    fn sanitize_api_key_trims_pasted_whitespace() {
+        assert_eq!(
+            sanitize_api_key("  sk-test-123  \n").expect("trims"),
+            "sk-test-123"
+        );
+        assert_eq!(
+            sanitize_api_key("\r\nopencode-key\t").expect("trims"),
+            "opencode-key"
+        );
+    }
+
+    #[test]
+    fn sanitize_api_key_rejects_empty_and_control_chars() {
+        assert!(sanitize_api_key("   ").is_err());
+        assert!(sanitize_api_key("").is_err());
+        // Salto interno rompe HeaderValue de reqwest: debe fallar acá con
+        // mensaje claro, no como builder error en el transporte.
+        assert!(sanitize_api_key("abc\ndef").is_err());
+        assert!(sanitize_api_key("cláve-con-ñ").is_err());
     }
 
     #[test]

@@ -887,10 +887,7 @@ fn request_agent_completion(
         .json(&payload)
         .timeout(timeout);
     if let Some(key) = api_key {
-        if key.trim().is_empty() {
-            return Err("assistant agent API key is unavailable".into());
-        }
-        call = call.bearer_auth(key);
+        call = call.bearer_auth(crate::sanitize_api_key(key)?);
     }
     if cancellation.is_cancelled() {
         return Err("assistant agent request was cancelled".into());
