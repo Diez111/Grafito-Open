@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 /// Límite de caracteres del texto que una herramienta devuelve al modelo.
-pub const MAX_TOOL_RESULT_CHARS: usize = 4_096;
+pub const MAX_TOOL_RESULT_CHARS: usize = 2_048;
 /// Límite del nombre de una herramienta.
 pub const MAX_TOOL_NAME_CHARS: usize = 64;
 /// Límite de la descripción de una herramienta.

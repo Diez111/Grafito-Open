@@ -2762,29 +2762,39 @@ fn normalize_complex_symbol(expr: &str, symbol: &str) -> String {
     if symbol.is_empty() || symbol == "z" {
         return expr.to_string();
     }
-
-    let mut out = String::with_capacity(expr.len());
-    let mut rest = expr;
-    while let Some(pos) = rest.find(symbol) {
-        let before = &rest[..pos];
-        let after = &rest[pos + symbol.len()..];
-        let prev_ident = before
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-        let next_ident = after
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-        out.push_str(before);
-        if prev_ident || next_ident {
-            out.push_str(symbol);
-        } else {
-            out.push('z');
-        }
-        rest = after;
+    // Evitar reemplazos dentro de identificadores más largos: sólo reemplazar
+    // ocurrencias aisladas de `symbol` delimitadas por no-ident.
+    // Hacer el escaneo por índice de char para no romper UTF-8.
+    let symbol_chars: Vec<char> = symbol.chars().collect();
+    let expr_chars: Vec<char> = expr.chars().collect();
+    let sym_len = symbol_chars.len();
+    if sym_len == 0 {
+        return expr.to_string();
     }
-    out.push_str(rest);
+    let mut out = String::with_capacity(expr.len());
+    let mut i = 0;
+    while i < expr_chars.len() {
+        let matches =
+            i + sym_len <= expr_chars.len() && expr_chars[i..i + sym_len] == symbol_chars[..];
+        if matches {
+            let prev_ident =
+                i > 0 && (expr_chars[i - 1].is_ascii_alphanumeric() || expr_chars[i - 1] == '_');
+            let next_ident = i + sym_len < expr_chars.len()
+                && (expr_chars[i + sym_len].is_ascii_alphanumeric()
+                    || expr_chars[i + sym_len] == '_');
+            if prev_ident || next_ident {
+                for &c in &symbol_chars {
+                    out.push(c);
+                }
+            } else {
+                out.push('z');
+            }
+            i += sym_len;
+        } else {
+            out.push(expr_chars[i]);
+            i += 1;
+        }
+    }
     out
 }
 

@@ -63,6 +63,8 @@ jobs:
             complex_parser
             document_deserialization
             command_atomicity
+            validation_limits
+            spreadsheet_recompute
           )
           failed=0
           for target in "${targets[@]}"; do

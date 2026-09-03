@@ -81,7 +81,7 @@ impl JSpaceLedger {
 
     /// Devuelve si quedan problemas abiertos sin resolver.
     pub fn has_open_items(&self) -> bool {
-        !self.open.iter().any(|item| item.trim().is_empty())
+        !self.open.is_empty() && self.open.iter().any(|item| !item.trim().is_empty())
     }
 }
 

@@ -345,6 +345,46 @@ const GPU_2D_CURVE_STEPS: usize = 4_000;
 // (ver también los TODO P1 en `grafito-render/src/*_compute.rs`).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
+/// Helper de readback asíncrono sin `device.poll(Wait)` bloqueante.
+/// TODO P1 async batch: reemplazar el `take(1)` + `maybe_compute_*` sincrónicos
+/// por un `GpuComputeBatch` que acumule encoders, haga un único `queue.submit`
+/// y resuelva los `map_async` con `device.poll(Maintain::Poll)` + `await`
+/// fuera del hilo de `prepare` (vía `spawn_blocking`/`pollster`).
+/// Mientras tanto el frame se limita a `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE`
+/// intentos sincrónicos (ver `CanvasCallback::prepare` y `Canvas3DCallback::prepare`).
+/// Ver `grafito-render/src/*_compute.rs` para los `poll(Wait)` actuales bloqueantes.
+#[allow(dead_code)]
+fn gpu_async_readback_todo_note() {
+    // Placeholder para el batch asíncrono futuro; no hace `device.poll(Wait)`.
+}
+
+/// Decide si un callback debe intentar GPU en este frame.
+/// Evita `Wait` bloqueante durante interacciones continuas (arrastre/zoom/pan).
+#[allow(dead_code)]
+fn should_attempt_gpu_compute(view_is_changing: bool, transient_animation: bool) -> bool {
+    !view_is_changing && !transient_animation
+}
+
+/// Acota presupuesto de trabajo VRAM/dispatch por frame sin `poll(Wait)` extra.
+/// Usado por `gpu_2d_pre_dispatch_plan` y `gpu_3d_pre_dispatch_plan` para no
+/// exceder `MAX_WORLD_MESH_WORK_UNITS` ni memoria de buffers.
+#[allow(dead_code)]
+fn gpu_budget_allows(remaining: usize, required: usize) -> bool {
+    remaining.checked_sub(required).is_some()
+}
+
+/// Itera a lo sumo `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` jobs por frame
+/// para garantizar un único `device.poll(Wait)` bloqueante como máximo.
+/// TODO P1 async batch: cuando el batch asíncrono esté listo, este helper
+/// dejará de hacer `take(1)` y pasará a encolar todos los jobs en el batch.
+fn limited_gpu_jobs<I>(iter: I) -> impl Iterator<Item = ObjectId>
+where
+    I: IntoIterator<Item = ObjectId>,
+{
+    iter.into_iter()
+        .take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)
+}
+
 /// Selects only visible 2D GPU cache evaluations that fit the same per-frame
 /// 65,536-unit quota used to prepare 3D world meshes. The 2D callback has no
 /// independent WorldMesh stream, so sampled work is also its cache capacity.
@@ -396,10 +436,10 @@ fn gpu_2d_pre_dispatch_plan(
         let Some(work_units) = work_units else {
             continue;
         };
-        let Some(remaining) = remaining_work.checked_sub(work_units) else {
+        if !gpu_budget_allows(remaining_work, work_units) {
             continue;
-        };
-        remaining_work = remaining;
+        }
+        remaining_work -= work_units;
         dispatch_ids.push(id);
     }
     dispatch_ids
@@ -596,10 +636,9 @@ impl CallbackTrait for CanvasCallback {
                     function_grid_size,
                     self.document.render_quality,
                 );
-                for id in dispatch_ids
-                    .into_iter()
-                    .take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)
-                {
+                // Limita GPU a un único `Wait` por frame vía `limited_gpu_jobs`
+                // (ver TODO async batch arriba). Evita saturar VRAM/tiempo de frame.
+                for id in limited_gpu_jobs(dispatch_ids) {
                     let Some(obj) = self.document.get_object(id) else {
                         continue;
                     };
@@ -955,10 +994,9 @@ impl CallbackTrait for Canvas3DCallback {
             puffin::profile_scope!("gpu_compute_3d");
             if let Some(compute) = renderer.parametric_compute.as_ref() {
                 let dispatch_ids = gpu_3d_pre_dispatch_plan(&self.document);
-                for id in dispatch_ids
-                    .into_iter()
-                    .take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)
-                {
+                // Limita GPU a un único `Wait` por frame vía `limited_gpu_jobs`
+                // (ver TODO async batch). Misma cota que en 2D para no bloquear UI.
+                for id in limited_gpu_jobs(dispatch_ids) {
                     let Some(obj) = self.document.get_object(id) else {
                         continue;
                     };

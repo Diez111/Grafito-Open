@@ -480,6 +480,21 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Locus[driver, target]"; "driver": ObjectLabel required, "target": ObjectLabel required)]
     ),
     command!(
+        "dynamic.locus-equation",
+        "LocusEquation",
+        ["locus_equation", "ecuacionlocus", "ecuacion_locus"],
+        "Dinamica",
+        "Aproxima eliminación Groebner (mock) a partir de muestreo de locus + regresión simbólica; genera curva implícita presupuestada.",
+        CreatesObject,
+        Medium,
+        true,
+        "LocusEquation",
+        [
+            signature!("LocusEquation[locus]"; "locus": ObjectLabel required),
+            signature!("LocusEquation[locus, grado]"; "locus": ObjectLabel required, "grado": Integer optional)
+        ]
+    ),
+    command!(
         "geometry.parametric-curve-2d",
         "ParametricCurve2D",
         ["parametric_curve_2d", "param2d"],
@@ -832,6 +847,21 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("CellRange[a1, b2]"; "a1": Expression required, "b2": Expression optional),
             signature!("CellRange[rango]"; "rango": Expression required)
+        ]
+    ),
+    command!(
+        "spreadsheet.fill-row",
+        "FillRow",
+        ["fill_row", "fillrow"],
+        "Estadistica",
+        "Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE.",
+        CreatesObject,
+        Medium,
+        true,
+        "FillRow",
+        [
+            signature!("FillRow[fila, valor]"; "fila": Expression required, "valor": Expression optional),
+            signature!("FillRow[fila, inicio, fin, valor]"; "fila": Expression required, "inicio": Integer optional, "fin": Integer optional, "valor": Expression optional)
         ]
     ),
     // Restricciones, conicas y booleanas documentadas
@@ -1843,6 +1873,45 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "FitSin",
         [signature!("FitSin[tabla]"; "tabla": Object required)]
+    ),
+    command!(
+        "statistics.fit-logistic",
+        "FitLogistic",
+        ["fit_logistic", "logistica", "ajuste logistico"],
+        "Estadistica",
+        "Ajusta a/(1+b*exp(-c*x)) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6; genera función y métricas RMSE/R².",
+        CreatesObject,
+        Medium,
+        true,
+        "FitLogistic",
+        [signature!("FitLogistic[tabla]"; "tabla": Object required)]
+    ),
+    command!(
+        "statistics.fit-growth",
+        "FitGrowth",
+        ["fit_growth", "crecimiento", "ajuste crecimiento"],
+        "Estadistica",
+        "Ajusta a*exp(b*x) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6.",
+        CreatesObject,
+        Medium,
+        true,
+        "FitGrowth",
+        [signature!("FitGrowth[tabla]"; "tabla": Object required)]
+    ),
+    command!(
+        "statistics.fit-implicit",
+        "FitImplicit",
+        ["fit_implicit", "implicit_fit", "ajuste implicito"],
+        "Estadistica",
+        "Ajuste implícito genérico Gauss-Newton: FitImplicit[tabla, exprConParams, a0, b0, ...] minimiza y - expr(x; params).",
+        CreatesObject,
+        High,
+        true,
+        "FitImplicit",
+        [
+            signature!("FitImplicit[tabla, expr]"; "tabla": Object required, "expr": Expression required),
+            signature!("FitImplicit[tabla, expr, a0, b0, c0]"; "tabla": Object required, "expr": Expression required, "a0": Number optional, "b0": Number optional, "c0": Number optional)
+        ]
     ),
     command!(
         "statistics.mean",
@@ -2923,6 +2992,18 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("Sequence[expr, var, start, end]"; "expr": Expression required, "var": Variable required, "start": Number required, "end": Number required)]
     ),
     command!(
+        "list.sequence-live",
+        "SequenceLive",
+        ["sequencelive", "secuenciaviva", "seqviva", "viva"],
+        "Lista",
+        "Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada).",
+        CreatesObject,
+        Low,
+        true,
+        "SequenceLive",
+        [signature!("SequenceLive[expr, var, start, end]"; "expr": Expression required, "var": Variable required, "start": Expression required, "end": Expression required)]
+    ),
+    command!(
         "list.zip",
         "Zip",
         ["zip", "emparejar", "cremallera"],
@@ -3053,6 +3134,109 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "CountIf",
         [signature!("CountIf[list, predicado]"; "list": Data required, "predicado": Expression required)]
+    ),
+    // ── Aula F5: cónicas puras + tabla + slider ──────────────────────────
+    command!(
+        "conic.focus",
+        "Focus",
+        ["Foco", "foco", "focos"],
+        "Cónicas",
+        "Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact.",
+        ReadOnly,
+        Low,
+        true,
+        "Focus",
+        [signature!("Focus[conica]"; "conica": ObjectLabel required)]
+    ),
+    command!(
+        "conic.directrix",
+        "Directrix",
+        ["Directriz", "directriz"],
+        "Cónicas",
+        "Devuelve la directriz de una parábola como recta (dos puntos) usando exact::parabola.",
+        ReadOnly,
+        Low,
+        true,
+        "Directrix",
+        [signature!("Directrix[conica]"; "conica": ObjectLabel required)]
+    ),
+    command!(
+        "conic.center",
+        "Center",
+        ["Centro", "centro"],
+        "Cónicas",
+        "Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center.",
+        ReadOnly,
+        Low,
+        true,
+        "Center",
+        [signature!("Center[conica]"; "conica": ObjectLabel required)]
+    ),
+    command!(
+        "conic.eccentricity",
+        "Eccentricity",
+        ["Excentricidad", "excentricidad", "ecc"],
+        "Cónicas",
+        "Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola).",
+        ReadOnly,
+        Low,
+        true,
+        "Eccentricity",
+        [signature!("Eccentricity[conica]"; "conica": ObjectLabel required)]
+    ),
+    command!(
+        "conic.axes",
+        "Axes",
+        ["Ejes", "ejes", "semiejes"],
+        "Cónicas",
+        "Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes.",
+        ReadOnly,
+        Low,
+        true,
+        "Axes",
+        [signature!("Axes[conica]"; "conica": ObjectLabel required)]
+    ),
+    command!(
+        "conic.is-tangent",
+        "IsTangent",
+        ["EsTangente", "esTangente", "estangente", "isTangent"],
+        "Cónicas",
+        "Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante).",
+        ReadOnly,
+        Low,
+        true,
+        "IsTangent",
+        [signature!("IsTangent[recta, conica]"; "recta": ObjectLabel required, "conica": ObjectLabel required)]
+    ),
+    command!(
+        "text.table-text",
+        "TableText",
+        ["TablaTexto", "tablatexto", "tablaTexto", "Table"],
+        "Texto",
+        "Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento.",
+        ReadOnly,
+        Low,
+        true,
+        "TableText",
+        [
+            signature!("TableText[funcion, min, max, paso]"; "funcion": ObjectLabel required, "min": Number required, "max": Number required, "paso": Number required),
+            signature!("TableText[expr, min, max, paso]"; "expr": Expression required, "min": Number required, "max": Number required, "paso": Number required)
+        ]
+    ),
+    command!(
+        "dynamic.slider",
+        "Slider",
+        ["Deslizador", "deslizador"],
+        "Dinámica",
+        "Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed).",
+        CreatesObject,
+        Low,
+        true,
+        "Slider",
+        [
+            signature!("Slider[variable, min, max, paso, modo]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required, "modo": Expression required),
+            signature!("Slider[variable, min, max, paso]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required)
+        ]
     ),
 ];
 

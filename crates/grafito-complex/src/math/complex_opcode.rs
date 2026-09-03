@@ -88,16 +88,25 @@ pub fn compile_complex_expr(
             if let Some((_, operand)) = var_map.iter().find(|(n, _)| *n == name) {
                 prog.code.push(ComplexOp::PushVar.encode(*operand));
             } else if name == "i" {
+                if prog.constants.len() >= 254 {
+                    return Err(CompileError::TooManyConstants);
+                }
                 let idx = prog.constants.len() as u32;
                 prog.constants.push(0.0);
                 prog.constants.push(1.0);
                 prog.code.push(ComplexOp::PushConst.encode(idx));
             } else if name == "e" {
+                if prog.constants.len() >= 254 {
+                    return Err(CompileError::TooManyConstants);
+                }
                 let idx = prog.constants.len() as u32;
                 prog.constants.push(std::f64::consts::E);
                 prog.constants.push(0.0);
                 prog.code.push(ComplexOp::PushConst.encode(idx));
             } else if name == "pi" {
+                if prog.constants.len() >= 254 {
+                    return Err(CompileError::TooManyConstants);
+                }
                 let idx = prog.constants.len() as u32;
                 prog.constants.push(std::f64::consts::PI);
                 prog.constants.push(0.0);
@@ -254,6 +263,52 @@ pub fn compile_complex_expr(
 
     if prog.code.len() > 4096 {
         return Err(CompileError::StackTooDeep);
+    }
+    if prog.constants.len() > 512 {
+        return Err(CompileError::TooManyConstants);
+    }
+    // Validación de profundidad de pila del programa compilado (GPU: 32).
+    // El compilador no rastreaba stack, permitiendo código que luego fallaba en
+    // gpu_program_is_supported. Rechazar aquí evita dispatch inútil.
+    {
+        let mut depth = 0usize;
+        let mut max_depth = 0usize;
+        for instr in &prog.code {
+            match instr & 0xFF {
+                0 => {}
+                1 | 2 => depth += 1,
+                3..=7 | 16 | 17 => {
+                    if depth < 2 {
+                        return Err(CompileError::StackTooDeep);
+                    }
+                    depth -= 1;
+                }
+                8..=15 | 18 | 19 | 22..=33 | 102..=105 => {
+                    if depth == 0 {
+                        return Err(CompileError::StackTooDeep);
+                    }
+                }
+                100 | 101 | 106..=109 => {
+                    if depth == 0 {
+                        return Err(CompileError::StackTooDeep);
+                    }
+                }
+                _ => {
+                    return Err(CompileError::UnsupportedNode(format!(
+                        "opcode {}",
+                        instr & 0xFF
+                    )))
+                }
+            }
+            max_depth = max_depth.max(depth);
+            if max_depth > 64 {
+                return Err(CompileError::StackTooDeep);
+            }
+        }
+        if depth != 1 {
+            // Programa mal formado (no deja exactamente un valor en la pila)
+            return Err(CompileError::StackTooDeep);
+        }
     }
     Ok(())
 }

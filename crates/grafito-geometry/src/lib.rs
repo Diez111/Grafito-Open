@@ -36,6 +36,7 @@ pub mod integral;
 pub mod intersections;
 pub mod interval;
 pub mod lines;
+pub mod locus_equation;
 pub mod matrices;
 pub mod ode;
 pub mod outcome;

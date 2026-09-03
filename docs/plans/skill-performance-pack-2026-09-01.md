@@ -106,7 +106,7 @@ En TUI `skill` tool lista 7 skills; `skill({name:"j-space"})` carga entry + mód
 
 - `python3 ~/.config/opencode/skills/j-space/scripts/verify_suite.py` DONE clean
 - `opencode debug config` merge ok DONE
-- `cargo fmt --check && cargo clippy -- -D warnings && cargo test --workspace` (ejecutar en box con Rust 1.88)
+- `cargo fmt --check && cargo clippy -- -D warnings && cargo test --workspace` (ejecutar en box con Rust 1.92)
 - `cargo run -p grafito-app --features profile` smoke
 
 ## Licencias y atribución

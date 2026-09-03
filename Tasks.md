@@ -26,7 +26,7 @@
 
 ## F4 — Estabilidad Total (Puertas AGENTS.md) — DONE
 - [x] F4.1 cargo fmt --check (0)
-- [x] F4.2 cargo clippy --workspace --all-targets -- -D warnings (0, 1.88 + stable)
+- [x] F4.2 cargo clippy --workspace --all-targets -- -D warnings (0, 1.92 + stable)
 - [x] F4.3 cargo check --workspace --locked (OK)
 - [x] F4.4 cargo test --workspace --locked (OK, 392+ tests, 0 FAILED tras revert safe_sinh)
 - [x] F4.5 cargo check --workspace --examples --benches --locked (OK)
@@ -36,5 +36,5 @@
 
 ## F5 — Docs & Handoff — DONE
 - [x] F5.1 docs/architecture.md + README + CHANGELOG (architecture.md creado)
-- [x] F5.2 progress.md evidencia CI + riesgos (RUSTSEC 2026-09-30, HashMap, etc.)
+- [x] F5.2 progress.md evidencia CI + riesgos (RUSTSEC 2026-12-31, HashMap, etc.)
 - [x] F5.3 Handoff: menu decisiones vibecoder-guide si algo fallo (este archivo)

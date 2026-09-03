@@ -6,10 +6,22 @@ use std::fmt;
 // Supports differentiation, simplification, display and numeric evaluation.
 
 fn safe_sinh(a: f64) -> f64 {
+    if !a.is_finite() {
+        return f64::NAN;
+    }
+    if a.abs() > 710.0 {
+        return f64::INFINITY.copysign(a);
+    }
     a.sinh()
 }
 
 fn safe_cosh(a: f64) -> f64 {
+    if !a.is_finite() {
+        return f64::NAN;
+    }
+    if a.abs() > 710.0 {
+        return f64::INFINITY;
+    }
     a.cosh()
 }
 

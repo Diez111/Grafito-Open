@@ -7,7 +7,7 @@ Windows. Ambos compilan el workspace bloqueado por `Cargo.lock`.
 
 ### Requisitos
 
-- Rust 1.88 o posterior y `build-essential`.
+- Rust 1.92 o posterior y `build-essential`.
 - `dpkg-dev` y `dpkg-deb`.
 - `libgmp-dev`, `libmpfr-dev`, `libmpc-dev`, `m4`, `pkg-config` y
   `libdbus-1-dev`.

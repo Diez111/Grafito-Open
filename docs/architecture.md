@@ -140,17 +140,17 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 
 ## 9. Verificacion CI (14 jobs) — .github/workflows/ci.yml
 
-MSRV 1.88 (`rust-version.workspace = "1.88"`) verificada en matriz `toolchain: ['1.88', stable]` para `check`, `test`, `lint`; `cargo metadata --locked` con 1.88 valida lockfile completo; docs advierten 1.88 en `Cargo.toml`, `ci.yml`, `CONTRIBUTING.md`, `AGENTS.md`, `README*.md`, `packaging/README.md` ( packaging-fixtures.sh lo exige).
+MSRV 1.92 (`rust-version.workspace = "1.92"`) verificada en matriz `toolchain: ['1.92', stable]` para `check`, `test`, `lint`; `cargo metadata --locked` con 1.92 valida lockfile completo; docs advierten 1.92 en `Cargo.toml`, `ci.yml`, `CONTRIBUTING.md`, `AGENTS.md`, `README*.md`, `packaging/README.md` ( packaging-fixtures.sh lo exige).
 
 | # | Job | Comando / descripcion | Runner / notas |
 |---|-----|------------------------|----------------|
-| 1 | `check` | `cargo check --workspace --locked` + `cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked` (solo 1.88) | matrix 1.88 + stable, apt cache libgmp/mpfr/mpc/dbus, mingw-w64 para 1.88 |
-| 2 | `test` | `cargo test --workspace --locked` | matrix 1.88 + stable |
+| 1 | `check` | `cargo check --workspace --locked` + `cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked` (solo 1.92) | matrix 1.92 + stable, apt cache libgmp/mpfr/mpc/dbus, mingw-w64 para 1.92 |
+| 2 | `test` | `cargo test --workspace --locked` | matrix 1.92 + stable |
 | 3 | `gpu-compute` | `cargo test -p grafito-render --test gpu_compute --locked` **required** | `WGPU_BACKEND=vulkan`, `GRAFITO_REQUIRE_GPU_TESTS=1`, `mesa-vulkan-drivers` + `libvulkan1`, no longer `WGPU_BACKEND=gl headless` ni SKIP; falla si GPU no disponible |
 | 4 | `examples` | `cargo check --workspace --examples --locked` | stable |
 | 5 | `benches` | `cargo check --workspace --benches --locked` | stable (separado de examples desde 14-job split) |
 | 6 | `docs` | `cargo doc --workspace --no-deps --locked` con `RUSTDOCFLAGS=-D warnings` | stable |
-| 7 | `lint` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | matrix 1.88 + stable, components clippy |
+| 7 | `lint` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | matrix 1.92 + stable, components clippy |
 | 8 | `release-build` | `cargo build --workspace --release --locked` | solo push main, ubuntu-22.04 |
 | 9 | `fmt` | `cargo fmt --all -- --check` | stable, rustfmt |
 | 10 | `all-targets` | `cargo check --workspace --all-targets --all-features --locked` | stable |
@@ -161,7 +161,7 @@ MSRV 1.88 (`rust-version.workspace = "1.88"`) verificada en matriz `toolchain: [
 
 Notas:
 - `gpu-compute` ahora **requerido** con `WGPU_BACKEND=vulkan` (antes `gl` headless SKIP); `GRAFITO_REQUIRE_GPU_TESTS=1` hace fail-closed si el adapter no esta disponible.
-- Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.88 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
+- Packaging fixtures (`packaging/tests/packaging-fixtures.sh`) es gate en `workflow-lint`: verifica iconos `16..512` + scalable `hicolor/scalable/apps/grafito.svg`, `grafito-icon.svg`, abort si falta asset, y `desktop Icon=grafito`, mas plugins `usr/share/grafito/plugins` (`j-space`), `postrm` parse, MSRV 1.92 docs, MSVC static CRT, e icon asset existencia; `assets/mora.png/.svg` existen y se embeben via `include_bytes!` (verificado en `app.rs:4870` test `<32 KiB`).
 - Baseline 2026-08-20: 7/8 PASS (gpu_compute SKIP headless, release-build SKIP 45m). Desde 14-job split: gpu-compute ya no SKIP, package-debian y workflow-lint son blocking.
 
 ## 10. Novedades v1.2.35 — supera GeoGebra (2026-08-26)

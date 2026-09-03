@@ -42,6 +42,23 @@ pub struct VariableMeta {
     pub animation_mode: AnimationMode,
 }
 
+/// Binding de una secuencia viva que depende de variables y se re-evalúa en cada cambio.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiveSequenceBinding {
+    /// Expresión a evaluar con variable local.
+    pub expr: String,
+    /// Variable local de iteración (ej. "k").
+    pub var: String,
+    /// Expresión para inicio (puede referenciar variables del documento).
+    pub start_expr: String,
+    /// Expresión para fin.
+    pub end_expr: String,
+}
+
+/// Presupuestos para secuencias vivas.
+pub const MAX_LIVE_SEQUENCES: usize = 64;
+pub const MAX_LIVE_SEQUENCE_LENGTH: usize = 10_000;
+
 fn default_animation_speed() -> f64 {
     1.0
 }
@@ -257,6 +274,9 @@ pub struct Document {
     pub version: u64,
     #[serde(skip)]
     pub cached_vars_list: CachedVarsList,
+    /// Secuencias vivas: DataTable backing con recálculo automático al cambiar variables.
+    #[serde(default)]
+    pub live_sequences: HashMap<ObjectId, LiveSequenceBinding>,
 }
 
 impl Default for Document {
@@ -283,6 +303,7 @@ impl Default for Document {
             last_solution: HashMap::new(),
             version: 0,
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            live_sequences: HashMap::new(),
         }
     }
 }
@@ -755,6 +776,7 @@ impl Document {
         self.selection.retain(|&s| s != id);
         self.spreadsheet_coordinate_points
             .retain(|_, point_id| *point_id != id);
+        self.live_sequences.remove(&id);
         let removed = self.objects.remove(&id);
         for out in orphaned {
             // Evitar doble eliminación si el output era el propio `id`.
@@ -3429,6 +3451,7 @@ impl Document {
         self.cas_worksheet.clear();
         self.spreadsheet_variables.clear();
         self.spreadsheet_coordinate_points.clear();
+        self.live_sequences.clear();
         self.spatial = crate::spatial::SpatialIndex::new();
         self.spatial_dirty = true;
         self.constraints = ConstraintGraph::new();
@@ -3537,6 +3560,7 @@ impl Document {
             return Ok(false);
         }
         staged.propagate_changed_roots(&changed)?;
+        staged.recompute_live_sequences()?;
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -3559,6 +3583,7 @@ impl Document {
         let mut staged = self.detached_clone_for_staging();
         mutate(&mut staged);
         staged.recompute_spreadsheet_variables()?;
+        staged.recompute_live_sequences()?;
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
@@ -3746,6 +3771,10 @@ impl Document {
         }
         if let Err(error) = staged.recompute_spreadsheet_variables() {
             log::warn!("Animation update rejected: {error}");
+            return false;
+        }
+        if let Err(error) = staged.recompute_live_sequences() {
+            log::warn!("Animation live sequences rejected: {error}");
             return false;
         }
         if let Err(error) = crate::validation::validate_document(&staged) {
@@ -4269,10 +4298,222 @@ impl Document {
             }
         }
         staged.propagate_changed_roots(&changed_points)?;
+        // Re-evalúa secuencias vivas cuyo rango o expresión dependa de variables cambiadas.
+        staged.recompute_live_sequences()?;
         crate::validation::validate_document(&staged)?;
         staged.version = self.version.wrapping_add(1);
         staged.spatial_dirty = true;
         Ok(staged)
+    }
+
+    /// Helper análogo a FillColumn pero por fila: rellena `row` en columnas [start_col..=end_col].
+    pub fn stage_fill_row(
+        &self,
+        row: usize,
+        start_col: usize,
+        end_col: usize,
+        value: &str,
+    ) -> Result<Self, String> {
+        if row >= Self::MAX_SPREADSHEET_ROWS {
+            return Err(format!(
+                "FillRow: fila {} excede máximo {}",
+                row + 1,
+                Self::MAX_SPREADSHEET_ROWS
+            ));
+        }
+        if start_col > end_col {
+            return Err("FillRow: inicio debe ser <= fin".to_string());
+        }
+        if end_col >= Self::MAX_SPREADSHEET_COLS {
+            return Err(format!(
+                "FillRow: columna {} excede máximo {}",
+                end_col + 1,
+                Self::MAX_SPREADSHEET_COLS
+            ));
+        }
+        let count = end_col
+            .checked_sub(start_col)
+            .and_then(|d| d.checked_add(1))
+            .ok_or_else(|| "rango FillRow desborda".to_string())?;
+        if count > Self::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+            return Err(format!(
+                "FillRow: {} celdas excede máximo {}",
+                count,
+                Self::MAX_SPREADSHEET_RECOMPUTE_CELLS
+            ));
+        }
+        if value.len() > crate::validation::MAX_STRING_LENGTH {
+            return Err("valor FillRow excede longitud máxima".to_string());
+        }
+        let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(count);
+        for col in start_col..=end_col {
+            edits.push((row, col, value.to_string()));
+        }
+        edits.sort_unstable_by_key(|(r, c, _)| (*r, *c));
+        self.stage_spreadsheet_cell_edits(&edits)
+    }
+
+    /// Registra una secuencia viva que depende de variables y se re-evalúa en cada cambio.
+    ///
+    /// Crea un `LiveSequenceBinding` asociado a `target` (debe ser un `DataTable`).
+    /// Usa `variable_meta` binding para la variable de iteración: registra dependencia
+    /// y permite animación/actualización vía `commit_variable_mutation`.
+    pub fn try_add_live_sequence(
+        &mut self,
+        target: ObjectId,
+        binding: LiveSequenceBinding,
+    ) -> Result<(), String> {
+        if self.live_sequences.len() >= MAX_LIVE_SEQUENCES {
+            return Err(format!(
+                "máximo de secuencias vivas {} alcanzado",
+                MAX_LIVE_SEQUENCES
+            ));
+        }
+        if binding.expr.trim().is_empty()
+            || binding.var.trim().is_empty()
+            || binding.start_expr.trim().is_empty()
+            || binding.end_expr.trim().is_empty()
+        {
+            return Err("LiveSequence: campos vacíos".to_string());
+        }
+        if binding.expr.len() > crate::validation::MAX_EXPR_LENGTH
+            || binding.start_expr.len() > crate::validation::MAX_EXPR_LENGTH
+            || binding.end_expr.len() > crate::validation::MAX_EXPR_LENGTH
+        {
+            return Err("LiveSequence: expresión excede longitud máxima".to_string());
+        }
+        if !Self::is_valid_live_var(&binding.var) {
+            return Err("LiveSequence: variable local inválida".to_string());
+        }
+        // Valida que target exista y sea DataTable.
+        match self.get_object(target) {
+            Some(GeoObject::DataTable(_)) => {}
+            _ => return Err("LiveSequence: target debe ser DataTable".to_string()),
+        }
+        // Registra binding de variable_meta para la variable de iteración si no existe,
+        // permitiendo que la secuencia se re-evalúe al animar/actualizar variables.
+        if !self.variables.contains_key(&binding.var) {
+            // Crea variable local con valor inicial 0 para que la meta tenga dónde anclarse.
+            self.variables.insert(binding.var.clone(), 0.0);
+        }
+        if !self.variable_meta.contains_key(&binding.var) {
+            let meta = VariableMeta {
+                position: Point2::new(0.0, 0.0),
+                min: -1e6,
+                max: 1e6,
+                step: 1.0,
+                visible: false,
+                animating: false,
+                animation_speed: 1.0,
+                animation_mode: AnimationMode::PingPong,
+            };
+            self.variable_meta.insert(binding.var.clone(), meta);
+        }
+        self.live_sequences.insert(target, binding);
+        self.bump_version();
+        self.spatial_dirty = true;
+        Ok(())
+    }
+
+    /// Re-evalúa todas las secuencias vivas tras un cambio de variables.
+    pub fn recompute_live_sequences(&mut self) -> Result<(), String> {
+        if self.live_sequences.is_empty() {
+            return Ok(());
+        }
+        // Snapshot de bindings para evitar borrow conflicts.
+        let bindings: Vec<(ObjectId, LiveSequenceBinding)> = self
+            .live_sequences
+            .iter()
+            .map(|(id, binding)| (*id, binding.clone()))
+            .collect();
+        for (target, binding) in bindings {
+            // Evalúa start/end con las variables actuales.
+            let start = self.resolve_live_expr(&binding.start_expr)?;
+            let end = self.resolve_live_expr(&binding.end_expr)?;
+            let start_i = start.round() as i64;
+            let end_i = end.round() as i64;
+            if !start.is_finite()
+                || !end.is_finite()
+                || (start - start.round()).abs() > 1e-9
+                || (end - end.round()).abs() > 1e-9
+            {
+                return Err(format!(
+                    "LiveSequence {target}: start/end deben ser enteros finitos"
+                ));
+            }
+            let len = (end_i - start_i).unsigned_abs() as usize + 1;
+            if len > MAX_LIVE_SEQUENCE_LENGTH {
+                return Err(format!(
+                    "LiveSequence {target}: longitud {len} excede máximo {MAX_LIVE_SEQUENCE_LENGTH}"
+                ));
+            }
+            if len > crate::validation::MAX_ARRAY_LENGTH {
+                return Err(format!(
+                    "LiveSequence {target}: longitud {len} excede MAX_ARRAY_LENGTH"
+                ));
+            }
+            // Genera nueva serie.
+            let mut xs: Vec<f64> = Vec::with_capacity(len);
+            let mut ys: Vec<f64> = Vec::with_capacity(len);
+            let step: i64 = if end_i >= start_i { 1 } else { -1 };
+            let mut current = start_i;
+            loop {
+                let mut mapping: Vec<(String, f64)> = self
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect();
+                mapping.push((binding.var.clone(), current as f64));
+                let value = grafito_geometry::expr::evaluate(&binding.expr, &mapping)
+                    .map_err(|error| format!("LiveSequence {target} eval: {error}"))?;
+                if !value.is_finite() {
+                    return Err(format!(
+                        "LiveSequence {target}: evaluación no finita en {}={current}",
+                        binding.var
+                    ));
+                }
+                xs.push(current as f64);
+                ys.push(value);
+                if current == end_i {
+                    break;
+                }
+                current += step;
+            }
+            // Actualiza el DataTable asociado.
+            if let Some(GeoObject::DataTable(table)) = self.objects.get_mut(&target) {
+                table.xs = xs;
+                table.ys = ys;
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_live_expr(&self, expr: &str) -> Result<f64, String> {
+        let trimmed = expr.trim();
+        if trimmed.is_empty() {
+            return Err("expresión vacía".to_string());
+        }
+        // Intenta parsear como número literal rápido.
+        if let Ok(value) = trimmed.parse::<f64>() {
+            if value.is_finite() {
+                return Ok(value);
+            }
+        }
+        let vars: Vec<(String, f64)> = self
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        grafito_geometry::expr::evaluate(trimmed, &vars)
+            .map_err(|error| format!("no se pudo evaluar '{trimmed}': {error}"))
+    }
+
+    fn is_valid_live_var(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|first| first.is_alphabetic() || first == '_')
+            && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
     }
 
     fn validate_spreadsheet_cell_edit_batch(

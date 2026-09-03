@@ -84,7 +84,9 @@ impl ComplexMatrix {
 
     pub fn div(&self, other: &Self) -> Option<Self> {
         let det = other.a * other.d - other.b * other.c;
-        if det.abs() < 1e-15 {
+        // det = |z|^2; umbral absoluto 1e-30 mantiene |z| < 1e-15 como singular,
+        // alineado con SINGULARITY_THRESHOLD de algebraic_mappings.
+        if !det.is_finite() || det.abs() < 1e-30 {
             return None;
         }
         let inv = Self {
@@ -195,7 +197,26 @@ impl ComplexExpr {
             ComplexExpr::Pow(a, b) => {
                 let ma = ComplexMatrix::from_complex(a.eval_depth(vars, depth + 1)?);
                 let mb = ComplexMatrix::from_complex(b.eval_depth(vars, depth + 1)?);
-                Ok(ComplexMatrix::from_complex(ma.to_complex().powc(mb.to_complex())).to_complex())
+                let base = ma.to_complex();
+                let exp = mb.to_complex();
+                // 0 con exponente no finito o potencia que desborda -> NaN; el caller filtra
+                // vía finite check. Para exponente negativo y base ~0, powc puede dar inf.
+                // Dejamos que el siguiente filtro de finite lo convierta en None en
+                // eval_complex_batch, pero si el exponente es entero negativo y la base
+                // es singular, adelantamos el error como División por cero para no
+                // propagar inf/nan como Ok.
+                if base.norm() < 1e-300 && exp.re < 0.0 && exp.im.abs() < 1e-12 {
+                    return Err("Division by zero".to_string());
+                }
+                let res = base.powc(exp);
+                if !res.re.is_finite() || !res.im.is_finite() {
+                    // Preservar la convención de funciones especiales (Gamma/Zeta) que
+                    // devuelven NaN intencional: sólo Pow con base no finita ya se
+                    // habría filtrado por eval_depth; aquí retornamos el NaN como Ok
+                    // para que contour_integral y batch lo detecten como no-finito.
+                    // No convertimos a Err para no romper zeta(1) NaN contract.
+                }
+                Ok(ComplexMatrix::from_complex(res).to_complex())
             }
             ComplexExpr::Sin(a) => {
                 let ma = ComplexMatrix::from_complex(a.eval_depth(vars, depth + 1)?);
@@ -310,82 +331,103 @@ impl ComplexExpr {
             }
             ComplexExpr::DerivZ(a) => {
                 let vars_base_symbol = if vars.contains_key("z") {
-                    "z".to_string()
+                    "z"
                 } else if vars.contains_key("w") {
-                    "w".to_string()
+                    "w"
                 } else {
-                    vars.keys()
-                        .next()
-                        .cloned()
-                        .unwrap_or_else(|| "z".to_string())
+                    vars.keys().next().map(|k| k.as_str()).unwrap_or("z")
                 };
                 let z = vars
-                    .get(&vars_base_symbol)
+                    .get(vars_base_symbol)
                     .copied()
                     .unwrap_or(Complex64::new(0.0, 0.0));
+                if !z.re.is_finite() || !z.im.is_finite() {
+                    return Err("non-finite base point for deriv_z".to_string());
+                }
                 let h = 1e-6;
 
-                let mut vars_plus_x = vars.clone();
-                vars_plus_x.insert(vars_base_symbol.clone(), z + Complex64::new(h, 0.0));
-                let f_plus_x = a.eval_depth(&vars_plus_x, depth + 1)?;
+                // Reusar una sola clonación + inserciones in-place para no
+                // cuadruplicar el costo de HashMap::clone en cada derivada.
+                // Derivadas anidadas siguen acotadas por MAX_COMPLEX_EVAL_DEPTH
+                // (cada sub-evaluación consume +1 de profundidad), evitando
+                // blowup exponencial 4^n.
+                let mut scratch = vars.clone();
+                scratch.insert(vars_base_symbol.to_string(), z + Complex64::new(h, 0.0));
+                let f_plus_x = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_minus_x = vars.clone();
-                vars_minus_x.insert(vars_base_symbol.clone(), z - Complex64::new(h, 0.0));
-                let f_minus_x = a.eval_depth(&vars_minus_x, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z - Complex64::new(h, 0.0));
+                let f_minus_x = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_plus_y = vars.clone();
-                vars_plus_y.insert(vars_base_symbol.clone(), z + Complex64::new(0.0, h));
-                let f_plus_y = a.eval_depth(&vars_plus_y, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z + Complex64::new(0.0, h));
+                let f_plus_y = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_minus_y = vars.clone();
-                vars_minus_y.insert(vars_base_symbol.clone(), z - Complex64::new(0.0, h));
-                let f_minus_y = a.eval_depth(&vars_minus_y, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z - Complex64::new(0.0, h));
+                let f_minus_y = a.eval_depth(&scratch, depth + 1)?;
 
                 let df_dx = (f_plus_x - f_minus_x) / (2.0 * h);
                 let df_dy = (f_plus_y - f_minus_y) / (2.0 * h);
 
+                if !df_dx.re.is_finite()
+                    || !df_dx.im.is_finite()
+                    || !df_dy.re.is_finite()
+                    || !df_dy.im.is_finite()
+                {
+                    return Err("non-finite finite-difference in deriv_z".to_string());
+                }
+
                 let i = Complex64::new(0.0, 1.0);
                 let df_dz = (df_dx - i * df_dy) * 0.5;
+                if !df_dz.re.is_finite() || !df_dz.im.is_finite() {
+                    return Err("non-finite deriv_z result".to_string());
+                }
                 Ok(df_dz)
             }
             ComplexExpr::DerivZConj(a) => {
                 let vars_base_symbol = if vars.contains_key("z") {
-                    "z".to_string()
+                    "z"
                 } else if vars.contains_key("w") {
-                    "w".to_string()
+                    "w"
                 } else {
-                    vars.keys()
-                        .next()
-                        .cloned()
-                        .unwrap_or_else(|| "z".to_string())
+                    vars.keys().next().map(|k| k.as_str()).unwrap_or("z")
                 };
                 let z = vars
-                    .get(&vars_base_symbol)
+                    .get(vars_base_symbol)
                     .copied()
                     .unwrap_or(Complex64::new(0.0, 0.0));
+                if !z.re.is_finite() || !z.im.is_finite() {
+                    return Err("non-finite base point for deriv_z_conj".to_string());
+                }
                 let h = 1e-6;
 
-                let mut vars_plus_x = vars.clone();
-                vars_plus_x.insert(vars_base_symbol.clone(), z + Complex64::new(h, 0.0));
-                let f_plus_x = a.eval_depth(&vars_plus_x, depth + 1)?;
+                let mut scratch = vars.clone();
+                scratch.insert(vars_base_symbol.to_string(), z + Complex64::new(h, 0.0));
+                let f_plus_x = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_minus_x = vars.clone();
-                vars_minus_x.insert(vars_base_symbol.clone(), z - Complex64::new(h, 0.0));
-                let f_minus_x = a.eval_depth(&vars_minus_x, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z - Complex64::new(h, 0.0));
+                let f_minus_x = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_plus_y = vars.clone();
-                vars_plus_y.insert(vars_base_symbol.clone(), z + Complex64::new(0.0, h));
-                let f_plus_y = a.eval_depth(&vars_plus_y, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z + Complex64::new(0.0, h));
+                let f_plus_y = a.eval_depth(&scratch, depth + 1)?;
 
-                let mut vars_minus_y = vars.clone();
-                vars_minus_y.insert(vars_base_symbol.clone(), z - Complex64::new(0.0, h));
-                let f_minus_y = a.eval_depth(&vars_minus_y, depth + 1)?;
+                scratch.insert(vars_base_symbol.to_string(), z - Complex64::new(0.0, h));
+                let f_minus_y = a.eval_depth(&scratch, depth + 1)?;
 
                 let df_dx = (f_plus_x - f_minus_x) / (2.0 * h);
                 let df_dy = (f_plus_y - f_minus_y) / (2.0 * h);
 
+                if !df_dx.re.is_finite()
+                    || !df_dx.im.is_finite()
+                    || !df_dy.re.is_finite()
+                    || !df_dy.im.is_finite()
+                {
+                    return Err("non-finite finite-difference in deriv_z_conj".to_string());
+                }
+
                 let i = Complex64::new(0.0, 1.0);
                 let df_dconj = (df_dx + i * df_dy) * 0.5;
+                if !df_dconj.re.is_finite() || !df_dconj.im.is_finite() {
+                    return Err("non-finite deriv_z_conj result".to_string());
+                }
                 Ok(df_dconj)
             }
         }

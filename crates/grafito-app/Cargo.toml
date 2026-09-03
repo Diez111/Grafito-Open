@@ -55,7 +55,7 @@ num-complex.workspace = true
 rfd.workspace = true
 keyring.workspace = true
 
-# This maintained profiler pair establishes the workspace Rust 1.88 minimum.
+# This maintained profiler pair establishes the workspace Rust 1.92 minimum.
 puffin = { version = "=0.19.1", optional = true }
 puffin_http = { version = "=0.16.1", optional = true }
 

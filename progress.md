@@ -10,17 +10,17 @@ Auditoría TOTAL de inicio a fin + mejoras + nuevas funciones, con foco en gener
 - /rust-ui: UI solo renderiza &Estado, sin I/O
 - /vibecoder-guide: micro-pasos, lenguaje criollo, menú ante error
 
-## Baseline gates (2026-08-20, toolchain 1.88)
+## Baseline gates (2026-08-20, toolchain 1.92)
 
 | Puerta | Comando | Resultado |
 |--------|---------|-----------|
-| fmt | cargo +1.88 fmt --check | PASS (0) |
-| clippy | cargo +1.88 clippy --workspace --all-targets -- -D warnings | PASS (0, 17s) |
-| check | cargo +1.88 check --workspace --locked | PASS |
-| examples | cargo +1.88 check --workspace --examples --locked | PASS |
-| benches | cargo +1.88 check --workspace --benches --locked | PASS |
-| test | cargo +1.88 test --workspace --locked | PASS (387 geo lib + 5 anim + doc-tests 7+1, 0 FAILED tras revert safe_sinh) |
-| doc | RUSTDOCFLAGS="-D warnings" cargo +1.88 doc --workspace --no-deps --locked | PASS |
+| fmt | cargo +1.92 fmt --check | PASS (0) |
+| clippy | cargo +1.92 clippy --workspace --all-targets -- -D warnings | PASS (0, 17s) |
+| check | cargo +1.92 check --workspace --locked | PASS |
+| examples | cargo +1.92 check --workspace --examples --locked | PASS |
+| benches | cargo +1.92 check --workspace --benches --locked | PASS |
+| test | cargo +1.92 test --workspace --locked | PASS (387 geo lib + 5 anim + doc-tests 7+1, 0 FAILED tras revert safe_sinh) |
+| doc | RUSTDOCFLAGS="-D warnings" cargo +1.92 doc --workspace --no-deps --locked | PASS |
 | packaging | bash packaging/tests/packaging-fixtures.sh | PASS (icon 16x16 warn no bloquea) |
 | gpu | cargo test -p grafito-render --test gpu_compute | SKIP headless (WGPU_BACKEND=gl) |
 
@@ -64,7 +64,7 @@ Auditoría TOTAL de inicio a fin + mejoras + nuevas funciones, con foco en gener
 
 ## Riesgos residuales (OPEN)
 
-- RUSTSEC-2026-0194/0195 quick-xml/zbus expiran 2026-09-30 (deny.toml)
+- RUSTSEC-2026-0194/0195 quick-xml/zbus expiran 2026-12-31 (deny.toml)
 - HashMap no determinista en Document (migrar a BTreeMap, P0)
 - Transformed solo check "0" singular (falta Jacobian det, P1)
 - AssistantRuntime sin Statem formal (distribuido, P1)

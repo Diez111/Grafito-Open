@@ -17,6 +17,10 @@ pub const MAX_DISCRETE_CDF_ITERATIONS: usize = 10_001;
 const MIN_SINUSOIDAL_SAMPLES: usize = 4;
 const SINUSOIDAL_FREQUENCY_STEPS: usize = 256;
 const FIT_EPSILON: f64 = 1e-12;
+/// Máximo de iteraciones para Gauss-Newton en ajustes no lineales.
+pub const MAX_GAUSS_ITER: usize = 100;
+/// Tolerancia de convergencia Gauss-Newton.
+pub const GAUSS_TOLERANCE: f64 = 1e-6;
 
 /// Familia de modelo usada por un ajuste local de datos `(x, y)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +32,9 @@ pub enum FitKind {
     Logarithmic,
     Power,
     Sinusoidal,
+    Logistic,
+    Growth,
+    Implicit,
 }
 
 impl FitKind {
@@ -37,6 +44,9 @@ impl FitKind {
             Self::Linear | Self::Exponential | Self::Logarithmic | Self::Power => Some(2),
             Self::Polynomial { degree } => degree.checked_add(1),
             Self::Sinusoidal => Some(4),
+            Self::Logistic => Some(3),
+            Self::Growth => Some(2),
+            Self::Implicit => None,
         }
     }
 
@@ -49,6 +59,9 @@ impl FitKind {
             Self::Logarithmic => "logarítmico",
             Self::Power => "potencia",
             Self::Sinusoidal => "sinusoidal",
+            Self::Logistic => "logístico",
+            Self::Growth => "crecimiento",
+            Self::Implicit => "implícito",
         }
     }
 }
@@ -138,13 +151,31 @@ pub fn fit_xy(kind: FitKind, xs: &[f64], ys: &[f64]) -> Result<FitResult, String
                 .ok_or_else(|| "el grado polinómico no es representable".to_string())?
         }
         FitKind::Sinusoidal => MIN_SINUSOIDAL_SAMPLES,
+        FitKind::Logistic => 4,
+        FitKind::Growth => 2,
+        FitKind::Implicit => 2,
         _ => 2,
     };
     validate_fit_samples(xs, ys, minimum_samples)?;
+    // Delegaciones para modelos no lineales Gauss-Newton (evitan doble normalización).
+    if kind == FitKind::Logistic {
+        return fit_logistic(xs, ys);
+    }
+    if kind == FitKind::Growth {
+        return fit_growth(xs, ys);
+    }
+    if kind == FitKind::Implicit {
+        return Err("FitKind::Implicit requiere fit_implicit genérico".to_string());
+    }
 
     let normalizes_x = matches!(
         kind,
-        FitKind::Linear | FitKind::Polynomial { .. } | FitKind::Exponential | FitKind::Sinusoidal
+        FitKind::Linear
+            | FitKind::Polynomial { .. }
+            | FitKind::Exponential
+            | FitKind::Sinusoidal
+            | FitKind::Logistic
+            | FitKind::Growth
     );
     let normalization = if normalizes_x {
         x_normalization(xs)?
@@ -200,6 +231,9 @@ pub fn fit_xy(kind: FitKind, xs: &[f64], ys: &[f64]) -> Result<FitResult, String
             vec![scale, exponent]
         }
         FitKind::Sinusoidal => sinusoidal_regression(model_xs, ys)?,
+        FitKind::Logistic | FitKind::Growth | FitKind::Implicit => {
+            unreachable!("fit_xy delega Logistic/Growth/Implicit antes de este punto")
+        }
     };
 
     if coefficients.iter().any(|value| !value.is_finite()) {
@@ -493,6 +527,20 @@ fn evaluate_fit(
             coefficients[0] * (coefficients[1] * normalized_x + coefficients[2]).sin()
                 + coefficients[3]
         }
+        FitKind::Logistic => {
+            // a / (1 + b*exp(-c*normalized_x))
+            let a = coefficients[0];
+            let b = coefficients[1];
+            let c = coefficients[2];
+            a / (1.0 + b * (-c * normalized_x).exp())
+        }
+        FitKind::Growth => {
+            // a * exp(b*normalized_x)
+            coefficients[0] * (coefficients[1] * normalized_x).exp()
+        }
+        FitKind::Implicit => {
+            return Err("FitKind::Implicit requiere evaluación genérica externa".to_string());
+        }
     };
     value
         .is_finite()
@@ -555,6 +603,23 @@ fn fit_expression(
             scalar(2)?,
             scalar(3)?
         )),
+        FitKind::Logistic => Ok(format!(
+            "({})/(1+({})*exp(-({})*{}))",
+            scalar(0)?,
+            scalar(1)?,
+            scalar(2)?,
+            normalized_x
+        )),
+        FitKind::Growth => Ok(format!(
+            "({})*exp(({})*{})",
+            scalar(0)?,
+            scalar(1)?,
+            normalized_x
+        )),
+        FitKind::Implicit => Ok(format!(
+            "implicit({})",
+            scalar(0).unwrap_or_else(|_| "0".to_string())
+        )),
     }
 }
 
@@ -582,6 +647,387 @@ fn normalized_x_expression(normalization: XNormalization) -> Result<String, Stri
             format_fit_scalar(normalization.scale)
         ))
     }
+}
+
+fn is_math_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+/// Ajuste logístico a/(1+b*exp(-c*x)) con Gauss-Newton acotado.
+///
+/// Usa normalización de `x` para estabilidad y tolerancia `GAUSS_TOLERANCE`.
+pub fn fit_logistic(xs: &[f64], ys: &[f64]) -> Result<FitResult, String> {
+    validate_fit_samples(xs, ys, 4)?;
+    if ys.iter().any(|value| *value <= 0.0) {
+        // No exigimos positividad estricta pero mantenemos finitud.
+    }
+    let normalization = x_normalization(xs)?;
+    let normalized_xs = normalize_xs(xs, normalization)?;
+    // Estimación inicial robusta.
+    let y_max = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_min = ys.iter().copied().fold(f64::INFINITY, f64::min);
+    let a0 = if y_max.is_finite() && y_max > 0.0 {
+        y_max * 1.05
+    } else {
+        1.0
+    };
+    // Heurística para b,c usando extremos.
+    let b0: f64 = 1.0;
+    let c0: f64 = 1.0;
+    let mut initial = vec![a0, b0, c0];
+    // Asegura que los initial sean finitos y razonables.
+    for value in &mut initial {
+        if !value.is_finite() || *value == 0.0 {
+            *value = 1.0;
+        }
+        if value.abs() > 1e6 {
+            *value = value.signum() * 1e6;
+        }
+    }
+    // y_min puede ser usado para estimar offset si modelo no incluye, pero lo ignoramos.
+    let _ = y_min;
+    let coefficients = gauss_newton_fit(
+        &normalized_xs,
+        ys,
+        &initial,
+        |x: f64, params: &[f64]| -> f64 {
+            let a = params[0];
+            let b = params[1];
+            let c = params[2];
+            // Evita overflow en exp(-c*x)
+            let exponent = (-c * x).clamp(-50.0, 50.0);
+            a / (1.0 + b * exponent.exp())
+        },
+    )?;
+    if coefficients.iter().any(|value| !value.is_finite()) {
+        return Err("el ajuste logístico produjo parámetros no finitos".to_string());
+    }
+    let diagnostics = fit_diagnostics(FitKind::Logistic, &coefficients, xs, ys, normalization)?;
+    Ok(FitResult {
+        kind: FitKind::Logistic,
+        coefficients,
+        x_offset: normalization.offset,
+        x_scale: normalization.scale,
+        diagnostics,
+    })
+}
+
+/// Ajuste de crecimiento a*exp(b*x) con Gauss-Newton acotado.
+pub fn fit_growth(xs: &[f64], ys: &[f64]) -> Result<FitResult, String> {
+    validate_fit_samples(xs, ys, 2)?;
+    if ys.iter().any(|value| *value <= 0.0) {
+        return Err("el ajuste de crecimiento requiere valores y positivos".to_string());
+    }
+    let normalization = x_normalization(xs)?;
+    let normalized_xs = normalize_xs(xs, normalization)?;
+    // Estimación inicial: a ~ median(y), b ~ 0.1
+    let y_mean = stable_mean(ys).unwrap_or(1.0);
+    let a0 = if y_mean.is_finite() && y_mean > 0.0 {
+        y_mean
+    } else {
+        1.0
+    };
+    let b0 = 0.5;
+    let initial = vec![a0, b0];
+    let coefficients = gauss_newton_fit(
+        &normalized_xs,
+        ys,
+        &initial,
+        |x: f64, params: &[f64]| -> f64 {
+            let a = params[0];
+            let b = params[1];
+            let exponent = (b * x).clamp(-50.0, 50.0);
+            a * exponent.exp()
+        },
+    )?;
+    if coefficients.iter().any(|value| !value.is_finite()) {
+        return Err("el ajuste de crecimiento produjo parámetros no finitos".to_string());
+    }
+    let diagnostics = fit_diagnostics(FitKind::Growth, &coefficients, xs, ys, normalization)?;
+    Ok(FitResult {
+        kind: FitKind::Growth,
+        coefficients,
+        x_offset: normalization.offset,
+        x_scale: normalization.scale,
+        diagnostics,
+    })
+}
+
+/// Ajuste implícito genérico con Gauss-Newton.
+///
+/// `model(x, params)` predice `y` para `x`. El vector `initial` define la
+/// dimensión de `params`. Retorna coeficientes optimizados.
+pub fn fit_implicit<F>(
+    xs: &[f64],
+    ys: &[f64],
+    initial: &[f64],
+    model: F,
+) -> Result<Vec<f64>, String>
+where
+    F: Fn(f64, &[f64]) -> f64,
+{
+    validate_fit_samples(xs, ys, initial.len().max(1).checked_add(1).unwrap_or(2))?;
+    if initial.is_empty() {
+        return Err("fit_implicit requiere parámetros iniciales".to_string());
+    }
+    if initial.len() > 16 {
+        return Err("fit_implicit supera máximo de 16 parámetros".to_string());
+    }
+    for value in initial {
+        if !value.is_finite() {
+            return Err("parámetros iniciales deben ser finitos".to_string());
+        }
+    }
+    // Sin normalización para el genérico: respeta las unidades originales de `x`.
+    let coefficients = gauss_newton_fit(xs, ys, initial, model)?;
+    if coefficients.iter().any(|value| !value.is_finite()) {
+        return Err("fit_implicit produjo parámetros no finitos".to_string());
+    }
+    Ok(coefficients)
+}
+
+/// Variante que evalúa `expr` con variables `x` y parámetros `a,b,c...` usando el
+/// evaluador de expresiones de Grafito. Útil para `FitImplicit` por comando.
+pub fn fit_implicit_expr(
+    xs: &[f64],
+    ys: &[f64],
+    expr: &str,
+    param_names: &[String],
+    initial: &[f64],
+) -> Result<FitResult, String> {
+    if expr.trim().is_empty() {
+        return Err("expresión implícita vacía".to_string());
+    }
+    if expr.len() > crate::MAX_MATH_INPUT_BYTES {
+        return Err("expresión excede el máximo de bytes".to_string());
+    }
+    if param_names.is_empty() {
+        return Err("se requiere al menos un parámetro".to_string());
+    }
+    if param_names.len() != initial.len() {
+        return Err("cantidad de parámetros e iniciales no coincide".to_string());
+    }
+    for name in param_names {
+        if !is_math_identifier(name) {
+            return Err(format!("parámetro '{name}' no es identificador válido"));
+        }
+    }
+    // Validar que la expresión sea parseable con x y params.
+    let mut vars: Vec<&str> = vec!["x"];
+    for name in param_names {
+        vars.push(name.as_str());
+    }
+    crate::expr::prepare_function_ast(expr, &std::collections::HashMap::new(), &vars)
+        .map_err(|error| format!("expresión implícita inválida: {error}"))?;
+    // Captura owned copies para el closure.
+    let expr_owned = expr.to_string();
+    let param_names_owned = param_names.to_vec();
+    let model = move |x: f64, params: &[f64]| -> f64 {
+        let mut mapping: Vec<(String, f64)> = Vec::with_capacity(1 + params.len());
+        mapping.push(("x".to_string(), x));
+        for (name, value) in param_names_owned.iter().zip(params.iter()) {
+            mapping.push((name.clone(), *value));
+        }
+        crate::expr::evaluate(&expr_owned, &mapping).unwrap_or(f64::NAN)
+    };
+    let coefficients = fit_implicit(xs, ys, initial, model)?;
+    // Para FitResult usamos kind Implicit con normalización identidad.
+    let diagnostics = {
+        // Calcula residuales directamente con el modelo genérico.
+        let mut residuals = Vec::with_capacity(xs.len());
+        for (&x, &y) in xs.iter().zip(ys) {
+            let pred = {
+                let mut mapping: Vec<(String, f64)> = Vec::with_capacity(1 + coefficients.len());
+                mapping.push(("x".to_string(), x));
+                for (name, value) in param_names.iter().zip(coefficients.iter()) {
+                    mapping.push((name.clone(), *value));
+                }
+                crate::expr::evaluate(expr, &mapping).unwrap_or(f64::NAN)
+            };
+            if !pred.is_finite() {
+                return Err("fit_implicit produjo predicción no finita".to_string());
+            }
+            let residual = y - pred;
+            if !residual.is_finite() {
+                return Err("residual no finito".to_string());
+            }
+            residuals.push(residual);
+        }
+        let rmse =
+            root_mean_square(&residuals).ok_or_else(|| "RMSE no representable".to_string())?;
+        let y_mean =
+            stable_mean(ys).ok_or_else(|| "la media de y no es representable".to_string())?;
+        let (residual_scale, residual_sum) = scaled_sum_squares(&residuals, 0.0);
+        let (total_scale, total_sum) = scaled_sum_squares(ys, y_mean);
+        let r_squared = if total_scale == 0.0 || total_sum == 0.0 {
+            if rmse <= FIT_EPSILON * y_mean.abs().max(1.0) {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            let ratio = residual_scale / total_scale;
+            1.0 - ratio * ratio * residual_sum / total_sum
+        };
+        if !r_squared.is_finite() {
+            return Err("R² no representable".to_string());
+        }
+        FitDiagnostics {
+            residuals,
+            rmse,
+            r_squared,
+        }
+    };
+    Ok(FitResult {
+        kind: FitKind::Implicit,
+        coefficients,
+        x_offset: 0.0,
+        x_scale: 1.0,
+        diagnostics,
+    })
+}
+
+/// Núcleo Gauss-Newton acotado a `MAX_GAUSS_ITER` y `GAUSS_TOLERANCE` (numérico).
+#[allow(unused_assignments)]
+fn gauss_newton_fit<F>(
+    xs: &[f64],
+    ys: &[f64],
+    initial: &[f64],
+    model: F,
+) -> Result<Vec<f64>, String>
+where
+    F: Fn(f64, &[f64]) -> f64,
+{
+    let n = xs.len();
+    let p = initial.len();
+    if n != ys.len() {
+        return Err("xs e ys deben tener igual longitud".to_string());
+    }
+    if n > MAX_FIT_DATA_POINTS {
+        return Err(format!(
+            "la tabla supera el máximo de {MAX_FIT_DATA_POINTS} pares"
+        ));
+    }
+    if p == 0 || p > 16 {
+        return Err("dimensión de parámetros no soportada".to_string());
+    }
+    let mut params: Vec<f64> = initial.to_vec();
+    let mut prev_rmse = f64::INFINITY;
+    for _iteration in 0..MAX_GAUSS_ITER {
+        // Residuales y RMSE.
+        let mut residuals: Vec<f64> = Vec::with_capacity(n);
+        let mut sum_sq = 0.0_f64;
+        for (&x, &y) in xs.iter().zip(ys) {
+            let pred = model(x, &params);
+            if !pred.is_finite() {
+                return Err("predicción no finita durante Gauss-Newton".to_string());
+            }
+            let residual = y - pred;
+            if !residual.is_finite() {
+                return Err("residual no finito durante Gauss-Newton".to_string());
+            }
+            residuals.push(residual);
+            sum_sq += residual * residual;
+            if !sum_sq.is_finite() {
+                return Err("suma de cuadrados no finita".to_string());
+            }
+        }
+        let rmse = (sum_sq / n as f64).sqrt();
+        if !rmse.is_finite() {
+            return Err("RMSE no finito".to_string());
+        }
+        // Convergencia por RMSE.
+        if (prev_rmse - rmse).abs() < GAUSS_TOLERANCE && rmse < prev_rmse + GAUSS_TOLERANCE {
+            // También chequea delta pequeño más adelante.
+        }
+        // Si RMSE ya es muy pequeño, considera convergido.
+        if rmse < GAUSS_TOLERANCE {
+            prev_rmse = rmse;
+            break;
+        }
+        // Jacobiano J (n × p): J[i][j] = d model / d param_j (numérico central)
+        let mut jacobian_data = Vec::with_capacity(n * p);
+        for &x in xs {
+            let mut numeric = Vec::with_capacity(p);
+            for index in 0..p {
+                let base = params[index];
+                let eps = 1e-7 * (1.0 + base.abs());
+                let mut perturbed_plus = params.to_vec();
+                let mut perturbed_minus = params.to_vec();
+                perturbed_plus[index] = base + eps;
+                perturbed_minus[index] = base - eps;
+                let f_plus = model(x, &perturbed_plus);
+                let f_minus = model(x, &perturbed_minus);
+                if !f_plus.is_finite() || !f_minus.is_finite() {
+                    return Err("modelo no finito en jacobiano numérico".to_string());
+                }
+                numeric.push((f_plus - f_minus) / (2.0 * eps));
+            }
+            jacobian_data.extend_from_slice(&numeric);
+        }
+        let jacobian_mat = DMatrix::from_row_slice(n, p, &jacobian_data);
+        let residual_vec = DVector::from_column_slice(&residuals);
+        // JTJ y JTr
+        let jacobian_transpose = jacobian_mat.transpose();
+        let jacobian_t_j = &jacobian_transpose * &jacobian_mat;
+        let jacobian_t_r = &jacobian_transpose * &residual_vec;
+        // Resolver JTJ * delta = JTr
+        let svd = jacobian_t_j.clone().svd(true, true);
+        if svd.singular_values.is_empty() {
+            return Err("SVD vacío en Gauss-Newton".to_string());
+        }
+        let sigma_max = svd.singular_values[0];
+        if !sigma_max.is_finite() || sigma_max == 0.0 {
+            return Err("valor singular máximo no finito en Gauss-Newton".to_string());
+        }
+        let eps = crate::matrices::dimension_relative_epsilon(p, p) * sigma_max;
+        let delta = svd
+            .solve(&jacobian_t_r, eps)
+            .map_err(|error| format!("fallo al resolver JTJ: {error}"))?;
+        if delta.iter().any(|value| !value.is_finite()) {
+            return Err("delta no finito en Gauss-Newton".to_string());
+        }
+        let delta_norm = (delta.component_mul(&delta).sum()).sqrt();
+        if !delta_norm.is_finite() {
+            return Err("norma de delta no finita".to_string());
+        }
+        // Actualiza parámetros.
+        for (param, correction) in params.iter_mut().zip(delta.iter()) {
+            *param += correction;
+            if !param.is_finite() {
+                return Err("parámetro no finito tras actualización".to_string());
+            }
+            // Acota magnitud para evitar overflow en iteraciones posteriores.
+            if param.abs() > 1e9 {
+                return Err("parámetro excede magnitud 1e9".to_string());
+            }
+        }
+        if delta_norm < GAUSS_TOLERANCE {
+            prev_rmse = rmse;
+            break;
+        }
+        // Si el RMSE no mejora, corta oscilaciones.
+        if rmse > prev_rmse && (rmse - prev_rmse).abs() < GAUSS_TOLERANCE * 0.1 {
+            // Permite pequeña fluctuación pero no divergencia grande.
+        }
+        if (prev_rmse - rmse).abs() < GAUSS_TOLERANCE * 0.1 && delta_norm < GAUSS_TOLERANCE * 10.0 {
+            prev_rmse = rmse;
+            break;
+        }
+        prev_rmse = rmse;
+    }
+    // Validación final: chequea que el ajuste produjo residuales finitos.
+    for (&x, &y) in xs.iter().zip(ys) {
+        let pred = model(x, &params);
+        if !pred.is_finite() || (y - pred).abs() > 1e12 {
+            return Err("ajuste no convergió a predicción finita".to_string());
+        }
+    }
+    Ok(params)
 }
 
 fn discrete_cdf_within_budget(k: u32) -> bool {

@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        toolchain: ['1.88', stable]
+        toolchain: ['1.92', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -42,19 +42,19 @@ jobs:
           packages: mingw-w64
           version: 1.0
       - name: Install MinGW for the Windows MSRV check
-        if: matrix.toolchain == '1.88'
+        if: matrix.toolchain == '1.92'
         run: sudo apt-get install -y mingw-w64
       - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
         with:
           toolchain: ${{ matrix.toolchain }}
-          targets: ${{ matrix.toolchain == '1.88' && 'x86_64-pc-windows-gnu' || '' }}
+          targets: ${{ matrix.toolchain == '1.92' && 'x86_64-pc-windows-gnu' || '' }}
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
       - name: Parse the complete lockfile with the declared MSRV
-        if: matrix.toolchain == '1.88'
+        if: matrix.toolchain == '1.92'
         run: cargo metadata --locked --format-version 1 > /dev/null
       - run: cargo check --workspace --locked
       - name: Check the Windows GNU app with the declared MSRV
-        if: matrix.toolchain == '1.88'
+        if: matrix.toolchain == '1.92'
         run: cargo check -p grafito-app --target x86_64-pc-windows-gnu --all-features --locked
 
   test:
@@ -63,7 +63,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       matrix:
-        toolchain: ['1.88', stable]
+        toolchain: ['1.92', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -79,7 +79,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --all-targets --all-features --locked
 
   gpu-compute:
     name: required GPU renderer regressions
@@ -147,6 +147,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
       - run: cargo check --workspace --benches --locked
+      - run: cargo bench --workspace --no-run --locked
 
   docs:
     name: cargo doc
@@ -177,7 +178,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        toolchain: ['1.88', stable]
+        toolchain: ['1.92', stable]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
@@ -198,7 +199,7 @@ jobs:
 
   release-build:
     name: cargo build release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -332,13 +333,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          GOBIN="$RUNNER_TEMP/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7  # pinned
       - name: Lint GitHub Actions workflows
         run: ${{ runner.temp }}/bin/actionlint
       - name: Parse and lint package scripts
         run: |
           bash -n packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh
-          shellcheck --shell=bash packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh
+          shellcheck --severity=error --shell=bash packaging/build-deb.sh packaging/build-exe.sh packaging/debian/postinst packaging/debian/prerm packaging/debian/postrm packaging/tests/packaging-fixtures.sh
           bash packaging/tests/packaging-fixtures.sh
       - name: Verify Debian version mapping
         shell: bash
@@ -390,7 +391,7 @@ jobs:
           packages=(packaging/build/*.deb)
           (( ${#packages[@]} == 1 )) || { echo "expected exactly one Debian package" >&2; exit 1; }
           package="${packages[0]}"
-          expected_cargo_version="$(grep -E '^version\s*=\s*"' Cargo.toml | head -1 | sed -E 's/^version\s*=\s*"([^"]+)"/\1/')"
+          expected_cargo_version="$(cargo metadata --format-version 1 --no-deps --locked | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
           expected_version="$(packaging/build-deb.sh --print-debian-version "$expected_cargo_version")"
           expected_architecture="$(dpkg --print-architecture)"
           [[ -n "$expected_version" ]] || { echo "could not read the workspace version" >&2; exit 1; }

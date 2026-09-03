@@ -39,9 +39,9 @@ pub struct AgentBudget {
 impl Default for AgentBudget {
     fn default() -> Self {
         Self {
-            max_tool_turns: 8,
-            per_turn_timeout: Duration::from_secs(120),
-            total_span: Duration::from_secs(600),
+            max_tool_turns: 4,
+            per_turn_timeout: Duration::from_secs(30),
+            total_span: Duration::from_secs(120),
             max_output_chars: 8_192,
         }
     }

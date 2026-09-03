@@ -11,8 +11,22 @@
     "ignore": ["target/**", "node_modules/**", ".git/**", "dist/**", "packaging/deb/**"]
   },
   "permission": "allow",
-  "instructions": ["AGENTS.md", "docs/architecture.md", "Plans.md", "Tasks.md", ".jspace/WORKSPACE.md"],
+  "instructions": ["AGENTS.md", "docs/architecture.md", ".jspace/WORKSPACE.md"],
   "agent": {
+    "plan": {
+      "description": "Planificador barato: arch, budgets, DAG",
+      "mode": "subagent",
+      "model": "opencode-go/deepseek-v4-flash",
+      "temperature": 0.1,
+      "permission": "allow"
+    },
+    "build": {
+      "description": "Constructor principal Rust",
+      "mode": "subagent",
+      "model": "opencode-go/muse-spark-1.2-contributor",
+      "temperature": 0.2,
+      "permission": "allow"
+    },
     "cerebro-audit": {
       "description": "Auditor cerebro puro Rust: core/geometry/command sin egui/wgpu, invariants type-safety",
       "mode": "subagent",

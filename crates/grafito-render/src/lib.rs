@@ -36,7 +36,8 @@ use lyon::{
 };
 use wgpu::util::DeviceExt;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 pub mod complex_compute;
@@ -50,6 +51,51 @@ pub mod vector_compute;
 
 #[cfg(test)]
 mod tests;
+
+type TransformedCacheMap = HashMap<u64, (Vec<Vertex>, Vec<u32>)>;
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static FILL_TESS: RefCell<FillTessellator> = RefCell::new(FillTessellator::new());
+    #[allow(clippy::type_complexity)]
+    static TRANSFORMED_CACHE: RefCell<TransformedCacheMap> = RefCell::new(HashMap::new());
+}
+const TRANSFORMED_CACHE_CAP: usize = 64;
+
+/// Tolerancia de `lyon` escalada inversamente a `view.scale` para mantener
+/// calidad visual constante: zoom alto → tolerancia fina, zoom bajo → gruesa.
+/// Base 0.1 a `scale = 50` (default), clamp para evitar extremos.
+fn lyon_tolerance_for_view_scale(scale: f64) -> f32 {
+    let base_scale = 50.0;
+    let base_tol = 0.1_f32;
+    let ratio = (base_scale / scale.max(1e-6)) as f32;
+    (base_tol * ratio.clamp(0.25, 4.0)).clamp(0.01, 0.5)
+}
+
+fn transformed_cache_key(
+    document: &Document,
+    transformed: &TransformedObj,
+    view: &ViewTransform,
+    dark_mode: bool,
+    depth: usize,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    document.version.hash(&mut hasher);
+    view.scale.to_bits().hash(&mut hasher);
+    view.offset.x.to_bits().hash(&mut hasher);
+    view.offset.y.to_bits().hash(&mut hasher);
+    view.screen_size.x.to_bits().hash(&mut hasher);
+    view.screen_size.y.to_bits().hash(&mut hasher);
+    view.x_log.hash(&mut hasher);
+    view.y_log.hash(&mut hasher);
+    dark_mode.hash(&mut hasher);
+    depth.hash(&mut hasher);
+    transformed.complex_expr.hash(&mut hasher);
+    transformed.inner.id().hash(&mut hasher);
+    format!("{:?}", transformed.inner).hash(&mut hasher);
+    hasher.finish()
+}
 
 fn sample_environment(
     variables: &std::collections::HashMap<String, f64>,
@@ -1250,7 +1296,13 @@ impl Renderer {
                         screen_verts.push(view.world_to_screen(Point2::new(x, y)));
                     }
                     if let Some(fill) = poly.fill_color {
-                        Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
+                        Self::add_polygon_fill(
+                            &mut vertices,
+                            &mut indices,
+                            &screen_verts,
+                            fill,
+                            view,
+                        );
                     }
                     Self::add_polygon_stroke(
                         &mut vertices,
@@ -1596,7 +1648,13 @@ impl Renderer {
                         screen_verts.push(view.world_to_screen(*v));
                     }
                     if let Some(fill) = sector.fill_color {
-                        Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill);
+                        Self::add_polygon_fill(
+                            &mut vertices,
+                            &mut indices,
+                            &screen_verts,
+                            fill,
+                            view,
+                        );
                     }
                     Self::add_polygon_stroke(
                         &mut vertices,
@@ -1688,6 +1746,12 @@ impl Renderer {
             return (Vec::new(), Vec::new());
         }
 
+        // Cache keyed por document.version+view+expr para evitar `document.clone()` y recompute
+        let cache_key = transformed_cache_key(document, transformed, view, dark_mode, depth);
+        if let Some(cached) = TRANSFORMED_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+            return cached;
+        }
+
         let (mut vertices, indices) = match transformed.inner.as_ref() {
             GeoObject::Transformed(inner) => Self::build_transformed_geometry_static_at(
                 document,
@@ -1705,22 +1769,8 @@ impl Renderer {
                 (vertices, indices)
             }
             inner => {
-                let mut source = document.clone();
-                let target_id = inner.id();
-                let mut replaced = false;
-                for (id, object) in source.objects_iter_mut() {
-                    if *id == target_id {
-                        *object = inner.clone();
-                        object.set_visible(true);
-                        replaced = true;
-                    } else {
-                        object.set_visible(false);
-                    }
-                }
-                if !replaced {
-                    source.add_object(inner.clone());
-                }
-                Self::build_geometry_static(&source, view, dark_mode, false)
+                // Evita `document.clone()`: genera geometría aislada usando `&Document`
+                Self::build_isolated_geometry_static(document, inner, view, dark_mode)
             }
         };
         let _ = apply_complex_transform_cpu(
@@ -1730,6 +1780,440 @@ impl Renderer {
             &document.variables,
             document.complex_base_symbol.as_str(),
         );
+        TRANSFORMED_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            if cache.len() >= TRANSFORMED_CACHE_CAP {
+                let keys: Vec<u64> = cache
+                    .keys()
+                    .copied()
+                    .take(TRANSFORMED_CACHE_CAP / 2)
+                    .collect();
+                for k in keys {
+                    cache.remove(&k);
+                }
+            }
+            cache.insert(cache_key, (vertices.clone(), indices.clone()));
+        });
+        (vertices, indices)
+    }
+
+    fn build_isolated_geometry_static(
+        document: &Document,
+        object: &GeoObject,
+        view: &ViewTransform,
+        dark_mode: bool,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        match object {
+            GeoObject::Point(p) => {
+                let screen = view.world_to_screen(p.position);
+                let size = p.size.max(1.0);
+                Self::add_rect(&mut vertices, &mut indices, screen, size, size, p.color);
+            }
+            GeoObject::Line(l) => {
+                let start = Point2::new(
+                    document.resolve_expr(&l.start_x_expr, l.start.x),
+                    document.resolve_expr(&l.start_y_expr, l.start.y),
+                );
+                let end = Point2::new(
+                    document.resolve_expr(&l.end_x_expr, l.end.x),
+                    document.resolve_expr(&l.end_y_expr, l.end.y),
+                );
+                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                let world_br = view.screen_to_world(view.screen_size);
+                let view_bounds = grafito_geometry::AABB::new(
+                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                );
+                let clipped = match l.kind {
+                    grafito_core::LineKind::Segment => {
+                        grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Ray => {
+                        grafito_geometry::clip_ray_to_rect(start, end, view_bounds)
+                    }
+                    grafito_core::LineKind::Line => {
+                        grafito_geometry::clip_line_to_rect(start, end, view_bounds)
+                    }
+                };
+                if let Some((clip_start, clip_end)) = clipped {
+                    let a = view.world_to_screen(clip_start);
+                    let b = view.world_to_screen(clip_end);
+                    Self::add_line_segment(&mut vertices, &mut indices, a, b, l.width, l.color);
+                }
+            }
+            GeoObject::Circle(c) => {
+                let center = view.world_to_screen(c.center);
+                let radius = (c.radius as f32) * view.scale as f32;
+                Self::add_circle_stroke(
+                    &mut vertices,
+                    &mut indices,
+                    center,
+                    radius,
+                    c.width,
+                    c.color,
+                );
+                if let Some(fill) = c.fill_color {
+                    Self::add_circle_fill(&mut vertices, &mut indices, center, radius, fill);
+                }
+            }
+            GeoObject::Polygon(poly) if polygon_geometry_is_within_limit(poly.vertices.len()) => {
+                let mut screen_verts = Vec::with_capacity(poly.vertices.len());
+                for (i, v) in poly.vertices.iter().enumerate() {
+                    let x = document.resolve_expr(poly.x_exprs.get(i).unwrap_or(&None), v.x);
+                    let y = document.resolve_expr(poly.y_exprs.get(i).unwrap_or(&None), v.y);
+                    screen_verts.push(view.world_to_screen(Point2::new(x, y)));
+                }
+                if let Some(fill) = poly.fill_color {
+                    Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill, view);
+                }
+                Self::add_polygon_stroke(
+                    &mut vertices,
+                    &mut indices,
+                    &screen_verts,
+                    poly.width,
+                    poly.color,
+                );
+            }
+            GeoObject::Ellipse(el) => {
+                let n = 64;
+                let mut pts = Vec::with_capacity(n);
+                for i in 0..n {
+                    let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                    let x = el.center.x + el.rx * t.cos() * el.angle.cos()
+                        - el.ry * t.sin() * el.angle.sin();
+                    let y = el.center.y
+                        + el.rx * t.cos() * el.angle.sin()
+                        + el.ry * t.sin() * el.angle.cos();
+                    pts.push(view.world_to_screen(Point2::new(x, y)));
+                }
+                if let Some(fill) = el.fill_color {
+                    Self::add_polygon_fill(&mut vertices, &mut indices, &pts, fill, view);
+                }
+                Self::add_polygon_stroke(&mut vertices, &mut indices, &pts, el.width, el.color);
+            }
+            GeoObject::Parabola(pb) if pb.p.is_finite() && pb.p.abs() >= 1e-12 => {
+                let steps = 128;
+                let range = (20.0 / view.scale).clamp(0.1, 500.0);
+                let cos_a = pb.angle.cos();
+                let sin_a = pb.angle.sin();
+                let mut prev: Option<glam::Vec2> = None;
+                for i in 0..=steps {
+                    let t = -range + 2.0 * range * i as f64 / steps as f64;
+                    let wx = pb.vertex.x + t * cos_a - (t * t / (4.0 * pb.p)) * sin_a;
+                    let wy = pb.vertex.y + t * sin_a + (t * t / (4.0 * pb.p)) * cos_a;
+                    if wx.is_finite() && wy.is_finite() {
+                        let s = view.world_to_screen(Point2::new(wx, wy));
+                        if let Some(prev) = prev {
+                            if (s.x - prev.x).abs() < 300.0 {
+                                Self::add_line_segment(
+                                    &mut vertices,
+                                    &mut indices,
+                                    prev,
+                                    s,
+                                    pb.width,
+                                    pb.color,
+                                );
+                            }
+                        }
+                        prev = Some(s);
+                    }
+                }
+            }
+            GeoObject::Hyperbola(hb) => {
+                let n = 64;
+                let epsilon = 0.05;
+                let cos_a = hb.angle.cos();
+                let sin_a = hb.angle.sin();
+                for branch in 0..2 {
+                    let t_start = -std::f64::consts::FRAC_PI_2
+                        + epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let t_end = std::f64::consts::FRAC_PI_2 - epsilon
+                        + branch as f64 * std::f64::consts::PI;
+                    let mut prev: Option<glam::Vec2> = None;
+                    for i in 0..=n {
+                        let t = t_start + (t_end - t_start) * i as f64 / n as f64;
+                        let sec = 1.0 / t.cos();
+                        let tan = t.tan();
+                        let (lx, ly) = if hb.horizontal {
+                            (hb.a * sec, hb.b * tan)
+                        } else {
+                            (hb.b * tan, hb.a * sec)
+                        };
+                        let wx = hb.center.x + lx * cos_a - ly * sin_a;
+                        let wy = hb.center.y + lx * sin_a + ly * cos_a;
+                        if wx.is_finite() && wy.is_finite() {
+                            let s = view.world_to_screen(Point2::new(wx, wy));
+                            if let Some(prev) = prev {
+                                if (s.x - prev.x).abs() < 300.0 {
+                                    Self::add_line_segment(
+                                        &mut vertices,
+                                        &mut indices,
+                                        prev,
+                                        s,
+                                        hb.width,
+                                        hb.color,
+                                    );
+                                }
+                            }
+                            prev = Some(s);
+                        }
+                    }
+                }
+            }
+            GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
+                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+                let world_br = view.screen_to_world(view.screen_size);
+                let view_bounds = grafito_geometry::AABB::new(
+                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+                );
+                for w in pencil.points.windows(2) {
+                    let a = w[0];
+                    let b = w[1];
+                    if let Some((clip_a, clip_b)) =
+                        grafito_geometry::clip_segment_to_rect(a, b, view_bounds)
+                    {
+                        let sa = view.world_to_screen(clip_a);
+                        let sb = view.world_to_screen(clip_b);
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            sa,
+                            sb,
+                            pencil.width,
+                            pencil.color,
+                        );
+                    }
+                }
+            }
+            GeoObject::Arc(arc) => {
+                let pts = arc.sample_points(64);
+                let mut prev: Option<glam::Vec2> = None;
+                for p in pts {
+                    if !p.x.is_finite() || !p.y.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    let cur = view.world_to_screen(p);
+                    if !cur.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    if let Some(prev) = prev {
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            prev,
+                            cur,
+                            arc.width,
+                            arc.color,
+                        );
+                    }
+                    prev = Some(cur);
+                }
+            }
+            GeoObject::Sector(sector) => {
+                let verts_world = sector.polygon_vertices(64);
+                let mut screen_verts = Vec::with_capacity(verts_world.len());
+                for v in &verts_world {
+                    screen_verts.push(view.world_to_screen(*v));
+                }
+                if let Some(fill) = sector.fill_color {
+                    Self::add_polygon_fill(&mut vertices, &mut indices, &screen_verts, fill, view);
+                }
+                Self::add_polygon_stroke(
+                    &mut vertices,
+                    &mut indices,
+                    &screen_verts,
+                    sector.width,
+                    sector.color,
+                );
+            }
+            GeoObject::BezierCurve(bez) => {
+                let pts = bez.sample_points(64);
+                let mut prev: Option<glam::Vec2> = None;
+                for p in pts {
+                    if !p.x.is_finite() || !p.y.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    let cur = view.world_to_screen(p);
+                    if !cur.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    if let Some(prev) = prev {
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            prev,
+                            cur,
+                            bez.width,
+                            bez.color,
+                        );
+                    }
+                    prev = Some(cur);
+                }
+            }
+            GeoObject::Spline(spline) => {
+                let pts = spline.sample_points(16);
+                let mut prev: Option<glam::Vec2> = None;
+                for p in pts {
+                    if !p.x.is_finite() || !p.y.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    let cur = view.world_to_screen(p);
+                    if !cur.is_finite() {
+                        prev = None;
+                        continue;
+                    }
+                    if let Some(prev) = prev {
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            prev,
+                            cur,
+                            spline.width,
+                            spline.color,
+                        );
+                    }
+                    prev = Some(cur);
+                }
+            }
+            GeoObject::Function(fun) => {
+                Self::add_function_geometry(&mut vertices, &mut indices, document, view, fun);
+            }
+            GeoObject::ParametricCurve2D(curve) => {
+                let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
+                    curve,
+                    1_000,
+                    &document.variables,
+                );
+                let mut previous: Option<glam::Vec2> = None;
+                for &(x, y) in samples.iter() {
+                    if !x.is_finite() || !y.is_finite() {
+                        previous = None;
+                        continue;
+                    }
+                    let current = view.world_to_screen(Point2::new(x, y));
+                    if !current.is_finite() {
+                        previous = None;
+                        continue;
+                    }
+                    if let Some(prev) = previous {
+                        if (current.x - prev.x).abs() < 300.0 && (current.y - prev.y).abs() < 300.0
+                        {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                prev,
+                                current,
+                                curve.width,
+                                curve.color,
+                            );
+                        }
+                    }
+                    previous = Some(current);
+                }
+            }
+            GeoObject::PolarCurve(curve) => {
+                let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
+                    curve,
+                    1_000,
+                    &document.variables,
+                );
+                let mut previous: Option<glam::Vec2> = None;
+                for &(x, y) in samples.iter() {
+                    if !x.is_finite() || !y.is_finite() {
+                        previous = None;
+                        continue;
+                    }
+                    let current = view.world_to_screen(Point2::new(x, y));
+                    if !current.is_finite() {
+                        previous = None;
+                        continue;
+                    }
+                    if let Some(prev) = previous {
+                        if (current.x - prev.x).abs() < 300.0 && (current.y - prev.y).abs() < 300.0
+                        {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                prev,
+                                current,
+                                curve.width,
+                                curve.color,
+                            );
+                        }
+                    }
+                    previous = Some(current);
+                }
+            }
+            GeoObject::ImplicitCurve(curve) => {
+                let top_left = view.screen_to_world(glam::Vec2::ZERO);
+                let bottom_right = view.screen_to_world(view.screen_size);
+                let bounds = (
+                    top_left.x.min(bottom_right.x),
+                    top_left.x.max(bottom_right.x),
+                    top_left.y.min(bottom_right.y),
+                    top_left.y.max(bottom_right.y),
+                );
+                let segments = grafito_core::implicit_curve::segments_or_compute(
+                    curve,
+                    bounds,
+                    128,
+                    &document.variables,
+                    document.render_quality,
+                );
+                for (_, level_segments) in segments.iter() {
+                    for (start, end) in level_segments {
+                        let start = view.world_to_screen(*start);
+                        let end = view.world_to_screen(*end);
+                        if start.is_finite() && end.is_finite() {
+                            Self::add_line_segment(
+                                &mut vertices,
+                                &mut indices,
+                                start,
+                                end,
+                                curve.width,
+                                curve.color,
+                            );
+                        }
+                    }
+                }
+            }
+            GeoObject::VectorField2D(vf) => {
+                Self::add_vector_field_geometry(&mut vertices, &mut indices, document, view, vf);
+            }
+            GeoObject::ComplexGrid(cg) => {
+                Self::add_complex_grid_geometry(&mut vertices, &mut indices, document, view, cg);
+            }
+            GeoObject::Fractal2D(fr) => {
+                let _ = Self::add_fractal_geometry(&mut vertices, &mut indices, view, fr);
+            }
+            GeoObject::PhasePortrait(portrait) => {
+                for (start, end) in sample_phase_portrait(portrait, &document.variables) {
+                    let start = view.world_to_screen(start);
+                    let end = view.world_to_screen(end);
+                    if start.is_finite() && end.is_finite() {
+                        Self::add_line_segment(
+                            &mut vertices,
+                            &mut indices,
+                            start,
+                            end,
+                            1.5,
+                            portrait.color,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        let _ = dark_mode;
         (vertices, indices)
     }
 
@@ -2568,7 +3052,7 @@ impl Renderer {
                     screen_verts.push(view_transform.world_to_screen(Point2::new(x, y)));
                 }
                 if let Some(fill) = poly.fill_color {
-                    Self::add_polygon_fill(vertices, indices, &screen_verts, fill);
+                    Self::add_polygon_fill(vertices, indices, &screen_verts, fill, view_transform);
                 }
                 Self::add_polygon_stroke(vertices, indices, &screen_verts, poly.width, poly.color);
             }
@@ -2615,7 +3099,7 @@ impl Renderer {
                     pts.push(s);
                 }
                 if let Some(fill) = el.fill_color {
-                    Self::add_polygon_fill(vertices, indices, &pts, fill);
+                    Self::add_polygon_fill(vertices, indices, &pts, fill, view_transform);
                 }
                 Self::add_polygon_stroke(vertices, indices, &pts, el.width, el.color);
             }
@@ -3359,7 +3843,21 @@ impl Renderer {
             }
         }
 
-        // Fallback al path CPU
+        // Fallback al path CPU: este path no debe generar 250k `rect_filled` bloqueantes.
+        // El canvas pasa `None, None` (ver `canvas.rs` — `MAX_SYNC_GPU_COMPUTE_ATTEMPTS=1`)
+        // para forzar el fallback determinista y evitar `device.poll(Wait)`. El path CPU
+        // de domain_coloring está acotado por `complex_grid_resolution` (Preview 64,
+        // Normal 200, High 300) y, para celdas grandes, el `render_2d` usa textura
+        // en lugar de 250k rects (ver `draw_object_styled` domain coloring).
+        // Si la resolución supera el presupuesto de geometría, se omite la malla
+        // y se deja la textura como owner (evita OOM y 250k draws).
+        if cg.render_mode == 1 {
+            let res = complex_grid_resolution(cg, document.render_quality);
+            if res * res > 65_536 {
+                // Evita 250k rect_filled en CPU: usa textura en `render_2d`
+                return;
+            }
+        }
         Self::add_complex_grid_geometry(vertices, indices, document, view, cg);
     }
 
@@ -4516,6 +5014,7 @@ impl Renderer {
         indices: &mut Vec<u32>,
         pts: &[glam::Vec2],
         color: Color,
+        view: &ViewTransform,
     ) {
         if !polygon_geometry_is_within_limit(pts.len())
             || pts.iter().any(|point| !screen_point_is_renderable(*point))
@@ -4530,16 +5029,20 @@ impl Renderer {
         }
         path_builder.end(true);
 
-        let mut tessellator = FillTessellator::new();
+        let tolerance = lyon_tolerance_for_view_scale(view.scale);
+        let mut tess_ok = false;
         let mut geometry: VertexBuffers<lyon::math::Point, u32> = VertexBuffers::new();
-        if tessellator
-            .tessellate_path(
-                &path_builder.build(),
-                &FillOptions::default(),
-                &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| vertex.position()),
-            )
-            .is_err()
-        {
+        FILL_TESS.with(|cell| {
+            let mut tess = cell.borrow_mut();
+            tess_ok = tess
+                .tessellate_path(
+                    &path_builder.build(),
+                    &FillOptions::default().with_tolerance(tolerance),
+                    &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| vertex.position()),
+                )
+                .is_ok();
+        });
+        if !tess_ok {
             return;
         }
         let Some(base) = reserve_geometry(

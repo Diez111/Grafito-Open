@@ -44,7 +44,7 @@ cargo test --workspace --locked
 cargo check --workspace --locked
 ```
 
-> MSRV Rust 1.88 — verificado en CI `ci.yml` matrix `['1.88', stable]` + `cargo metadata --locked` (ver `docs/architecture.md:9`).
+> MSRV Rust 1.92 — verificado en CI `ci.yml` matrix `['1.92', stable]` + `cargo metadata --locked` (ver `docs/architecture.md:9`).
 
 ## Skills
 

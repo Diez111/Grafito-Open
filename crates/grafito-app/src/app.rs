@@ -3664,7 +3664,14 @@ mod transient_render_state_tests {
 impl eframe::App for GrafitoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(feature = "profile")]
+        puffin::GlobalProfiler::lock().new_frame();
+        #[cfg(feature = "profile")]
         puffin::profile_scope!("app_update");
+        // Optional puffin_egui profiler window — keep behind a cfg(false) to avoid
+        // egui version duplication (puffin_egui 0.28 vs egui 0.29). Enable manually
+        // when a compatible egui version is available.
+        #[cfg(all(feature = "profile", any()))]
+        puffin_egui::profiler_window(ctx);
 
         // F17: reset del presupuesto de repintado coalescido del frame.
         self.repaint_budget = RepaintBudget::default();

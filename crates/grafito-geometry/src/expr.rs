@@ -1,12 +1,27 @@
 use evalexpr::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+
+use lru::LruCache;
 
 fn safe_sinh(a: f64) -> f64 {
+    if !a.is_finite() {
+        return f64::NAN;
+    }
+    if a.abs() > 710.0 {
+        return f64::INFINITY.copysign(a);
+    }
     a.sinh()
 }
 
 fn safe_cosh(a: f64) -> f64 {
+    if !a.is_finite() {
+        return f64::NAN;
+    }
+    if a.abs() > 710.0 {
+        return f64::INFINITY;
+    }
     a.cosh()
 }
 
@@ -866,14 +881,17 @@ fn is_known_math_function(name: &str) -> bool {
 }
 
 const MAX_COMPILED_EXPR_CACHE: usize = 128;
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const COMPILED_EXPR_CACHE_SIZE: NonZeroUsize =
+    unsafe { NonZeroUsize::new_unchecked(MAX_COMPILED_EXPR_CACHE) };
 
 thread_local! {
-    /// Cache of compiled expressions, keyed by the original expression string.
+    /// Cache LRU de expresiones compiladas, clave normalizada (trimmed).
     ///
-    /// Storing `None` means the expression failed to compile and should fall
-    /// back to the slow interpreted path. Acotado a 128 entradas para evitar DoS.
-    static COMPILED_EXPR_CACHE: RefCell<HashMap<String, Option<CompiledExpr>>> =
-        RefCell::new(HashMap::new());
+    /// Almacenar `None` indica que la expresión falló al compilar y debe usar
+    /// el path lento interpretado. Acotado a 128 entradas con desalojo LRU real.
+    static COMPILED_EXPR_CACHE: RefCell<LruCache<String, Option<CompiledExpr>>> =
+        RefCell::new(LruCache::new(COMPILED_EXPR_CACHE_SIZE));
 }
 
 /// Evaluate a mathematical expression, reusing a previously compiled form when
@@ -889,24 +907,20 @@ pub fn evaluate_cached(expr: &str, vars: &[(String, f64)]) -> Result<f64, String
     }
     COMPILED_EXPR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if !cache.contains_key(expr) {
-            // Evicción simple: si superamos el límite, limpiamos la mitad más antigua.
-            if cache.len() >= MAX_COMPILED_EXPR_CACHE {
-                let keys: Vec<String> = cache
-                    .keys()
-                    .take(MAX_COMPILED_EXPR_CACHE / 2)
-                    .cloned()
-                    .collect();
-                for key in keys {
-                    cache.remove(&key);
-                }
+        let key = expr.trim().to_owned();
+        if let Some(cached) = cache.get(&key).cloned() {
+            match cached {
+                Some(compiled) => compiled.eval(vars),
+                None => evaluate(expr, vars),
             }
-            let compiled = CompiledExpr::new(expr, &HashMap::new()).ok();
-            cache.insert(expr.to_string(), compiled);
-        }
-        match cache.get(expr) {
-            Some(Some(compiled)) => compiled.eval(vars),
-            _ => evaluate(expr, vars),
+        } else {
+            let compiled = CompiledExpr::new(&key, &HashMap::new()).ok();
+            let result = match &compiled {
+                Some(c) => c.eval(vars),
+                None => evaluate(expr, vars),
+            };
+            cache.put(key, compiled);
+            result
         }
     })
 }

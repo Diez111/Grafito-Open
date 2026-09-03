@@ -3,8 +3,13 @@ use std::collections::HashMap;
 
 use crate::math::complex_expr::ComplexExpr;
 
+const MAX_CONTOUR_POINTS: usize = 10_000;
+
 /// Numerical integration of a complex function over a contour (path).
 /// Approximates the integral \oint_C f(z) dz using the trapezoidal rule.
+///
+/// Retorna error si algún `f(z)` no es finito (polo/NaN en el contorno) o
+/// si el contorno excede `MAX_CONTOUR_POINTS` (presupuesto anti-DoS).
 pub fn contour_integral(
     expr: &ComplexExpr,
     path: &[Complex64],
@@ -13,6 +18,12 @@ pub fn contour_integral(
 ) -> Result<Complex64, String> {
     if path.len() < 2 {
         return Ok(Complex64::new(0.0, 0.0));
+    }
+    if path.len() > MAX_CONTOUR_POINTS {
+        return Err(format!(
+            "contour too large: {} > {MAX_CONTOUR_POINTS}",
+            path.len()
+        ));
     }
 
     let mut integral = Complex64::new(0.0, 0.0);
@@ -25,15 +36,31 @@ pub fn contour_integral(
         // Evaluate at z0
         local_vars.insert(symbol.to_string(), z0);
         let f0 = expr.eval(&local_vars)?;
+        if !f0.re.is_finite() || !f0.im.is_finite() {
+            return Err(format!("non-finite value at contour point {i}: {f0}"));
+        }
 
         // Evaluate at z1
         local_vars.insert(symbol.to_string(), z1);
         let f1 = expr.eval(&local_vars)?;
+        if !f1.re.is_finite() || !f1.im.is_finite() {
+            return Err(format!("non-finite value at contour point {}: {f1}", i + 1));
+        }
 
         // Trapezoidal rule: (f(z0) + f(z1)) / 2 * (z1 - z0)
         let dz = z1 - z0;
+        if !dz.re.is_finite() || !dz.im.is_finite() {
+            return Err(format!("non-finite segment dz at {i}: {dz}"));
+        }
         let avg_f = (f0 + f1) * 0.5;
-        integral += avg_f * dz;
+        let contrib = avg_f * dz;
+        if !contrib.re.is_finite() || !contrib.im.is_finite() {
+            return Err(format!("non-finite contribution at segment {i}"));
+        }
+        integral += contrib;
+        if !integral.re.is_finite() || !integral.im.is_finite() {
+            return Err(format!("integral overflow at segment {i}"));
+        }
     }
 
     Ok(integral)
@@ -67,8 +94,14 @@ pub fn evaluate_flow(
     vars: &HashMap<String, Complex64>,
     symbol: &str,
 ) -> Result<(f64, f64), String> {
+    if !x.is_finite() || !y.is_finite() {
+        return Err("non-finite flow coordinates".to_string());
+    }
     let mut local_vars = vars.clone();
     local_vars.insert(symbol.to_string(), Complex64::new(x, y));
     let result = expr.eval(&local_vars)?;
+    if !result.re.is_finite() || !result.im.is_finite() {
+        return Err(format!("non-finite flow result: {result}"));
+    }
     Ok((result.re, result.im))
 }

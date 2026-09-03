@@ -11,7 +11,185 @@ use grafito_geometry::expr::{
 use grafito_geometry::{Color, Point2, ViewTransform};
 use grafito_ui::theme::current_theme;
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+
+// ── F3-Render caches: fractal / phase / ordered_visible keyed por document.version ──
+thread_local! {
+    static FRACTAL_RENDER_CACHE: RefCell<HashMap<u64, Vec<grafito_geometry::fractals::FractalPixel>>> =
+        RefCell::new(HashMap::new());
+    static PHASE_PORTRAIT_CACHE: RefCell<HashMap<u64, Vec<(Point2, Point2)>>> =
+        RefCell::new(HashMap::new());
+    static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Vec<ObjectId>)>> =
+        const { RefCell::new(None) };
+}
+const FRACTAL_RENDER_CACHE_CAP: usize = 8;
+const PHASE_RENDER_CACHE_CAP: usize = 32;
+
+fn fractal_render_cache_key(document_version: u64, fr: &grafito_core::Fractal2DObj) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    document_version.hash(&mut h);
+    fr.id.hash(&mut h);
+    fr.fractal_type.hash(&mut h);
+    fr.x_min.to_bits().hash(&mut h);
+    fr.x_max.to_bits().hash(&mut h);
+    fr.y_min.to_bits().hash(&mut h);
+    fr.y_max.to_bits().hash(&mut h);
+    fr.resolution.hash(&mut h);
+    fr.max_iter.hash(&mut h);
+    fr.params.len().hash(&mut h);
+    for p in &fr.params {
+        p.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+fn phase_render_cache_key(
+    document_version: u64,
+    portrait: &grafito_core::PhasePortraitObj,
+    variables: &HashMap<String, f64>,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    document_version.hash(&mut h);
+    portrait.id.hash(&mut h);
+    portrait.expr_dx.hash(&mut h);
+    portrait.expr_dy.hash(&mut h);
+    portrait.x_min.to_bits().hash(&mut h);
+    portrait.x_max.to_bits().hash(&mut h);
+    portrait.y_min.to_bits().hash(&mut h);
+    portrait.y_max.to_bits().hash(&mut h);
+    portrait.density.hash(&mut h);
+    let mut vars: Vec<_> = variables.iter().collect();
+    vars.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in vars {
+        k.hash(&mut h);
+        v.to_bits().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Cachea `try_compute_fractal` keyed por `document.version` para evitar recomputar
+/// el mismo fractal en cada frame (hasta 160k píxeles, trabajo pesado).
+fn cached_try_compute_fractal(
+    fr: &grafito_core::Fractal2DObj,
+    document_version: u64,
+) -> Option<Vec<grafito_geometry::fractals::FractalPixel>> {
+    let key = fractal_render_cache_key(document_version, fr);
+    if let Some(cached) = FRACTAL_RENDER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Some(cached);
+    }
+    let fractal_type = match fr.fractal_type.as_str() {
+        "julia" if fr.params.len() >= 2 => grafito_geometry::fractals::FractalType::Julia {
+            cr: fr.params[0],
+            ci: fr.params[1],
+            max_iter: fr.max_iter,
+        },
+        "burning_ship" => grafito_geometry::fractals::FractalType::BurningShip {
+            max_iter: fr.max_iter,
+        },
+        "tricorn" => grafito_geometry::fractals::FractalType::Tricorn {
+            max_iter: fr.max_iter,
+        },
+        _ => grafito_geometry::fractals::FractalType::Mandelbrot {
+            max_iter: fr.max_iter,
+        },
+    };
+    let pixels = grafito_geometry::fractals::try_compute_fractal(
+        &fractal_type,
+        fr.x_min,
+        fr.x_max,
+        fr.y_min,
+        fr.y_max,
+        fr.resolution,
+        fr.resolution,
+    )
+    .ok()?;
+    FRACTAL_RENDER_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= FRACTAL_RENDER_CACHE_CAP {
+            if let Some(k) = cache.keys().next().copied() {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, pixels.clone());
+    });
+    Some(pixels)
+}
+
+/// Cachea `sample_phase_portrait` keyed por `document.version` para evitar
+/// re-evaluar la malla vectorial (density² evaluaciones) cada frame.
+fn cached_sample_phase_portrait(
+    portrait: &grafito_core::PhasePortraitObj,
+    variables: &HashMap<String, f64>,
+    document_version: u64,
+) -> Vec<(Point2, Point2)> {
+    let key = phase_render_cache_key(document_version, portrait, variables);
+    if let Some(cached) = PHASE_PORTRAIT_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return cached;
+    }
+    let segments = grafito_render::sample_phase_portrait(portrait, variables);
+    PHASE_PORTRAIT_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= PHASE_RENDER_CACHE_CAP {
+            if let Some(k) = cache.keys().next().copied() {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, segments.clone());
+    });
+    segments
+}
+
+/// Cachea `ordered_visible_2d_objects` keyed por `document.version`.
+/// Evita re-ordenar (layer+ObjectId) y re-filtrar cada vez que se pintan
+/// múltiples pasadas (grid, fills, mappings) en el mismo frame.
+fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Vec<ObjectId> {
+    let version = document.version;
+    if let Some((cached_version, ids)) = ORDERED_VISIBLE_CACHE.with(|c| c.borrow().clone()) {
+        if cached_version == version {
+            return ids;
+        }
+    }
+    let ids: Vec<ObjectId> = grafito_render::ordered_visible_2d_objects(document)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    ORDERED_VISIBLE_CACHE.with(|c| *c.borrow_mut() = Some((version, ids.clone())));
+    ids
+}
+
+fn cached_ordered_visible_2d_objects(
+    document: &grafito_core::Document,
+) -> Vec<(ObjectId, &GeoObject)> {
+    // Usa ids cacheados (keyed por version) y reconstruye refs sin re-ordenar.
+    let ids = cached_ordered_visible_ids(document);
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(obj) = document.get_object(id) {
+            out.push((id, obj));
+        }
+    }
+    out
+}
+
+/// Read-lock optimizado con fast-path `try_read` y manejo de poison sin `unwrap`.
+#[inline]
+fn read_lock_optimized<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    if let Ok(guard) = lock.try_read() {
+        return guard;
+    }
+    match lock.read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            poisoned.into_inner()
+        }
+    }
+}
 
 fn to_color32(c: Color) -> Color32 {
     Color32::from_rgba_unmultiplied(
@@ -146,7 +324,7 @@ fn base_scene_paint_plan(
     document: &grafito_core::Document,
     gpu_base_active: bool,
 ) -> Vec<BasePaint2D> {
-    grafito_render::ordered_visible_2d_objects(document)
+    cached_ordered_visible_2d_objects(document)
         .into_iter()
         .map(|(id, object)| {
             if gpu_base_active && is_gpu_base_geometry(document, object) {
@@ -228,17 +406,12 @@ fn implicit_curve_cache_matches_request(
     };
     let padded_bounds = grafito_core::implicit_curve::padded_snapped_bounds(view_bounds, 2.0, 64);
     let requested_key = curve.cache_key(padded_bounds, grid_size, variables);
-    let cached_key = curve.cached_key.read().unwrap_or_else(|poisoned| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        poisoned.into_inner()
-    });
+    // Read-lock optimizado: fast-path `try_read` evita bloqueo si no hay escritor.
+    let cached_key = read_lock_optimized(&curve.cached_key);
     if cached_key.as_ref() != Some(&requested_key) {
         return false;
     }
-    let cached_region = curve.cached_region.read().unwrap_or_else(|poisoned| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        poisoned.into_inner()
-    });
+    let cached_region = read_lock_optimized(&curve.cached_region);
     cached_region.is_some_and(|(x_min, x_max, y_min, y_max)| {
         view_bounds.0 >= x_min
             && view_bounds.1 <= x_max
@@ -304,7 +477,7 @@ fn visible_implicit_cache_plan(
     canvas_rect: Rect,
 ) -> BTreeSet<grafito_core::ObjectId> {
     let quality = document.render_quality;
-    let objects = grafito_render::ordered_visible_2d_objects(document);
+    let objects = cached_ordered_visible_2d_objects(document);
 
     let mut remaining_work = MAX_CPU_IMPLICIT_FRAME_WORK_UNITS;
     let mut admitted = BTreeSet::new();
@@ -1412,6 +1585,8 @@ fn superscript(exp: i32) -> String {
 
 impl GrafitoApp {
     pub(crate) fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_grid");
         if !self.show_grid {
             return;
         }
@@ -1583,6 +1758,8 @@ impl GrafitoApp {
         canvas_rect: Rect,
         show_numeric_ticks: bool,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_axes");
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br =
@@ -1814,6 +1991,8 @@ impl GrafitoApp {
     }
 
     pub(crate) fn draw_trig_canvas_overlay(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_trig_canvas_overlay");
         if !self.show_trig_animation {
             return;
         }
@@ -2185,14 +2364,14 @@ impl GrafitoApp {
     }
 
     fn active_complex_animation_expr(&self) -> (String, &'static str) {
-        for (_, obj) in grafito_render::ordered_visible_2d_objects(&self.document) {
+        for (_, obj) in cached_ordered_visible_2d_objects(&self.document) {
             if let GeoObject::ComplexMapping(cm) = obj {
                 if cm.visible {
                     return (cm.expr.clone(), "f");
                 }
             }
         }
-        for (_, obj) in grafito_render::ordered_visible_2d_objects(&self.document) {
+        for (_, obj) in cached_ordered_visible_2d_objects(&self.document) {
             if let GeoObject::ComplexGrid(cg) = obj {
                 if cg.visible {
                     return (cg.expr.clone(), "f");
@@ -2209,6 +2388,8 @@ impl GrafitoApp {
         gpu_base_active: bool,
         mut paint_gpu_object: impl FnMut(ObjectId),
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_objects");
         self.prune_fill_texture_cache();
 
         // Cache misses and fill rasterization are admitted in ObjectId order
@@ -2326,6 +2507,8 @@ impl GrafitoApp {
         canvas_rect: Rect,
         object: &GeoObject,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_gpu_object_backfill");
         if gpu_base_needs_cpu_backfill(object) {
             self.draw_object_styled(
                 painter,
@@ -2491,6 +2674,8 @@ impl GrafitoApp {
         map: ConformalMap,
         fill_color: Color,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_complex_mapping_fill");
         // 1) Operador: Eq no tiene región rellenable.
         if matches!(ic.operator, RelationOperator::Eq) {
             return;
@@ -2672,6 +2857,8 @@ impl GrafitoApp {
         ic: &ImplicitCurveObj,
         fill_color: Color,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_implicit_curve_fill");
         // 1) Parsear lhs/rhs usando el cache del ImplicitCurveObj para evitar
         //    reparsear y re-simplificar el AST en cada frame.
         let (eval_lhs, eval_rhs) = match ic.get_cached_asts(&self.document.variables, &["x", "y"]) {
@@ -2843,6 +3030,8 @@ impl GrafitoApp {
         style: Option<StyleOverride>,
         overlay_only: bool,
     ) {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("draw_object_styled");
         let overlay_only = match cpu_object_pass(&self.document, obj, overlay_only) {
             CpuObjectPass::Full => false,
             CpuObjectPass::Supplement => true,
@@ -3132,10 +3321,17 @@ impl GrafitoApp {
                             canvas_rect.width(),
                             self.document.render_quality,
                         );
-                    grafito_core::function_sampling::samples_or_compute(
+                    // Evita `samples.clone()` iterando directamente sobre el guard del RwLock.
+                    // `samples_or_compute` devuelve `RwLockReadGuard<Vec<...>>`; iterar sin clonar
+                    // evita duplicar hasta 10k muestras por frame.
+                    let guard = grafito_core::function_sampling::samples_or_compute(
                         fun, domain, grid_size, variables,
-                    )
-                    .clone()
+                    );
+                    let mut owned = Vec::with_capacity(guard.len());
+                    for &(x, y) in guard.iter() {
+                        owned.push((x, y));
+                    }
+                    owned
                 };
 
                 let mut refined_samples = Vec::with_capacity(samples.len() + 100);
@@ -3581,37 +3777,12 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Fractal2D(fr) => {
-                use grafito_geometry::fractals::{
-                    fractal_color_hsv, try_compute_fractal, FractalType,
-                };
-                let fractal_type = match fr.fractal_type.as_str() {
-                    "julia" if fr.params.len() >= 2 => FractalType::Julia {
-                        cr: fr.params[0],
-                        ci: fr.params[1],
-                        max_iter: fr.max_iter,
-                    },
-                    "burning_ship" => FractalType::BurningShip {
-                        max_iter: fr.max_iter,
-                    },
-                    "tricorn" => FractalType::Tricorn {
-                        max_iter: fr.max_iter,
-                    },
-                    _ => FractalType::Mandelbrot {
-                        max_iter: fr.max_iter,
-                    },
-                };
-                let res = fr.resolution;
-                let Ok(pixels) = try_compute_fractal(
-                    &fractal_type,
-                    fr.x_min,
-                    fr.x_max,
-                    fr.y_min,
-                    fr.y_max,
-                    res,
-                    res,
-                ) else {
+                use grafito_geometry::fractals::fractal_color_hsv;
+                // Cache keyed por document.version: evita recomputar 160k píxeles cada frame.
+                let Some(pixels) = cached_try_compute_fractal(fr, self.document.version) else {
                     return;
                 };
+                let res = fr.resolution;
                 if res == 0 {
                     return;
                 }
@@ -3740,15 +3911,16 @@ impl GrafitoApp {
                 let dy = (view_bounds.3 - view_bounds.2).abs() / grid_size as f64;
                 let arrow_length = dx.min(dy) * 0.8;
 
+                // Evita `samples.clone()` iterando directamente sobre el guard del RwLock.
+                // `samples_or_compute` devuelve `RwLockReadGuard<Vec<...>>`; iterar sin clonar
+                // evita duplicar ~16k tuplas por frame y respeta el cache RwLock.
                 let samples = vector_field_sampling::samples_or_compute(
                     vf,
                     view_bounds,
                     grid_size,
                     &self.document.variables,
-                )
-                .clone();
-
-                for (x, y, u, v) in samples {
+                );
+                for (x, y, u, v) in samples.iter().copied() {
                     if x < view_bounds.0 - dx
                         || x > view_bounds.1 + dx
                         || y < view_bounds.2 - dy
@@ -3805,18 +3977,23 @@ impl GrafitoApp {
                     prepare_function_ast(&vf.expr_u, &self.document.variables, &["x", "y"]).ok();
                 let prepared_v =
                     prepare_function_ast(&vf.expr_v, &self.document.variables, &["x", "y"]).ok();
-                let mut base_environment: Vec<_> = self
+                // Evita `base_environment.clone()` en cada evaluación RK4 usando un vec mutable
+                // con slots fijos para "x" e "y" (20k clones por frame → 0).
+                let mut environment: Vec<(String, f64)> = self
                     .document
                     .variables
                     .iter()
                     .filter(|(name, _)| name.as_str() != "x" && name.as_str() != "y")
                     .map(|(name, value)| (name.clone(), *value))
                     .collect();
-                base_environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                let evaluate_field = |x: f64, y: f64| {
-                    let mut environment = base_environment.clone();
-                    environment.push(("x".to_string(), x));
-                    environment.push(("y".to_string(), y));
+                environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                environment.push(("x".to_string(), 0.0));
+                environment.push(("y".to_string(), 0.0));
+                let x_idx = environment.len() - 2;
+                let y_idx = environment.len() - 1;
+                let mut evaluate_field = |x: f64, y: f64| {
+                    environment[x_idx].1 = x;
+                    environment[y_idx].1 = y;
                     let u = prepared_u
                         .as_ref()
                         .map(|ast| ast.eval_2d("x", x, "y", y))
@@ -3886,8 +4063,12 @@ impl GrafitoApp {
                 }
             }
             GeoObject::PhasePortrait(portrait) => {
-                let segments =
-                    grafito_render::sample_phase_portrait(portrait, &self.document.variables);
+                // Cache keyed por document.version: evita re-muestrear la grilla cada frame.
+                let segments = cached_sample_phase_portrait(
+                    portrait,
+                    &self.document.variables,
+                    self.document.version,
+                );
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     let stroke = Stroke::new(1.5, to_color32(portrait.color));
                     for (start, end) in &segments {
@@ -3954,10 +4135,11 @@ impl GrafitoApp {
                 }
 
                 // 1) Contorno: dibujar los segmentos del marching squares.
-                let levels = ic.cached_segments.read().unwrap_or_else(|p| {
-                    log::warn!("cache lock envenenado; recuperando estado parcial");
-                    p.into_inner()
-                });
+                // Read-lock optimizado + clon breve para no retener el lock durante el pintado.
+                let levels = {
+                    let guard = read_lock_optimized(&ic.cached_segments);
+                    guard.clone()
+                };
                 if !levels.is_empty() {
                     let use_contour_colors = ic.contour_levels.is_some();
                     let contour_count = levels.len();

@@ -429,6 +429,33 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         }
     }
 
+    // Secuencias vivas — cotas y referencias.
+    if doc.live_sequences.len() > crate::document::MAX_LIVE_SEQUENCES {
+        return Err(format!(
+            "Document contains {} live sequences, maximum is {}",
+            doc.live_sequences.len(),
+            crate::document::MAX_LIVE_SEQUENCES
+        ));
+    }
+    for (id, binding) in &doc.live_sequences {
+        if doc.get_object(*id).is_none() {
+            return Err(format!("LiveSequence {id} references missing object"));
+        }
+        if !matches!(doc.get_object(*id), Some(crate::GeoObject::DataTable(_))) {
+            return Err(format!("LiveSequence {id} must reference a DataTable"));
+        }
+        validate_string(&binding.expr, "LiveSequence.expr")?;
+        validate_string(&binding.var, "LiveSequence.var")?;
+        validate_string(&binding.start_expr, "LiveSequence.start_expr")?;
+        validate_string(&binding.end_expr, "LiveSequence.end_expr")?;
+        if binding.expr.len() > MAX_EXPR_LENGTH
+            || binding.start_expr.len() > MAX_EXPR_LENGTH
+            || binding.end_expr.len() > MAX_EXPR_LENGTH
+        {
+            return Err("LiveSequence expression exceeds maximum length".to_string());
+        }
+    }
+
     Ok(())
 }
 

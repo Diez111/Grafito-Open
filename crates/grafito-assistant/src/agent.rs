@@ -23,7 +23,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Límite del cuerpo de la respuesta del agente.
-const MAX_AGENT_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_AGENT_RESPONSE_BYTES: usize = 32 * 1024;
 
 /// Proveedor de chat agéntico sobre un endpoint OpenAI-compatible.
 pub struct RemoteAgentCompleter {

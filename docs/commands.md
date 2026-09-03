@@ -43,6 +43,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Dinamica
 
 - `Locus[driver, target]`: Crea un lugar geometrico persistente: registra el objetivo despues de cada actualizacion local valida del driver, sin eventos de puntero ni tiempo. Mutacion: agrega restricciones. Riesgo: medio. Alias: `lugar`.
+- `LocusEquation[locus]`: Aproxima eliminación Groebner (mock) a partir de muestreo de locus + regresión simbólica; genera curva implícita presupuestada. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `LocusEquation[locus, grado]`. Alias: `locus_equation`, `ecuacionlocus`, `ecuacion_locus`.
 ## Crear
 
 - `ParametricCurve2D[x(t), y(t), t0, t1]`: Crea una curva parametrica 2D. Mutacion: crea objetos. Riesgo: medio. Alias: `parametric_curve_2d`, `param2d`.
@@ -78,6 +79,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FillColumn[col, valor]`: Rellena una columna de la hoja iterando filas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillColumn[col, inicio, fin, valor]`. Alias: `fill_column`, `fillcol`.
 - `FillCells[rango, valor]`: Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillCells[a1, b2, valor]`. Alias: `fill_cells`, `fillcells`, `rellenar`.
 - `CellRange[a1, b2]`: Resuelve un rango A1:B2 a array de valores evaluados; soporta A1:B2 o A1,B2. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CellRange[rango]`. Alias: `cell_range`, `rango`.
+- `FillRow[fila, valor]`: Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillRow[fila, inicio, fin, valor]`. Alias: `fill_row`, `fillrow`.
 ## Restricciones
 
 - `Distance[A, B, valor]`: Impone una distancia entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `dist`.
@@ -177,6 +179,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FitLog[tabla]`: Ajusta y = a ln(x) + b a una tabla local con x positiva. Mutacion: crea objetos. Riesgo: medio. Alias: `ajuste logaritmico`.
 - `FitPow[tabla]`: Ajusta y = a x^b a una tabla local con x e y positivas. Mutacion: crea objetos. Riesgo: medio. Alias: `ajuste potencia`.
 - `FitSin[tabla]`: Ajusta una senoide local con una búsqueda de frecuencia acotada. Mutacion: crea objetos. Riesgo: alto. Alias: `ajuste sinusoidal`.
+- `FitLogistic[tabla]`: Ajusta a/(1+b*exp(-c*x)) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6; genera función y métricas RMSE/R². Mutacion: crea objetos. Riesgo: medio. Alias: `fit_logistic`, `logistica`, `ajuste logistico`.
+- `FitGrowth[tabla]`: Ajusta a*exp(b*x) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6. Mutacion: crea objetos. Riesgo: medio. Alias: `fit_growth`, `crecimiento`, `ajuste crecimiento`.
+- `FitImplicit[tabla, expr]`: Ajuste implícito genérico Gauss-Newton: FitImplicit[tabla, exprConParams, a0, b0, ...] minimiza y - expr(x; params). Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `FitImplicit[tabla, expr, a0, b0, c0]`. Alias: `fit_implicit`, `implicit_fit`, `ajuste implicito`.
 - `Mean[{data}]`: Calcula la media. Mutacion: solo consulta. Riesgo: bajo. Alias: `media`.
 - `Median[{data}]`: Calcula la mediana. Mutacion: solo consulta. Riesgo: bajo. Alias: `mediana`.
 - `StdDev[{data}]`: Calcula el desvio estandar. Mutacion: solo consulta. Riesgo: bajo. Alias: `desviacion`.
@@ -278,6 +283,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Lista
 
 - `Sequence[expr, var, start, end]`: Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k. Mutacion: solo consulta. Riesgo: bajo. Alias: `seq`, `secuencia`, `rango`, `table`.
+- `SequenceLive[expr, var, start, end]`: Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada). Mutacion: crea objetos. Riesgo: bajo. Alias: `sequencelive`, `secuenciaviva`, `seqviva`, `viva`.
 - `Zip[list1, list2]`: Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `zip`, `emparejar`, `cremallera`.
 - `Flatten[list]`: Aplana un nivel de anidamiento {{1,2},{3,4}}→{1,2,3,4}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `flatten`, `aplanar`, `aplanado`.
 - `Sort[list]`: Ordena ascendentemente una lista plana numérica; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `sort`, `ordenar`, `orden`.
@@ -289,6 +295,20 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Take[list, n]`: Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `take`, `tomar`, `coger`.
 - `KeepIf[list, predicado]`: Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `keepif`, `keep_if`, `filtrar`, `selectif`, `filter`.
 - `CountIf[list, predicado]`: Cuenta elementos que cumplen predicado simple sobre x; valida longitud. Mutacion: solo consulta. Riesgo: bajo. Alias: `countif`, `count_if`, `contarsi`, `contar_si`.
+## Cónicas
+
+- `Focus[conica]`: Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact. Mutacion: solo consulta. Riesgo: bajo. Alias: `Foco`, `foco`, `focos`.
+- `Directrix[conica]`: Devuelve la directriz de una parábola como recta (dos puntos) usando exact::parabola. Mutacion: solo consulta. Riesgo: bajo. Alias: `Directriz`, `directriz`.
+- `Center[conica]`: Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center. Mutacion: solo consulta. Riesgo: bajo. Alias: `Centro`, `centro`.
+- `Eccentricity[conica]`: Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola). Mutacion: solo consulta. Riesgo: bajo. Alias: `Excentricidad`, `excentricidad`, `ecc`.
+- `Axes[conica]`: Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejes`, `ejes`, `semiejes`.
+- `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`, `esTangente`, `estangente`, `isTangent`.
+## Texto
+
+- `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`, `tablatexto`, `tablaTexto`, `Table`.
+## Dinámica
+
+- `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`, `deslizador`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

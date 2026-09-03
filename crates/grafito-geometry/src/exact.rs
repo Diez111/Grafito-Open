@@ -346,6 +346,425 @@ fn gcd(mut left: u128, mut right: u128) -> u128 {
     left
 }
 
+// ── Cónicas helpers — fórmulas exactas ──────────────────────────────────────
+// Estas funciones encapsulan la geometría exacta de las construcciones
+// EllipseByFoci / HyperbolaByFoci / ParabolaByFocusDirectrix para que
+// `grafito-command` pueda exponer getters puros (Focus, Center, ...)
+// sin duplicar fórmulas. Todas las funciones son puras, validan finitud y
+// usan `f64` con tolerancia `1e-12`; el sufijo `exact` indica que no hay
+// muestreo ni aproximación iterativa más allá de `sqrt`/`hypot`.
+
+use crate::Point2;
+
+/// Tolerancia geométrica mínima para considerar una cónica degenerada.
+const CONIC_EPS: f64 = 1e-12;
+
+/// Centro de una elipse definida por sus dos focos (punto medio exacto).
+#[must_use]
+pub fn ellipse_center(focus1: Point2, focus2: Point2) -> Point2 {
+    Point2::new(
+        focus1.x * 0.5 + focus2.x * 0.5,
+        focus1.y * 0.5 + focus2.y * 0.5,
+    )
+}
+
+/// Semiejes `(a, b)` de una elipse definida por focos y un punto de la cónica.
+/// `a = (|P-F1|+|P-F2|)/2`, `c = |F1-F2|/2`, `b = sqrt(a²-c²)`. Devuelve `None` si es degenerada.
+#[must_use]
+pub fn ellipse_axes(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<(f64, f64)> {
+    let dist_f = focus1.distance(&focus2);
+    let d1 = point_on.distance(&focus1);
+    let d2 = point_on.distance(&focus2);
+    if !dist_f.is_finite() || !d1.is_finite() || !d2.is_finite() {
+        return None;
+    }
+    let a = (d1 + d2) * 0.5;
+    let c = dist_f * 0.5;
+    if !a.is_finite() || !c.is_finite() || a <= c + CONIC_EPS {
+        return None;
+    }
+    let b2 = (a - c) * (a + c);
+    if b2 <= CONIC_EPS * CONIC_EPS || !b2.is_finite() {
+        return None;
+    }
+    let b = b2.sqrt();
+    if !b.is_finite() || b <= CONIC_EPS {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Excentricidad de elipse `e = c / a`.
+#[must_use]
+pub fn ellipse_eccentricity(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<f64> {
+    let (a, _) = ellipse_axes(focus1, focus2, point_on)?;
+    let c = focus1.distance(&focus2) * 0.5;
+    if a <= CONIC_EPS || !c.is_finite() {
+        return None;
+    }
+    let e = c / a;
+    if !e.is_finite() || !(0.0..1.0).contains(&e) {
+        return None;
+    }
+    Some(e)
+}
+
+/// Focos de una elipse (identidad trivial, expuesta como helper puro).
+#[must_use]
+pub fn ellipse_foci(focus1: Point2, focus2: Point2) -> (Point2, Point2) {
+    (focus1, focus2)
+}
+
+/// Focos derivados de un `EllipseObj` geométrico (centro, rx, ry, ángulo).
+/// Usa la dirección del eje mayor para colocar los focos a distancia `c`.
+#[must_use]
+pub fn ellipse_obj_foci(center: Point2, rx: f64, ry: f64, angle: f64) -> Option<(Point2, Point2)> {
+    if !center.x.is_finite()
+        || !center.y.is_finite()
+        || !rx.is_finite()
+        || !ry.is_finite()
+        || !angle.is_finite()
+        || rx <= CONIC_EPS
+        || ry <= CONIC_EPS
+    {
+        return None;
+    }
+    let (a, b, dir_x, dir_y) = if rx >= ry {
+        (rx, ry, angle.cos(), angle.sin())
+    } else {
+        (ry, rx, (-angle).sin(), angle.cos())
+    };
+    let c2 = (a - b) * (a + b);
+    if c2 <= CONIC_EPS * CONIC_EPS || !c2.is_finite() {
+        // Círculo: focos coincidentes con el centro.
+        return Some((center, center));
+    }
+    let c = c2.sqrt();
+    if !c.is_finite() {
+        return None;
+    }
+    let f1 = Point2::new(center.x + c * dir_x, center.y + c * dir_y);
+    let f2 = Point2::new(center.x - c * dir_x, center.y - c * dir_y);
+    if !f1.x.is_finite() || !f1.y.is_finite() || !f2.x.is_finite() || !f2.y.is_finite() {
+        return None;
+    }
+    Some((f1, f2))
+}
+
+/// Centro de hipérbola definida por focos (punto medio).
+#[must_use]
+pub fn hyperbola_center(focus1: Point2, focus2: Point2) -> Point2 {
+    ellipse_center(focus1, focus2)
+}
+
+/// Semiejes `(a, b)` de hipérbola `a = |d1-d2|/2`, `c = |F1-F2|/2`, `b = sqrt(c²-a²)`.
+#[must_use]
+pub fn hyperbola_axes(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<(f64, f64)> {
+    let dist_f = focus1.distance(&focus2);
+    let d1 = point_on.distance(&focus1);
+    let d2 = point_on.distance(&focus2);
+    if !dist_f.is_finite() || !d1.is_finite() || !d2.is_finite() {
+        return None;
+    }
+    let a = (d1 - d2).abs() * 0.5;
+    let c = dist_f * 0.5;
+    if !a.is_finite() || !c.is_finite() || a <= CONIC_EPS || a >= c - CONIC_EPS {
+        return None;
+    }
+    let b2 = (c - a) * (c + a);
+    if b2 <= CONIC_EPS * CONIC_EPS || !b2.is_finite() {
+        return None;
+    }
+    let b = b2.sqrt();
+    if !b.is_finite() || b <= CONIC_EPS {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Excentricidad de hipérbola `e = c / a > 1`.
+#[must_use]
+pub fn hyperbola_eccentricity(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<f64> {
+    let (a, _) = hyperbola_axes(focus1, focus2, point_on)?;
+    let c = focus1.distance(&focus2) * 0.5;
+    let e = c / a;
+    if !e.is_finite() || e <= 1.0 {
+        return None;
+    }
+    Some(e)
+}
+
+/// Focos de hipérbola (identidad).
+#[must_use]
+pub fn hyperbola_foci(focus1: Point2, focus2: Point2) -> (Point2, Point2) {
+    (focus1, focus2)
+}
+
+/// Focos derivados de un `HyperbolaObj` (centro, a, b, ángulo, eje horizontal).
+#[must_use]
+pub fn hyperbola_obj_foci(center: Point2, a: f64, b: f64, angle: f64) -> Option<(Point2, Point2)> {
+    if !center.x.is_finite()
+        || !center.y.is_finite()
+        || !a.is_finite()
+        || !b.is_finite()
+        || !angle.is_finite()
+        || a <= CONIC_EPS
+        || b <= CONIC_EPS
+    {
+        return None;
+    }
+    let c2 = a * a + b * b;
+    if !c2.is_finite() {
+        return None;
+    }
+    let c = c2.sqrt();
+    if !c.is_finite() {
+        return None;
+    }
+    let dir_x = angle.cos();
+    let dir_y = angle.sin();
+    let f1 = Point2::new(center.x + c * dir_x, center.y + c * dir_y);
+    let f2 = Point2::new(center.x - c * dir_x, center.y - c * dir_y);
+    if !f1.x.is_finite() || !f1.y.is_finite() || !f2.x.is_finite() || !f2.y.is_finite() {
+        return None;
+    }
+    Some((f1, f2))
+}
+
+// ── Parábola ────────────────────────────────────────────────────────────────
+
+fn project_point_to_line_exact(point: Point2, line_a: Point2, line_b: Point2) -> Option<Point2> {
+    let dx = line_b.x - line_a.x;
+    let dy = line_b.y - line_a.y;
+    let len2 = dx * dx + dy * dy;
+    if !dx.is_finite() || !dy.is_finite() || !len2.is_finite() || len2 <= CONIC_EPS * CONIC_EPS {
+        return None;
+    }
+    let t = ((point.x - line_a.x) * dx + (point.y - line_a.y) * dy) / len2;
+    if !t.is_finite() {
+        return None;
+    }
+    let proj = Point2::new(line_a.x + t * dx, line_a.y + t * dy);
+    if !proj.x.is_finite() || !proj.y.is_finite() {
+        return None;
+    }
+    Some(proj)
+}
+
+/// Foco de parábola (identidad exacta).
+#[must_use]
+pub fn parabola_focus(focus: Point2) -> Point2 {
+    focus
+}
+
+/// Directriz de parábola como segmento que define la recta infinita.
+#[must_use]
+pub fn parabola_directrix(line_a: Point2, line_b: Point2) -> Option<(Point2, Point2)> {
+    if !line_a.x.is_finite()
+        || !line_a.y.is_finite()
+        || !line_b.x.is_finite()
+        || !line_b.y.is_finite()
+    {
+        return None;
+    }
+    let dx = line_b.x - line_a.x;
+    let dy = line_b.y - line_a.y;
+    if !dx.is_finite() || !dy.is_finite() || dx.hypot(dy) <= CONIC_EPS {
+        return None;
+    }
+    Some((line_a, line_b))
+}
+
+/// Vértice (centro) de parábola: punto medio entre foco y su proyección en la directriz.
+#[must_use]
+pub fn parabola_vertex(focus: Point2, line_a: Point2, line_b: Point2) -> Option<Point2> {
+    let proj = project_point_to_line_exact(focus, line_a, line_b)?;
+    Some(Point2::new(
+        focus.x * 0.5 + proj.x * 0.5,
+        focus.y * 0.5 + proj.y * 0.5,
+    ))
+}
+
+/// Alias `center` para parábola: su vértice.
+#[must_use]
+pub fn parabola_center(focus: Point2, line_a: Point2, line_b: Point2) -> Option<Point2> {
+    parabola_vertex(focus, line_a, line_b)
+}
+
+/// Parámetro `p = distancia(foco, directriz)/2` (distancia focal exacta).
+#[must_use]
+pub fn parabola_parameter(focus: Point2, line_a: Point2, line_b: Point2) -> Option<f64> {
+    let proj = project_point_to_line_exact(focus, line_a, line_b)?;
+    let dist = focus.distance(&proj);
+    if !dist.is_finite() || dist <= CONIC_EPS {
+        return None;
+    }
+    let p = dist * 0.5;
+    if !p.is_finite() || p <= CONIC_EPS {
+        return None;
+    }
+    Some(p)
+}
+
+/// Excentricidad de parábola: exactamente 1.
+#[must_use]
+pub const fn parabola_eccentricity() -> f64 {
+    1.0
+}
+
+/// Foco derivado de un `ParabolaObj` (vértice, p, ángulo).
+/// Eje local +y → dirección mundial `(-sin angle, cos angle)`.
+#[must_use]
+pub fn parabola_obj_focus(vertex: Point2, p: f64, angle: f64) -> Option<Point2> {
+    if !vertex.x.is_finite()
+        || !vertex.y.is_finite()
+        || !p.is_finite()
+        || !angle.is_finite()
+        || p.abs() <= CONIC_EPS
+    {
+        return None;
+    }
+    let axis_x = -angle.sin();
+    let axis_y = angle.cos();
+    let f = Point2::new(vertex.x + p * axis_x, vertex.y + p * axis_y);
+    if !f.x.is_finite() || !f.y.is_finite() {
+        return None;
+    }
+    Some(f)
+}
+
+/// Directriz derivada de un `ParabolaObj` como recta infinita (dos puntos).
+#[must_use]
+pub fn parabola_obj_directrix(vertex: Point2, p: f64, angle: f64) -> Option<(Point2, Point2)> {
+    if !vertex.x.is_finite()
+        || !vertex.y.is_finite()
+        || !p.is_finite()
+        || !angle.is_finite()
+        || p.abs() <= CONIC_EPS
+    {
+        return None;
+    }
+    let axis_x = -angle.sin();
+    let axis_y = angle.cos();
+    let directrix_point = Point2::new(vertex.x - p * axis_x, vertex.y - p * axis_y);
+    // Dirección perpendicular al eje.
+    let dir_x = angle.cos();
+    let dir_y = angle.sin();
+    let a = Point2::new(
+        directrix_point.x - dir_x * 100.0,
+        directrix_point.y - dir_y * 100.0,
+    );
+    let b = Point2::new(
+        directrix_point.x + dir_x * 100.0,
+        directrix_point.y + dir_y * 100.0,
+    );
+    if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+        return None;
+    }
+    Some((a, b))
+}
+
+/// Determina si una recta es tangente a una elipse (discriminante exacto).
+/// La recta se da como segmento `a-b` (recta infinita). Devuelve `Some(true/false)`
+/// si la intersección es computable, `None` si es degenerada.
+#[must_use]
+pub fn is_tangent_to_ellipse(
+    center: Point2,
+    rx: f64,
+    ry: f64,
+    angle: f64,
+    line_a: Point2,
+    line_b: Point2,
+) -> Option<bool> {
+    if !center.x.is_finite()
+        || !center.y.is_finite()
+        || !rx.is_finite()
+        || !ry.is_finite()
+        || !angle.is_finite()
+        || rx <= CONIC_EPS
+        || ry <= CONIC_EPS
+        || !line_a.x.is_finite()
+        || !line_a.y.is_finite()
+        || !line_b.x.is_finite()
+        || !line_b.y.is_finite()
+    {
+        return None;
+    }
+    let dx = line_b.x - line_a.x;
+    let dy = line_b.y - line_a.y;
+    let len = dx.hypot(dy);
+    if !dx.is_finite() || !dy.is_finite() || len <= CONIC_EPS {
+        return None;
+    }
+    // Transforma la recta al sistema local de la elipse (traslación + rotación inversa).
+    let cos_a = angle.cos();
+    let sin_a = angle.sin();
+    let transform = |p: Point2| -> (f64, f64) {
+        let tx = p.x - center.x;
+        let ty = p.y - center.y;
+        let lx = tx * cos_a + ty * sin_a;
+        let ly = -tx * sin_a + ty * cos_a;
+        (lx, ly)
+    };
+    let (ax, ay) = transform(line_a);
+    let (bx, by) = transform(line_b);
+    let ldx = bx - ax;
+    let ldy = by - ay;
+    // Ecuación paramétrica: (ax + t*ldx)^2/rx² + (ay + t*ldy)^2/ry² =1
+    // → (ldx²/rx² + ldy²/ry²) t² + 2(ax*ldx/rx² + ay*ldy/ry²) t + (ax²/rx²+ay²/ry² -1)=0
+    let rx2 = rx * rx;
+    let ry2 = ry * ry;
+    let a_coef = ldx * ldx / rx2 + ldy * ldy / ry2;
+    let b_coef = 2.0 * (ax * ldx / rx2 + ay * ldy / ry2);
+    let c_coef = ax * ax / rx2 + ay * ay / ry2 - 1.0;
+    if !a_coef.is_finite() || !b_coef.is_finite() || !c_coef.is_finite() {
+        return None;
+    }
+    if a_coef.abs() <= CONIC_EPS {
+        // Recta degenerada en el sistema local (casi puntual): decide por distancia.
+        return None;
+    }
+    let disc = b_coef * b_coef - 4.0 * a_coef * c_coef;
+    if !disc.is_finite() {
+        return None;
+    }
+    // Tangencia exacta cuando discriminante ≈0 (tolerancia relativa).
+    let scale = (b_coef * b_coef + 4.0 * a_coef.abs() * c_coef.abs()).max(1.0);
+    Some(disc.abs() <= CONIC_EPS * scale)
+}
+
+// ── Aliases genéricos exigidos por la tarea ────────────────────────────────
+
+/// Alias genérico `focus` para elipse (dos focos).
+#[must_use]
+pub fn focus(focus1: Point2, focus2: Point2) -> (Point2, Point2) {
+    ellipse_foci(focus1, focus2)
+}
+
+/// Alias genérico `directrix` para parábola (recta directriz).
+#[must_use]
+pub fn directrix(line_a: Point2, line_b: Point2) -> Option<(Point2, Point2)> {
+    parabola_directrix(line_a, line_b)
+}
+
+/// Alias genérico `center` para elipse (punto medio de focos).
+#[must_use]
+pub fn center(focus1: Point2, focus2: Point2) -> Point2 {
+    ellipse_center(focus1, focus2)
+}
+
+/// Alias genérico `eccentricity` para elipse.
+#[must_use]
+pub fn eccentricity(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<f64> {
+    ellipse_eccentricity(focus1, focus2, point_on)
+}
+
+/// Alias genérico `axes` para elipse.
+#[must_use]
+pub fn axes(focus1: Point2, focus2: Point2, point_on: Point2) -> Option<(f64, f64)> {
+    ellipse_axes(focus1, focus2, point_on)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

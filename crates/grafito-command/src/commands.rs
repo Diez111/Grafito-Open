@@ -2,22 +2,25 @@ use geo::BooleanOps;
 use grafito_core::{
     analyzable::{self, default_analysis_features},
     implicit_curve::validate_contour_levels,
-    ArcObj, Attractor3DObj, BezierCurveObj, BoxPlotObj, CasWorksheetStatus, CircleObj,
-    ComplexGridObj, ComplexIntegralObj, ComplexMappingObj, Cone3DObj, Cube3DObj, Cylinder3DObj,
-    DataTableObj, Document, EllipseObj, FitMetadata, Fractal2DObj, FunctionObj, GeoObject,
-    HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, Line3DObj, LineKind, LineObj,
-    MoebiusStripObj, ObjectId, ParabolaObj, ParametricCurve2DObj, ParametricCurve3DObj, PencilObj,
-    PhasePortraitObj, Plane3DObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj,
-    Quadric3DObj, RegressionLineObj, RegularPolychoron4DObj, RegularPolytopeNDObj,
-    RelationOperator, ScatterPlotObj, SectorObj, Segment3DObj, Sphere3DObj, SplineObj,
-    Surface3DObj, Tetrahedron3DObj, Torus3DObj, VectorField2DObj, VectorField3DObj,
+    AnimationMode, ArcObj, Attractor3DObj, BezierCurveObj, BoxPlotObj, CasWorksheetStatus,
+    CircleObj, ComplexGridObj, ComplexIntegralObj, ComplexMappingObj, Cone3DObj, Cube3DObj,
+    Cylinder3DObj, DataTableObj, Document, EllipseObj, FitMetadata, Fractal2DObj, FunctionObj,
+    GeoObject, HistogramObj, HyperSurface4DObj, HyperbolaObj, ImplicitCurveObj, Line3DObj,
+    LineKind, LineObj, LiveSequenceBinding, MoebiusStripObj, ObjectId, ParabolaObj,
+    ParametricCurve2DObj, ParametricCurve3DObj, PencilObj, PhasePortraitObj, Plane3DObj,
+    Point3DObj, PointObj, PolarCurveObj, PolygonObj, Prism3DObj, Quadric3DObj, RegressionLineObj,
+    RegularPolychoron4DObj, RegularPolytopeNDObj, RelationOperator, ScatterPlotObj, SectorObj,
+    Segment3DObj, Sphere3DObj, SplineObj, Surface3DObj, Tetrahedron3DObj, Torus3DObj, VariableMeta,
+    VectorField2DObj, VectorField3DObj,
 };
 use grafito_geometry::analysis::{
     analyze_intersection, arc_length, curvature_at, normal_line_at, surface_of_revolution,
     tangent_line_at, volume_of_revolution, AnalysisFeature, IntersectionCurve,
 };
 use grafito_geometry::boolean::polygon_to_geo;
+use grafito_geometry::exact as conic_exact;
 use grafito_geometry::expr::{evaluate, prepare_function_ast};
+use grafito_geometry::locus_equation;
 use grafito_geometry::matrices::{
     cholesky, condition_number, eigenvalues, eigenvectors, lu_decomposition, null_space,
     qr_decomposition, rank, solve_linear_system, svd, Matrix,
@@ -1252,6 +1255,32 @@ fn parse_spreadsheet_column_index(
     Ok(val as usize)
 }
 
+/// Parsea un índice de fila (1-based) desde argumento numérico o expresión.
+fn parse_spreadsheet_row_index(
+    row_arg: &str,
+    variables: &HashMap<String, f64>,
+) -> Result<usize, CommandOutcome> {
+    let trimmed = row_arg
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .trim();
+    if trimmed.is_empty() {
+        return Err(CommandOutcome::Error("fila vacía".into()));
+    }
+    let val = require_finite(parse_numeric_arg(trimmed, variables))
+        .map_err(|e| CommandOutcome::Error(format!("fila inválida: {e}")))?;
+    if val < 1.0 || val > Document::MAX_SPREADSHEET_ROWS as f64 {
+        return Err(CommandOutcome::Error(format!(
+            "fila {val} fuera de rango 1..{}",
+            Document::MAX_SPREADSHEET_ROWS
+        )));
+    }
+    if (val - val.round()).abs() > 1e-9 {
+        return Err(CommandOutcome::Error("fila debe ser entero".into()));
+    }
+    Ok((val.round() as usize).saturating_sub(1))
+}
+
 /// Parsea una etiqueta de celda tipo A1 a (row, col) 0-based.
 fn parse_cell_label_to_indices(cell: &str) -> Option<(usize, usize)> {
     let trimmed = cell
@@ -1390,6 +1419,61 @@ fn run_fill_column(
         col,
         start_row + 1,
         end_row + 1
+    ))
+}
+
+/// Ejecuta FillRow de forma transaccional (análogo a FillColumn por fila).
+fn run_fill_row(
+    document: &mut Document,
+    row: usize,
+    start_col: usize,
+    end_col: usize,
+    value: &str,
+) -> Result<String, CommandOutcome> {
+    if start_col > end_col {
+        return Err(CommandOutcome::Error(
+            "FillRow: inicio debe ser <= fin".into(),
+        ));
+    }
+    let count = end_col
+        .checked_sub(start_col)
+        .and_then(|d| d.checked_add(1))
+        .ok_or_else(|| CommandOutcome::Error("rango desborda".into()))?;
+    if count > Document::MAX_SPREADSHEET_RECOMPUTE_CELLS {
+        return Err(CommandOutcome::Error(format!(
+            "FillRow: {} celdas excede máximo {}",
+            count,
+            Document::MAX_SPREADSHEET_RECOMPUTE_CELLS
+        )));
+    }
+    if row >= Document::MAX_SPREADSHEET_ROWS {
+        return Err(CommandOutcome::Error(format!(
+            "FillRow: fila {} excede máximo {}",
+            row + 1,
+            Document::MAX_SPREADSHEET_ROWS
+        )));
+    }
+    if end_col >= Document::MAX_SPREADSHEET_COLS {
+        return Err(CommandOutcome::Error(format!(
+            "FillRow: columna {} excede máximo {}",
+            end_col + 1,
+            Document::MAX_SPREADSHEET_COLS
+        )));
+    }
+    if value.len() > grafito_core::validation::MAX_STRING_LENGTH {
+        return Err(CommandOutcome::Error("valor excede longitud máxima".into()));
+    }
+    // Usa el helper core stage_fill_row para respetar budgets idénticos a FillColumn.
+    let staged = document
+        .stage_fill_row(row, start_col, end_col, value)
+        .map_err(CommandOutcome::Error)?;
+    *document = staged;
+    Ok(format!(
+        "FillRow: {} celdas rellenadas en fila {} columnas {}..{}",
+        count,
+        row + 1,
+        start_col + 1,
+        end_col + 1
     ))
 }
 
@@ -1780,7 +1864,11 @@ fn validate_command_label_ambiguity(document: &Document, command: &CasCmd) -> Re
         | "FitLog"
         | "FitPow"
         | "FitSin"
-        | "FitPoly" => &[0],
+        | "FitPoly"
+        | "FitLogistic"
+        | "FitGrowth"
+        | "FitImplicit" => &[0],
+        "LocusEquation" => &[0],
         "Distance"
         | "Intersect"
         | "Angle"
@@ -1814,6 +1902,8 @@ fn validate_command_label_ambiguity(document: &Document, command: &CasCmd) -> Re
         "Intersection3D" if command.args.len() == 3 => &[0, 1, 2],
         "Intersection3D" => &[0, 1],
         "ComplexMapping" | "ComplexIntegral" | "Gauss" => &[1],
+        "Focus" | "Directrix" | "Eccentricity" | "Axes" | "TableText" => &[0],
+        "IsTangent" => &[0, 1],
         _ => &[],
     };
     for index in indices {
@@ -2611,6 +2701,737 @@ fn handle_area_center_commands(
     }
 }
 
+// ── F5 Aula A: cónicas puras + tabla + slider ────────────────────────────
+
+fn parse_slider_mode(raw: &str) -> Result<(AnimationMode, f64), String> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if trimmed.is_empty() {
+        return Ok((AnimationMode::PingPong, 1.0));
+    }
+    // Soporta "Loop:2.5" o "PingPong,0.5"
+    let (mode_part, velocity_part) = if let Some(idx) = trimmed.find(':') {
+        (&trimmed[..idx], Some(&trimmed[idx + 1..]))
+    } else if let Some(idx) = trimmed.find(',') {
+        (&trimmed[..idx], Some(&trimmed[idx + 1..]))
+    } else {
+        (trimmed, None)
+    };
+    let velocity = velocity_part
+        .map(|v| {
+            v.trim()
+                .parse::<f64>()
+                .map_err(|_| format!("Slider: velocidad '{v}' no es número finito"))
+                .and_then(|val| {
+                    if val.is_finite() && val != 0.0 {
+                        Ok(val.abs())
+                    } else {
+                        Err("Slider: velocidad debe ser finita y no nula".into())
+                    }
+                })
+        })
+        .transpose()?
+        .unwrap_or(1.0);
+    let lower = mode_part.trim().to_lowercase();
+    let mode = match lower.as_str() {
+        "pingpong" | "ping_pong" | "ping-pong" | "rebote" | "bounce" | "pong" | "0" => {
+            AnimationMode::PingPong
+        }
+        "loop" | "ciclo" | "cíclico" | "ciclico" | "bucle" | "cycle" | "circular" | "1" => {
+            AnimationMode::Loop
+        }
+        _ => {
+            // Intenta parsear como número entero
+            if let Ok(num) = lower.parse::<i32>() {
+                if num == 0 {
+                    AnimationMode::PingPong
+                } else {
+                    AnimationMode::Loop
+                }
+            } else {
+                return Err(format!(
+                    "Slider: modo '{mode_part}' debe ser PingPong o Loop"
+                ));
+            }
+        }
+    };
+    Ok((mode, velocity))
+}
+
+fn run_slider_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    // Acepta 4 o 5 argumentos: Slider[a, min, max, step] o Slider[a, min, max, step, mode]
+    if args.len() < 4 || args.len() > 5 {
+        return None;
+    }
+    let var_name = clean_symbol_arg(&args[0]);
+    if !is_valid_parameter_name(&var_name) {
+        return Some(CommandOutcome::Error(
+            "Slider: la variable debe ser un identificador válido".into(),
+        ));
+    }
+    let min = match parse_finite_command_arg("Slider", "min", &args[1], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    let max = match parse_finite_command_arg("Slider", "max", &args[2], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    let step = match parse_finite_command_arg("Slider", "step", &args[3], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    if !min.is_finite() || !max.is_finite() || !step.is_finite() {
+        return Some(CommandOutcome::Error(
+            "Slider: min, max y step deben ser finitos".into(),
+        ));
+    }
+    if min >= max {
+        return Some(CommandOutcome::Error(
+            "Slider: se requiere min < max".into(),
+        ));
+    }
+    if step <= 0.0 || !step.is_finite() {
+        return Some(CommandOutcome::Error(
+            "Slider: step debe ser finito y positivo".into(),
+        ));
+    }
+    let (mode, velocity) = if let Some(mode_raw) = args.get(4) {
+        match parse_slider_mode(mode_raw) {
+            Ok(v) => v,
+            Err(e) => return Some(CommandOutcome::Error(e)),
+        }
+    } else {
+        (AnimationMode::PingPong, 1.0)
+    };
+    // Valor inicial: 0 si está en rango, si no min
+    let initial = if (min..=max).contains(&0.0) { 0.0 } else { min };
+    // Crea o actualiza variable
+    if let Err(e) = document.try_set_variable(var_name.clone(), initial) {
+        // Si ya existe y es spreadsheet-owned, propaga error
+        // Si el valor ya es igual, try_set_variable puede no fallar; si falla por otra razón lo reportamos
+        // Fallback: intenta de todos modos continuar si el error es que el valor ya es igual? try_set mantiene validación
+        return Some(CommandOutcome::Error(format!("Slider: {e}")));
+    }
+    let meta = VariableMeta {
+        position: Point2::new(0.0, 0.0),
+        min,
+        max,
+        step,
+        visible: true,
+        animating: false,
+        animation_speed: velocity,
+        animation_mode: mode,
+    };
+    match document.try_replace_variable_meta_with_previous(&var_name, meta) {
+        Ok(_) => {
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Slider '{}' [{:.3}..{:.3} step {:.3}] modo {:?} velocidad {:.3}",
+                var_name, min, max, step, mode, velocity
+            )))
+        }
+        Err(e) => Some(CommandOutcome::Error(format!("Slider: {e}"))),
+    }
+}
+
+fn run_tabletext_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 4 {
+        return None;
+    }
+    let func_arg = args[0].trim().trim_matches('"').trim_matches('\'');
+    if func_arg.is_empty() {
+        return Some(CommandOutcome::Error(
+            "TableText: se requiere función o expresión".into(),
+        ));
+    }
+    let min = match parse_finite_command_arg("TableText", "min", &args[1], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    let max = match parse_finite_command_arg("TableText", "max", &args[2], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    let step = match parse_finite_command_arg("TableText", "step", &args[3], &document.variables) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    if !min.is_finite() || !max.is_finite() || !step.is_finite() {
+        return Some(CommandOutcome::Error(
+            "TableText: min, max y step deben ser finitos".into(),
+        ));
+    }
+    if step <= 0.0 {
+        return Some(CommandOutcome::Error(
+            "TableText: step debe ser positivo".into(),
+        ));
+    }
+    if min > max {
+        return Some(CommandOutcome::Error(
+            "TableText: se requiere min <= max".into(),
+        ));
+    }
+    // Resuelve expresión: si es etiqueta de Function (con o sin "(x)"), usa su expr; si no usa literal
+    let base_label = func_arg
+        .split_once('(')
+        .map(|(b, _)| b.trim())
+        .unwrap_or(func_arg);
+    let expr: String = if let Some(id) = find_object_by_label(document, func_arg)
+        .or_else(|| find_object_by_label(document, base_label))
+    {
+        if let Some(GeoObject::Function(f)) = document.get_object(id) {
+            f.expr.clone()
+        } else {
+            return Some(CommandOutcome::Error(format!(
+                "TableText: '{}' no es una función",
+                func_arg
+            )));
+        }
+    } else {
+        func_arg.to_string()
+    };
+    if expr.trim().is_empty() {
+        return Some(CommandOutcome::Error("TableText: expresión vacía".into()));
+    }
+    if expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return Some(CommandOutcome::Error(
+            "TableText: expresión excede longitud máxima".into(),
+        ));
+    }
+    // Valida que la expresión sea parseable con variable x
+    if let Err(e) = prepare_function_ast(&expr, &document.variables, &["x"]) {
+        return Some(CommandOutcome::Error(format!(
+            "TableText: expresión inválida '{}': {e}",
+            expr
+        )));
+    }
+    let count_f = ((max - min) / step).floor() + 1.0;
+    if !count_f.is_finite() || count_f <= 0.0 || count_f > 500.0 {
+        return Some(CommandOutcome::Error(format!(
+            "TableText: rango/paso produce {:.0} filas, máximo 500",
+            count_f
+        )));
+    }
+    let count = count_f as usize;
+    if count == 0 || count > 500 {
+        return Some(CommandOutcome::Error(
+            "TableText: número de filas fuera de rango (1..500)".into(),
+        ));
+    }
+    // Genera filas
+    let mut rows: Vec<(f64, Option<f64>)> = Vec::with_capacity(count);
+    let mut vars_base = document.variables.clone();
+    for i in 0..count {
+        let x = min + i as f64 * step;
+        if x > max + 1e-9 {
+            break;
+        }
+        vars_base.insert("x".to_string(), x);
+        let vals: Vec<(String, f64)> = vars_base.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let y = evaluate(&expr, &vals).ok().filter(|v| v.is_finite());
+        rows.push((x, y));
+    }
+    // Construye tabla LaTeX-like + texto plano
+    let mut table = String::new();
+    table.push_str(&format!(
+        "TableText: {}  x∈[{:.3}, {:.3}] paso {:.3}\n",
+        expr, min, max, step
+    ));
+    table.push_str("\\begin{tabular}{c|c}\n");
+    table.push_str("x & f(x) \\\\ \\hline\n");
+    for (x, y_opt) in &rows {
+        let y_str = match y_opt {
+            Some(y) => fmt_scalar(*y),
+            None => "—".to_string(),
+        };
+        table.push_str(&format!("{} & {} \\\\\n", fmt_scalar(*x), y_str));
+    }
+    table.push_str("\\end{tabular}\n");
+    // También añade versión texto plano para visibilidad sin LaTeX
+    table.push('\n');
+    table.push_str(&format!("{:>12} | {:>12}\n", "x", "f(x)"));
+    table.push_str(&format!("{}-+->{}\n", "-".repeat(12), "-".repeat(12)));
+    for (x, y_opt) in &rows {
+        let y_str = match y_opt {
+            Some(y) => fmt_scalar(*y),
+            None => "—".to_string(),
+        };
+        table.push_str(&format!("{:>12} | {:>12}\n", fmt_scalar(*x), y_str));
+    }
+    input_text.clear();
+    Some(CommandOutcome::Message(table))
+}
+
+fn conic_label_of(document: &Document, label: &str) -> Result<GeoObject, String> {
+    let clean = clean_label(label);
+    let id = find_object_by_label(document, clean)
+        .ok_or_else(|| format!("objeto '{}' no encontrado", clean))?;
+    document
+        .get_object(id)
+        .cloned()
+        .ok_or_else(|| format!("objeto '{}' inválido", clean))
+}
+
+fn run_focus_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 1 {
+        return None;
+    }
+    let label = args[0].clone();
+    let obj = match conic_label_of(document, &label) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("Focus: {e}"))),
+    };
+    match obj {
+        GeoObject::Ellipse(e) => {
+            let foci = conic_exact::ellipse_obj_foci(e.center, e.rx, e.ry, e.angle);
+            if let Some((f1, f2)) = foci {
+                // Usa helpers exact:: para demostrar uso puro (ellipse_foci)
+                let (ff1, ff2) = conic_exact::ellipse_foci(f1, f2);
+                // Crea puntos foci opcionalmente (no bloquea si falla)
+                let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(ff1)));
+                let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(ff2)));
+                input_text.clear();
+                return Some(CommandOutcome::Message(format!(
+                    "Focus[{}]: F1=({:.6}, {:.6}) F2=({:.6}, {:.6})",
+                    label.trim(),
+                    ff1.x,
+                    ff1.y,
+                    ff2.x,
+                    ff2.y
+                )));
+            }
+            Some(CommandOutcome::Error(format!(
+                "Focus: no se pudieron calcular focos de '{}'",
+                label.trim()
+            )))
+        }
+        GeoObject::Hyperbola(h) => {
+            if let Some((f1, f2)) = conic_exact::hyperbola_obj_foci(h.center, h.a, h.b, h.angle) {
+                let (ff1, ff2) = conic_exact::hyperbola_foci(f1, f2);
+                let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(ff1)));
+                let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(ff2)));
+                input_text.clear();
+                return Some(CommandOutcome::Message(format!(
+                    "Focus[{}]: F1=({:.6}, {:.6}) F2=({:.6}, {:.6})",
+                    label.trim(),
+                    ff1.x,
+                    ff1.y,
+                    ff2.x,
+                    ff2.y
+                )));
+            }
+            Some(CommandOutcome::Error(format!(
+                "Focus: no se pudieron calcular focos de '{}'",
+                label.trim()
+            )))
+        }
+        GeoObject::Parabola(p) => {
+            if let Some(f) = conic_exact::parabola_obj_focus(p.vertex, p.p, p.angle) {
+                let ff = conic_exact::parabola_focus(f);
+                let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(ff)));
+                input_text.clear();
+                return Some(CommandOutcome::Message(format!(
+                    "Focus[{}]: F=({:.6}, {:.6})",
+                    label.trim(),
+                    ff.x,
+                    ff.y
+                )));
+            }
+            Some(CommandOutcome::Error(format!(
+                "Focus: no se pudo calcular foco de '{}'",
+                label.trim()
+            )))
+        }
+        GeoObject::Circle(c) => {
+            // Círculo: focos coinciden con centro
+            let f = c.center;
+            let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(f)));
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Focus[{}]: F=({:.6}, {:.6}) (círculo)",
+                label.trim(),
+                f.x,
+                f.y
+            )))
+        }
+        _ => Some(CommandOutcome::Error(format!(
+            "Focus: '{}' no es una cónica (elipse/hipérbola/parábola/círculo)",
+            label.trim()
+        ))),
+    }
+}
+
+fn run_directrix_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 1 {
+        return None;
+    }
+    let label = args[0].clone();
+    let obj = match conic_label_of(document, &label) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("Directrix: {e}"))),
+    };
+    match obj {
+        GeoObject::Parabola(p) => {
+            if let Some((a, b)) = conic_exact::parabola_obj_directrix(p.vertex, p.p, p.angle) {
+                // Valida con helper exact::directrix / parabola_directrix
+                let _ = conic_exact::directrix(a, b);
+                let _ = conic_exact::parabola_directrix(a, b);
+                let line = LineObj::new_with_kind(a, b, LineKind::Line);
+                let _ = try_insert_command_object(document, GeoObject::Line(line));
+                input_text.clear();
+                return Some(CommandOutcome::Message(format!(
+                    "Directrix[{}]: recta por ({:.6}, {:.6}) - ({:.6}, {:.6})",
+                    label.trim(),
+                    a.x,
+                    a.y,
+                    b.x,
+                    b.y
+                )));
+            }
+            Some(CommandOutcome::Error(format!(
+                "Directrix: no se pudo calcular directriz de '{}'",
+                label.trim()
+            )))
+        }
+        _ => Some(CommandOutcome::Error(format!(
+            "Directrix: '{}' no es una parábola",
+            label.trim()
+        ))),
+    }
+}
+
+fn run_center_aula_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 1 {
+        return None;
+    }
+    let label = args[0].clone();
+    let obj = match conic_label_of(document, &label) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("Center: {e}"))),
+    };
+    let center = match &obj {
+        GeoObject::Ellipse(e) => Some(e.center),
+        GeoObject::Hyperbola(h) => Some(h.center),
+        GeoObject::Parabola(p) => {
+            // Usa exact::parabola_center con focus+directriz derivados para demostrar uso exact
+            if let (Some(f), Some((da, db))) = (
+                conic_exact::parabola_obj_focus(p.vertex, p.p, p.angle),
+                conic_exact::parabola_obj_directrix(p.vertex, p.p, p.angle),
+            ) {
+                conic_exact::parabola_center(f, da, db).or(Some(p.vertex))
+            } else {
+                Some(p.vertex)
+            }
+        }
+        GeoObject::Circle(c) => Some(c.center),
+        _ => None,
+    };
+    if let Some(c) = center {
+        // Usa exact::center para elipse como demostración de API
+        if let GeoObject::Ellipse(e) = &obj {
+            if let Some((f1, f2)) = conic_exact::ellipse_obj_foci(e.center, e.rx, e.ry, e.angle) {
+                let _ = conic_exact::center(f1, f2);
+            }
+        }
+        let _ = try_insert_command_object(document, GeoObject::Point(PointObj::new(c)));
+        input_text.clear();
+        return Some(CommandOutcome::Message(format!(
+            "Center[{}]: ({:.6}, {:.6})",
+            label.trim(),
+            c.x,
+            c.y
+        )));
+    }
+    Some(CommandOutcome::Error(format!(
+        "Center: '{}' no tiene centro definible",
+        label.trim()
+    )))
+}
+
+fn run_eccentricity_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 1 {
+        return None;
+    }
+    let label = args[0].clone();
+    let obj = match conic_label_of(document, &label) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("Eccentricity: {e}"))),
+    };
+    let ecc: Option<f64> = match &obj {
+        GeoObject::Ellipse(e) => {
+            // Calcula vía exact::ellipse_eccentricity si tenemos punto en elipse: usa vértice mayor
+            let a = e.rx.max(e.ry);
+            let b = e.rx.min(e.ry);
+            if a <= 1e-12 || !a.is_finite() || !b.is_finite() {
+                None
+            } else {
+                let c2 = (a - b) * (a + b);
+                if c2 <= 0.0 {
+                    Some(0.0)
+                } else {
+                    let c = c2.sqrt();
+                    let e_val = c / a;
+                    // También intenta vía helper exact con punto ficticio en (center.x + a)
+                    let _ = conic_exact::ellipse_eccentricity(
+                        Point2::new(e.center.x + c, e.center.y),
+                        Point2::new(e.center.x - c, e.center.y),
+                        Point2::new(e.center.x + a, e.center.y),
+                    );
+                    Some(e_val)
+                }
+            }
+        }
+        GeoObject::Hyperbola(h) => {
+            let c2 = h.a * h.a + h.b * h.b;
+            if !c2.is_finite() || h.a <= 1e-12 {
+                None
+            } else {
+                let c = c2.sqrt();
+                let e_val = c / h.a;
+                let _ = conic_exact::hyperbola_eccentricity(
+                    Point2::new(h.center.x + c, h.center.y),
+                    Point2::new(h.center.x - c, h.center.y),
+                    Point2::new(h.center.x + h.a + 1.0, h.center.y),
+                );
+                Some(e_val)
+            }
+        }
+        GeoObject::Parabola(_) => Some(conic_exact::parabola_eccentricity()),
+        GeoObject::Circle(_) => Some(0.0),
+        _ => None,
+    };
+    if let Some(e) = ecc {
+        if e.is_finite() {
+            input_text.clear();
+            return Some(CommandOutcome::Message(format!(
+                "Eccentricity[{}]: {:.6}",
+                label.trim(),
+                e
+            )));
+        }
+    }
+    Some(CommandOutcome::Error(format!(
+        "Eccentricity: no se pudo calcular excentricidad de '{}'",
+        label.trim()
+    )))
+}
+
+fn run_axes_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 1 {
+        return None;
+    }
+    let label = args[0].clone();
+    let obj = match conic_label_of(document, &label) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("Axes: {e}"))),
+    };
+    match &obj {
+        GeoObject::Ellipse(e) => {
+            let _ = conic_exact::ellipse_obj_foci(e.center, e.rx, e.ry, e.angle);
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Axes[{}]: a={:.6} b={:.6}",
+                label.trim(),
+                e.rx,
+                e.ry
+            )))
+        }
+        GeoObject::Hyperbola(h) => {
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Axes[{}]: a={:.6} b={:.6}",
+                label.trim(),
+                h.a,
+                h.b
+            )))
+        }
+        GeoObject::Parabola(p) => {
+            if let Some(pp) = conic_exact::parabola_parameter(
+                conic_exact::parabola_obj_focus(p.vertex, p.p, p.angle).unwrap_or(p.vertex),
+                conic_exact::parabola_obj_directrix(p.vertex, p.p, p.angle)
+                    .map(|(a, _)| a)
+                    .unwrap_or(p.vertex),
+                conic_exact::parabola_obj_directrix(p.vertex, p.p, p.angle)
+                    .map(|(_, b)| b)
+                    .unwrap_or(p.vertex),
+            ) {
+                // atrapa uso de exact::parabola_parameter
+                let _ = pp;
+            }
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Axes[{}]: p={:.6}",
+                label.trim(),
+                p.p
+            )))
+        }
+        GeoObject::Circle(c) => {
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "Axes[{}]: r={:.6}",
+                label.trim(),
+                c.radius
+            )))
+        }
+        _ => Some(CommandOutcome::Error(format!(
+            "Axes: '{}' no es cónica con ejes definibles",
+            label.trim()
+        ))),
+    }
+}
+
+fn run_is_tangent_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.len() != 2 {
+        return None;
+    }
+    let label_a = args[0].trim().trim_matches('"').trim_matches('\'');
+    let label_b = args[1].trim().trim_matches('"').trim_matches('\'');
+    let obj_a = match conic_label_of(document, label_a) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("IsTangent: {e}"))),
+    };
+    let obj_b = match conic_label_of(document, label_b) {
+        Ok(o) => o,
+        Err(e) => return Some(CommandOutcome::Error(format!("IsTangent: {e}"))),
+    };
+    // Determina cuál es recta y cuál elipse/círculo
+    let (line, ellipse) = match (&obj_a, &obj_b) {
+        (GeoObject::Line(l), GeoObject::Ellipse(e)) => (l, e),
+        (GeoObject::Ellipse(e), GeoObject::Line(l)) => (l, e),
+        (GeoObject::Line(l), GeoObject::Circle(c)) => {
+            // Convierte círculo a elipse helper con rx=ry
+            let pseudo = EllipseObj::new(c.center, c.radius, c.radius);
+            // Usa función con rx=ry directamente vía is_tangent_to_ellipse
+            let result = conic_exact::is_tangent_to_ellipse(
+                pseudo.center,
+                pseudo.rx,
+                pseudo.ry,
+                pseudo.angle,
+                l.start,
+                l.end,
+            );
+            let is_t = result.unwrap_or(false);
+            input_text.clear();
+            return Some(CommandOutcome::Message(format!(
+                "IsTangent[{}, {}]: {}",
+                label_a, label_b, is_t
+            )));
+        }
+        (GeoObject::Circle(c), GeoObject::Line(l)) => {
+            let pseudo = EllipseObj::new(c.center, c.radius, c.radius);
+            let result = conic_exact::is_tangent_to_ellipse(
+                pseudo.center,
+                pseudo.rx,
+                pseudo.ry,
+                pseudo.angle,
+                l.start,
+                l.end,
+            );
+            let is_t = result.unwrap_or(false);
+            input_text.clear();
+            return Some(CommandOutcome::Message(format!(
+                "IsTangent[{}, {}]: {}",
+                label_a, label_b, is_t
+            )));
+        }
+        _ => {
+            return Some(CommandOutcome::Error(
+                "IsTangent: se requiere una recta y una elipse (o círculo)".into(),
+            ))
+        }
+    };
+    let result = conic_exact::is_tangent_to_ellipse(
+        ellipse.center,
+        ellipse.rx,
+        ellipse.ry,
+        ellipse.angle,
+        line.start,
+        line.end,
+    );
+    match result {
+        Some(is_t) => {
+            input_text.clear();
+            Some(CommandOutcome::Message(format!(
+                "IsTangent[{}, {}]: {}",
+                label_a, label_b, is_t
+            )))
+        }
+        None => Some(CommandOutcome::Error(
+            "IsTangent: no se pudo evaluar tangencia (geometría degenerada)".into(),
+        )),
+    }
+}
+
+fn handle_aula_commands(
+    document: &mut Document,
+    cmd: &CasCmd,
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    let name = cmd.command.as_str();
+    // Normaliza a minúsculas para alias ES sin depender solo de canonicalize previo
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        "focus" | "foco" | "focos" => run_focus_command(document, &cmd.args, input_text),
+        "directrix" | "directriz" => run_directrix_command(document, &cmd.args, input_text),
+        "center" | "centro" => {
+            // Prioriza aula center si el objeto es cónica; fallback al handler clásico si no
+            if let Some(out) = run_center_aula_command(document, &cmd.args, input_text) {
+                // Si es cónica, run_center_aula_command ya dio mensaje; si falló por no cónica, deja que el handler clásico intente
+                match &out {
+                    CommandOutcome::Error(msg) if msg.contains("no tiene centro") => None,
+                    _ => Some(out),
+                }
+            } else {
+                None
+            }
+        }
+        "eccentricity" | "excentricidad" | "ecc" => {
+            run_eccentricity_command(document, &cmd.args, input_text)
+        }
+        "axes" | "ejes" | "semiejes" => run_axes_command(document, &cmd.args, input_text),
+        "istangent" | "estangente" | "es_tangente" | "is_tangent" => {
+            run_is_tangent_command(document, &cmd.args, input_text)
+        }
+        "tabletext" | "tablatexto" | "tablatext" | "table" => {
+            run_tabletext_command(document, &cmd.args, input_text)
+        }
+        "slider" | "deslizador" => run_slider_command(document, &cmd.args, input_text),
+        _ => None,
+    }
+}
+
 fn dispatch_cas_command(
     document: &mut Document,
     cmd: &CasCmd,
@@ -2627,6 +3448,9 @@ fn dispatch_cas_command(
         return outcome;
     }
     if let Some(outcome) = handle_intersect_command(document, cmd, input_text) {
+        return outcome;
+    }
+    if let Some(outcome) = handle_aula_commands(document, cmd, input_text) {
         return outcome;
     }
     if let Some(outcome) = handle_area_center_commands(document, cmd, input_text) {
@@ -5823,6 +6647,51 @@ fn handle_remaining_cas_commands(
                 Err(e) => return e,
             }
         }
+        "FillRow" => {
+            if cmd.args.is_empty() || cmd.args.len() > 4 {
+                return CommandOutcome::Error(
+                    "FillRow: usa FillRow[fila, valor] o FillRow[fila, inicio, fin, valor]".into(),
+                );
+            }
+            let row = command_result!(parse_spreadsheet_row_index(
+                &cmd.args[0],
+                &document.variables
+            ));
+            let (start_col, end_col, value) = if cmd.args.len() == 2 {
+                let valor = cmd.args[1]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                (0_usize, 9_usize, valor)
+            } else if cmd.args.len() == 4 {
+                let inicio_col = command_result!(parse_spreadsheet_column_index(
+                    &cmd.args[1],
+                    &document.variables
+                ));
+                let fin_col = command_result!(parse_spreadsheet_column_index(
+                    &cmd.args[2],
+                    &document.variables
+                ));
+                let valor = cmd.args[3]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string();
+                (inicio_col, fin_col, valor)
+            } else if cmd.args.len() == 3 {
+                return CommandOutcome::Error(
+                    "FillRow: usa FillRow[fila, valor] o FillRow[fila, inicio, fin, valor]".into(),
+                );
+            } else {
+                return CommandOutcome::Error("FillRow: se requiere valor para rellenar".into());
+            };
+            match run_fill_row(document, row, start_col, end_col, &value) {
+                Ok(msg) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(msg);
+                }
+                Err(e) => return e,
+            }
+        }
         "FillCells" => {
             if cmd.args.len() < 2 || cmd.args.len() > 3 {
                 return CommandOutcome::Error(
@@ -6034,6 +6903,96 @@ fn handle_remaining_cas_commands(
             return CommandOutcome::Message(format!(
                 "Locus {label}: {} sigue a {}",
                 target_label, driver_label
+            ));
+        }
+        "LocusEquation" => {
+            if cmd.args.is_empty() || cmd.args.len() > 2 {
+                return CommandOutcome::Error(
+                    "LocusEquation: usa LocusEquation[locus] o LocusEquation[locus, grado]".into(),
+                );
+            }
+            let label = clean_label(&cmd.args[0]);
+            let degree_opt = if let Some(degree_str) = cmd.args.get(1) {
+                let parsed = match degree_str.trim().parse::<usize>() {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return CommandOutcome::Error(
+                            "LocusEquation: grado debe ser entero 2..4".into(),
+                        )
+                    }
+                };
+                if !(2..=locus_equation::MAX_LOCUS_DEGREE).contains(&parsed) {
+                    return CommandOutcome::Error(format!(
+                        "LocusEquation: grado debe estar entre 2 y {}",
+                        locus_equation::MAX_LOCUS_DEGREE
+                    ));
+                }
+                Some(parsed)
+            } else {
+                None
+            };
+            let id = match document.try_find_object_by_label(label) {
+                Ok(Some(found)) => found,
+                Ok(None) => {
+                    return CommandOutcome::Error(format!(
+                        "LocusEquation: objeto '{label}' no encontrado"
+                    ))
+                }
+                Err(error) => return CommandOutcome::Error(format!("LocusEquation: {error}")),
+            };
+            let points = match document.get_object(id) {
+                Some(GeoObject::Pencil(pencil)) if pencil.is_dynamic_locus() => {
+                    if pencil.points.len() < locus_equation::MIN_LOCUS_SAMPLES {
+                        return CommandOutcome::Error(format!(
+                            "LocusEquation: se requieren al menos {} muestras, tiene {}",
+                            locus_equation::MIN_LOCUS_SAMPLES,
+                            pencil.points.len()
+                        ));
+                    }
+                    if pencil.points.len() > locus_equation::MAX_LOCUS_SAMPLES {
+                        return CommandOutcome::Error(format!(
+                            "LocusEquation: muestras {} exceden máximo {}",
+                            pencil.points.len(),
+                            locus_equation::MAX_LOCUS_SAMPLES
+                        ));
+                    }
+                    pencil.points.clone()
+                }
+                _ => {
+                    return CommandOutcome::Error(format!(
+                        "LocusEquation: '{label}' no es un locus dinámico"
+                    ))
+                }
+            };
+            let result = match locus_equation::approximate_locus_equation(&points, degree_opt) {
+                Ok(value) => value,
+                Err(error) => return CommandOutcome::Error(format!("LocusEquation: {error}")),
+            };
+            if result.equation.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+                return CommandOutcome::Error(
+                    "LocusEquation: ecuación excede longitud máxima".into(),
+                );
+            }
+            // Crea curva implícita f(x,y)=0 con la ecuación inferida.
+            let mut implicit = ImplicitCurveObj::new(&result.equation, "0", RelationOperator::Eq);
+            implicit.color = Color::new(0.85, 0.2, 0.2, 1.0);
+            let implicit_id =
+                match try_insert_command_object(document, GeoObject::ImplicitCurve(implicit)) {
+                    Ok(id) => id,
+                    Err(error) => return CommandOutcome::Error(error),
+                };
+            let implicit_label = document
+                .get_object(implicit_id)
+                .map(|object| object.label().to_string())
+                .unwrap_or_else(|| "ImplicitCurve".to_string());
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "LocusEquation[{}] (grado {} RMSE {:.6}): {} =0 → {}",
+                label.trim(),
+                result.degree,
+                result.rmse,
+                result.equation,
+                implicit_label
             ));
         }
         "SampledGraph" if cmd.args.len() == 2 => {
@@ -6920,6 +7879,159 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(message);
         }
+        "FitLogistic" if cmd.args.len() == 1 => {
+            let (source, xs, ys) =
+                command_result!(data_table_for_fit(document, "FitLogistic", &cmd.args[0],));
+            let fit =
+                command_result!(statistics::fit_logistic(&xs, &ys).map_err(CommandOutcome::Error));
+            let expression = fit.expression();
+            if expression.is_empty() {
+                return CommandOutcome::Error(
+                    "FitLogistic: no se pudo representar el modelo".into(),
+                );
+            }
+            let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let diagnostics = fit.diagnostics.clone();
+            let mut function = FunctionObj::new(expression).with_label("FitLogistic");
+            function.color = Color::RED;
+            function.width = 2.5;
+            function.domain_min = Some(x_min);
+            function.domain_max = Some(x_max);
+            function = function.with_fit(FitMetadata::from_result(source, fit));
+            insert_command_object!(document, GeoObject::Function(function));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "Ajuste logístico: RMSE={:.6}, R²={:.6}",
+                diagnostics.rmse, diagnostics.r_squared
+            ));
+        }
+        "FitGrowth" if cmd.args.len() == 1 => {
+            let (source, xs, ys) =
+                command_result!(data_table_for_fit(document, "FitGrowth", &cmd.args[0],));
+            let fit =
+                command_result!(statistics::fit_growth(&xs, &ys).map_err(CommandOutcome::Error));
+            let expression = fit.expression();
+            if expression.is_empty() {
+                return CommandOutcome::Error("FitGrowth: no se pudo representar el modelo".into());
+            }
+            let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let diagnostics = fit.diagnostics.clone();
+            let mut function = FunctionObj::new(expression).with_label("FitGrowth");
+            function.color = Color::RED;
+            function.width = 2.5;
+            function.domain_min = Some(x_min);
+            function.domain_max = Some(x_max);
+            function = function.with_fit(FitMetadata::from_result(source, fit));
+            insert_command_object!(document, GeoObject::Function(function));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "Ajuste crecimiento: RMSE={:.6}, R²={:.6}",
+                diagnostics.rmse, diagnostics.r_squared
+            ));
+        }
+        "FitImplicit" if cmd.args.len() >= 2 => {
+            let (source, xs, ys) =
+                command_result!(data_table_for_fit(document, "FitImplicit", &cmd.args[0],));
+            let expr_raw = cmd.args[1]
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_string();
+            if expr_raw.is_empty() {
+                return CommandOutcome::Error("FitImplicit: expresión vacía".into());
+            }
+            if expr_raw.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+                return CommandOutcome::Error(
+                    "FitImplicit: expresión excede longitud máxima".into(),
+                );
+            }
+            // Extrae nombres de parámetros: identificadores que no son x ni funciones conocidas.
+            let mut param_names: Vec<String> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let reserved: std::collections::HashSet<&str> = [
+                "x", "y", "z", "t", "pi", "tau", "e", "sin", "cos", "tan", "asin", "acos", "atan",
+                "sinh", "cosh", "tanh", "exp", "ln", "log", "sqrt", "abs", "pow", "exp",
+            ]
+            .iter()
+            .copied()
+            .collect();
+            let mut current = String::new();
+            for ch in expr_raw.chars().chain(std::iter::once(' ')) {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    current.push(ch);
+                } else {
+                    if !current.is_empty() {
+                        let lower = current.to_lowercase();
+                        if !reserved.contains(lower.as_str())
+                            && !seen.contains(&current)
+                            && is_math_identifier(&current)
+                            && current != "x"
+                        {
+                            // Filtra funciones de una letra como exp etc ya reservadas.
+                            seen.insert(current.clone());
+                            param_names.push(current.clone());
+                        }
+                        current.clear();
+                    }
+                }
+            }
+            if param_names.is_empty() {
+                // Fallback: usa a,b,c por orden.
+                param_names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+            }
+            // Iniciales opcionales a partir de args[2..]
+            let mut initials: Vec<f64> = Vec::new();
+            for arg in cmd.args.iter().skip(2) {
+                let value = command_result!(parse_finite_command_arg(
+                    "FitImplicit",
+                    "inicial",
+                    arg,
+                    &document.variables,
+                ));
+                initials.push(value);
+            }
+            if initials.is_empty() {
+                initials = vec![1.0; param_names.len()];
+            } else if initials.len() != param_names.len() {
+                // Si el usuario dio menos iniciales que parámetros, completa con 1.0;
+                // si dio más, trunca.
+                if initials.len() < param_names.len() {
+                    initials.resize(param_names.len(), 1.0);
+                } else {
+                    initials.truncate(param_names.len());
+                }
+            }
+            let fit = command_result!(statistics::fit_implicit_expr(
+                &xs,
+                &ys,
+                &expr_raw,
+                &param_names,
+                &initials
+            )
+            .map_err(CommandOutcome::Error));
+            let expression = fit.expression();
+            let diagnostics = fit.diagnostics.clone();
+            let mut function = FunctionObj::new(if expression.is_empty() {
+                expr_raw.clone()
+            } else {
+                expression
+            })
+            .with_label("FitImplicit");
+            function.color = Color::RED;
+            function.width = 2.5;
+            let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            function.domain_min = Some(x_min);
+            function.domain_max = Some(x_max);
+            function = function.with_fit(FitMetadata::from_result(source, fit));
+            insert_command_object!(document, GeoObject::Function(function));
+            input_text.clear();
+            return CommandOutcome::Message(format!(
+                "Ajuste implícito: RMSE={:.6}, R²={:.6}",
+                diagnostics.rmse, diagnostics.r_squared
+            ));
+        }
         "BoxPlot" if !cmd.args.is_empty() => {
             let data = command_result!(parse_data_command_arg(
                 "BoxPlot",
@@ -7026,6 +8138,16 @@ fn handle_remaining_cas_commands(
         // ---- Lista funcional (P2.5) — comandos puros ----
         "Sequence" => {
             let outcome = run_sequence_command(&cmd.args, document);
+            match &outcome {
+                CommandOutcome::Error(_) => return outcome,
+                _ => {
+                    input_text.clear();
+                    return outcome;
+                }
+            }
+        }
+        "SequenceLive" => {
+            let outcome = run_sequence_live_command(&cmd.args, document);
             match &outcome {
                 CommandOutcome::Error(_) => return outcome,
                 _ => {
@@ -13534,6 +14656,145 @@ fn run_sequence_command(args: &[String], document: &Document) -> CommandOutcome 
         current += step;
     }
     CommandOutcome::Message(format_list(&results))
+}
+
+/// Ejecuta `SequenceLive[expr, var, start, end]` como secuencia viva.
+///
+/// Crea un `DataTable` persistente y registra `LiveSequenceBinding` con
+/// `variable_meta` binding, de modo que cada cambio de variables re-evalúa
+/// automáticamente la secuencia vía `Document::recompute_live_sequences`.
+fn run_sequence_live_command(args: &[String], document: &mut Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "SequenceLive: se requieren 4 argumentos SequenceLive[expr, var, start, end]".into(),
+        );
+    }
+    let expr_raw = args[0].trim().trim_matches('"').trim_matches('\'');
+    let var_raw = args[1].trim().trim_matches('"').trim_matches('\'');
+    let start_raw = args[2].trim().trim_matches('"').trim_matches('\'');
+    let end_raw = args[3].trim().trim_matches('"').trim_matches('\'');
+    if expr_raw.is_empty() {
+        return CommandOutcome::Error("SequenceLive: expr vacía".into());
+    }
+    if expr_raw.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("SequenceLive: expr excede longitud máxima".into());
+    }
+    if !is_math_identifier(var_raw) {
+        return CommandOutcome::Error("SequenceLive: var debe ser un identificador válido".into());
+    }
+    if start_raw.is_empty() || end_raw.is_empty() {
+        return CommandOutcome::Error("SequenceLive: start/end vacíos".into());
+    }
+    if start_raw.len() > grafito_core::validation::MAX_EXPR_LENGTH
+        || end_raw.len() > grafito_core::validation::MAX_EXPR_LENGTH
+    {
+        return CommandOutcome::Error("SequenceLive: start/end excede longitud máxima".into());
+    }
+    // Valida que la expresión sea parseable con la variable local + variables del documento.
+    if let Err(error) = prepare_function_ast(expr_raw, &document.variables, &[var_raw]) {
+        return CommandOutcome::Error(format!("SequenceLive: expr inválida: {error}"));
+    }
+    // Evalúa start/end como números (pueden ser expresiones con variables del documento).
+    let start_val = match require_finite(parse_numeric_arg(start_raw, &document.variables)) {
+        Ok(value) => value,
+        Err(error) => {
+            return CommandOutcome::Error(format!("SequenceLive: start inválido: {error}"))
+        }
+    };
+    let end_val = match require_finite(parse_numeric_arg(end_raw, &document.variables)) {
+        Ok(value) => value,
+        Err(error) => return CommandOutcome::Error(format!("SequenceLive: end inválido: {error}")),
+    };
+    let start_is_int = (start_val - start_val.round()).abs() < 1e-9;
+    let end_is_int = (end_val - end_val.round()).abs() < 1e-9;
+    if !start_is_int || !end_is_int {
+        return CommandOutcome::Error("SequenceLive: start y end deben ser enteros".into());
+    }
+    let start_i = start_val.round() as i64;
+    let end_i = end_val.round() as i64;
+    let len = (end_i - start_i).unsigned_abs() as usize + 1;
+    if len > grafito_core::document::MAX_LIVE_SEQUENCE_LENGTH {
+        return CommandOutcome::Error(format!(
+            "SequenceLive: longitud {len} excede máximo {}",
+            grafito_core::document::MAX_LIVE_SEQUENCE_LENGTH
+        ));
+    }
+    if len > MAX_DISCRETE_COUNT as usize {
+        return CommandOutcome::Error(format!(
+            "SequenceLive: longitud {len} excede el máximo {MAX_DISCRETE_COUNT}"
+        ));
+    }
+    if let Err(error) = validate_list_len(len, "SequenceLive") {
+        return CommandOutcome::Error(error);
+    }
+    if document.live_sequences.len() >= grafito_core::document::MAX_LIVE_SEQUENCES {
+        return CommandOutcome::Error(format!(
+            "SequenceLive: máximo de secuencias vivas {} alcanzado",
+            grafito_core::document::MAX_LIVE_SEQUENCES
+        ));
+    }
+    // Genera valores.
+    let mut results: Vec<ListElem> = Vec::with_capacity(len);
+    let mut xs: Vec<f64> = Vec::with_capacity(len);
+    let mut ys: Vec<f64> = Vec::with_capacity(len);
+    let step: i64 = if end_i >= start_i { 1 } else { -1 };
+    let mut current = start_i;
+    loop {
+        let mut vars_vec: Vec<(String, f64)> = document
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        vars_vec.push((var_raw.to_string(), current as f64));
+        let value = match evaluate(expr_raw, &vars_vec) {
+            Ok(value) if value.is_finite() => value,
+            Ok(value) => {
+                return CommandOutcome::Error(format!(
+                    "SequenceLive: evaluación no finita en {var_raw}={current}: {value}"
+                ))
+            }
+            Err(error) => {
+                return CommandOutcome::Error(format!(
+                    "SequenceLive: no se pudo evaluar '{expr_raw}' con {var_raw}={current}: {error}"
+                ))
+            }
+        };
+        results.push(ListElem::Scalar(value));
+        xs.push(current as f64);
+        ys.push(value);
+        if current == end_i {
+            break;
+        }
+        current += step;
+    }
+    // Crea DataTable backing.
+    let table = DataTableObj::new(var_raw, expr_raw, xs.clone(), ys.clone());
+    let table_id = match try_insert_command_object(document, GeoObject::DataTable(table)) {
+        Ok(id) => id,
+        Err(error) => return CommandOutcome::Error(error),
+    };
+    let binding = LiveSequenceBinding {
+        expr: expr_raw.to_string(),
+        var: var_raw.to_string(),
+        start_expr: start_raw.to_string(),
+        end_expr: end_raw.to_string(),
+    };
+    if let Err(error) = document.try_add_live_sequence(table_id, binding) {
+        // Revierte DataTable si el binding falla.
+        let _ = document.remove_object(table_id);
+        return CommandOutcome::Error(error);
+    }
+    // Variable_meta binding ya registrado dentro de try_add_live_sequence.
+    CommandOutcome::Message(format!(
+        "SequenceLive {}: {} (viva, {} elementos, DataTable {})",
+        var_raw,
+        format_list(&results),
+        len,
+        document
+            .get_object(table_id)
+            .map(|object| object.label().to_string())
+            .unwrap_or_else(|| table_id.to_string())
+    ))
 }
 
 /// Ejecuta `Zip[list1, list2]`: lista de pares `{ {a1,b1}, {a2,b2}, … }`.

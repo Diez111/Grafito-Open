@@ -29,7 +29,7 @@ pub const REMOTE_FOCUS_PROMPT_PREFIX: &str =
 /// Bytes reservados para el encabezado remoto de un objeto enfocado.
 pub const REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES: usize = REMOTE_FOCUS_PROMPT_PREFIX.len();
 /// Tope del texto de instrucciones de plugins inyectado al system prompt.
-pub const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 16 * 1024;
+pub const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 4 * 1024;
 pub const REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES: usize = 32;
 /// Encabezado que el transporte añade antes del catálogo de herramientas relevante.
 pub const REMOTE_TOOL_CATALOG_PROMPT_PREFIX: &str =
@@ -198,11 +198,9 @@ pub struct RequestBudget {
 impl Default for RequestBudget {
     fn default() -> Self {
         Self {
-            // 1M tokens ~ 4M chars, pero 1M chars ≈ 250k tokens es un buen default práctico
-            // investigado: deepseek-v4, mimo-2.5, muse-spark soportan 128k-1M tokens de contexto
-            max_input_chars: 1_000_000,
-            max_output_chars: 1_000_000,
-            max_steps: 24,
+            max_input_chars: 8_192,
+            max_output_chars: 2_048,
+            max_steps: 8,
             timeout_ms: 15_000,
         }
     }
@@ -211,13 +209,13 @@ impl Default for RequestBudget {
 impl RequestBudget {
     /// Verifica que los límites sean finitos y suficientemente pequeños para el MVP.
     pub fn validate(&self) -> Result<(), String> {
-        if self.max_input_chars == 0 || self.max_input_chars > 1_048_576 {
+        if self.max_input_chars == 0 || self.max_input_chars > 8_192 {
             return Err("assistant input budget is outside the allowed range".into());
         }
-        if self.max_output_chars == 0 || self.max_output_chars > 1_048_576 {
+        if self.max_output_chars == 0 || self.max_output_chars > 2_048 {
             return Err("assistant output budget is outside the allowed range".into());
         }
-        if self.max_steps == 0 || self.max_steps > 128 {
+        if self.max_steps == 0 || self.max_steps > 8 {
             return Err("assistant derivation step budget is outside the allowed range".into());
         }
         if !(100..=120_000).contains(&self.timeout_ms) {
@@ -245,11 +243,11 @@ pub struct AttachmentLimits {
 impl Default for AttachmentLimits {
     fn default() -> Self {
         Self {
-            max_bytes: 5 * 1024 * 1024,
-            max_pixels: 20_000_000,
-            max_attachments: 3,
-            max_total_bytes: 8 * 1024 * 1024,
-            max_total_pixels: 20_000_000,
+            max_bytes: 512 * 1024,
+            max_pixels: 1_048_576,
+            max_attachments: 2,
+            max_total_bytes: 1_024 * 1024,
+            max_total_pixels: 2_097_152,
         }
     }
 }
