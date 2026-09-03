@@ -6,7 +6,7 @@ use grafito_ui::tokens::{
     CARD_SPACING, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_SM, SPACE_SM,
     SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
-use grafito_ui::toolbar::draw_tool_icon;
+use grafito_ui::toolbar::{draw_tool_icon, filter_groups_by_level, ToolGroupId};
 use grafito_ui::Tool;
 
 pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
@@ -58,6 +58,14 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let is_3d = app.current_view == crate::ViewMode::D3;
 
+                // Progressive disclosure (F5): el lateral respeta el mismo
+                // filtrado por nivel que la toolbar superior — intersección
+                // perspectiva × nivel pedagógico (ver `toolbar.rs`).
+                let level_value = app.profile.level;
+                let perspective_groups = app.perspective.layout().visible_tool_groups;
+                let groups = filter_groups_by_level(perspective_groups, level_value);
+                let has = |g: ToolGroupId| groups.contains(&g);
+
                 // ── BÁSICAS ──
                 let mut basic_tools = vec![(Tool::Select, "Mover", "Arrastra objetos")];
                 if is_3d {
@@ -69,15 +77,23 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 draw_tool_group(ui, app, "Básicas", &basic_tools);
 
                 // ── EDICIÓN ──
-                draw_tool_group(
-                    ui,
-                    app,
-                    "Edición",
-                    &[(Tool::Select, "Seleccionar", "Selecciona un objeto")],
-                );
+                // `Move` está en los 3 niveles (5/8/17) y en toda perspectiva.
+                if has(ToolGroupId::Move) {
+                    draw_tool_group(
+                        ui,
+                        app,
+                        "Edición",
+                        &[(Tool::Select, "Seleccionar", "Selecciona un objeto")],
+                    );
+                }
 
                 // ── CONSTRUCCIÓN ──
-                if !is_3d {
+                // Punto medio ∈ Point, Perpendicular ∈ Line, Tangente ∈ Circle.
+                if !is_3d
+                    && (has(ToolGroupId::Point)
+                        || has(ToolGroupId::Line)
+                        || has(ToolGroupId::Circle))
+                {
                     draw_tool_group(
                         ui,
                         app,
@@ -91,7 +107,8 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 // ── MEDICIÓN ──
-                if !is_3d {
+                // Secondary+ (nivel 5..10): Measure.
+                if !is_3d && has(ToolGroupId::Measure) {
                     draw_tool_group(
                         ui,
                         app,
@@ -106,7 +123,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 // ── LÍNEAS Y POLÍGONOS ──
-                if !is_3d {
+                if !is_3d && (has(ToolGroupId::Line) || has(ToolGroupId::Polygon)) {
                     draw_tool_group(
                         ui,
                         app,
@@ -124,13 +141,13 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                 // ── CÓNICAS Y COMPÁS ──
                 // Calm: descarga Cónicas, añade construcciones de compás.
-                if !is_3d {
+                if !is_3d && (has(ToolGroupId::Circle) || has(ToolGroupId::Conic)) {
                     draw_tool_group(
                         ui,
                         app,
                         "Cónicas y Compás",
                         &[
-                            (Tool::Circle, "Circunferencia", "Centro y punto — Circle[centro, radio]"),
+                            (Tool::Circle, "Círculo centro-radio", "Circle[centro, radio] — centro y punto del borde"),
                             (
                                 Tool::EllipseByFoci,
                                 "Elipse",
@@ -153,17 +170,17 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ),
                             (
                                 Tool::Circle,
-                                "Incírculo",
-                                "Incircle[A,B,C] — círculo inscrito en triángulo",
+                                "Incírculo [A,B,C]",
+                                "Incircle[A,B,C] — círculo inscrito en el triángulo",
                             ),
                             (
                                 Tool::Circle,
-                                "Circuncírculo",
-                                "Circumcircle[A,B,C] — círculo circunscrito",
+                                "Circuncírculo [A,B,C]",
+                                "Circumcircle[A,B,C] — círculo circunscrito al triángulo",
                             ),
                             (
                                 Tool::Circle,
-                                "Compás",
+                                "Compás [centro+punto]",
                                 "Compasses[centro, punto] — traza círculo con compás",
                             ),
                         ],
@@ -172,7 +189,8 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                 // ── CURVAS ESPECIALES ──
                 // Nuevo grupo calm 2 cols que aligera Líneas/Cónicas.
-                if !is_3d {
+                // Arco/Sector/Semicírculo ∈ Circle; Bezier/Spline ∈ Curve.
+                if !is_3d && (has(ToolGroupId::Curve) || has(ToolGroupId::Circle)) {
                     draw_tool_group(
                         ui,
                         app,
@@ -180,18 +198,18 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         &[
                             (
                                 Tool::Circle,
-                                "Arco",
+                                "Arco [C,r,a,b]",
                                 "Arc[centro, radio, inicio, fin] o Arc[P1,P2,P3]",
                             ),
                             (
                                 Tool::Circle,
-                                "Sector",
+                                "Sector circular",
                                 "Sector[centro, radio, ángulo] — relleno circular",
                             ),
                             (
                                 Tool::Circle,
-                                "Semicírculo",
-                                "Semicircle[centro, radio] o [P1,P2,P3]",
+                                "Semicírculo 3 ptos",
+                                "Semicircle[centro, radio] o Semicircle[P1,P2,P3]",
                             ),
                             (
                                 Tool::ParametricCurve2D,
@@ -209,7 +227,8 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
 
                 // ── TRANSFORMACIONES ──
                 // Shear/Stretch/Reflect no tienen Tool dedicado: se mapean a Select con tooltip.
-                if !is_3d {
+                // University (nivel 11+): Constraint.
+                if !is_3d && has(ToolGroupId::Constraint) {
                     draw_tool_group(
                         ui,
                         app,
@@ -256,7 +275,8 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 // ── 3D ──
-                if is_3d {
+                // Misma intersección perspectiva × nivel que la toolbar superior.
+                if is_3d && has(ToolGroupId::ThreeD) {
                     draw_tool_group(
                         ui,
                         app,
@@ -267,6 +287,7 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                         ],
                     );
                     // Sólidos avanzados — solo en 3D (progressive disclosure).
+                    // Nota: comparte el gate `ThreeD` del bloque `if is_3d` superior.
                     draw_tool_group(
                         ui,
                         app,
@@ -289,11 +310,12 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             ),
                         ],
                     );
-                    draw_tool_group(
-                        ui,
-                        app,
-                        "4D proyectado",
-                        &[
+                    if has(ToolGroupId::FourD) {
+                        draw_tool_group(
+                            ui,
+                            app,
+                            "4D proyectado",
+                            &[
                             (
                                 Tool::Tesseract4D,
                                 "Teseracto 4D",
@@ -304,12 +326,14 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 "Hipercubo 5D",
                                 "Crea un hipercubo 5D centrado y proyectado",
                             ),
-                        ],
-                    );
+                            ],
+                        );
+                    }
                 }
 
                 // ── ANÁLISIS ──
-                if !is_3d {
+                // Secondary+ (nivel 5..10): Analysis; AlgebraCas/Calculus aportan Curve.
+                if !is_3d && (has(ToolGroupId::Analysis) || has(ToolGroupId::Curve)) {
                     draw_tool_group(
                         ui,
                         app,
@@ -328,7 +352,8 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 // ── BOOL. POLÍGONOS ──
-                if !is_3d {
+                // University (nivel 11+): Boolean.
+                if !is_3d && has(ToolGroupId::Boolean) {
                     draw_tool_group(
                         ui,
                         app,
@@ -351,8 +376,9 @@ pub fn draw_tools_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                 }
 
                 // ── DISCRETA Y LISTAS ──
-                // Progressive disclosure: solo en 2D, vía comando (Financiera/CAS/Probabilidad en paleta).
-                if !is_3d {
+                // Progressive disclosure: solo en 2D + University/Advanced,
+                // vía comando (Financiera/CAS/Probabilidad en paleta).
+                if !is_3d && has(ToolGroupId::Advanced) {
                     draw_tool_group(
                         ui,
                         app,

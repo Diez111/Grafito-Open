@@ -181,8 +181,8 @@ All three pipelines compile a WGSL shader with the user's expression embedded at
 | Panel | Access | Purpose |
 |-------|--------|---------|
 | **Algebra** | Tab A | Object list, input bar, variables with sliders, animations, per-type filter |
-| **Toolbar** | Tab T | 12 groups, 40+ tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
-| **Command Palette** | Ctrl+K | 70+ indexed commands across 12 categories, arrow navigation, syntax template insertion |
+| **Toolbar** | Tab T | 16 groups (5/8/17 progressive), ~69 tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
+| **Command Palette** | Ctrl+K | 222 indexed commands (183 palette-visible) across 16 categories, arrow navigation, syntax template insertion |
 | **Math Keyboard** | Footer | 4 tabs: numeric, functions, letters, advanced |
 | **Properties** | Right panel | Type, editable label, visibility toggle, color picker, real-time measurements |
 | **Spreadsheet** | Tab S | Full grid editor, create points from cell coordinates |
@@ -236,14 +236,13 @@ grafito/
 | GPU | `wgpu` (WebGPU -> Vulkan/Metal/DX12) | 22.0 |
 | Linear Algebra | `glam`, `nalgebra` | 0.29 / 0.33 |
 | Computational Geometry | `geo`, `spade` (Delaunay), `robust` | 0.29 / 2.10 / 1.1 |
-| Arbitrary Precision | `rug` (GMP/MPFR, 53-256 bit) | 1.28 |
 | Expression Parser | `evalexpr` | 11.3 |
 | Complex Numbers | `num-complex` | 0.4 |
 | Parallelism | `rayon` | 1.10 |
 | Spatial Index | `rstar` (R-tree) | 0.12 |
-| Serialization | `serde` + `serde_json` / `toml` / `ron` | 1.0 |
+| Serialization | `serde` + `serde_json` / `toml` | 1.0 |
 | Image Export | `image` | 0.25 |
-| UUID | `uuid` | 1.10 |
+| UUID | `uuid` | 1.20 |
 | File Dialogs | `rfd` | 0.14 |
 
 ---
@@ -278,8 +277,8 @@ grafito/
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Delete | Delete key |
 | Command palette | Ctrl+K |
-| Tools | F1 (Select), F2 (Point), F3 (Line), F4 (Circle), F5 (Polygon), F6 (Function), F8 (Sphere 3D), F9 (Cube 3D) |
-| Analysis shortcuts | R (Root), E (Extremum), N (Inflection), Ctrl+Y (Y-Intercept), Ctrl+A (Analyze) |
+| Tools | F1 (Select), F2 (Point), F3 (Line), F4 (Circle), F5 (Polygon), F6 (Function) |
+| Analysis shortcuts | R (Root), E (Extremum), N (Inflection), Ctrl+Shift+Y (Y-Intercept), Ctrl+A (Analyze) |
 
 ---
 

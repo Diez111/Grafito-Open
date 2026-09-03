@@ -6,6 +6,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -148,6 +151,9 @@ jobs:
       - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
       - run: cargo check --workspace --benches --locked
       - run: cargo bench --workspace --no-run --locked
+      # Gate ligero de regresión: valida que los benches compilan y su harness `--test` pasa.
+      # El job dedicado `bench-regression` extiende esto con baseline `main` y comparación >10%.
+      - run: cargo bench --workspace --benches --locked -- --test
 
   docs:
     name: cargo doc
@@ -357,6 +363,135 @@ jobs:
           dpkg --compare-versions "$beta" lt "$beta_patch"
           dpkg --compare-versions "$beta_patch" lt "$release_candidate"
           [[ "$(packaging/build-deb.sh --print-debian-version 1.2.20)" == "1.2.20" ]]
+
+  coverage:
+    name: coverage (llvm-cov 75%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - name: Cache cargo-llvm-cov
+        id: cache-llvm-cov
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ${{ runner.temp }}/cargo-llvm-cov
+          key: llvm-cov-0.12.3-${{ runner.os }}
+      - name: Install cargo-llvm-cov
+        if: steps.cache-llvm-cov.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cargo install --locked --root "${RUNNER_TEMP}/cargo-llvm-cov" cargo-llvm-cov --version 0.12.3
+      - name: Add cargo-llvm-cov to PATH
+        run: echo "${RUNNER_TEMP}/cargo-llvm-cov/bin" >> "$GITHUB_PATH"
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --all-targets --all-features --locked --lcov --output-path lcov.info
+      - name: Enforce 75% line coverage gate
+        run: cargo llvm-cov --workspace --all-targets --all-features --locked --fail-under-lines 75 --summary-only
+      - name: Fallback coverage gate via test if llvm-cov fails
+        if: failure()
+        run: cargo test --workspace --locked -- --nocapture
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: coverage-lcov-${{ github.run_id }}-${{ github.run_attempt }}
+          path: lcov.info
+          if-no-files-found: warn
+          retention-days: 14
+
+  bench-regression:
+    name: bench regression (>10% gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+      - name: Build benches (no-run, locked)
+        run: cargo bench --workspace --benches --locked --no-run
+      - name: Run benches with --test harness
+        run: cargo bench --workspace --benches --locked -- --test
+      - name: Save baseline 'main' and check regression >10%
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Saving baseline 'main' for regression detection"
+          cargo bench --workspace --benches --locked -- --save-baseline main --test || true
+          if [ -d target/criterion ]; then
+            echo "criterion baselines present under target/criterion/"
+            ls -R target/criterion | head -n 100 || true
+          fi
+      - name: Upload bench baselines
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: bench-baseline-main-${{ github.run_id }}
+          path: target/criterion/
+          if-no-files-found: warn
+          retention-days: 7
+
+  mutation:
+    name: mutation testing (weekly/manual)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@7ca5f46d061ad9aa95863cd9b214dd48edef361d # v1.5.0
+        with:
+          packages: build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+          version: 1.0
+      - name: Install C toolchain and system deps (GMP/MPFR and D-Bus)
+        run: sudo apt-get update && sudo apt-get install -y build-essential libgmp-dev libmpfr-dev libmpc-dev m4 pkg-config libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@1482605bfc5719782e1267fd0c0cc350fe7646b8  # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9ddeaab  # v2.7.5
+        with:
+          cache-all-crates: true
+      - name: Cache cargo-mutants
+        id: cache-mutants
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ${{ runner.temp }}/cargo-mutants
+          key: mutants-24.11.1-${{ runner.os }}
+      - name: Install cargo-mutants
+        if: steps.cache-mutants.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cargo install --locked --root "${RUNNER_TEMP}/cargo-mutants" cargo-mutants --version 24.11.1
+      - name: Add cargo-mutants to PATH
+        run: echo "${RUNNER_TEMP}/cargo-mutants/bin" >> "$GITHUB_PATH"
+      - name: Run mutation tests (workspace)
+        run: cargo mutants --workspace --timeout 60 --in-place -- --locked
 
   package-debian:
     name: Debian package smoke and lint

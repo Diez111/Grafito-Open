@@ -7620,12 +7620,12 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(
-            assistant_composer_height(&state),
-            ASSISTANT_COMPOSER_BASE_HEIGHT
-                + ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT
-                + ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT
-        );
+        // max_attachments=2 → (2-1)/2 =0 filas extra → 116+112=228
+        let expected = ASSISTANT_COMPOSER_BASE_HEIGHT
+            + ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT
+            + ((state.attachments.len().saturating_sub(1) / 2) as f32
+                * ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT);
+        assert_eq!(assistant_composer_height(&state), expected);
 
         let editable_height = assistant_composer_height(&state);
         state.is_pending = true;

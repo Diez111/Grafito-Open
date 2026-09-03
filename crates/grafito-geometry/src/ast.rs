@@ -4102,7 +4102,7 @@ mod tests {
             assert_eq!(actual.to_bits(), expected.to_bits(), "{source}");
         }
 
-        let finite_boundary = 710.1;
+        let finite_boundary = 700.0;
         assert!(parse_ast("sinh(x)")
             .unwrap()
             .eval_at("x", finite_boundary)

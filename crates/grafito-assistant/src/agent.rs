@@ -155,6 +155,9 @@ impl ToolDispatcher for PedagogyDispatcher {
 }
 
 fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
+    if let Some(rejected) = reject_oversized_string_args(call) {
+        return rejected;
+    }
     match call.name.as_str() {
         "evaluate_expr" => evaluate_expr_tool(call),
         "grafito_docs" => grafito_docs_tool(call),
@@ -179,6 +182,9 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
 }
 
 fn dispatch_pedagogy_tool(call: &ToolCall) -> ToolResult {
+    if let Some(rejected) = reject_oversized_string_args(call) {
+        return rejected;
+    }
     match call.name.as_str() {
         "scaffold" => scaffold_tool(call),
         "generate_exercise" => generate_exercise_tool(call),
@@ -198,8 +204,53 @@ fn string_arg(call: &ToolCall, key: &str) -> Option<String> {
     call.arguments
         .get(key)
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.len() <= 2_000)
         .map(str::to_owned)
-        .filter(|value| !value.trim().is_empty())
+}
+
+/// Rechaza cualquier argumento de cadena >2000 bytes antes de despachar la tool.
+///
+/// Mitiga DoS por payload excesivo sin necesidad de parsear el contenido.
+fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
+    // Recorre recursivamente todos los strings en arguments (incluye objetos anidados)
+    fn check_value(call_id: &str, key: &str, value: &Value) -> Option<ToolResult> {
+        if let Some(text) = value.as_str() {
+            if text.len() > 2_000 {
+                return Some(ToolResult::text(
+                    call_id,
+                    false,
+                    format!("argument '{key}' exceeds 2000 byte limit"),
+                ));
+            }
+        } else if let Some(map) = value.as_object() {
+            for (nested_key, nested_value) in map {
+                if let Some(rejected) = check_value(call_id, nested_key, nested_value) {
+                    return Some(rejected);
+                }
+            }
+        } else if let Some(array) = value.as_array() {
+            for element in array {
+                if let Some(text) = element.as_str() {
+                    if text.len() > 2_000 {
+                        return Some(ToolResult::text(
+                            call_id,
+                            false,
+                            format!("argument '{key}' array element exceeds 2000 byte limit"),
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+    if let Some(map) = call.arguments.as_object() {
+        for (key, value) in map {
+            if let Some(rejected) = check_value(&call.id, key, value) {
+                return Some(rejected);
+            }
+        }
+    }
+    None
 }
 
 // ── Helpers de nivel pedagógico ─────────────────────────────────────────────
@@ -520,6 +571,63 @@ fn suggest_next_tool(call: &ToolCall) -> ToolResult {
     ToolResult::text(&call.id, true, payload.to_string())
 }
 
+/// Extrae canvas desde los argumentos del schema con fallback a 640x480.
+///
+/// Acepta `canvas: [w,h]`, `width`/`height` top-level, o `params.width`/`params.height`/
+/// `params.canvas_width`/`params.canvas_height`. Valida 64..=4096; fuera de rango ignora y usa default.
+fn canvas_from_call(call: &ToolCall) -> (u32, u32) {
+    const DEFAULT: (u32, u32) = (640, 480);
+    const MIN: u64 = 64;
+    const MAX: u64 = 4096;
+    // 1. canvas como array [w,h]
+    if let Some(array) = call.arguments.get("canvas").and_then(Value::as_array) {
+        if array.len() == 2 {
+            if let (Some(width), Some(height)) = (array[0].as_u64(), array[1].as_u64()) {
+                if (MIN..=MAX).contains(&width) && (MIN..=MAX).contains(&height) {
+                    return (width as u32, height as u32);
+                }
+            }
+        }
+    }
+    // 2. width/height top-level o dentro de params
+    let mut width_opt = call
+        .arguments
+        .get("width")
+        .and_then(Value::as_u64)
+        .filter(|value| (MIN..=MAX).contains(value))
+        .map(|value| value as u32);
+    let mut height_opt = call
+        .arguments
+        .get("height")
+        .and_then(Value::as_u64)
+        .filter(|value| (MIN..=MAX).contains(value))
+        .map(|value| value as u32);
+    if let Some(object) = call.arguments.get("params").and_then(Value::as_object) {
+        if width_opt.is_none() {
+            width_opt = object
+                .get("width")
+                .or_else(|| object.get("canvas_width"))
+                .and_then(Value::as_u64)
+                .filter(|value| (MIN..=MAX).contains(value))
+                .map(|value| value as u32);
+        }
+        if height_opt.is_none() {
+            height_opt = object
+                .get("height")
+                .or_else(|| object.get("canvas_height"))
+                .and_then(Value::as_u64)
+                .filter(|value| (MIN..=MAX).contains(value))
+                .map(|value| value as u32);
+        }
+    }
+    match (width_opt, height_opt) {
+        (Some(width), Some(height)) => (width, height),
+        (Some(width), None) => (width, DEFAULT.1),
+        (None, Some(height)) => (DEFAULT.0, height),
+        (None, None) => DEFAULT,
+    }
+}
+
 /// generate_animation(template, concept, params) — valida AnimRequest sin ejecutar motor.
 fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     let template_raw = string_arg(call, "template").unwrap_or_default();
@@ -549,14 +657,20 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
     };
     let template = grafito_anim::protocol::sanitize_template(&template_raw, &concept);
     let normalized_concept = grafito_anim::protocol::normalize_concept(&concept);
-    let request = grafito_anim::protocol::AnimRequest {
+    let canvas = canvas_from_call(call);
+    let resolution =
+        grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
+    let duration = grafito_anim::protocol::AnimDuration::try_new(2.0).unwrap_or_default();
+    let anim_params = grafito_anim::protocol::AnimParams {
         template: template.clone(),
         concept: normalized_concept.clone(),
         params: params_map.clone(),
-        spec: None,
+        duration,
+        resolution,
         export: grafito_anim::ExportFormat::Gif,
-        canvas: (640, 480),
+        spec: None,
     };
+    let request = anim_params.into_request();
     if let Err(error) = request.validate() {
         return ToolResult::text(&call.id, false, format!("AnimRequest inválido: {error}"));
     }
@@ -656,6 +770,9 @@ pub fn suggest_next_tool_schema() -> ToolSchema {
 }
 
 /// Schema de `generate_animation(template, concept, params)`.
+///
+/// `canvas`/`width`/`height` son opcionales; si vienen del LLM se usan con validación
+/// 64..=4096, con fallback a 640x480.
 pub fn generate_animation_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "generate_animation",
@@ -665,7 +782,10 @@ pub fn generate_animation_tool_schema() -> ToolSchema {
             "properties": {
                 "template": {"type": "string", "description": "Plantilla opcional: derivative-slope, integral-area, taylor-series, conformal-map, pitagoras, auto"},
                 "concept": {"type": "string", "description": "Concepto en lenguaje natural, ej. derivada como pendiente"},
-                "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}}
+                "params": {"type": "object", "description": "Mapa opcional de parámetros numéricos finitos", "additionalProperties": {"type": "number"}},
+                "canvas": {"type": "array", "description": "Resolución opcional [width, height] 64..4096", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                "width": {"type": "integer", "description": "Ancho opcional 64..4096 (fallback 640)"},
+                "height": {"type": "integer", "description": "Alto opcional 64..4096 (fallback 480)"}
             },
             "required": []
         }),

@@ -92,6 +92,8 @@ const GROUP_ANALYSIS: &[ToolEntry] = &[
     (Tool::Analyze, "Analizar", ""),
 ];
 
+// Nota dedup: `Tool::Locus` vive solo en GROUP_CURVE (canónico para las
+// perspectivas analíticas) — no duplicar aquí; cada Tool un solo grupo.
 const GROUP_CONSTRAINT: &[ToolEntry] = &[
     (Tool::Coincident, "Coincidente", ""),
     (Tool::DistanceConstraint, "Distancia", ""),
@@ -100,7 +102,6 @@ const GROUP_CONSTRAINT: &[ToolEntry] = &[
     (Tool::Vertical, "Vertical", ""),
     (Tool::EqualLength, "= Igual longitud", ""),
     (Tool::Symmetry, "Simetria", ""),
-    (Tool::Locus, "Lugar geometrico", ""),
 ];
 
 const GROUP_BOOLEAN: &[ToolEntry] = &[
@@ -140,8 +141,9 @@ const GROUP_4D: &[ToolEntry] = &[
     ),
 ];
 
+// Nota dedup: `Tool::Attractor` vive solo en GROUP_DYNAMICS ("Atractor 3D") —
+// no duplicar aquí; cada Tool un solo grupo.
 const GROUP_ADVANCED: &[ToolEntry] = &[
-    (Tool::Attractor, "Atractor", ""),
     (Tool::Fractal, "Fractal", ""),
     (Tool::Histogram, "Histograma", ""),
     (Tool::ScatterPlot, "Dispersion", ""),

@@ -20,10 +20,10 @@ log.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
+pollster.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-pollster.workspace = true
 wgpu.workspace = true
 
 [[bench]]

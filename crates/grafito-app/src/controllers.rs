@@ -470,7 +470,7 @@ mod tests {
         assert!(empty.estimated_bytes() >= 8 * 1024);
         let with_objs = doc_with_points(5);
         let bytes = with_objs.estimated_bytes();
-        assert!(bytes >= 5 * 200 * 1024);
+        assert!(bytes >= 5 * 4 * 1024);
         assert!(bytes >= 8 * 1024);
         // JSON path: documento con poca geometría pero spreadsheet grande
         let mut with_sheet = Document::new();

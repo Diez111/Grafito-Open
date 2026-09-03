@@ -22,9 +22,17 @@ thread_local! {
         RefCell::new(HashMap::new());
     static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Vec<ObjectId>)>> =
         const { RefCell::new(None) };
+    /// Cache de ASTs complejos parseados (ComplexGrid/ComplexMapping) keyed por
+    /// la expresión. Evita re-parsear `complex_expr` en cada frame (H10).
+    static COMPLEX_EXPR_CACHE: RefCell<HashMap<String, grafito_complex::ComplexExpr>> =
+        RefCell::new(HashMap::new());
+    /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
+    /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
+    static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 const FRACTAL_RENDER_CACHE_CAP: usize = 8;
 const PHASE_RENDER_CACHE_CAP: usize = 32;
+const COMPLEX_EXPR_CACHE_CAP: usize = 16;
 
 fn fractal_render_cache_key(document_version: u64, fr: &grafito_core::Fractal2DObj) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -142,6 +150,70 @@ fn cached_sample_phase_portrait(
         cache.insert(key, segments.clone());
     });
     segments
+}
+
+/// Refina discontinuidades (transiciones finito/no-finito) en muestras de
+/// función mediante bisección. Consume un iterador de muestras para no copiar
+/// el guard del RwLock de `samples_or_compute` (hasta 10k muestras por frame
+/// en cache caliente).
+fn refine_function_samples(
+    samples: impl IntoIterator<Item = (f64, Option<f64>)>,
+    expr: &str,
+    variables: &HashMap<String, f64>,
+) -> Vec<(f64, Option<f64>)> {
+    let mut iter = samples.into_iter().peekable();
+    let mut refined = Vec::new();
+    while let Some(current) = iter.next() {
+        refined.push(current);
+        if let Some(&next) = iter.peek() {
+            let (x1, y1_opt) = current;
+            let (x2, y2_opt) = next;
+            if y1_opt.is_some() != y2_opt.is_some() {
+                let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
+                let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
+                let mut best_y = if let Some(y1) = y1_opt {
+                    y1
+                } else {
+                    y2_opt.unwrap_or(0.0)
+                };
+                for _ in 0..24 {
+                    let mid = (good_x + bad_x) * 0.5;
+                    if let Ok(y) = eval_function_with_vars(expr, mid, variables) {
+                        if y.is_finite() {
+                            good_x = mid;
+                            best_y = y;
+                        } else {
+                            bad_x = mid;
+                        }
+                    } else {
+                        bad_x = mid;
+                    }
+                }
+                refined.push((good_x, Some(best_y)));
+            }
+        }
+    }
+    refined
+}
+
+/// Devuelve el AST complejo parseado de `expr`, cacheado por string de
+/// expresión (LRU acotado). Evita re-parsear `complex_expr` en cada frame
+/// (H10): el parseo solo ocurre en cache miss.
+fn cached_complex_expr(expr: &str) -> Option<grafito_complex::ComplexExpr> {
+    if let Some(cached) = COMPLEX_EXPR_CACHE.with(|c| c.borrow().get(expr).cloned()) {
+        return Some(cached);
+    }
+    let parsed = grafito_complex::complex_expr::parse(expr).ok()?;
+    COMPLEX_EXPR_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= COMPLEX_EXPR_CACHE_CAP {
+            if let Some(k) = cache.keys().next().cloned() {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(expr.to_string(), parsed.clone());
+    });
+    Some(parsed)
 }
 
 /// Cachea `ordered_visible_2d_objects` keyed por `document.version`.
@@ -1104,7 +1176,6 @@ impl Default for FillTextureCacheStore {
     }
 }
 
-#[allow(dead_code)] // TODO P2: remover cuando FillTextureCacheStore se use en prod (actualmente usado en tests overlay_layer_tests)
 impl FillTextureCacheStore {
     fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
         Self {
@@ -1143,6 +1214,7 @@ impl FillTextureCacheStore {
         Some(entry)
     }
 
+    #[cfg(test)]
     fn insert(&mut self, object_id: grafito_core::ObjectId, mut entry: FillTextureCache) {
         if entry.byte_size > self.max_bytes || self.max_entries == 0 {
             return;
@@ -1175,6 +1247,7 @@ impl FillTextureCacheStore {
         self.evict_to_budget_with_ctx(Some(ctx));
     }
 
+    #[cfg(test)]
     fn remove(&mut self, object_id: grafito_core::ObjectId) {
         if let Some(entry) = self.entries.remove(&object_id) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
@@ -1255,6 +1328,7 @@ impl FillTextureCacheStore {
             .fold(0usize, |total, entry| total.saturating_add(entry.byte_size));
     }
 
+    #[cfg(test)]
     fn evict_to_budget(&mut self) {
         self.evict_to_budget_with_ctx(None);
     }
@@ -2556,11 +2630,20 @@ impl GrafitoApp {
     }
 
     fn prune_fill_texture_cache(&self) {
+        let version = self.document.version;
+        // PERF: solo re-prunea si el documento cambió desde la última pasada.
+        // Evita tomar el write lock + barrer el LRU completo en cada frame idle.
+        let already_pruned =
+            LAST_FILL_PRUNE_DOC_VERSION.with(|last| last.borrow().as_ref() == Some(&version));
+        if already_pruned {
+            return;
+        }
         let mut cache = self.fill_textures.write().unwrap_or_else(|poisoned| {
             log::warn!("Fill texture cache write lock poisoned; recovering");
             poisoned.into_inner()
         });
         cache.retain_visible_fill_owners(&self.document);
+        LAST_FILL_PRUNE_DOC_VERSION.with(|last| *last.borrow_mut() = Some(version));
     }
 
     fn hovered_analysis_color(
@@ -3313,7 +3396,7 @@ impl GrafitoApp {
                         }
                         s.push((x, None));
                     }
-                    s
+                    refine_function_samples(s, &fun.expr, variables)
                 } else {
                     let domain = (min_x, max_x);
                     let grid_size =
@@ -3321,53 +3404,16 @@ impl GrafitoApp {
                             canvas_rect.width(),
                             self.document.render_quality,
                         );
-                    // Evita `samples.clone()` iterando directamente sobre el guard del RwLock.
-                    // `samples_or_compute` devuelve `RwLockReadGuard<Vec<...>>`; iterar sin clonar
-                    // evita duplicar hasta 10k muestras por frame.
+                    // PERF (H1): iteramos el guard del RwLock sin clonar (evita
+                    // copiar hasta 10k muestras por frame en cache caliente). Si
+                    // `samples_or_compute` devolviera `Arc<FunctionSamples>`,
+                    // podríamos retener `&[Sample]` sin copia alguna.
                     let guard = grafito_core::function_sampling::samples_or_compute(
                         fun, domain, grid_size, variables,
                     );
-                    let mut owned = Vec::with_capacity(guard.len());
-                    for &(x, y) in guard.iter() {
-                        owned.push((x, y));
-                    }
-                    owned
+                    refine_function_samples(guard.iter().copied(), &fun.expr, variables)
                 };
 
-                let mut refined_samples = Vec::with_capacity(samples.len() + 100);
-                for i in 0..samples.len() {
-                    refined_samples.push(samples[i]);
-                    if i + 1 < samples.len() {
-                        let (x1, y1_opt) = samples[i];
-                        let (x2, y2_opt) = samples[i + 1];
-                        if y1_opt.is_some() != y2_opt.is_some() {
-                            let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
-                            let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
-                            let mut best_y = if let Some(y1) = y1_opt {
-                                y1
-                            } else {
-                                y2_opt.unwrap_or(0.0)
-                            };
-
-                            for _ in 0..24 {
-                                let mid = (good_x + bad_x) * 0.5;
-                                if let Ok(y) = eval_function_with_vars(&fun.expr, mid, variables) {
-                                    if y.is_finite() {
-                                        good_x = mid;
-                                        best_y = y;
-                                    } else {
-                                        bad_x = mid;
-                                    }
-                                } else {
-                                    bad_x = mid;
-                                }
-                            }
-
-                            refined_samples.push((good_x, Some(best_y)));
-                        }
-                    }
-                }
-                let samples = refined_samples;
                 let projected_samples: Vec<Option<Pos2>> = samples
                     .iter()
                     .map(|&(x, y)| y.and_then(|y| function_screen_point(view, canvas_rect, x, y)))
@@ -4172,6 +4218,9 @@ impl GrafitoApp {
             GeoObject::ComplexGrid(cg) => {
                 use num_complex::Complex64;
                 use std::collections::HashMap;
+                // Recorta al canvas: el domain coloring y la rejilla deformada
+                // pueden emitir primitivas fuera del área de dibujo.
+                let painter = painter.with_clip_rect(canvas_rect);
 
                 if cg.render_mode == 1 || cg.render_mode == 2 {
                     // Domain coloring (complex f(z)) or Heat map (real f(x,y))
@@ -4228,6 +4277,11 @@ impl GrafitoApp {
                         for (name, val) in &self.document.variables {
                             vars.insert(name.clone(), Complex64::new(*val, 0.0));
                         }
+                        // PERF (H9): cachear `complex_base_symbol` como `&str` y
+                        // actualizar la clave con `get_mut` evita 250k `String`
+                        // allocations por frame (una por píxel en domain coloring).
+                        let base_symbol = self.document.complex_base_symbol.as_str();
+                        vars.insert(base_symbol.to_string(), Complex64::new(0.0, 0.0));
                         let dc_mode = cg.domain_coloring_mode;
                         // Umbral: si |f(z)| < MAG_ZERO se considera cero y se pinta negro.
                         // Evita que arg(~0) dé ruido aleatorio en retratos de fase.
@@ -4236,10 +4290,9 @@ impl GrafitoApp {
                             let y = cg.y_min + (res - 1 - j) as f64 * dy;
                             for i in 0..res {
                                 let x = cg.x_min + i as f64 * dx;
-                                vars.insert(
-                                    self.document.complex_base_symbol.clone(),
-                                    Complex64::new(x, y),
-                                );
+                                if let Some(z) = vars.get_mut(base_symbol) {
+                                    *z = Complex64::new(x, y);
+                                }
                                 if let Ok(fz) = expr.eval(&vars) {
                                     if fz.re.is_finite() && fz.im.is_finite() {
                                         let mag = fz.norm();
@@ -4367,6 +4420,11 @@ impl GrafitoApp {
                 for (name, val) in &self.document.variables {
                     vars.insert(name.clone(), Complex64::new(*val, 0.0));
                 }
+                // PERF (H9): misma técnica que domain coloring — cachear el
+                // símbolo base como `&str` y actualizar con `get_mut` (sin
+                // `String` alloc por punto de la rejilla deformada).
+                let base_symbol = self.document.complex_base_symbol.as_str();
+                vars.insert(base_symbol.to_string(), Complex64::new(0.0, 0.0));
 
                 // Draw horizontal lines (constant imaginary part)
                 for j in 0..=grid_lines {
@@ -4374,10 +4432,9 @@ impl GrafitoApp {
                     let mut prev: Option<Pos2> = None;
                     for i in 0..=grid_lines * 4 {
                         let x = cg.x_min + i as f64 * dx / 4.0;
-                        vars.insert(
-                            self.document.complex_base_symbol.clone(),
-                            Complex64::new(x, y),
-                        );
+                        if let Some(z) = vars.get_mut(base_symbol) {
+                            *z = Complex64::new(x, y);
+                        }
 
                         if let Ok(result) = expr.eval(&vars) {
                             if result.re.is_finite()
@@ -4410,10 +4467,9 @@ impl GrafitoApp {
                     let mut prev: Option<Pos2> = None;
                     for j in 0..=grid_lines * 4 {
                         let y = cg.y_min + j as f64 * dy / 4.0;
-                        vars.insert(
-                            self.document.complex_base_symbol.clone(),
-                            Complex64::new(x, y),
-                        );
+                        if let Some(z) = vars.get_mut(base_symbol) {
+                            *z = Complex64::new(x, y);
+                        }
 
                         if let Ok(result) = expr.eval(&vars) {
                             if result.re.is_finite()
@@ -4443,15 +4499,21 @@ impl GrafitoApp {
             GeoObject::ComplexMapping(cm) => {
                 use num_complex::Complex64;
                 use std::collections::HashMap;
+                // Recorta al canvas: trazos transformados (asíntotas, segmentos
+                // largos) pueden salir del área de dibujo.
+                let painter = painter.with_clip_rect(canvas_rect);
 
                 // 1) Validar que la expresión compleja parsea. Si falla,
                 //    skip (es comportamiento lazy: el objeto queda creado pero
                 //    no se dibuja hasta que la expresión sea válida).
-                //    La validación la hace `eval_complex_batch` más abajo
-                //    (parsea internamente y devuelve Err si no parsea).
-                if grafito_complex::complex_expr::parse(&cm.expr).is_err() {
-                    return;
-                }
+                // PERF (H10): parsear una sola vez y cachear el AST por string
+                // de expresión (`cached_complex_expr`); el parseo solo ocurre
+                // en cache miss, no en cada frame. El AST se reutiliza en el
+                // batch eval de abajo (evita el doble parse por frame).
+                let parsed_expr = match cached_complex_expr(&cm.expr) {
+                    Some(expr) => expr,
+                    None => return,
+                };
 
                 // 2) Resolver el target. Si no existe o el tipo no está
                 //    soportado, no dibujamos nada.
@@ -4488,7 +4550,7 @@ impl GrafitoApp {
                     if homotopy_factor >= 1.0 - f64::EPSILON {
                         if let Some(fill_color) = ic.fill_color {
                             self.draw_complex_mapping_fill(
-                                painter,
+                                &painter,
                                 canvas_rect,
                                 view,
                                 ic,
@@ -4824,16 +4886,29 @@ impl GrafitoApp {
                 let results: Vec<Option<Complex64>> = if let Some(map) = conformal_map {
                     z_samples.iter().map(|z| map.apply(*z)).collect()
                 } else {
-                    let real_vars: HashMap<String, f64> = self.document.variables.clone();
-                    match grafito_complex::complex_expr::eval_complex_batch(
-                        &cm.expr,
-                        self.document.complex_base_symbol.as_str(),
-                        z_samples.iter().copied(),
-                        &real_vars,
-                    ) {
-                        Ok(r) => r,
-                        Err(_) => return,
-                    }
+                    // PERF (H10): reutiliza el AST ya parseado/cacheado en lugar
+                    // de `eval_complex_batch`, que re-parsea la expresión en cada
+                    // frame. `get_mut` evita `String` alloc por punto muestreado.
+                    let mut cmap: HashMap<String, Complex64> = self
+                        .document
+                        .variables
+                        .iter()
+                        .map(|(name, val)| (name.clone(), Complex64::new(*val, 0.0)))
+                        .collect();
+                    let base_symbol = self.document.complex_base_symbol.as_str();
+                    cmap.insert(base_symbol.to_string(), Complex64::new(0.0, 0.0));
+                    z_samples
+                        .iter()
+                        .map(|z| {
+                            if let Some(slot) = cmap.get_mut(base_symbol) {
+                                *slot = *z;
+                            }
+                            match parsed_expr.eval(&cmap) {
+                                Ok(val) if val.re.is_finite() && val.im.is_finite() => Some(val),
+                                _ => None,
+                            }
+                        })
+                        .collect()
                 };
 
                 // 5b) **Relleno de área** para el caso del `ImplicitCurve` como
@@ -4845,7 +4920,7 @@ impl GrafitoApp {
                 if let GeoObject::ImplicitCurve(ic) = target {
                     if let (Some(fill_color), Some(map)) = (ic.fill_color, conformal_map) {
                         self.draw_complex_mapping_fill(
-                            painter,
+                            &painter,
                             canvas_rect,
                             view,
                             ic,

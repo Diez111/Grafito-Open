@@ -184,7 +184,10 @@ impl AnimParams {
                 });
             }
         }
-        // duration y resolution ya validadas por try_new
+        // duration ya validada en try_new 0.1..=30s; resolution 64..=4096.
+        // Re-validar aquí para detectar构造 via struct literal que bypasee try_new.
+        Resolution::try_new(self.resolution.width, self.resolution.height)?;
+        AnimDuration::try_new(self.duration.0)?;
         Ok(())
     }
     pub fn into_request(self) -> AnimRequest {
@@ -195,6 +198,7 @@ impl AnimParams {
             spec: self.spec,
             export: self.export,
             canvas: self.resolution.as_tuple(),
+            duration_ms: self.duration.as_millis(),
         }
     }
 }
@@ -238,6 +242,13 @@ pub struct AnimRequest {
     pub export: ExportFormat,
     /// Dimensiones del lienzo en píxeles.
     pub canvas: (u32, u32),
+    /// Duración en ms (propagada desde AnimParams::duration). Default 2000 si falta (compat v1).
+    #[serde(default = "default_duration_ms")]
+    pub duration_ms: u64,
+}
+
+fn default_duration_ms() -> u64 {
+    2000
 }
 
 impl AnimRequest {
@@ -280,10 +291,20 @@ impl AnimRequest {
         if w < 64 || h < 64 {
             return Err(ProtocolError::InvalidCanvas(format!("{w}x{h} < 64")));
         }
-        if w > 8192 || h > 8192 {
-            return Err(ProtocolError::InvalidCanvas(format!("{w}x{h} > 8192")));
+        // Límite estricto 4096: coincide con Resolution::try_new y con el motor Python (MIN/MAX_CANVAS).
+        // Antes 8192 se aceptaba silencioso y el motor clampaba sin error — ahora es error tipado.
+        if w > 4096 || h > 4096 {
+            return Err(ProtocolError::InvalidCanvas(format!(
+                "{w}x{h} > 4096 (máximo soportado)"
+            )));
         }
-        // Advertencia: python motor limita a 4096; requests >4096 serán clampadas por el motor.
+        // Valida duration_ms propagada (0.1..30s → 100..30000ms).
+        if self.duration_ms != 0 && (self.duration_ms < 100 || self.duration_ms > 30000) {
+            return Err(ProtocolError::InvalidField {
+                field: "duration_ms",
+                reason: format!("{} fuera de 100..=30000", self.duration_ms),
+            });
+        }
         Ok(())
     }
 }
@@ -503,6 +524,22 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     if c.contains("vector") || (c.contains("campo") && c.contains("vectorial")) {
         return "conformal-map";
     }
+    if c.contains("euler")
+        || c.contains("número e")
+        || c.contains("numero e")
+        || c.contains("exp(")
+        || c.contains("exponencial")
+    {
+        return "euler";
+    }
+    if c.contains("fourier")
+        || c.contains("armónico")
+        || c.contains("armonico")
+        || c.contains("serie trigonométrica")
+        || c.contains("serie trigonometrica")
+    {
+        return "fourier";
+    }
     if c.contains("probab") || c.contains("binom") || c.contains("distrib") || c.contains("estad") {
         return "integral-area";
     }
@@ -517,7 +554,7 @@ pub fn sanitize_template(template: &str, concept: &str) -> String {
     let t = template.trim().to_lowercase();
     match t.as_str() {
         "derivative-slope" | "integral-area" | "taylor-series" | "conformal-map" | "pitagoras"
-        | "pythagoras" => {
+        | "pythagoras" | "euler" | "fourier" => {
             if t == "pythagoras" {
                 "pitagoras".to_string()
             } else {
@@ -541,6 +578,7 @@ pub fn request_for_concept(concept: &str, template_hint: &str) -> AnimRequest {
         spec: None,
         export: ExportFormat::Gif,
         canvas: (640, 480),
+        duration_ms: 2000,
     }
 }
 

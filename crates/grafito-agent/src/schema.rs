@@ -178,7 +178,9 @@ pub fn parse_tool_calls(message: &Value) -> Result<Vec<ToolCall>, String> {
                 "assistant tool call {index} arguments exceed the budget"
             ));
         }
-        let arguments = serde_json::from_str(raw_arguments).unwrap_or_else(|_| json!({}));
+        let arguments: Value = serde_json::from_str(raw_arguments).map_err(|error| {
+            format!("assistant tool call {index} arguments JSON is invalid: {error}")
+        })?;
         let id = call
             .get("id")
             .and_then(Value::as_str)
@@ -267,8 +269,8 @@ mod tests {
                 "role": "assistant",
                 "tool_calls": [{"function": {"name": "x", "arguments": "{"}}]
             }))
-            .is_ok(),
-            "falls back to an empty args object on malformed arguments"
+            .is_err(),
+            "malformed JSON arguments must be rejected, not swallowed"
         );
         assert!(parse_tool_calls(&json!({
             "role": "assistant",

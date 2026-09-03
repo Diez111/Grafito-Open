@@ -159,6 +159,15 @@ pub fn validate_instruction_path(
     Ok(canonical)
 }
 
+/// Allowlist de binarios permitidos para `engine.command[0]`.
+/// Solo se permiten ejecutables conocidos; cualquier otro (ej. `sh`, `bash`) se rechaza
+/// para evitar ejecución arbitraria via `sh -c`.
+pub const ALLOWED_ENGINE_BINARIES: &[&str] = &["python3", "grafito-manim"];
+
+/// Límites para `engine.capabilities`.
+pub const MAX_ENGINE_CAPABILITIES: usize = 16;
+pub const MAX_CAPABILITY_CHARS: usize = 64;
+
 fn validate_engine(engine: &EngineSection) -> Result<(), String> {
     if engine.transport != "stdio" {
         return Err("plugin engine transport must be stdio".into());
@@ -166,13 +175,84 @@ fn validate_engine(engine: &EngineSection) -> Result<(), String> {
     if engine.command.is_empty() || engine.command.len() > MAX_ENGINE_COMMAND_ARGS {
         return Err("plugin engine command is empty or exceeds the argument limit".into());
     }
+    // Allowlist: solo binarios conocidos. Rechaza `sh`, `bash`, `cmd`, `powershell`, etc.
+    let binary = &engine.command[0];
+    if !ALLOWED_ENGINE_BINARIES.contains(&binary.as_str()) {
+        return Err(format!(
+            "plugin engine command binary '{}' is not in allowlist {:?}",
+            binary, ALLOWED_ENGINE_BINARIES
+        ));
+    }
     for argument in &engine.command {
         if argument.is_empty() || argument.contains('\u{0}') {
             return Err("plugin engine command contains an empty or NUL argument".into());
         }
+        // Denylist shell metacaracteres y `sh -c` pattern.
+        // Incluso con allowlist, rechazamos inyección via args como `; rm -rf /`, `|`, `&&`, etc.
+        if argument.contains(';')
+            || argument.contains('&')
+            || argument.contains('|')
+            || argument.contains('`')
+            || argument.contains('$')
+            || argument.contains('\n')
+            || argument.contains('\r')
+        {
+            return Err(format!(
+                "plugin engine command argument '{argument}' contains shell metacharacters"
+            ));
+        }
+        // Bloquea intento de shell indirection incluso si binario es allowlisted
+        // (ej. ["python3", "-c", "import os; os.system(...)"] se permite solo si -c no es shell,
+        // pero bloqueamos `sh -c` via allowlist; aquí bloqueamos `-c` suelto si parece shell)
+        // Denylist explícito para args que indican shell execution
+        let lowered = argument.to_ascii_lowercase();
+        if lowered == "sh"
+            || lowered == "bash"
+            || lowered == "cmd"
+            || lowered == "powershell"
+            || lowered == "pwsh"
+        {
+            return Err(format!(
+                "plugin engine command argument '{argument}' is denied (shell binary)"
+            ));
+        }
+    }
+    // Detecta patrón `sh -c` aunque `sh` sea rechazado por allowlist, documenta razón
+    if engine.command.iter().any(|arg| arg == "-c")
+        && engine
+            .command
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "sh" | "bash" | "cmd" | "powershell"))
+    {
+        return Err("plugin engine command contains denied 'sh -c' pattern".into());
     }
     if engine.protocol_version == 0 || engine.protocol_version > 1_000 {
         return Err("plugin engine protocol version is outside the supported range".into());
+    }
+    // Valida capabilities: longitud y charset ^[a-z0-9-]{1,64}$
+    if engine.capabilities.len() > MAX_ENGINE_CAPABILITIES {
+        return Err(format!(
+            "plugin engine capabilities exceed limit {} (got {})",
+            MAX_ENGINE_CAPABILITIES,
+            engine.capabilities.len()
+        ));
+    }
+    for cap in &engine.capabilities {
+        if cap.is_empty() || cap.len() > MAX_CAPABILITY_CHARS {
+            return Err(format!(
+                "plugin engine capability '{}' length must be 1..{}",
+                cap, MAX_CAPABILITY_CHARS
+            ));
+        }
+        let valid = cap
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !valid {
+            return Err(format!(
+                "plugin engine capability '{}' must match ^[a-z0-9-]{{1,64}}$",
+                cap
+            ));
+        }
     }
     Ok(())
 }

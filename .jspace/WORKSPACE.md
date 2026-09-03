@@ -1,7 +1,7 @@
 # J-Space Workspace Ledger
 
 ## Goal
-Implementación total auditoría v2 1.2.34: 0 unwraps prod, canales acotados, TOCTOU cerrado, matemática exacta, memoria presupuestada, tokens 100% — push GitHub
+Auditoría v2 lista — 0 unwraps prod, canales acotados, TOCTOU cerrado, matemática exacta, memoria presupuestada, tokens 100% — sync docs 14→17 jobs / 92 caps / fuzz 6 targets listo para push
 
 ## Core
 

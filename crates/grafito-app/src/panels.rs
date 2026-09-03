@@ -1346,7 +1346,7 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         .add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
                                         .clicked()
                                     {
-                                        app.export_with_dialog(crate::export::ExportFormat::Svg);
+                                        app.export_with_dialog(crate::export::ExportFormat::Svg, None);
                                     }
                                 },
                             );

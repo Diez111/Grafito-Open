@@ -518,7 +518,7 @@ impl Curriculum {
         ]
     }
 
-    /// Secundaria — 10 LOs.
+    /// Secundaria — 11 LOs (incluye `sec-pitagoras`).
     pub fn secondary() -> Vec<LearningObjective> {
         vec![
             Self::lo(
@@ -624,6 +624,23 @@ impl Curriculum {
                     "diagrama",
                     "frecuencia",
                     "secundaria",
+                ],
+                3.0,
+            ),
+            Self::lo(
+                "sec-pitagoras",
+                "Teorema de Pitágoras",
+                "Triángulo rectángulo, catetos e hipotenusa, c²=a²+b², demostración y aplicaciones",
+                None,
+                8,
+                &["sec-area"],
+                &[
+                    "pitagoras",
+                    "triangulo",
+                    "hipotenusa",
+                    "cateto",
+                    "secundaria",
+                    "geometria",
                 ],
                 3.0,
             ),
@@ -796,12 +813,12 @@ mod tests {
     #[test]
     fn all_counts() {
         assert_eq!(Curriculum::primary().len(), 5);
-        assert_eq!(Curriculum::secondary().len(), 10);
+        assert_eq!(Curriculum::secondary().len(), 11);
         assert_eq!(Curriculum::utn_am1().len(), 8);
         assert_eq!(Curriculum::utn_am2().len(), 7);
         assert_eq!(Curriculum::utn_algebra().len(), 6);
         assert_eq!(Curriculum::utn_probabilidad().len(), 6);
-        assert_eq!(Curriculum::all().len(), 42);
+        assert_eq!(Curriculum::all().len(), 43);
     }
     #[test]
     fn get_and_prereqs() {

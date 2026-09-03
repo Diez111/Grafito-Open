@@ -112,6 +112,27 @@ struct SessionApiKey {
     key: String,
 }
 
+impl Drop for SessionApiKey {
+    fn drop(&mut self) {
+        // Zeroize clave en memoria para no dejar secretos en heap.
+        // No usamos crate `zeroize` (no está en Cargo.toml); implementamos manual
+        // con volatile write + black_box para evitar optimización.
+        let len = self.key.len();
+        if len > 0 {
+            // Safety: String's allocation es contigua y escribible; sobreescribimos bytes.
+            unsafe {
+                std::ptr::write_bytes(self.key.as_mut_ptr(), 0u8, len);
+            }
+        }
+        std::hint::black_box(&self.key);
+        // Limpia contenido lógico; la memoria ya está zeroizada arriba.
+        self.key.clear();
+        // Asegura que el compilador no elimine el zeroize.
+        std::hint::black_box(&self.key);
+        // Si zeroize crate estuviera disponible, usaríamos `self.key.zeroize()`.
+    }
+}
+
 impl AssistantRuntime {
     fn key_for(&self, provider: ProviderProfile) -> Option<String> {
         self.session_api_key
@@ -1810,14 +1831,20 @@ impl GrafitoApp {
                 .unwrap_or(0)
         ));
         let _ = std::fs::create_dir_all(&work_dir);
-        let request = grafito_anim::AnimRequest {
+        let canvas = (720, 540);
+        let resolution =
+            grafito_anim::protocol::Resolution::try_new(canvas.0, canvas.1).unwrap_or_default();
+        let duration = grafito_anim::protocol::AnimDuration::try_new(2.0).unwrap_or_default();
+        let anim_params = grafito_anim::protocol::AnimParams {
             template: template.to_string(),
             concept: concept.clone(),
             params: std::collections::BTreeMap::new(),
-            spec: None,
+            duration,
+            resolution,
             export: grafito_anim::ExportFormat::Gif,
-            canvas: (720, 540),
+            spec: None,
         };
+        let request = anim_params.into_request();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let repaint = ctx.clone();
         let template_owned = template.to_string();
@@ -2724,8 +2751,8 @@ impl GrafitoApp {
             );
         }
         let mut settings = if self.assistant.provider == ProviderProfile::CustomOpenAiCompatible {
-            // Compatible genérico: por defecto reusa el endpoint OpenCode Go para muse-spark/glm/mimo sin config extra.
-            // Si el usuario define GRAFITO_ASSISTANT_CUSTOM_*_API_KEY, se usará esa clave.
+            // Custom requiere clave propia (GRAFITO_ASSISTANT_CUSTOM_*_API_KEY) y no reutiliza OpenCodeGo.
+            // Si no hay clave Custom configurada, retorna Err en lugar de fallback silencioso.
             ProviderSettings::custom_openai_compatible(
                 "https://opencode.ai/zen/go/v1",
                 self.assistant.model.trim(),
@@ -2738,12 +2765,11 @@ impl GrafitoApp {
                     "GRAFITO_ASSISTANT_CUSTOM_API_KEY",
                 )
             })
-            .unwrap_or_else(|_| {
-                ProviderSettings::for_profile(
-                    ProviderProfile::OpenCodeGo,
-                    self.assistant.model.trim(),
+            .map_err(|error| {
+                format!(
+                    "Custom provider requires its own API key (GRAFITO_ASSISTANT_CUSTOM_*_API_KEY): {error}"
                 )
-            })
+            })?
         } else {
             ProviderSettings::for_profile(self.assistant.provider, self.assistant.model.trim())
         };
@@ -2775,19 +2801,8 @@ impl GrafitoApp {
         if let Some(key) = self.assistant_runtime.key_for(self.assistant.provider) {
             return Ok(Some(key));
         }
-        // Fallback: si es Compatible y no hay clave para Custom, reusa la de OpenCodeGo
-        if self.assistant.provider == ProviderProfile::CustomOpenAiCompatible {
-            if let Some(key) = self.assistant_runtime.key_for(ProviderProfile::OpenCodeGo) {
-                return Ok(Some(key));
-            }
-            if let Ok(Some(key)) = assistant_credentials::load(ProviderProfile::OpenCodeGo) {
-                self.assistant.key_available = true;
-                self.assistant.key_status_checked = true;
-                self.assistant_runtime
-                    .remember_key(ProviderProfile::OpenCodeGo, key.clone());
-                return Ok(Some(key));
-            }
-        }
+        // Custom requiere clave propia (assistant-custom); no reutiliza OpenCodeGo.
+        // Si no hay clave Custom, se retorna Err abajo vía load(Custom) => None.
         match assistant_credentials::load(self.assistant.provider) {
             Ok(Some(key)) => {
                 self.assistant.key_available = true;

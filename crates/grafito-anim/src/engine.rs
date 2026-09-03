@@ -45,6 +45,14 @@ impl Default for EngineConfig {
 
 /// Estado tipado del ciclo de vida de un job (Statem).
 /// Cada transicion es verificada; no hay submit sin Ready, no hay fuga sin ShuttingDown.
+///
+/// ```text
+/// Idle -> Spawning -> AwaitingHello{deadline} -> AwaitingPong{deadline} -> Ready
+///      -> Running{job_id, deadline, duration} -> Cancelling{job_id} -> ShuttingDown{deadline}
+///      -> Completed{media_path} | Failed{code,msg} | TimedOut | Cancelled
+/// ```
+/// Deadlines absolutas (Instant::now()+timeout) para no derivar con polls.
+/// Drop no-bloqueante: kill+try_wait sin wait().
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnimJobState {
     Idle,
@@ -86,6 +94,98 @@ impl AnimJobState {
     }
     pub fn can_submit(&self) -> bool {
         matches!(self, Self::Ready)
+    }
+}
+
+// ── Statem v3 extendido (documentado + preparado para migración) ───────────
+// El statem v2 actual (AnimJobState) cubre el puente IPC. La extensión v3
+// expone progreso fino Queued/Rendering/Exporting/Retrying y duración.
+// Si no se migra engine completo, este enum + trait permiten implementar
+// un motor v3 sin romper el API v2 — el engine v2 puede mapearse a v3.
+
+// ---------------------------------------------------------------------------
+// AnimEngineState v3 — granulometría fina de pipeline
+// ---------------------------------------------------------------------------
+
+/// Estado extendido v3 para motores que exponen cola, render y export.
+/// Complementa a `AnimJobState`; no reemplaza todavía el Statem IPC.
+/// Migración futura: `AnimJobState::Running` ↔ `Rendering` + `Exporting`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimEngineState {
+    /// En cola, aún no enviado al worker.
+    Queued,
+    /// Renderizando frames: `done` de `total` (0..=total).
+    Rendering {
+        done: u32,
+        total: u32,
+    },
+    /// Exportando al formato pedido (gif/mp4/png).
+    Exporting {
+        format: String,
+    },
+    /// Reintentando tras error transitorio: intento N con backoff.
+    Retrying {
+        attempt: u32,
+        backoff_ms: u64,
+    },
+    /// Mapeo 1:1 a terminales de `AnimJobState` (para compat).
+    Completed {
+        media_path: PathBuf,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
+    TimedOut,
+    Cancelled,
+}
+
+impl AnimEngineState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Failed { .. } | Self::TimedOut | Self::Cancelled
+        )
+    }
+}
+
+/// Trait mínimo para motores v3 (y para mockear en tests).
+/// Especificación pedida: `trait AnimEngine { fn submit(&mut self, params: AnimParams) -> Result<AnimJobId> }`
+/// Se nombra `AnimEngineTrait` para evitar colisión con la struct `AnimEngine` existente;
+/// alias `AnimEngine` en spec → `AnimEngineTrait` aquí. Migración futura renombrará la struct a `AnimEngineImpl`.
+pub trait AnimEngineTrait {
+    fn submit(&mut self, params: crate::protocol::AnimParams) -> Result<AnimJobId, String>;
+    fn engine_state(&self) -> Option<AnimEngineState>;
+    fn cancel_engine(&mut self) -> Result<(), String>;
+}
+
+impl AnimEngineTrait for AnimEngine {
+    fn submit(&mut self, params: crate::protocol::AnimParams) -> Result<AnimJobId, String> {
+        self.submit_params(params)
+    }
+    fn engine_state(&self) -> Option<AnimEngineState> {
+        match self.state() {
+            AnimJobState::Idle | AnimJobState::Spawning => Some(AnimEngineState::Queued),
+            AnimJobState::Running { .. } => Some(AnimEngineState::Rendering { done: 0, total: 48 }),
+            AnimJobState::ShuttingDown { .. } => Some(AnimEngineState::Exporting {
+                format: "gif".into(),
+            }),
+            AnimJobState::Completed { media_path } => Some(AnimEngineState::Completed {
+                media_path: media_path.clone(),
+            }),
+            AnimJobState::Failed { code, message } => Some(AnimEngineState::Failed {
+                code: code.clone(),
+                message: message.clone(),
+            }),
+            AnimJobState::TimedOut => Some(AnimEngineState::TimedOut),
+            AnimJobState::Cancelled | AnimJobState::Cancelling { .. } => {
+                Some(AnimEngineState::Cancelled)
+            }
+            _ => None,
+        }
+    }
+    fn cancel_engine(&mut self) -> Result<(), String> {
+        self.cancel()
     }
 }
 
@@ -295,12 +395,18 @@ impl AnimEngine {
     }
 
     /// Envia un nuevo pedido y devuelve su id. Solo en Ready (SB1).
+    /// Propaga `duration_ms` al worker (antes se perdía en `into_request` sin campo).
     pub fn submit(&mut self, request: AnimRequest) -> Result<AnimJobId, String> {
         if !self.state.can_submit() {
             return Err(format!(
                 "cannot submit in state {:?}: wait_ready() first",
                 self.state
             ));
+        }
+        // Validación temprana: evita enviar canvas >4096 o duration fuera de rango al motor.
+        // Antes 8192 pasaba y el motor clampaba silencioso.
+        if let Err(e) = request.validate() {
+            return Err(format!("invalid request: {e}"));
         }
         self.next_job = self.next_job.wrapping_add(1);
         let job_id = AnimJobId(format!("job-{}", self.next_job));
@@ -313,6 +419,7 @@ impl AnimEngine {
             "spec": request.spec,
             "export": request.export.as_str(),
             "canvas": [request.canvas.0, request.canvas.1],
+            "duration_ms": request.duration_ms,
         });
         self.send(&message)?;
         self.state = AnimJobState::Running {
@@ -320,6 +427,18 @@ impl AnimEngine {
             deadline: Instant::now() + self.config.job_timeout,
         };
         Ok(job_id)
+    }
+
+    /// Variante type-safe que recibe `AnimParams` (con duration tipada) y valida.
+    pub fn submit_params(
+        &mut self,
+        params: crate::protocol::AnimParams,
+    ) -> Result<AnimJobId, String> {
+        params
+            .validate()
+            .map_err(|e| format!("invalid params: {e}"))?;
+        let req = params.into_request();
+        self.submit(req)
     }
 
     /// Cancela el job en curso si está en Running. Transiciona a Cancelling.
@@ -445,6 +564,10 @@ pub fn run_job(
     cancel: Option<&dyn Fn() -> bool>,
     mut on_event: impl FnMut(JobEvent),
 ) -> Result<AnimResult, String> {
+    // Validación temprana: duration y canvas viajaban perdidos o clampados.
+    request
+        .validate()
+        .map_err(|e| format!("invalid request: {e}"))?;
     let mut engine = AnimEngine::spawn(config.clone())?;
     engine.wait_ready()?;
     let job_id = engine.submit(request.clone())?;
@@ -774,6 +897,7 @@ for line in sys.stdin:
             spec: None,
             export: ExportFormat::PngSequence,
             canvas: (640, 480),
+            duration_ms: 2000,
         }
     }
 

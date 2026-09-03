@@ -236,28 +236,155 @@ fn snap_to_feature(
         feature: Some(f),
         label,
     })
-    .or_else(|| snap_to_intersections(world, document, tol))
+    .or_else(|| snap_to_intersections(world, document, tol, view_bounds))
 }
 
+/// Cap de pares evaluados por frame: acota el O(n²) en documentos densos.
+const MAX_INTERSECTION_PAIRS_PER_FRAME: usize = 32;
+
+/// Multiplicador del pre-filtro respecto a la tolerancia de snap.
+const INTERSECTION_PREFILTER_MULT: f64 = 4.0;
+
 /// Computa intersecciones entre pares de objetos visibles cercanos al cursor.
-fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option<SnapResult> {
-    use grafito_core::GeoObject;
+///
+/// Pre-filtro en dos niveles: (1) `SpatialIndex::candidates(world, tol*4)` si
+/// el índice está poblado; (2) AABB rápida expandida por `tol*4`, descartando
+/// lo que no interseca el disco `(world, tol*4)`. Con índice vacío o stale se
+/// usa solo el AABB manual. Los pares supervivientes se ordenan por distancia
+/// media al cursor y se capan a 32 pares/frame.
+///
+/// `view_bounds = (xmin, xmax, ymin, ymax)` es el viewport ya calculado en
+/// `snap_to_feature`: delimita los barridos `function_line`/`function_function`
+/// (antes hardcodeados a `±5.0` y `-20..20`).
+fn snap_to_intersections(
+    world: Point2,
+    document: &Document,
+    tol: f64,
+    view_bounds: (f64, f64, f64, f64),
+) -> Option<SnapResult> {
+    use grafito_core::{GeoObject, LineKind, ObjectId};
     use grafito_geometry::intersections::{
         circle_circle, function_function, function_line, line_circle, line_line, IntersectionResult,
     };
+    use std::cmp::Ordering;
 
-    let mut nearby: Vec<&GeoObject> = Vec::new();
-    for (_, obj) in document.objects_iter() {
+    let pre_tol = (tol * INTERSECTION_PREFILTER_MULT).max(1e-9);
+
+    /// AABB rápida de objetos finitos; `None` = no acotado (Function y recta
+    /// infinita) → siempre candidato al pre-filtro.
+    fn quick_aabb(obj: &GeoObject) -> Option<(f64, f64, f64, f64)> {
+        match obj {
+            GeoObject::Line(l) => {
+                if l.kind == LineKind::Line {
+                    None
+                } else {
+                    Some((
+                        l.start.x.min(l.end.x),
+                        l.start.y.min(l.end.y),
+                        l.start.x.max(l.end.x),
+                        l.start.y.max(l.end.y),
+                    ))
+                }
+            }
+            GeoObject::Circle(c) => {
+                if !c.radius.is_finite() {
+                    return None;
+                }
+                Some((
+                    c.center.x - c.radius,
+                    c.center.y - c.radius,
+                    c.center.x + c.radius,
+                    c.center.y + c.radius,
+                ))
+            }
+            // Function: no acotada en x → siempre candidata.
+            _ => None,
+        }
+    }
+
+    /// Distancia del cursor al AABB (0 si el cursor cae dentro).
+    fn aabb_distance(world: Point2, bb: (f64, f64, f64, f64)) -> f64 {
+        let cx = world.x.clamp(bb.0, bb.2);
+        let cy = world.y.clamp(bb.1, bb.3);
+        ((world.x - cx).powi(2) + (world.y - cy).powi(2)).sqrt()
+    }
+
+    // Nivel 1: candidatos del índice espacial (R-tree) si está poblado.
+    let spatial_ids = if document.spatial.is_empty() {
+        Vec::new()
+    } else {
+        document.spatial.candidates(world.x, world.y, pre_tol)
+    };
+    let use_spatial = !spatial_ids.is_empty();
+
+    // Nivel 2: AABB manual contra el disco (world, tol*4). `anchor` estima la
+    // distancia objeto→cursor y sirve para ordenar los pares después.
+    let mut manual: Vec<(ObjectId, &GeoObject, f64)> = Vec::new();
+    for (id, obj) in document.objects_iter() {
         if !obj.is_visible() {
             continue;
         }
-        if matches!(
+        if !matches!(
             obj,
             GeoObject::Line(_) | GeoObject::Circle(_) | GeoObject::Function(_)
         ) {
-            nearby.push(obj);
+            continue;
+        }
+        let anchor = match obj {
+            // Recta infinita: el AABB del segmento muestra es arbitrario; se
+            // usa distancia punto-recta.
+            GeoObject::Line(l) if l.kind == LineKind::Line => l.distance_to_point(world),
+            _ => match quick_aabb(obj) {
+                Some(bb) => aabb_distance(world, bb),
+                None => {
+                    // Function: estima con la distancia vertical si es evaluable.
+                    if let GeoObject::Function(f) = obj {
+                        match grafito_geometry::expr::eval_function_with_vars(
+                            &f.expr,
+                            world.x,
+                            &document.variables,
+                        ) {
+                            Ok(y) if y.is_finite() => (y - world.y).abs(),
+                            _ => 0.0,
+                        }
+                    } else {
+                        0.0
+                    }
+                }
+            },
+        };
+        if anchor <= pre_tol {
+            manual.push((*id, obj, anchor));
         }
     }
+
+    // Intersección con el índice espacial; si el índice está stale y filtra
+    // todo (< 2 supervivientes), se conserva la lista solo-AABB.
+    let nearby: Vec<(ObjectId, &GeoObject, f64)> = if use_spatial {
+        let filtered: Vec<(ObjectId, &GeoObject, f64)> = manual
+            .iter()
+            .filter(|(id, _, _)| spatial_ids.contains(id))
+            .cloned()
+            .collect();
+        if filtered.len() >= 2 {
+            filtered
+        } else {
+            manual
+        }
+    } else {
+        manual
+    };
+
+    // Ordena los pares por distancia media al cursor y capa a 32/frame.
+    let mut pairs: Vec<(usize, usize, f64)> = Vec::new();
+    for i in 0..nearby.len() {
+        for j in (i + 1)..nearby.len() {
+            let score = (nearby[i].2 + nearby[j].2) * 0.5;
+            pairs.push((i, j, score));
+        }
+    }
+    pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
+    pairs.truncate(MAX_INTERSECTION_PAIRS_PER_FRAME);
 
     let extract_points = |result: IntersectionResult| -> Vec<Point2> {
         match result {
@@ -267,44 +394,49 @@ fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option
         }
     };
 
+    let (vx0, vx1, _, _) = view_bounds;
+
     let mut best: Option<(f64, Point2, String)> = None;
-    for i in 0..nearby.len() {
-        for j in (i + 1)..nearby.len() {
-            let a = nearby[i];
-            let b = nearby[j];
-            let points = match (a, b) {
-                (GeoObject::Line(l1), GeoObject::Line(l2)) => {
-                    let s1 = Point2::new(l1.start.x, l1.start.y);
-                    let e1 = Point2::new(l1.end.x, l1.end.y);
-                    let s2 = Point2::new(l2.start.x, l2.start.y);
-                    let e2 = Point2::new(l2.end.x, l2.end.y);
-                    extract_points(line_line(s1, e1, s2, e2))
-                        .into_iter()
-                        .filter(|point| {
-                            l1.kind_contains_t(l1.param_at_point(*point))
-                                && l2.kind_contains_t(l2.param_at_point(*point))
-                        })
-                        .collect()
-                }
-                (GeoObject::Line(l), GeoObject::Circle(c))
-                | (GeoObject::Circle(c), GeoObject::Line(l)) => {
-                    let s = Point2::new(l.start.x, l.start.y);
-                    let e = Point2::new(l.end.x, l.end.y);
-                    extract_points(line_circle(s, e, c.center, c.radius))
-                        .into_iter()
-                        .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
-                        .collect()
-                }
-                (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
-                    extract_points(circle_circle(c1.center, c1.radius, c2.center, c2.radius))
-                }
-                (GeoObject::Function(f), GeoObject::Line(l))
-                | (GeoObject::Line(l), GeoObject::Function(f)) => {
-                    let s = Point2::new(l.start.x, l.start.y);
-                    let e = Point2::new(l.end.x, l.end.y);
-                    let dx = e.x - s.x;
-                    let dy = e.y - s.y;
-                    let points = if dx.abs() < 1e-12 {
+    for (i, j, _) in pairs {
+        let a = nearby[i].1;
+        let b = nearby[j].1;
+        let points = match (a, b) {
+            (GeoObject::Line(l1), GeoObject::Line(l2)) => {
+                let s1 = Point2::new(l1.start.x, l1.start.y);
+                let e1 = Point2::new(l1.end.x, l1.end.y);
+                let s2 = Point2::new(l2.start.x, l2.start.y);
+                let e2 = Point2::new(l2.end.x, l2.end.y);
+                extract_points(line_line(s1, e1, s2, e2))
+                    .into_iter()
+                    .filter(|point| {
+                        l1.kind_contains_t(l1.param_at_point(*point))
+                            && l2.kind_contains_t(l2.param_at_point(*point))
+                    })
+                    .collect()
+            }
+            (GeoObject::Line(l), GeoObject::Circle(c))
+            | (GeoObject::Circle(c), GeoObject::Line(l)) => {
+                let s = Point2::new(l.start.x, l.start.y);
+                let e = Point2::new(l.end.x, l.end.y);
+                extract_points(line_circle(s, e, c.center, c.radius))
+                    .into_iter()
+                    .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
+                    .collect()
+            }
+            (GeoObject::Circle(c1), GeoObject::Circle(c2)) => {
+                extract_points(circle_circle(c1.center, c1.radius, c2.center, c2.radius))
+            }
+            (GeoObject::Function(f), GeoObject::Line(l))
+            | (GeoObject::Line(l), GeoObject::Function(f)) => {
+                let s = Point2::new(l.start.x, l.start.y);
+                let e = Point2::new(l.end.x, l.end.y);
+                let dx = e.x - s.x;
+                let dy = e.y - s.y;
+                let points = if dx.abs() < 1e-12 {
+                    // Recta vertical: solo si su x cae dentro del viewport.
+                    if s.x < vx0 || s.x > vx1 {
+                        vec![]
+                    } else {
                         grafito_geometry::expr::eval_function_with_vars(
                             &f.expr,
                             s.x,
@@ -314,30 +446,45 @@ fn snap_to_intersections(world: Point2, document: &Document, tol: f64) -> Option
                         .filter(|y| y.is_finite())
                         .map(|y| vec![Point2::new(s.x, y)])
                         .unwrap_or_default()
+                    }
+                } else {
+                    // Barrido acotado al viewport: la recta infinita usa
+                    // todo el rango visible; el segmento, su span ∩ vista.
+                    let (x_min, x_max) = match l.kind {
+                        LineKind::Segment => {
+                            ((s.x.min(e.x) - tol).max(vx0), (s.x.max(e.x) + tol).min(vx1))
+                        }
+                        LineKind::Ray | LineKind::Line => (vx0, vx1),
+                    };
+                    if x_max < x_min || !x_min.is_finite() || !x_max.is_finite() {
+                        vec![]
                     } else {
                         let slope = dy / dx;
                         let intercept = s.y - slope * s.x;
-                        let x_min = s.x.min(e.x) - 5.0;
-                        let x_max = s.x.max(e.x) + 5.0;
                         function_line(&f.expr, slope, intercept, x_min, x_max)
-                    };
-                    points
-                        .into_iter()
-                        .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
-                        .collect()
+                    }
+                };
+                points
+                    .into_iter()
+                    .filter(|point| l.kind_contains_t(l.param_at_point(*point)))
+                    .collect()
+            }
+            (GeoObject::Function(f1), GeoObject::Function(f2)) => {
+                // Barrido acotado al viewport visible (antes `-20..20` fijo).
+                if !vx0.is_finite() || !vx1.is_finite() || vx1 <= vx0 {
+                    vec![]
+                } else {
+                    function_function(&f1.expr, &f2.expr, vx0, vx1)
                 }
-                (GeoObject::Function(f1), GeoObject::Function(f2)) => {
-                    function_function(&f1.expr, &f2.expr, -20.0, 20.0)
-                }
-                _ => vec![],
-            };
-            for p in points {
-                let d = p.distance(&world);
-                if d <= tol
-                    && (best.is_none() || d < best.as_ref().map(|b| b.0).unwrap_or(f64::INFINITY))
-                {
-                    best = Some((d, p, format!("Intersección: ({:.3}, {:.3})", p.x, p.y)));
-                }
+            }
+            _ => vec![],
+        };
+        for p in points {
+            let d = p.distance(&world);
+            if d <= tol
+                && (best.is_none() || d < best.as_ref().map(|b| b.0).unwrap_or(f64::INFINITY))
+            {
+                best = Some((d, p, format!("Intersección: ({:.3}, {:.3})", p.x, p.y)));
             }
         }
     }
@@ -361,11 +508,30 @@ fn snap_to_curve(
             continue;
         }
         // Solo intentamos proyección para objetos que tengan una
-        // representación curva.
+        // representación curva. `PolarCurve` se trata aparte con un barrido
+        // dedicado porque `evaluate_curve_at` devuelve `None` para ella;
+        // `ImplicitCurve` devuelve `None` a propósito (requiere marching
+        // squares / Newton 2D, fuera del presupuesto por frame del snap).
         match obj {
             grafito_core::GeoObject::Function(_)
             | grafito_core::GeoObject::Circle(_)
-            | grafito_core::GeoObject::Line(_) => {}
+            | grafito_core::GeoObject::Line(_)
+            | grafito_core::GeoObject::Pencil(_)
+            | grafito_core::GeoObject::ParametricCurve2D(_) => {}
+            grafito_core::GeoObject::PolarCurve(c) => {
+                let vars: HashMap<String, f64> = document.variables.clone();
+                if let Some(pt) = closest_point_on_polar(c, world, &vars) {
+                    if pt.distance(&world) * view_scale <= tol_screen {
+                        return Some(SnapResult {
+                            point: pt,
+                            kind: SnapKind::Curve,
+                            feature: None,
+                            label: format!("polar ≈ ({:.3}, {:.3})", pt.x, pt.y),
+                        });
+                    }
+                }
+                continue;
+            }
             _ => continue,
         }
         // Aproximación rápida: si el cursor está "razonablemente" cerca en
@@ -373,7 +539,7 @@ fn snap_to_curve(
         // se delega a `evaluate_curve_at`.
         let vars: HashMap<String, f64> = document.variables.clone();
         if let Some(proj) = grafito_core::analyzable::evaluate_curve_at(obj, world, &vars) {
-            if let grafito_core::GeoObject::Function(f) = obj {
+            if let grafito_core::GeoObject::Function(_) = obj {
                 let y = proj;
                 if y.is_finite() && (y - world.y).abs() * view_scale <= tol_screen {
                     return Some(SnapResult {
@@ -383,7 +549,6 @@ fn snap_to_curve(
                         label: format!("f({:.3}) = {:.3}", world.x, y),
                     });
                 }
-                let _ = f;
             } else if let grafito_core::GeoObject::Circle(c) = obj {
                 let d = proj;
                 if d.abs() * view_scale <= tol_screen {
@@ -423,10 +588,135 @@ fn snap_to_curve(
                         }
                     }
                 }
+            } else if let grafito_core::GeoObject::Pencil(p) = obj {
+                // `proj` es la distancia al segmento contiguo más cercano; el
+                // punto más cercano se recalcula con barrido lineal.
+                let d = proj;
+                if d * view_scale <= tol_screen {
+                    if let Some(pt) = closest_point_on_pencil(p, world) {
+                        if pt.distance(&world) * view_scale <= tol_screen {
+                            return Some(SnapResult {
+                                point: pt,
+                                kind: SnapKind::Curve,
+                                feature: None,
+                                label: format!("trazo({:.3}, {:.3})", pt.x, pt.y),
+                            });
+                        }
+                    }
+                }
+            } else if let grafito_core::GeoObject::ParametricCurve2D(c) = obj {
+                // `proj` es el best_t del barrido de 200 muestras en
+                // `evaluate_curve_at`; se evalúa (x(t), y(t)) para el punto.
+                let t = proj;
+                if t.is_finite() && t >= c.t_min && t <= c.t_max {
+                    let x = grafito_geometry::expr::eval_batch_1d(
+                        &c.expr_x,
+                        "t",
+                        std::iter::once(t),
+                        &vars,
+                    )
+                    .ok()
+                    .and_then(|mut v| v.pop().flatten());
+                    let y = grafito_geometry::expr::eval_batch_1d(
+                        &c.expr_y,
+                        "t",
+                        std::iter::once(t),
+                        &vars,
+                    )
+                    .ok()
+                    .and_then(|mut v| v.pop().flatten());
+                    if let (Some(x), Some(y)) = (x, y) {
+                        if x.is_finite() && y.is_finite() {
+                            let pt = Point2::new(x, y);
+                            if pt.distance(&world) * view_scale <= tol_screen {
+                                return Some(SnapResult {
+                                    point: pt,
+                                    kind: SnapKind::Curve,
+                                    feature: None,
+                                    label: format!("param(t={:.3}) = ({:.3}, {:.3})", t, x, y),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
     None
+}
+
+/// Punto más cercano sobre un trazo Pencil (barrido de segmentos con t
+/// clamped a [0, 1]; O(n) en puntos del trazo).
+fn closest_point_on_pencil(p: &grafito_core::PencilObj, world: Point2) -> Option<Point2> {
+    if p.points.is_empty() {
+        return None;
+    }
+    if p.points.len() == 1 {
+        return Some(p.points[0]);
+    }
+    let mut best: Option<(f64, Point2)> = None;
+    for w in p.points.windows(2) {
+        let a = w[0];
+        let b = w[1];
+        let abx = b.x - a.x;
+        let aby = b.y - a.y;
+        let len2 = abx * abx + aby * aby;
+        let (cx, cy) = if len2 < 1e-15 {
+            (a.x, a.y)
+        } else {
+            let t = ((world.x - a.x) * abx + (world.y - a.y) * aby) / len2;
+            let t = t.clamp(0.0, 1.0);
+            (a.x + t * abx, a.y + t * aby)
+        };
+        let d2 = (world.x - cx).powi(2) + (world.y - cy).powi(2);
+        let closer = match &best {
+            None => true,
+            Some((bd2, _)) => d2 < *bd2,
+        };
+        if closer {
+            best = Some((d2, Point2::new(cx, cy)));
+        }
+    }
+    best.map(|(_, pt)| pt)
+}
+
+/// Punto más cercano sobre una curva polar r(t): barrido de 200 muestras
+/// t → (r·cos t, r·sin t). `evaluate_curve_at` no soporta Polar (→ None),
+/// de ahí el barrido dedicado.
+fn closest_point_on_polar(
+    c: &grafito_core::PolarCurveObj,
+    world: Point2,
+    vars: &HashMap<String, f64>,
+) -> Option<Point2> {
+    if !(c.t_min.is_finite() && c.t_max.is_finite()) || c.t_max <= c.t_min {
+        return None;
+    }
+    let n = 200;
+    let mut best: Option<(f64, Point2)> = None;
+    for i in 0..=n {
+        let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+        let r = grafito_geometry::expr::eval_batch_1d(&c.expr_r, "t", std::iter::once(t), vars)
+            .ok()
+            .and_then(|mut v| v.pop().flatten());
+        if let Some(r) = r {
+            if !r.is_finite() {
+                continue;
+            }
+            let pt = Point2::new(r * t.cos(), r * t.sin());
+            if !pt.x.is_finite() || !pt.y.is_finite() {
+                continue;
+            }
+            let d2 = (pt.x - world.x).powi(2) + (pt.y - world.y).powi(2);
+            let closer = match &best {
+                None => true,
+                Some((bd2, _)) => d2 < *bd2,
+            };
+            if closer {
+                best = Some((d2, pt));
+            }
+        }
+    }
+    best.map(|(_, pt)| pt)
 }
 
 fn snap_to_object(
@@ -653,7 +943,13 @@ mod tests {
             LineKind::Line,
         )));
 
-        assert!(snap_to_intersections(Point2::new(2.0, 0.0), &intersection_doc, 0.1).is_none());
+        assert!(snap_to_intersections(
+            Point2::new(2.0, 0.0),
+            &intersection_doc,
+            0.1,
+            (-10.0, 10.0, -10.0, 10.0)
+        )
+        .is_none());
 
         let mut vertical_doc = empty_doc();
         vertical_doc.add_object(GeoObject::Function(FunctionObj::new("x".to_string())));
@@ -662,8 +958,13 @@ mod tests {
             Point2::new(2.0, 3.0),
             LineKind::Segment,
         )));
-        let vertical = snap_to_intersections(Point2::new(2.0, 2.0), &vertical_doc, 0.1)
-            .expect("vertical function-line intersection should snap");
+        let vertical = snap_to_intersections(
+            Point2::new(2.0, 2.0),
+            &vertical_doc,
+            0.1,
+            (-10.0, 10.0, -10.0, 10.0),
+        )
+        .expect("vertical function-line intersection should snap");
         assert_eq!(vertical.point, Point2::new(2.0, 2.0));
     }
 }

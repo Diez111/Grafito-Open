@@ -26,9 +26,11 @@
 pub mod analyzable;
 pub mod constraints;
 pub mod document;
+pub mod error;
 pub mod function_sampling;
 pub mod id;
 pub mod implicit_curve;
+pub mod lifecycle;
 pub mod numeric_solver;
 pub mod object;
 pub mod parametric_sampling;
@@ -45,7 +47,9 @@ mod numeric_constraints_tests;
 
 pub use constraints::*;
 pub use document::*;
+pub use error::{CoreError, CoreResult};
 pub use id::*;
+pub use lifecycle::DocumentLifecycle;
 pub use object::*;
 pub use pencil::{LocusBinding, PencilObj};
 pub use persistence::*;

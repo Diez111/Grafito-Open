@@ -75,6 +75,23 @@ impl Exercise {
 }
 
 /// Generador determinista — mapea LO + nivel + seed a ejercicio.
+///
+/// # Dificultad por nivel pedagógico (no solo `level_value` numérico)
+///
+/// | `PedagogicalLevel` | `ExerciseDifficulty` | `level_value` | Criterio |
+/// |---|---|---|---|
+/// | `Primary` | `Easy` | 2 | Operaciones con enteros 1..5, sin fracciones complejas |
+/// | `Secondary` | `Medium` | 8 | Incluye fracciones, trigonometría discreta (4 variantes sin) |
+/// | `University` | `Hard` | 15 | Parámetros simbólicos, tolerancia numérica 2% |
+/// | `UTN(AM1)` | `Hard` | 12 | Cálculo: derivadas/integrales con `NumericTol(0.02)` |
+/// | `UTN(AM2)` | `Hard` | 14 | Series/Taylor, multivariable |
+/// | `UTN(Algebra)` | `Hard` | 13 | Matrices, transformaciones |
+/// | `UTN(Probabilidad)` | `Hard` | 15 | Distribuciones, inferencia |
+///
+/// Nota: `level_value` colisionaba históricamente en 14 (AM2 vs Probabilidad);
+/// la dificultad se decide por `match level` (variante enum), no por el
+/// número crudo, por eso `Probabilidad` y `AM2` ambas son `Hard` aunque
+/// ahora difieran en `level_value` (14 vs 15).
 #[derive(Debug, Clone, Default)]
 pub struct ExerciseGenerator;
 

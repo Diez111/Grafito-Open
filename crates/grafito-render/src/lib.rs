@@ -25,8 +25,8 @@
 
 use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::{
-    ComplexGridObj, Document, GeoObject, ObjectId, PhasePortraitObj, RenderQuality, TransformedObj,
-    VectorField3DObj,
+    ComplexGridObj, Document, GeoObject, ObjectId, PhasePortraitObj, RelationOperator,
+    RenderQuality, TransformedObj, VectorField3DObj,
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform};
 use lyon::{
@@ -60,6 +60,42 @@ thread_local! {
     static TRANSFORMED_CACHE: RefCell<TransformedCacheMap> = RefCell::new(HashMap::new());
 }
 const TRANSFORMED_CACHE_CAP: usize = 64;
+
+/// Timeout for synchronous GPU readbacks. The caller already bounds this to
+/// one attempt per frame via `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` in
+/// canvas.rs, so a bounded poll here only guards against a hung GPU freezing
+/// the prepare thread indefinitely.
+const SYNC_GPU_READBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Bounded synchronous readback: wraps `map_async` + `poll` in
+/// `pollster::block_on` with a timeout. Uses `wgpu::Maintain::Poll` (non
+/// blocking) in a loop instead of `Maintain::Wait`, so a stuck GPU cannot
+/// block the prepare thread forever. Returns `true` if the buffer was mapped
+/// before the deadline.
+///
+/// TODO P1: mover a `spawn_blocking` — el readback síncrono sigue bloqueando
+/// el hilo de prepare (acotado a 1 intento por frame via
+/// `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` en canvas.rs).
+pub(crate) fn sync_readback_with_timeout(
+    device: &wgpu::Device,
+    map_ok: &std::sync::atomic::AtomicBool,
+) -> bool {
+    pollster::block_on(async {
+        let deadline = std::time::Instant::now() + SYNC_GPU_READBACK_TIMEOUT;
+        while !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                log::warn!(
+                    "GPU readback timed out after {:?}; falling back to CPU (1 intento por frame)",
+                    SYNC_GPU_READBACK_TIMEOUT
+                );
+                return false;
+            }
+            device.poll(wgpu::Maintain::Poll);
+            std::thread::yield_now();
+        }
+        true
+    })
+}
 
 /// Tolerancia de `lyon` escalada inversamente a `view.scale` para mantener
 /// calidad visual constante: zoom alto → tolerancia fina, zoom bajo → gruesa.
@@ -686,8 +722,10 @@ pub struct Renderer {
     pub function_compute: Option<crate::function_compute::FunctionComputePipeline>,
     pub parametric_compute: Option<crate::parametric_compute::ParametricComputePipeline>,
     pub vector_compute: Option<crate::vector_compute::VectorComputePipeline>,
-    #[allow(dead_code)]
-    // TODO: remover dead_code tras activar fill_compute (actualmente siempre None para ahorrar 128 MiB)
+    /// Fill-mask compute pipeline, creado lazy en el primer uso. El pipeline
+    /// reserva dos buffers 4096×4096 (~128 MiB), así que permanece `None`
+    /// hasta que una región implícita pida un fill GPU (operador != Eq) o un
+    /// caller invoque [`Renderer::ensure_fill_compute`]. No se activa por frame.
     pub fill_compute: Option<crate::fill_compute::FillComputePipeline>,
     pub complex_compute: Option<crate::complex_compute::ComplexComputePipeline>,
     pub domain_coloring_compute:
@@ -1042,6 +1080,19 @@ impl Renderer {
 
         let limits = device.limits();
         let has_compute_storage = limits.max_storage_buffers_per_shader_stage >= 3;
+        // Instrumentación de timing GPU: TIMESTAMP_QUERY es opcional. Cuando
+        // está disponible se puede cablear wgpu-profiler a los compute passes;
+        // hoy los passes mantienen `timestamp_writes: None` porque el readback
+        // es síncrono y el wait del lado CPU domina (ver cada módulo compute).
+        if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            log::debug!(
+                "GPU TIMESTAMP_QUERY disponible — habilitar wgpu-profiler para medir compute passes"
+            );
+        } else {
+            log::debug!(
+                "GPU TIMESTAMP_QUERY no disponible — timing de compute passes deshabilitado"
+            );
+        }
         let implicit_compute = if has_compute_storage {
             Some(crate::implicit_compute::ImplicitComputePipeline::new(
                 device, queue, 1024,
@@ -1102,7 +1153,8 @@ impl Renderer {
             vector_compute,
             // Fill masks are currently rasterized by the CPU path. Keeping the
             // optional pipeline empty avoids reserving two 4096x4096 buffers
-            // (128 MiB) for a feature with no caller.
+            // (128 MiB) for a feature with no caller. Se crea lazy via
+            // `ensure_fill_compute` cuando un documento pide fill (op != Eq).
             fill_compute: None,
             complex_compute,
             domain_coloring_compute,
@@ -1115,6 +1167,33 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&mvp.to_cols_array()),
         );
+    }
+
+    /// Crea lazy el pipeline de fill compute en el primer uso. El pipeline
+    /// reserva dos buffers 4096×4096 (~128 MiB), así que solo se asigna cuando
+    /// una región implícita pide un fill GPU o un caller lo solicita
+    /// explícitamente. No se invoca por frame.
+    pub fn ensure_fill_compute(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> &crate::fill_compute::FillComputePipeline {
+        self.fill_compute.get_or_insert_with(|| {
+            log::info!("Lazy init fill compute pipeline (128 MiB GPU buffers)");
+            crate::fill_compute::FillComputePipeline::new(device, queue)
+        })
+    }
+
+    /// Devuelve `true` si el documento contiene una curva implícita con
+    /// operador rellenable (`Less`/`LessEq`/`Greater`/`GreaterEq`). `Eq` es
+    /// solo contorno y nunca necesita el pipeline de fill.
+    pub fn document_needs_fill_compute(document: &Document) -> bool {
+        document.objects_iter().any(|(_, object)| {
+            matches!(
+                object,
+                GeoObject::ImplicitCurve(curve) if curve.operator != RelationOperator::Eq
+            )
+        })
     }
 
     /// Allocates a multisampled 3D color/depth target plus a resolved texture

@@ -37,6 +37,10 @@ impl Interval {
         self.hi.to_f64() < 0.0
     }
 
+    /// Punto medio overflow-safe: `lo + (hi - lo) / 2`.
+    ///
+    /// Nunca se usa `(lo + hi) / 2`, que desborda con extremos grandes
+    /// (`hi = f64::MAX`) o pierde precisión con rangos asimétricos.
     pub fn midpoint(&self) -> f64 {
         let lo = self.lo.to_f64();
         let hi = self.hi.to_f64();
@@ -46,6 +50,15 @@ impl Interval {
 
 /// Safe sample of a function f(x) with asymptote detection.
 /// Returns (x, y) where y is None at discontinuities/asymptotes.
+///
+/// Garantías verificadas (auditoría geometría):
+/// - Presupuesto `MAX_SAMPLES` = 100k: `n` fuera de `2..=100_000` devuelve
+///   `vec![]` sin reservar (cota OOM; el peor caso son ~1.6 MiB).
+/// - `x_min`/`x_max` deben ser finitos y `x_min < x_max`; `dx` debe ser finito,
+///   no nulo y con granularidad representable (`x_min + dx != x_min`).
+/// - Cada `x` muestreado se valida finito; cada `y` debe ser finito y
+///   `|y| < 1e50` (un `Div` 1/0 del evaluador da `NaN`, nunca `Inf`, y cae a
+///   `None` aquí en lugar de contaminar el render).
 pub fn safe_sample<F: Fn(f64) -> f64>(
     f: F,
     x_min: f64,
@@ -159,6 +172,19 @@ mod tests {
         ];
         let asymp = detect_asymptotes(&samples);
         assert!(!asymp.is_empty());
+    }
+
+    #[test]
+    fn safe_sample_enforces_finite_bounds_and_max_samples_budget() {
+        let f = |x: f64| x;
+        // Sobre el presupuesto: vacío sin reservar.
+        assert!(safe_sample(f, 0.0, 1.0, 100_001).is_empty());
+        // Bordes no finitos o invertidos: vacío.
+        assert!(safe_sample(f, f64::NAN, 1.0, 10).is_empty());
+        assert!(safe_sample(f, 0.0, f64::INFINITY, 10).is_empty());
+        assert!(safe_sample(f, 1.0, 0.0, 10).is_empty());
+        // Tope exacto del presupuesto: 100k muestras.
+        assert_eq!(safe_sample(f, 0.0, 1.0, 100_000).len(), 100_000);
     }
 
     #[test]

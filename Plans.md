@@ -24,7 +24,7 @@ grafito-profile/pedagogy/plugins/assistant-types
 - **Cerebro puro**: core, geometry, command, complex, whiteboard, profile, pedagogy, plugins, assistant
 - **Puente**: anim (IPC JSON v1 stdio a Python/manim)
 - **Piel**: ui (tokens, theme, assistant, animation), app (app.rs 4826L, assistant.rs 4731L, render_2d 4750L, panels 3177L, etc.)
-- **Infra**: packaging/deb, .github/workflows/ci.yml (8 jobs)
+- **Infra**: packaging/deb, .github/workflows/ci.yml (17 jobs)
 
 ## Principios Invariantes (CORE)
 - **CORE-1 /j-space**: Nada de código sin que esté en Plans.md/Tasks.md/progress.md primero.

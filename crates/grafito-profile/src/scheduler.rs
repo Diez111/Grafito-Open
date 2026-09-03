@@ -41,12 +41,36 @@ impl std::error::Error for SchedulerError {}
 
 /// Calcula el intervalo en segundos hasta el próximo repaso.
 ///
-/// Fórmula SM-2 simplificada:
+/// Fórmula SM-2 simplificada adaptada para Grafito:
 /// `interval = base * 2^(box_level-1) * (2.0 - mastery)`
 /// con base = 86400 s (1 día) y box_level clamp 1..=8.
 ///
 /// Si `box_level == 0` se trata como 1 (primer repaso en ~1 día modulado).
 /// `mastery` se clamp a 0..=1; valores no finitos retornan intervalo base.
+///
+/// # Nota sobre `factor = (2 - mastery)` — ¿inversión de SM-2?
+///
+/// En SM-2 clásico el factor de facilidad (E-Factor) **crece** cuando el
+/// repaso fue fácil (mastery alto ⇒ intervalo más largo). Aquí ocurre lo
+/// opuesto: `mastery` alto ⇒ `factor` cercano a 1.0 ⇒ intervalo **más corto**.
+/// Esto es **intencional y documentado** para Grafito (decisión pedagógica):
+///
+/// - Leitner ya codifica la facilidad en `box_level` (intervalo exponencial
+///   2^(nivel-1)). `box_level` es la señal principal de espaciamiento.
+/// - `mastery` es una señal secundaria de **refuerzo preventivo**: si el
+///   dominio reciente es alto pero la caja aún es baja (ej. alumno brillante
+///   que acaba de fallar antes), acortar levemente el intervalo acelera la
+///   consolidación en lugar de alejar el repaso.
+/// - Si el dominio es bajo (`mastery`≈0), `factor≈2.0` duplica el intervalo:
+///   paradójicamente deja más tiempo para estudiar antes del próximo repaso,
+///   evitando sobrecarga inmediata (el alumno ya recibió el castigo de
+///   `box_level -=2` en `record_outcome`).
+///
+/// Si en el futuro se quiere un SM-2 puro (`factor` creciente con `mastery`),
+/// basta invertir a `(1.0 + mastery)` o usar el E-Factor clásico
+/// `EF' = EF + (0.1 - (5-q)*(0.08+(5-q)*0.02))`. Por ahora se mantiene
+/// `(2 - mastery)` por compatibilidad y por los tests existentes
+/// (`next_interval_mastery_modulates`, `scheduler_interval_grows_with_box_level`).
 pub fn next_interval(box_level: u8, mastery: f32) -> u64 {
     let level = box_level.clamp(1, MAX_BOX_LEVEL);
     let mastery_clamped = if mastery.is_finite() {
@@ -57,7 +81,7 @@ pub fn next_interval(box_level: u8, mastery: f32) -> u64 {
     let base: f64 = DAY_SECS as f64;
     let pow = 2_f64.powi(i32::from(level) - 1);
     let factor = 2.0 - f64::from(mastery_clamped);
-    // factor en [1.0, 2.0]; mastery alto => intervalo un poco más corto.
+    // factor en [1.0, 2.0]; mastery alto => intervalo un poco más corto (ver nota arriba).
     // Saturar a u64 y evitar 0.
     let interval = base * pow * factor;
     let secs = interval.round() as u64;

@@ -7,7 +7,9 @@
 //! Asesoría matemática: Aivo382 (almironi780@gmail.com)
 
 use crate::ast::{parse_ast, Expr};
-use crate::expr::{eval_batch_1d, eval_batch_2d, eval_function, eval_function_with_vars};
+use crate::expr::{
+    eval_batch_1d, eval_batch_2d, eval_function, eval_function_with_vars, prepare_function_ast,
+};
 use crate::integral::composite_simpson;
 use crate::{line_param_at_point, LineKind, Point2};
 use std::collections::HashMap;
@@ -2204,14 +2206,36 @@ fn tool_second_derivative_at(expr: &str, x_val: f64) -> Result<f64, String> {
 
 /// Integra `g(x)` en `[a, b]` con la regla de Simpson compuesta sobre `n`
 /// muestras uniformes.
-fn tool_simpson<F: Fn(f64) -> f64>(g: F, a: f64, b: f64, n: usize) -> f64 {
+///
+/// El integrando `g` ya debe capturar un AST preparado fuera del loop
+/// (`prepare_function_ast` + `eval_at` por punto, sin re-parsear ni allocs).
+/// Cada muestra se valida finita en batch ANTES de llamar a
+/// `composite_simpson`: un `Div` 1/0 del AST nativo produce `NaN` (nunca `Inf`)
+/// y aquí se convierte en `Err` de dominio, nunca en un `Inf` silencioso.
+/// `n` está acotado por el llamante (`TOOL_SAMPLES` = 2000), así el
+/// `with_capacity` no puede OOM.
+fn tool_simpson<F: Fn(f64) -> f64>(g: F, a: f64, b: f64, n: usize) -> Result<f64, String> {
     if (b - a).abs() < 1e-15 {
-        return 0.0;
+        return Ok(0.0);
     }
     let n = n.max(2);
     let dx = (b - a) / (n - 1) as f64;
-    let ys: Vec<f64> = (0..n).map(|i| g(a + i as f64 * dx)).collect();
-    composite_simpson(&ys, dx)
+    if !dx.is_finite() || dx == 0.0 {
+        return Err("la cuadratura no es finita".to_string());
+    }
+    let mut ys = Vec::with_capacity(n);
+    for i in 0..n {
+        let value = g(a + i as f64 * dx);
+        if !value.is_finite() {
+            return Err("el integrando no es finito: singularidad en el dominio".to_string());
+        }
+        ys.push(value);
+    }
+    let area = composite_simpson(&ys, dx);
+    if !area.is_finite() {
+        return Err("la cuadratura no es finita".to_string());
+    }
+    Ok(area)
 }
 
 /// Tangente a `f(x)` en `x = x0`.
@@ -2265,12 +2289,25 @@ pub fn normal_line_at(expr: &str, x: f64) -> Result<(f64, f64, f64), String> {
 /// assert!((l - 2.0_f64.sqrt()).abs() < 1e-6);
 /// ```
 pub fn arc_length(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    if !a.is_finite() || !b.is_finite() {
+        return Err("la longitud de arco requiere extremos finitos".to_string());
+    }
     let d = crate::symbolic::derivative(expr, "x")?;
+    // Hoist: un solo `prepare_function_ast` fuera del loop. Antes cada una de
+    // las 2000 muestras llamaba a `eval_function(&d, xv)`, que re-parseaba `d`
+    // (preprocess + parse_ast + substitute + simplify por punto). Ahora cada
+    // punto es solo `eval_at` sobre el AST ya preparado (sin allocs).
+    // Fallback a `eval_function` solo si el AST no se pudo preparar, para no
+    // perder la sintaxis que únicamente cubre el path lento de evalexpr.
+    let prepared = prepare_function_ast(&d, &HashMap::new(), &["x"]).ok();
     let g = |xv: f64| {
-        let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
+        let dp = match &prepared {
+            Some(ast) => ast.eval_at("x", xv),
+            None => eval_function(&d, xv).unwrap_or(f64::NAN),
+        };
         (1.0 + dp * dp).sqrt()
     };
-    let length = tool_simpson(g, a, b, TOOL_SAMPLES);
+    let length = tool_simpson(g, a, b, TOOL_SAMPLES)?;
     if !length.is_finite() {
         return Err("la longitud de arco no es finita".to_string());
     }
@@ -2311,11 +2348,20 @@ pub fn curvature_at(expr: &str, x: f64) -> Result<f64, String> {
 /// assert!((v - std::f64::consts::PI / 3.0).abs() < 1e-6);
 /// ```
 pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    if !a.is_finite() || !b.is_finite() {
+        return Err("el volumen de revolución requiere extremos finitos".to_string());
+    }
+    // Hoist idéntico al de `arc_length`: AST preparado una vez, `eval_at` por
+    // punto; fallback a `eval_function` si el AST no se pudo preparar.
+    let prepared = prepare_function_ast(expr, &HashMap::new(), &["x"]).ok();
     let g = |xv: f64| {
-        let y = eval_function(expr, xv).unwrap_or(f64::NAN);
+        let y = match &prepared {
+            Some(ast) => ast.eval_at("x", xv),
+            None => eval_function(expr, xv).unwrap_or(f64::NAN),
+        };
         y * y
     };
-    let volume = std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES);
+    let volume = std::f64::consts::PI * tool_simpson(g, a, b, TOOL_SAMPLES)?;
     if !volume.is_finite() {
         return Err("el volumen de revolución no es finito".to_string());
     }
@@ -2333,13 +2379,27 @@ pub fn volume_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
 /// assert!((s - std::f64::consts::PI * 2.0_f64.sqrt()).abs() < 1e-6);
 /// ```
 pub fn surface_of_revolution(expr: &str, a: f64, b: f64) -> Result<f64, String> {
+    if !a.is_finite() || !b.is_finite() {
+        return Err("la superficie de revolución requiere extremos finitos".to_string());
+    }
     let d = crate::symbolic::derivative(expr, "x")?;
+    // Hoist doble: `f` y `f'` se preparan una vez fuera del loop (antes eran
+    // 2×2000 re-parseos por llamada); fallback a `eval_function` por punto
+    // solo si algún AST no se pudo preparar.
+    let prepared_f = prepare_function_ast(expr, &HashMap::new(), &["x"]).ok();
+    let prepared_d = prepare_function_ast(&d, &HashMap::new(), &["x"]).ok();
     let g = |xv: f64| {
-        let y = eval_function(expr, xv).unwrap_or(f64::NAN);
-        let dp = eval_function(&d, xv).unwrap_or(f64::NAN);
+        let y = match &prepared_f {
+            Some(ast) => ast.eval_at("x", xv),
+            None => eval_function(expr, xv).unwrap_or(f64::NAN),
+        };
+        let dp = match &prepared_d {
+            Some(ast) => ast.eval_at("x", xv),
+            None => eval_function(&d, xv).unwrap_or(f64::NAN),
+        };
         2.0 * std::f64::consts::PI * y.abs() * (1.0 + dp * dp).sqrt()
     };
-    let surface = tool_simpson(g, a, b, TOOL_SAMPLES);
+    let surface = tool_simpson(g, a, b, TOOL_SAMPLES)?;
     if !surface.is_finite() {
         return Err("la superficie de revolución no es finita".to_string());
     }
@@ -2850,6 +2910,21 @@ mod tests {
         let expected = 0.5 * 5.0_f64.sqrt() + 0.25 * (2.0 + 5.0_f64.sqrt()).ln();
         let l = arc_length("x^2", 0.0, 1.0).expect("arco");
         assert!((l - expected).abs() < 1e-4, "esperada {expected}, got {l}");
+    }
+
+    #[test]
+    fn arc_length_reports_domain_error_on_singularity_instead_of_inf() {
+        // f(x) = 1/x en [0, 1]: el polo cae exactamente sobre la muestra
+        // i=0 (x=0). El AST nativo evalúa `Div` 1/0 como NaN (nunca Inf) y el
+        // gate finito en batch de `tool_simpson` lo convierte en Err.
+        let err = arc_length("1/x", 0.0, 1.0).expect_err("singularidad debe ser Err, no Inf");
+        assert!(
+            !err.is_empty(),
+            "el error de dominio debe explicar la causa"
+        );
+        // Extremos no finitos también son Err inmediato, no NaN/Inf.
+        assert!(arc_length("x", f64::NAN, 1.0).is_err());
+        assert!(arc_length("x", 0.0, f64::INFINITY).is_err());
     }
 
     #[test]

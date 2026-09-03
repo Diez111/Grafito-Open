@@ -7,12 +7,30 @@ pub const MAX_MATRIX_DIMENSION: usize = 1_000;
 /// Límite total de elementos para matrices públicas densas.
 pub const MAX_MATRIX_ELEMENTS: usize = 1_000_000;
 
-fn matrix_len(rows: usize, cols: usize) -> Option<usize> {
+/// Calcula `rows * cols` con `checked_mul` y valida contra los límites públicos
+/// (`MAX_MATRIX_DIMENSION` por lado, `MAX_MATRIX_ELEMENTS` en total).
+///
+/// Es la única vía para dimensionar una matriz densa pública: `new`,
+/// `try_zeros`, `try_identity`, `from_rows`, `inverse`, `solve_linear_system`,
+/// `eigenvectors`, `from_nalgebra` y `ValidatedMatrix::try_new` pasan por aquí,
+/// de modo que ningún `rows * cols` sin comprobar puede reservar memoria
+/// (OOM) ni desbordar `usize`. Retorna `Result` (fail-closed en bordes
+/// públicos); los constructores que devuelven `Option` lo consumen con `.ok()?`.
+pub fn matrix_len(rows: usize, cols: usize) -> Result<usize, String> {
     if rows > MAX_MATRIX_DIMENSION || cols > MAX_MATRIX_DIMENSION {
-        return None;
+        return Err(format!(
+            "matrix dimensions {rows}x{cols} exceed maximum {MAX_MATRIX_DIMENSION}"
+        ));
     }
-    rows.checked_mul(cols)
-        .filter(|&elements| elements <= MAX_MATRIX_ELEMENTS)
+    let elements = rows
+        .checked_mul(cols)
+        .ok_or_else(|| format!("matrix dimensions {rows}x{cols} overflow usize"))?;
+    if elements > MAX_MATRIX_ELEMENTS {
+        return Err(format!(
+            "matrix with {elements} elements exceeds maximum {MAX_MATRIX_ELEMENTS}"
+        ));
+    }
+    Ok(elements)
 }
 
 pub(crate) fn dimension_relative_epsilon(rows: usize, cols: usize) -> f64 {
@@ -41,7 +59,7 @@ pub struct Matrix {
 
 impl Matrix {
     pub fn new(rows: usize, cols: usize, data: Vec<f64>) -> Option<Self> {
-        if data.len() != matrix_len(rows, cols)? {
+        if data.len() != matrix_len(rows, cols).ok()? {
             return None;
         }
         Some(Self { rows, cols, data })
@@ -49,7 +67,7 @@ impl Matrix {
 
     /// Construye una matriz nula dentro de los límites públicos de dimensión.
     pub fn try_zeros(rows: usize, cols: usize) -> Option<Self> {
-        let elements = matrix_len(rows, cols)?;
+        let elements = matrix_len(rows, cols).ok()?;
         Some(Self {
             rows,
             cols,
@@ -73,6 +91,12 @@ impl Matrix {
     pub fn try_identity(n: usize) -> Option<Self> {
         let mut matrix = Self::try_zeros(n, n)?;
         for i in 0..n {
+            // Seguro: `try_zeros` ya validó `n*n <= MAX_MATRIX_ELEMENTS`,
+            // luego `i*n+i < n*n` no desborda ni sale del buffer.
+            debug_assert!(i
+                .checked_mul(n)
+                .and_then(|base| base.checked_add(i))
+                .is_some());
             matrix.data[i * n + i] = 1.0;
         }
         Some(matrix)
@@ -99,7 +123,7 @@ impl Matrix {
         if rows.iter().any(|row| row.len() != c) {
             return None;
         }
-        matrix_len(r, c)?;
+        matrix_len(r, c).ok()?;
         let data: Vec<f64> = rows.into_iter().flatten().collect();
         Self::new(r, c, data)
     }
@@ -418,16 +442,22 @@ fn to_nalgebra(m: &Matrix) -> DMatrix<f64> {
 }
 
 /// Convierte una `nalgebra::DMatrix<f64>` de vuelta a `Matrix` (row-major).
-fn from_nalgebra(nmat: &DMatrix<f64>) -> Matrix {
+///
+/// Fallible: valida el tamaño con [`matrix_len`] (`checked_mul` + cotas) antes
+/// de reservar, así un resultado de nalgebra sobredimensionado no puede
+/// provocar OOM desde un constructor infalible.
+fn from_nalgebra(nmat: &DMatrix<f64>) -> Option<Matrix> {
     let rows = nmat.nrows();
     let cols = nmat.ncols();
-    let mut data = Vec::with_capacity(rows * cols);
+    let elements = matrix_len(rows, cols).ok()?;
+    let mut data = Vec::with_capacity(elements);
     for i in 0..rows {
         for j in 0..cols {
             data.push(nmat[(i, j)]);
         }
     }
-    Matrix { rows, cols, data }
+    debug_assert_eq!(data.len(), elements);
+    Some(Matrix { rows, cols, data })
 }
 
 fn full_rank_tolerance(m: &Matrix) -> Option<f64> {
@@ -673,7 +703,7 @@ pub fn eigenvectors(m: &Matrix) -> Option<Vec<(Vec<f64>, f64, f64)>> {
             handled[index] = true;
             // Sistema real 2n×2n para el par complejo conjugado.
             let doubled_n = n.checked_mul(2)?;
-            matrix_len(doubled_n, doubled_n)?;
+            matrix_len(doubled_n, doubled_n).ok()?;
             let mut big = DMatrix::zeros(doubled_n, doubled_n);
             for i in 0..n {
                 for j in 0..n {
@@ -707,7 +737,7 @@ pub fn svd(m: &Matrix) -> Option<(Matrix, Vec<f64>, Matrix)> {
     let u = svd.u?;
     let v_t = svd.v_t?;
     let sigma: Vec<f64> = svd.singular_values.iter().copied().collect();
-    Some((from_nalgebra(&u), sigma, from_nalgebra(&v_t)))
+    Some((from_nalgebra(&u)?, sigma, from_nalgebra(&v_t)?))
 }
 
 /// Descomposición LU (con pivoteo parcial de nalgebra): `(L, U)`.
@@ -720,7 +750,7 @@ pub fn lu_decomposition(m: &Matrix) -> Option<(Matrix, Matrix)> {
     }
     let nmat = to_nalgebra(m);
     let lu = nmat.lu();
-    Some((from_nalgebra(&lu.l()), from_nalgebra(&lu.u())))
+    Some((from_nalgebra(&lu.l())?, from_nalgebra(&lu.u())?))
 }
 
 /// Descomposición QR: `(Q, R)` con `Q` ortogonal y `R` triangular superior.
@@ -730,7 +760,7 @@ pub fn qr_decomposition(m: &Matrix) -> Option<(Matrix, Matrix)> {
     }
     let nmat = to_nalgebra(m);
     let qr = nmat.qr();
-    Some((from_nalgebra(&qr.q()), from_nalgebra(&qr.r())))
+    Some((from_nalgebra(&qr.q())?, from_nalgebra(&qr.r())?))
 }
 
 /// Factorización de Cholesky: `L` triangular inferior tal que `A = L·L^T`.
@@ -744,7 +774,7 @@ pub fn cholesky(m: &Matrix) -> Option<Matrix> {
         return None;
     }
     let chol = nmat.cholesky()?;
-    Some(from_nalgebra(&chol.l()))
+    from_nalgebra(&chol.l())
 }
 
 /// Rango numérico de la matriz (número de valores singulares significativos).
@@ -913,7 +943,12 @@ impl ValidatedMatrix {
                 matrix.rows, matrix.cols, MAX_MATRIX_DIMENSION
             ));
         }
-        if matrix.data.len() != matrix.rows * matrix.cols {
+        // `matrix_len` (checked_mul + cotas) en lugar de `rows * cols`:
+        // con dimensiones hostiles el `*` directo desbordaría `usize` (pánico
+        // en debug) antes de poder rechazar; aquí desbordo => Err.
+        let expected = matrix_len(matrix.rows, matrix.cols)
+            .map_err(|reason| format!("ValidatedMatrix: {reason}"))?;
+        if matrix.data.len() != expected {
             return Err("Matrix data length mismatch".to_string());
         }
         // Rechaza valores no finitos (NaN/Inf) antes de SVD/det.
@@ -979,6 +1014,31 @@ mod tests {
     fn constructors_reject_overflowing_and_excessive_dimensions() {
         assert!(Matrix::new(usize::MAX, 2, Vec::new()).is_none());
         assert!(Matrix::new(1025, 1024, vec![0.0; 1025 * 1024]).is_none());
+    }
+
+    #[test]
+    fn matrix_len_enforces_checked_mul_and_budgets() {
+        assert!(matrix_len(usize::MAX, 2).is_err());
+        assert!(matrix_len(1001, 1).is_err());
+        // 1000x1001 = 1_001_000 > MAX_MATRIX_ELEMENTS (1M).
+        assert!(matrix_len(1000, 1001).is_err());
+        assert_eq!(
+            matrix_len(1000, 1000).expect("1000x1000 es el tope exacto"),
+            1_000_000
+        );
+        assert_eq!(matrix_len(0, 0).expect("0x0 es representable"), 0);
+    }
+
+    #[test]
+    fn validated_matrix_rejects_hostile_dimensions_without_overflowing() {
+        // Con el antiguo `rows * cols` directo esto hacía overflow de `usize`
+        // (pánico en debug); con `matrix_len` es un Err limpio.
+        let hostile = Matrix {
+            rows: usize::MAX,
+            cols: 2,
+            data: Vec::new(),
+        };
+        assert!(ValidatedMatrix::try_new(hostile).is_err());
     }
 
     #[test]

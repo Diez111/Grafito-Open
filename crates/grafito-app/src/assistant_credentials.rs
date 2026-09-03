@@ -9,11 +9,15 @@ use grafito_assistant_types::ProviderProfile;
 const KEYRING_SERVICE: &str = "Grafito";
 
 /// Devuelve la cuenta fija del llavero para perfiles que requieren credencial.
+///
+/// Nota: `CustomOpenAiCompatible` requiere clave propia (`assistant-custom`) y
+/// nunca reutiliza la de `OpenCodeGo`. `OllamaLocal` no usa clave.
 pub(crate) const fn account_for(profile: ProviderProfile) -> Option<&'static str> {
     match profile {
         ProviderProfile::OpenCodeGo => Some("assistant-opencode-go"),
         ProviderProfile::DeepSeek => Some("assistant-deepseek"),
-        ProviderProfile::OllamaLocal | ProviderProfile::CustomOpenAiCompatible => None,
+        ProviderProfile::CustomOpenAiCompatible => Some("assistant-custom"),
+        ProviderProfile::OllamaLocal => None,
     }
 }
 

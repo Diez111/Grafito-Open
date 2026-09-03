@@ -102,13 +102,14 @@ impl TeachingTopic {
     }
 
     /// ID de LO del currículum más cercano para este tópico.
+    /// `Pitagoras` mapea a `sec-pitagoras` (no a `sec-fracc`; ver curriculum.rs).
     pub fn lo_id(&self) -> Option<String> {
         match self {
             Self::Derivada => Some("am1-der".into()),
             Self::Integral => Some("am1-int".into()),
             Self::Limite => Some("am1-lim".into()),
             Self::Funcion => Some("am1-func".into()),
-            Self::Pitagoras => Some("sec-fracc".into()),
+            Self::Pitagoras => Some("sec-pitagoras".into()),
             Self::Fraccion => Some("sec-fracc".into()),
             Self::Vector => Some("sec-vect".into()),
             Self::Matriz => Some("alg-matrices".into()),

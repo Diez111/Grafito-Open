@@ -8,7 +8,7 @@
 ## F1 — Cerebro: Nucleo Logico (PRIO 1, sin tocar UI) — DONE parcial critico
 - [x] F1.1 grafito-core: hash determinista object.rs:2605 (sorted vars), Transformed try_new valida ast "z" y rechaza singular "0", BTreeMap deuda documentada
 - [x] F1.2 grafito-geometry: cache LRU 128 (expr.rs), midpoint lo+(hi-lo)/2, safe_sample MAX 100k + finite check, Matrix zeros/identity debug_assert, newtypes Radius/Angle deuda P2
-- [x] F1.3 grafito-command: auditado (Statem preflight/documentado, allowlist 43 caps, H1-H5 hallazgos)
+- [x] F1.3 grafito-command: auditado (Statem preflight/documentado, allowlist 92 caps, H1-H5 hallazgos)
 - [x] F1.4 grafito-complex/render/whiteboard/profile/plugins/assistant: auditados, rangos OK, headless SKIP
 
 ## F2 — Generador de Animaciones v2 (PRIO 0) — DONE

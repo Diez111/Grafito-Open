@@ -525,6 +525,15 @@ impl GrafitoApp {
             }
             _ => {}
         }
+        // Overlay fantasma tangente/normal: no pisa el ghost propio de la
+        // herramienta activa.
+        self.update_tangent_normal_ghost();
+    }
+
+    fn update_tangent_normal_ghost(&mut self) {
+        // Ghost tangente/normal al hover sobre función: overlay no-objeto.
+        // Implementación completa requiere f'(x0) simbólica; stub para compilar.
+        // Ver snap.rs ghost overlay v2 y analysis::curvature_at.
     }
 
     pub(crate) fn handle_canvas_input(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) {

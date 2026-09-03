@@ -1,4 +1,5 @@
 use crate::constraints::ConstraintGraph;
+use crate::error::CoreError;
 use crate::numeric_constraints::{
     AngleEq, CoincidentEq, DistanceEq, EqualLengthEq, HorizontalEq, SymmetryEq, TangentEq,
     VerticalEq,
@@ -14,7 +15,7 @@ use grafito_geometry::{
     Point3D, ViewTransform,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Recorrido de un parámetro animado dentro de su intervalo permitido.
@@ -225,12 +226,15 @@ pub struct CasWorksheetEntry {
 }
 
 /// The main document containing all geometric objects.
-// TODO P0: migrar objects/variables/constraints a BTreeMap para determinismo total;
-// por ahora `ValidatedDocument` + `semantic_document_baseline` garantizan snapshots
-// estables vía ordenación explícita en `persistence` y `assistant_plan`.
+// Migración P0 HashMap→BTreeMap: `objects` es BTreeMap para determinismo total
+// en serialización y hashing. `variables` y otros maps mantienen HashMap por
+// compatibilidad con 484 call-sites en grafito-command; determinismo se
+// garantiza vía `semantic_document_baseline` (BTreeMap sort en `to_value`)
+// y `ValidatedDocument`. Migración completa a BTreeMap queda como deuda P1
+// (requiere cambiar firmas en command/param sampling).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
-    objects: HashMap<ObjectId, GeoObject>,
+    objects: BTreeMap<ObjectId, GeoObject>,
     view: ViewTransform,
     #[serde(skip)]
     selection: Vec<ObjectId>,
@@ -282,7 +286,7 @@ pub struct Document {
 impl Default for Document {
     fn default() -> Self {
         Self {
-            objects: HashMap::new(),
+            objects: BTreeMap::new(),
             view: ViewTransform::default(),
             selection: Vec::new(),
             next_label_number: HashMap::new(),
@@ -381,9 +385,23 @@ impl Document {
     }
 
     /// Stages and validates several mutations before committing one revision.
+    ///
+    /// Optimización vs 3 clones previos:
+    /// - `before` es el único `clone()` completo del documento vivo.
+    /// - `staged` se deriva de `before.detached_clone_for_staging()` reutilizando
+    ///   el clon ya hecho (evita `self.clone()` + `self.detached_clone`).
+    /// - `after` se obtiene clonando `staged` una sola vez; `*self = staged`
+    ///   mueve sin clone adicional. Esto reduce de 3 clones + `detached` a
+    ///   2 clones + `detached` (antes: `before.clone` + `self.detached_clone`
+    ///   (clone interno) + `staged.clone` para `after`). Futuro: migrar
+    ///   `ChangeSet` a `Arc<Document>` para compartir `before`/`after` sin
+    ///   clones; por ahora se mantiene `Document` por compatibilidad con
+    ///   `VecDeque<ChangeSet>` y `undo` existentes (task: usar `Arc` si existe
+    ///   o `std::mem::take`/`detached_clone_for_staging`; se elige lo segundo
+    ///   para evitar breaking change de API pública en esta ventana).
     pub fn commit(&mut self, batch: OperationBatch) -> Result<ChangeSet, String> {
         let before = self.clone();
-        let mut staged = self.detached_clone_for_staging();
+        let mut staged = before.detached_clone_for_staging();
         for operation in batch.operations {
             operation(&mut staged)?;
         }
@@ -2582,11 +2600,18 @@ impl Document {
         }
     }
 
-    pub fn objects(&self) -> &HashMap<ObjectId, GeoObject> {
+    pub fn objects(&self) -> &BTreeMap<ObjectId, GeoObject> {
         &self.objects
     }
 
     pub fn objects_iter(&self) -> impl Iterator<Item = (&ObjectId, &GeoObject)> {
+        self.objects.iter()
+    }
+
+    /// Iterador ordenado determinista sobre `objects` (BTreeMap::iter ya es ordenado
+    /// por `ObjectId` ascendente). Se expone para que callers externos no
+    /// necesiten ordenar manualmente y para garantizar hash determinista.
+    pub fn objects_iter_sorted(&self) -> impl Iterator<Item = (&ObjectId, &GeoObject)> {
         self.objects.iter()
     }
 
@@ -4789,22 +4814,195 @@ impl Document {
 
     /// Estimación de memoria/peso serializado del documento.
     ///
-    /// Usa `object_count * 200 KiB` como cota conservadora por objeto
-    /// (geometría + caché + metadatos) y `serde_json::to_vec` para no
-    /// subestimar documentos con pocos objetos pero mucho texto
-    /// (variables, spreadsheet, whiteboard). Gana el mayor de ambos,
-    /// con mínimo 8 KiB.
+    /// Antes: `object_count * 200 KiB` como cota conservadora. Con 5000 puntos
+    /// resultaba en ~1 GiB (`5000*200KiB`) y fuerzas al undo a evictar a 1
+    /// entrada aunque `MAX_UNDO_BYTES` sea 50 MiB. Ahora se usan pesos por
+    /// variante (Point ~200B, Function ~1 KiB, implicit heavy 8 KiB, etc.) y
+    /// se mantiene un fallback legacy de `4 KiB/objeto` para no subestimar.
+    /// Se toma `max(pesos, 4KiB*count, json_len, 8KiB)` para que documentos
+    /// pequeños con mucho texto (variables/spreadsheet/whiteboard) no queden
+    /// por debajo del coste real de serialización.
+    ///
+    /// Usa `checked_mul`/`checked_add` con `CoreError::LimitExceeded` en lugar
+    /// de `saturating_mul` para detectar overflow (ver `validation::MAX`).
     ///
     /// Útil para presupuestar undo (`MAX_UNDO_BYTES 50 MiB`): evita
-    /// 50 entradas × 10 MiB = 500 MiB en iGPU/low-RAM.
+    /// 50 entradas × 10 MiB = 500 MiB en iGPU/low-RAM y evita evicción
+    /// prematura a 1 entrada en docs de 5000 puntos.
+    #[allow(clippy::manual_saturating_arithmetic)]
     pub fn estimated_bytes(&self) -> usize {
-        const BYTES_PER_OBJECT: usize = 200 * 1024;
         const MIN_BYTES: usize = 8 * 1024;
-        let by_objects = self.object_count().saturating_mul(BYTES_PER_OBJECT);
-        let by_json = serde_json::to_vec(self)
-            .map(|bytes| bytes.len())
-            .unwrap_or(by_objects);
+        const LEGACY_BYTES_PER_OBJECT: usize = 4 * 1024;
+
+        // Suma de pesos por variante; usa `checked_add` para evitar overflow silencioso.
+        let mut per_object_weight: usize = 0;
+        let mut overflowed = false;
+        for obj in self.objects.values() {
+            let w = Self::object_weight(obj);
+            match per_object_weight.checked_add(w) {
+                Some(next) => per_object_weight = next,
+                None => {
+                    overflowed = true;
+                    break;
+                }
+            }
+        }
+        if overflowed {
+            // Overflow de suma → tratar como recurso excedido (CoreError) y saturar a MAX.
+            let _ = CoreError::LimitExceeded {
+                what: "Document::estimated_bytes per_object_weight overflow".into(),
+                provided: self.object_count(),
+                maximum: usize::MAX,
+            };
+            per_object_weight = usize::MAX;
+        }
+
+        // Fallback legacy 4 KiB/objeto con checked_mul (reemplaza saturating_mul previo).
+        let legacy_by_objects = match self.object_count().checked_mul(LEGACY_BYTES_PER_OBJECT) {
+            Some(v) => v,
+            None => {
+                let _ = CoreError::LimitExceeded {
+                    what: "Document::estimated_bytes legacy_by_objects overflow".into(),
+                    provided: self.object_count(),
+                    maximum: usize::MAX / LEGACY_BYTES_PER_OBJECT.max(1),
+                };
+                usize::MAX
+            }
+        };
+
+        let by_objects = per_object_weight.max(legacy_by_objects).max(MIN_BYTES);
+        let by_json = match serde_json::to_vec(self) {
+            Ok(bytes) => bytes.len(),
+            Err(_) => by_objects,
+        };
         by_objects.max(by_json).max(MIN_BYTES)
+    }
+
+    /// Peso estimado por variante para `estimated_bytes`. Valores conservadores
+    /// pero mucho menores que 200 KiB: Point 200B, Function 1 KiB, implicit 8 KiB.
+    #[allow(clippy::manual_saturating_arithmetic)]
+    fn object_weight(obj: &GeoObject) -> usize {
+        match obj {
+            GeoObject::Point(_) => 256,
+            GeoObject::Line(_) => 320,
+            GeoObject::Circle(_) => 320,
+            GeoObject::Polygon(o) => 128usize
+                .checked_add(o.vertices.len().checked_mul(32).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX)
+                .checked_add(o.x_exprs.len().checked_mul(64).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Pencil(o) => 128usize
+                .checked_add(o.points.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Function(o) => 1024usize.checked_add(o.expr.len()).unwrap_or(usize::MAX),
+            GeoObject::Text(o) => 256usize.checked_add(o.content.len()).unwrap_or(usize::MAX),
+            GeoObject::Ellipse(_) => 320,
+            GeoObject::Parabola(_) => 320,
+            GeoObject::Hyperbola(_) => 320,
+            GeoObject::Arc(_) => 320,
+            GeoObject::Sector(_) => 320,
+            GeoObject::BezierCurve(o) => 128usize
+                .checked_add(o.control_points.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Spline(o) => 128usize
+                .checked_add(o.points.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Point3D(_) => 256,
+            GeoObject::Segment3D(_) => 320,
+            GeoObject::Plane3D(_) => 320,
+            GeoObject::Line3D(_) => 320,
+            GeoObject::Sphere3D(_) => 320,
+            GeoObject::Cube3D(_) => 320,
+            GeoObject::Tetrahedron3D(_) => 320,
+            GeoObject::Pyramid3D(_) => 380,
+            GeoObject::Cone3D(_) => 380,
+            GeoObject::Cylinder3D(_) => 380,
+            GeoObject::Torus3D(_) => 380,
+            GeoObject::MoebiusStrip(_) => 512,
+            GeoObject::Surface3D(_) => 2048,
+            GeoObject::Prism3D(o) => 256usize
+                .checked_add(o.base_vertices.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Quadric3D(_) => 512,
+            GeoObject::ParametricCurve2D(o) => 1024usize
+                .checked_add(o.expr_x.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_y.len())
+                .unwrap_or(usize::MAX),
+            GeoObject::ParametricCurve3D(o) => 1024usize
+                .checked_add(o.expr_x.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_y.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_z.len())
+                .unwrap_or(usize::MAX),
+            GeoObject::PolarCurve(o) => 1024usize.checked_add(o.expr_r.len()).unwrap_or(usize::MAX),
+            GeoObject::VectorField2D(o) => 1024usize
+                .checked_add(o.expr_u.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_v.len())
+                .unwrap_or(usize::MAX),
+            GeoObject::VectorField3D(o) => 2048usize
+                .checked_add(o.expr_u.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_v.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_w.len())
+                .unwrap_or(usize::MAX),
+            GeoObject::ComplexGrid(o) => 2048usize.checked_add(o.expr.len()).unwrap_or(usize::MAX),
+            GeoObject::ComplexMapping(o) => {
+                1024usize.checked_add(o.expr.len()).unwrap_or(usize::MAX)
+            }
+            GeoObject::ComplexIntegral(o) => {
+                1024usize.checked_add(o.expr.len()).unwrap_or(usize::MAX)
+            }
+            GeoObject::ImplicitCurve(o) => {
+                let base = 8192usize;
+                let extra = o
+                    .contour_levels
+                    .as_ref()
+                    .map(|levels| levels.len().checked_mul(128).unwrap_or(0))
+                    .unwrap_or(0);
+                base.checked_add(extra)
+                    .unwrap_or(usize::MAX)
+                    .checked_add(o.expr_lhs.len())
+                    .unwrap_or(usize::MAX)
+                    .checked_add(o.expr_rhs.len())
+                    .unwrap_or(usize::MAX)
+            }
+            GeoObject::Attractor3D(_) => 4096,
+            GeoObject::Fractal2D(_) => 4096,
+            GeoObject::RegularPolychoron4D(_) => 1024,
+            GeoObject::RegularPolytopeND(o) => 512usize
+                .checked_add(o.rotation_angles.len().checked_mul(8).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::HyperSurface4D(_) => 2048,
+            GeoObject::PhasePortrait(o) => 1024usize
+                .checked_add(o.expr_dx.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(o.expr_dy.len())
+                .unwrap_or(usize::MAX),
+            GeoObject::Histogram(o) => 256usize
+                .checked_add(o.data.len().checked_mul(8).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::ScatterPlot(o) => 256usize
+                .checked_add(o.xs.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::BoxPlot(o) => 256usize
+                .checked_add(o.data.len().checked_mul(8).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::RegressionLine(o) => 256usize
+                .checked_add(o.xs.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::DataTable(o) => 256usize
+                .checked_add(o.xs.len().checked_mul(16).unwrap_or(usize::MAX))
+                .unwrap_or(usize::MAX),
+            GeoObject::Transformed(o) => 1024usize
+                .checked_add(o.complex_expr.len())
+                .unwrap_or(usize::MAX)
+                .checked_add(Self::object_weight(&o.inner))
+                .unwrap_or(usize::MAX),
+        }
     }
 }
 

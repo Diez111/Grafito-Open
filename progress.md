@@ -47,7 +47,7 @@ Auditoría TOTAL de inicio a fin + mejoras + nuevas funciones, con foco en gener
 - **grafito-app**: AssistantRuntime auditado (I/O en thread, Budget), app.rs God Object/Fun deuda P1 documentada, MAX_UNDO 50 deuda P2, ViewMode redundancia P1
 
 ### Infra
-- **docs/architecture.md**: creado (DAG, statems, type-safety, presupuestos, CI 8 jobs, riesgos)
+- **docs/architecture.md**: creado (DAG, statems, type-safety, presupuestos, CI 14 jobs, riesgos)
 - **Plans.md v2 / Tasks.md v2**: trabajo por capas documentado
 
 ## Verificación de errores de compilador (vibecoder-guide)

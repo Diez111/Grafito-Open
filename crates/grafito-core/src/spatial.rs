@@ -36,8 +36,31 @@ impl SpatialIndex {
     }
 
     pub fn insert(&mut self, id: ObjectId, min_x: f64, min_y: f64, max_x: f64, max_y: f64) {
+        // Guard: non-finite bounds would corrupt `bulk_load` (NaN breaks R-tree ordering).
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            return;
+        }
         let aabb = AABB::from_corners([min_x, min_y], [max_x, max_y]);
         self.tree.insert(SpatialItem { id, aabb });
+    }
+
+    /// Fallible variant — returns `Err` if any bound is non-finite.
+    pub fn try_insert(
+        &mut self,
+        id: ObjectId,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> Result<(), String> {
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            return Err(format!(
+                "SpatialIndex::insert: non-finite bounds [{min_x},{min_y}]-[{max_x},{max_y}]"
+            ));
+        }
+        let aabb = AABB::from_corners([min_x, min_y], [max_x, max_y]);
+        self.tree.insert(SpatialItem { id, aabb });
+        Ok(())
     }
 
     pub fn rebuild(&mut self, items: Vec<(ObjectId, f64, f64, f64, f64)>) {
@@ -46,6 +69,8 @@ impl SpatialIndex {
 
     /// Rebuilds finite envelopes while retaining objects whose true envelope is
     /// unbounded. Those IDs are conservatively returned for every point query.
+    /// Items with non-finite bounds are silently dropped to keep `bulk_load` sound
+    /// (NaN would corrupt R-tree ordering and break `locate_in_envelope`).
     pub fn rebuild_with_unbounded(
         &mut self,
         items: Vec<(ObjectId, f64, f64, f64, f64)>,
@@ -53,6 +78,9 @@ impl SpatialIndex {
     ) {
         let sp: Vec<_> = items
             .into_iter()
+            .filter(|(_, min_x, min_y, max_x, max_y)| {
+                min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()
+            })
             .map(|(id, min_x, min_y, max_x, max_y)| SpatialItem {
                 id,
                 aabb: AABB::from_corners([min_x, min_y], [max_x, max_y]),

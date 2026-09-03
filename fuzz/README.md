@@ -4,27 +4,29 @@ This directory is a standalone `cargo-fuzz` package. Its local `[workspace]`
 section and committed `Cargo.lock` keep fuzz dependency resolution separate
 from Grafito's root workspace and root lockfile.
 
-The targets cover four untrusted-input boundaries:
+The targets cover six untrusted-input boundaries:
 
 - `ast_parser`: native mathematical AST parsing.
 - `complex_parser`: complex-expression parsing.
 - `document_deserialization`: validated persisted-document loading.
 - `command_atomicity`: rejected commands must leave a document unchanged.
+- `validation_limits`: document and expression limits (10M, 5000 objects, 2000 expr).
+- `spreadsheet_recompute`: spreadsheet formula recomputation.
 
 ## Running locally
 
 `cargo-fuzz` requires a Rust nightly toolchain and libFuzzer support. The
-fuzz-specific `rust-toolchain.toml` pins `nightly-2025-02-15`; CI also pins
+fuzz-specific `rust-toolchain.toml` pins `nightly-2026-08-01`; CI also pins
 `cargo-fuzz` to `0.12.0`. Install that tool outside this repository, then run
 a bounded target from the repository root:
 
 ```sh
-rustup toolchain install nightly-2025-02-15 --profile minimal --component rust-src
-cargo +nightly-2025-02-15 install --locked cargo-fuzz --version 0.12.0
-cargo +nightly-2025-02-15 fetch --locked --manifest-path fuzz/Cargo.toml
+rustup toolchain install nightly-2026-08-01 --profile minimal --component rust-src
+cargo +nightly-2026-08-01 install --locked cargo-fuzz --version 0.12.0
+cargo +nightly-2026-08-01 fetch --locked --manifest-path fuzz/Cargo.toml
 
-for target in ast_parser complex_parser document_deserialization command_atomicity; do
-  CARGO_NET_OFFLINE=true cargo +nightly-2025-02-15 fuzz run "$target" \
+for target in ast_parser complex_parser document_deserialization command_atomicity validation_limits spreadsheet_recompute; do
+  CARGO_NET_OFFLINE=true cargo +nightly-2026-08-01 fuzz run "$target" \
     --fuzz-dir fuzz -- -max_total_time=180 -max_len=65536
 done
 ```
@@ -36,8 +38,8 @@ and AST parser limits. `cargo-fuzz` creates corpus and crash artifacts under
 ## Continuous Fuzzing
 
 `.github/workflows/fuzz.yml` runs every Sunday at 03:17 UTC and on manual
-dispatch. It runs all four targets above for at most 180 seconds each, so
-libFuzzer execution is capped at 12 minutes per workflow run; the GitHub job
+dispatch. It runs all six targets above for at most 180 seconds each, so
+libFuzzer execution is capped at 18 minutes per workflow run; the GitHub job
 has a 30-minute timeout. The workflow uses `fuzz/Cargo.lock`, verifies it with
 `cargo metadata --locked`, and uploads any files under `fuzz/artifacts/` for 14
 days when a crash is found.
@@ -52,8 +54,8 @@ run does not establish the absence of defects or security vulnerabilities.
 Update fuzz dependencies intentionally and independently of the root workspace:
 
 ```sh
-cargo +nightly-2025-02-15 generate-lockfile --manifest-path fuzz/Cargo.toml
-cargo +nightly-2025-02-15 metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps
+cargo +nightly-2026-08-01 generate-lockfile --manifest-path fuzz/Cargo.toml
+cargo +nightly-2026-08-01 metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 --no-deps
 ```
 
 Review the resulting `fuzz/Cargo.lock`; do not update the root `Cargo.lock` as

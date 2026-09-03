@@ -23,17 +23,25 @@ fn command_palette_empty_search_returns_all_commands() {
 
 #[test]
 fn command_palette_fuzzy_match_narrows_results() {
+    use grafito_ui::command_palette::fuzzy_match;
     let state = CommandPaletteState {
         search: "ellipse".to_string(),
         ..Default::default()
     };
     let filtered = state.filtered_commands();
     assert!(!filtered.is_empty(), "searching 'ellipse' should match");
-    // Every filtered command name should contain "ellipse" (case-insensitive)
-    // or its category should.
+    // Búsqueda difusa bilingüe: cada resultado debe coincidir (subcadena o
+    // subsecuencia en orden) en nombre, categoría, syntax_hint, ayuda o alias.
     for cmd in &filtered {
-        let matches = cmd.name.to_lowercase().contains("ellipse")
-            || cmd.category.to_lowercase().contains("ellipse");
+        let matches = [
+            cmd.name,
+            cmd.category,
+            cmd.syntax_hint,
+            cmd.help,
+            cmd.keywords,
+        ]
+        .iter()
+        .any(|haystack| fuzzy_match("ellipse", haystack));
         assert!(
             matches,
             "filtered command '{}' should match 'ellipse'",
@@ -99,8 +107,9 @@ fn command_palette_templates_skip_actions_and_fix_visual_names() {
 
     let save = commands
         .iter()
-        .find(|cmd| cmd.name == "Save")
-        .expect("Save command should be present");
+        .find(|cmd| cmd.name == "Guardar")
+        .expect("Guardar command should be present");
+    assert_eq!(save.selection_key, "Save");
     assert!(save.input_template().is_none());
 
     let derivative = commands
@@ -108,6 +117,14 @@ fn command_palette_templates_skip_actions_and_fix_visual_names() {
         .find(|cmd| cmd.name == "Derivative")
         .expect("Derivative command should be present");
     assert_eq!(derivative.input_template().as_deref(), Some("Derivative["));
+}
+
+#[test]
+fn command_palette_footer_hints_navigation_keys() {
+    let palette_source = include_str!("../src/command_palette.rs");
+    assert!(palette_source.contains("↑↓"));
+    assert!(palette_source.contains("Enter"));
+    assert!(palette_source.contains("Esc"));
 }
 
 #[test]

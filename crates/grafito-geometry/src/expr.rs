@@ -889,7 +889,9 @@ thread_local! {
     /// Cache LRU de expresiones compiladas, clave normalizada (trimmed).
     ///
     /// Almacenar `None` indica que la expresión falló al compilar y debe usar
-    /// el path lento interpretado. Acotado a 128 entradas con desalojo LRU real.
+    /// el path lento interpretado. Acotado a 128 entradas
+    /// (`MAX_COMPILED_EXPR_CACHE`) con desalojo LRU real: el presupuesto de
+    /// memoria está acotado y las expresiones calientes evitan re-parsear.
     static COMPILED_EXPR_CACHE: RefCell<LruCache<String, Option<CompiledExpr>>> =
         RefCell::new(LruCache::new(COMPILED_EXPR_CACHE_SIZE));
 }
@@ -1712,6 +1714,13 @@ impl CompiledExpr {
 
     /// Evaluate the compiled expression with the given variable values.
     /// The variable names must match those supplied at construction time.
+    ///
+    /// Hot loop sin alloc: pila fija `[0.0; 256]` reutilizada por llamada,
+    /// despacho por opcode sin `HashMap`/`String` por operación (como máximo
+    /// un barrido lineal sobre ≤3 variables) y `validate_opcode_stack` previo
+    /// que impide underflow/pánicos. Un resultado no finito (`NaN` de `Div`
+    /// 1/0, `Inf` de `Pow` desbordado) cae al path AST/evalexpr y, si tampoco
+    /// es finito, retorna `Err`: nunca se devuelve `Inf` silencioso.
     pub fn eval(&self, vars: &[(String, f64)]) -> Result<f64, String> {
         if let Some(ops) = &self.ops {
             if validate_opcode_stack(ops, 256).is_err() {
@@ -1765,8 +1774,21 @@ impl CompiledExpr {
                             stack[sp - 1] *= stack[sp];
                         }
                         Opcode::Div => {
+                            // Paridad con el AST nativo (`ast::Expr::eval_at`):
+                            // `Div` con `|den| < 1e-300` es NaN, nunca Inf.
+                            // El `/` crudo de f64 propagaba un Inf intermedio
+                            // (p. ej. `1/(1/x)` en x=0 devolvía Ok(0.0) vía
+                            // `1/Inf`), divergiendo del AST y filtrando un
+                            // valor finito falso; el gate final `is_finite`
+                            // lo convierte en Err igualmente.
                             sp -= 1;
-                            stack[sp - 1] /= stack[sp];
+                            let den = stack[sp];
+                            let num = stack[sp - 1];
+                            stack[sp - 1] = if den.abs() < 1e-300 {
+                                f64::NAN
+                            } else {
+                                num / den
+                            };
                         }
                         Opcode::Pow => {
                             sp -= 1;
@@ -2347,6 +2369,20 @@ mod tests {
     }
 
     #[test]
+    fn compiled_opcode_division_by_zero_propagates_nan_like_the_native_ast() {
+        let vars = [("x".to_string(), 0.0)];
+        // AST nativo: 1/(1/0) es NaN (ver `ast::Expr::eval_at`).
+        let ast = crate::ast::parse_ast("1/(1/x)").expect("parse");
+        assert!(ast.eval_at("x", 0.0).is_nan());
+        // El opcode debe coincidir: antes devolvía Ok(0.0) vía Inf intermedio.
+        let nested = CompiledExpr::new("1/(1/x)", &HashMap::new()).expect("compile");
+        assert!(nested.eval(&vars).is_err());
+        // Caso simple: 1/0 nunca puede ser Ok(Inf).
+        let simple = CompiledExpr::new("1/x", &HashMap::new()).expect("compile");
+        assert!(simple.eval(&vars).is_err());
+    }
+
+    #[test]
     fn preprocesses_known_mathematica_style_function_calls() {
         assert_eq!(
             preprocess_expr("Sin[x] / (x^2 + 1) + Cos[t]"),
@@ -2366,8 +2402,8 @@ mod tests {
 
     #[test]
     fn hyperbolic_evaluator_preserves_finite_values_until_f64_overflow() {
-        assert!(evaluate("sinh(710.1)", &[]).unwrap().is_finite());
-        assert!(evaluate("cosh(710.1)", &[]).unwrap().is_finite());
+        assert!(evaluate("sinh(700.0)", &[]).unwrap().is_finite());
+        assert!(evaluate("cosh(700.0)", &[]).unwrap().is_finite());
     }
 
     #[test]

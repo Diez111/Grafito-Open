@@ -208,9 +208,9 @@ Todos los comandos usan la sintaxis `Comando[arg1, arg2, ...]`. Casi todos tiene
 
 | Comando | Descripción |
 |---------|-------------|
-| `DistanceConstraint[a, b, valor]` | Fija la distancia entre a y b |
-| `AngleConstraint[l1, l2, grados]` | Fija el ángulo entre dos rectas |
-| `TangentConstraint[c1, c2]` | Fuerza tangencia entre círculos |
+| `Distance[a, b, valor]` | Fija la distancia entre a y b |
+| `Angle[l1, l2, grados]` | Fija el ángulo entre dos rectas |
+| `Tangent[c1, c2]` | Fuerza tangencia entre círculos |
 | `Coincident[a, b]` | Fuerza coincidencia de dos puntos |
 | `Horizontal[segmento]` | Fuerza horizontalidad |
 | `Vertical[segmento]` | Fuerza verticalidad |
@@ -237,8 +237,8 @@ Correlation[{xs}, {ys}]                   # correlación de Pearson
 | `Median[datos]` | Mediana |
 | `Mode[datos]` | Moda |
 | `Variance[datos]` | Varianza muestral |
-| `Quantile[datos, q]` | Cuantil (0 a 1) |
-| `IQR[datos]` | Rango intercuartílico |
+| `Percentile[datos, p]` | Percentil (0 a 1) |
+| `Q1[datos]` / `Q3[datos]` | Cuartiles (IQR = Q3−Q1) |
 | `Covariance[{xs}, {ys}]` | Covarianza |
 
 ### Fractales y atractores
@@ -414,7 +414,7 @@ Puntos, segmentos, esferas, cubos, pirámides, conos, cilindros, toros, cintas d
 ```text
 Sphere[r]                           # esfera de radio r
 Cube[l]                             # cubo de lado l
-ParametricCurve3D[cos(t), sin(t), t/5, 0, 20]    # hélice
+Curve3D[(cos(t), sin(t), t/5), 0, 20]    # hélice
 Lorenz[]                            # atractor de Lorenz en 3D
 Hypercube[angle1, angle2, angle3]   # teseracto proyectado
 Tesseract4D[]                       # teseracto regular 4D con caras y aristas
@@ -470,10 +470,8 @@ grafito/
 | Eliminar objeto | Suprimir (con objeto seleccionado) |
 | Paleta de comandos | Ctrl+K |
 | Herramientas 2D | F1 Seleccionar / F2 Punto / F3 Recta / F4 Círculo / F5 Polígono / F6 Función |
-| Herramientas 3D | F7 Punto 3D / F8 Esfera 3D / F9 Cubo 3D |
-| Análisis | R Raíz / E Extremo / N Inflexión / Ctrl+Y Intersección Y / Ctrl+A Analizar |
+| Análisis | R Raíz / E Extremo / N Inflexión / Ctrl+Shift+Y Intersección Y / Ctrl+A Analizar |
 | Grilla y ejes | Shift+L (log), Shift+K (lineal), Shift+J (cuadrícula), G (snap a grilla) |
-| Tema claro/oscuro | Ctrl+T |
 | Abrir / Guardar | Ctrl+O / Ctrl+S |
 
 ---

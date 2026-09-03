@@ -94,7 +94,13 @@ impl PencilObj {
     }
 
     /// Añade un punto al final del trazo. Usado durante el arrastre.
+    /// Filtra muestras no finitas (`NaN`/`Inf`) para evitar corromper el
+    /// índice espacial y la serialización; los puntos inválidos se descartan
+    /// silenciosamente y no cuentan para la cota `MAX_PENCIL_POINTS`.
     pub fn push(&mut self, p: Point2) {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return;
+        }
         while self.points.len() >= MAX_PENCIL_POINTS {
             let Some(last) = self.points.last().copied() else {
                 break;
@@ -110,6 +116,8 @@ impl PencilObj {
 
     /// Registra una muestra de locus sólo si es finita y distinta de la última.
     /// Devuelve si la polilínea cambió.
+    /// Documenta: filtra `!finite` tanto aquí como en [`Self::push`] (defensa
+    /// en profundidad — `push` es público y puede ser llamado fuera de locus).
     pub fn capture_locus_sample(&mut self, point: Point2) -> bool {
         if !self.is_dynamic_locus()
             || !point.x.is_finite()

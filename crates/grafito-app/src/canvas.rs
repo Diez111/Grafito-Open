@@ -332,27 +332,35 @@ const GPU_3D_MAX_ATTRACTOR_STEPS: usize = 16_000;
 const GPU_2D_CURVE_STEPS: usize = 4_000;
 // All current compute APIs synchronously map their readback buffers: each
 // pipeline (`implicit_compute`, `parametric_compute`, `function_compute`,
-// `vector_compute`, ...) calls `device.poll(wgpu::Maintain::Wait)` internally
-// on its readback path (see `grafito-render/src/*_compute.rs`). Limit a
-// callback to one such attempt until the pipelines can share an async batch.
+// `vector_compute`, ...) performs a bounded synchronous readback via
+// `sync_readback_with_timeout` in `grafito-render/src/lib.rs`.
+//
+// Mitigación Wait→Poll: el readback NO usa `device.poll(Maintain::Wait)`
+// bloqueante; usa `Maintain::Poll` (no bloqueante) en un bucle con timeout de
+// 250 ms (`SYNC_GPU_READBACK_TIMEOUT`), de modo que una GPU colgada no puede
+// congelar el hilo de prepare de egui indefinidamente. Aun así, el readback
+// síncrono bloquea el hilo hasta el deadline, por lo que se acota a UN intento
+// por frame.
 //
 // Verificado: `take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)` en prepare() 2D
-// y 3D garantiza 1 `device.poll(Wait)` bloqueante como máximo por frame: los
-// callbacks 2D (`CanvasCallback`) y 3D (`Canvas3DCallback`) son mutuamente
-// excluyentes (match `ViewMode::D2`/`ViewMode::D3` en app.rs), por lo que el
-// `.take(1)` de cada rama acota el Wait global a 1 por frame.
-// TODO P1: mover a spawn_blocking — el Wait bloquea el hilo de prepare de egui
-// (ver también los TODO P1 en `grafito-render/src/*_compute.rs`).
+// y 3D garantiza 1 readback síncrono como máximo por frame: los callbacks 2D
+// (`CanvasCallback`) y 3D (`Canvas3DCallback`) son mutuamente excluyentes
+// (match `ViewMode::D2`/`ViewMode::D3` en app.rs), por lo que el `.take(1)` de
+// cada rama acota el readback global a 1 por frame.
+// TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando el
+// hilo de prepare de egui (ver también los TODO P1 en `grafito-render/src/*_compute.rs`).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Helper de readback asíncrono sin `device.poll(Wait)` bloqueante.
+/// Mitigación Wait→Poll ya activa: `grafito-render::sync_readback_with_timeout`
+/// usa `device.poll(Maintain::Poll)` (no bloqueante) en bucle con timeout de
+/// 250 ms, por lo que una GPU colgada no congela el hilo de prepare.
 /// TODO P1 async batch: reemplazar el `take(1)` + `maybe_compute_*` sincrónicos
 /// por un `GpuComputeBatch` que acumule encoders, haga un único `queue.submit`
 /// y resuelva los `map_async` con `device.poll(Maintain::Poll)` + `await`
 /// fuera del hilo de `prepare` (vía `spawn_blocking`/`pollster`).
 /// Mientras tanto el frame se limita a `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE`
 /// intentos sincrónicos (ver `CanvasCallback::prepare` y `Canvas3DCallback::prepare`).
-/// Ver `grafito-render/src/*_compute.rs` para los `poll(Wait)` actuales bloqueantes.
 #[allow(dead_code)]
 fn gpu_async_readback_todo_note() {
     // Placeholder para el batch asíncrono futuro; no hace `device.poll(Wait)`.
@@ -374,7 +382,10 @@ fn gpu_budget_allows(remaining: usize, required: usize) -> bool {
 }
 
 /// Itera a lo sumo `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` jobs por frame
-/// para garantizar un único `device.poll(Wait)` bloqueante como máximo.
+/// para garantizar un único readback síncrono como máximo. El readback usa
+/// `Maintain::Poll` (no bloqueante) con timeout (mitigación Wait→Poll en
+/// `grafito-render::sync_readback_with_timeout`); este `take(1)` acota el
+/// bloqueo del hilo de prepare a un intento por frame.
 /// TODO P1 async batch: cuando el batch asíncrono esté listo, este helper
 /// dejará de hacer `take(1)` y pasará a encolar todos los jobs en el batch.
 fn limited_gpu_jobs<I>(iter: I) -> impl Iterator<Item = ObjectId>

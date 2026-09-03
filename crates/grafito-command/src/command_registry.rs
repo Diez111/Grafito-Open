@@ -1,7 +1,11 @@
 //! Catalogo declarativo de comandos de texto estables.
 //!
-//! El despacho permanece en `commands.rs`. `dispatch_key` documenta el handler
-//! actual, pero no sustituye su normalizacion amplia ni sus fallbacks.
+//! Fuente canonica de nombres: este registro es la unica fuente de verdad para
+//! `canonical`/`aliases`/`dispatch_key` y paleta. `commands.rs` conserva tablas
+//! hardcodeadas heredadas para compatibilidad del dispatcher (propiedad de otro
+//! agente) y no debe considerarse fuente canonica; toda adicion/cambio de nombre
+//! debe pasar por este archivo. `dispatch_key` documenta el handler actual, pero
+//! no sustituye su normalizacion amplia ni sus fallbacks.
 
 /// Tipo de valor que acepta un argumento de un comando.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3236,6 +3240,202 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("Slider[variable, min, max, paso, modo]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required, "modo": Expression required),
             signature!("Slider[variable, min, max, paso]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required)
+        ]
+    ),
+    // ---- P0 CAS analisis geometrico: TangentAt / NormalAt / ArcLength / CurvatureAt / Volume/SurfaceOfRevolution ----
+    command!(
+        "cas.tangent-at",
+        "TangentAt",
+        ["TangenteEn", "tangenteen", "tangentat"],
+        "Análisis",
+        "Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0).",
+        CreatesObject,
+        Low,
+        true,
+        "TangentAt",
+        [signature!("TangentAt[expr, x0]"; "expr": Expression required, "x0": Number required)]
+    ),
+    command!(
+        "cas.normal-at",
+        "NormalAt",
+        ["NormalEn", "normalen", "normalat"],
+        "Análisis",
+        "Recta normal a y=f(x) en x0: NormalAt[expr, x0] crea una recta perpendicular a la tangente en (x0,f(x0)).",
+        CreatesObject,
+        Low,
+        true,
+        "NormalAt",
+        [signature!("NormalAt[expr, x0]"; "expr": Expression required, "x0": Number required)]
+    ),
+    command!(
+        "cas.arc-length",
+        "ArcLength",
+        ["LongitudArco", "longitudarco", "arclength"],
+        "Análisis",
+        "Longitud de arco de y=f(x) entre a y b: ArcLength[expr, a, b] integra sqrt(1+f'(x)^2).",
+        ReadOnly,
+        Medium,
+        true,
+        "ArcLength",
+        [signature!("ArcLength[expr, a, b]"; "expr": Expression required, "a": Number required, "b": Number required)]
+    ),
+    command!(
+        "cas.curvature-at",
+        "CurvatureAt",
+        ["CurvaturaEn", "curvaturaen", "curvatureat"],
+        "Análisis",
+        "Curvatura de y=f(x) en x0: CurvatureAt[expr, x0] calcula κ = |f''|/(1+f'^2)^{3/2}.",
+        ReadOnly,
+        Medium,
+        true,
+        "CurvatureAt",
+        [signature!("CurvatureAt[expr, x0]"; "expr": Expression required, "x0": Number required)]
+    ),
+    command!(
+        "cas.volume-of-revolution",
+        "VolumeOfRevolution",
+        ["VolumenRevolucion", "volumenrevolucion", "volumen_revolucion", "volumeofrevolution"],
+        "Análisis",
+        "Volumen de revolución de y=f(x) alrededor del eje X entre a y b: VolumeOfRevolution[expr, a, b] = π∫f(x)^2 dx.",
+        ReadOnly,
+        Medium,
+        true,
+        "VolumeOfRevolution",
+        [signature!("VolumeOfRevolution[expr, a, b]"; "expr": Expression required, "a": Number required, "b": Number required)]
+    ),
+    command!(
+        "cas.surface-of-revolution",
+        "SurfaceOfRevolution",
+        ["SuperficieRevolucion", "superficierevolucion", "superficie_revolucion", "surfaceofrevolution"],
+        "Análisis",
+        "Superficie de revolución de y=f(x) entre a y b: SurfaceOfRevolution[expr, a, b] = 2π∫f(x)sqrt(1+f'(x)^2) dx.",
+        ReadOnly,
+        Medium,
+        true,
+        "SurfaceOfRevolution",
+        [signature!("SurfaceOfRevolution[expr, a, b]"; "expr": Expression required, "a": Number required, "b": Number required)]
+    ),
+    command!(
+        "cas.ode",
+        "ODE",
+        ["EDO", "edo", "ode"],
+        "CAS",
+        "Resuelve EDO y'=f(t,y): ODE[expr, t0, y0, t_end, steps, metodo, tolerancia] con metodos euler/rk4/rk45/backward; genera PencilObj.",
+        CreatesObject,
+        High,
+        true,
+        "ODE",
+        [
+            signature!("ODE[expr, t0, y0, t_end]"; "expr": Expression required, "t0": Number required, "y0": Number required, "t_end": Number required),
+            signature!("ODE[expr, t0, y0, t_end, steps]"; "expr": Expression required, "t0": Number required, "y0": Number required, "t_end": Number required, "steps": Integer optional),
+            signature!("ODE[expr, t0, y0, t_end, steps, metodo]"; "expr": Expression required, "t0": Number required, "y0": Number required, "t_end": Number required, "steps": Integer optional, "metodo": Expression optional),
+            signature!("ODE[expr, t0, y0, t_end, steps, metodo, tolerancia]"; "expr": Expression required, "t0": Number required, "y0": Number required, "t_end": Number required, "steps": Integer optional, "metodo": Expression optional, "tolerancia": Number optional)
+        ]
+    ),
+    command!(
+        "cas.ode-system",
+        "ODESystem",
+        ["SistemaEDO", "sistemaedo", "sistema_edo", "ode_system", "odesystem"],
+        "CAS",
+        "Resuelve sistema 2D x'=f(t,x,y), y'=g(t,x,y): ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia].",
+        CreatesObject,
+        High,
+        true,
+        "ODESystem",
+        [
+            signature!("ODESystem[expr1, expr2, t0, x0, y0]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required),
+            signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional),
+            signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end, steps]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional, "steps": Integer optional),
+            signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional, "steps": Integer optional, "metodo": Expression optional),
+            signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional, "steps": Integer optional, "metodo": Expression optional, "tolerancia": Number optional)
+        ]
+    ),
+    // ---- Bonus paridad GeoGebra: Variance / Percentile / Q1 / Q3 / Mode / Covariance / Checkbox ----
+    command!(
+        "statistics.variance",
+        "Variance",
+        ["varianza", "variance", "var"],
+        "Estadística",
+        "Calcula varianza muestral (n-1): Variance[{data}] usa grafito-geometry::statistics::variance.",
+        ReadOnly,
+        Low,
+        true,
+        "Variance",
+        [signature!("Variance[{data}]"; "data": Data required)]
+    ),
+    command!(
+        "statistics.percentile",
+        "Percentile",
+        ["percentil", "percentile", "cuantil", "quantile"],
+        "Estadística",
+        "Cuantil por interpolación lineal: Percentile[{data}, p] con p en [0,100] o [0,1] según motor quantile.",
+        ReadOnly,
+        Low,
+        true,
+        "Percentile",
+        [signature!("Percentile[{data}, p]"; "data": Data required, "p": Number required)]
+    ),
+    command!(
+        "statistics.q1",
+        "Q1",
+        ["q1", "cuartil1", "q_1", "primer_cuartil"],
+        "Estadística",
+        "Primer cuartil: Q1[{data}] = quantile 0.25.",
+        ReadOnly,
+        Low,
+        true,
+        "Q1",
+        [signature!("Q1[{data}]"; "data": Data required)]
+    ),
+    command!(
+        "statistics.q3",
+        "Q3",
+        ["q3", "cuartil3", "q_3", "tercer_cuartil"],
+        "Estadística",
+        "Tercer cuartil: Q3[{data}] = quantile 0.75.",
+        ReadOnly,
+        Low,
+        true,
+        "Q3",
+        [signature!("Q3[{data}]"; "data": Data required)]
+    ),
+    command!(
+        "statistics.mode",
+        "Mode",
+        ["moda", "mode"],
+        "Estadística",
+        "Moda por frecuencia con tolerancia 1e-10: Mode[{data}].",
+        ReadOnly,
+        Low,
+        true,
+        "Mode",
+        [signature!("Mode[{data}]"; "data": Data required)]
+    ),
+    command!(
+        "statistics.covariance",
+        "Covariance",
+        ["covarianza", "covariance", "cov"],
+        "Estadística",
+        "Covarianza muestral: Covariance[{xs}, {ys}] con n-1.",
+        ReadOnly,
+        Low,
+        true,
+        "Covariance",
+        [signature!("Covariance[{xs}, {ys}]"; "xs": Data required, "ys": Data required)]
+    ),
+    command!(
+        "controls.checkbox",
+        "Checkbox",
+        ["casilla", "checkbox", "check_box"],
+        "Controles",
+        "Casilla de verificación ligada a variable booleana (stub ReadOnly hasta motor UI): Checkbox[variable] o Checkbox[etiqueta, variable].",
+        ReadOnly,
+        Low,
+        true,
+        "Checkbox",
+        [
+            signature!("Checkbox[variable]"; "variable": Variable required),
+            signature!("Checkbox[etiqueta, variable]"; "etiqueta": Expression required, "variable": Variable required)
         ]
     ),
 ];

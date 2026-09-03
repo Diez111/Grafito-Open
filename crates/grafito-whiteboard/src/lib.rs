@@ -103,10 +103,15 @@ fn point_segment_distance(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> f64 {
     ((p.0 - proj.0).powi(2) + (p.1 - proj.1).powi(2)).sqrt()
 }
 
-/// Documento de pizarra con elementos y selección.
+/// Documento de pizarra con elementos y selección transitoria.
+///
+/// `selected` es estado UI efímero (índice seleccionado) y no debe persistir:
+/// se marca `#[serde(skip)]` para que save/load no conserve selección stale
+/// y no filtre un índice fuera de rango tras deserializar.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WhiteboardDoc {
     elements: Vec<WhiteboardElement>,
+    #[serde(skip)]
     selected: Option<usize>,
 }
 

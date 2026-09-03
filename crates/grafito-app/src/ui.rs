@@ -163,7 +163,7 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
                 ("TikZ...", crate::export::ExportFormat::Tikz),
             ] {
                 if ui.button(label).clicked() {
-                    app.export_with_dialog(format);
+                    app.export_with_dialog(format, Some(ui.ctx()));
                     ui.close_menu();
                 }
             }
@@ -178,14 +178,27 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 
 fn draw_edit_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Editar", |ui| {
-        if ui.button("Deshacer (Ctrl+Z)").clicked() {
+        let undo_len = app.undo_stack.len();
+        let redo_len = app.redo_stack.len();
+        let undo_label = format!("Deshacer (Ctrl+Z) {}/{}", undo_len, crate::app::MAX_UNDO);
+        if ui
+            .add_enabled(!app.undo_stack.is_empty(), egui::Button::new(undo_label))
+            .clicked()
+        {
             app.undo();
+            ui.close_menu();
         }
-        if ui.button("Rehacer (Ctrl+Y)").clicked() {
+        let redo_label = format!("Rehacer (Ctrl+Y) {}/{}", redo_len, crate::app::MAX_UNDO);
+        if ui
+            .add_enabled(!app.redo_stack.is_empty(), egui::Button::new(redo_label))
+            .clicked()
+        {
             app.redo();
+            ui.close_menu();
         }
         if ui.button("Eliminar (Supr)").clicked() {
             app.delete_selected();
+            ui.close_menu();
         }
     });
 }
@@ -950,6 +963,7 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
     let Some(action) = app.pending_document_action() else {
         return;
     };
+    let current_path = app.current_document_path().map(|p| p.to_path_buf());
     let save_error = app.document_save_error().map(str::to_owned);
     let mut open = true;
     let mut decision = None;
@@ -971,7 +985,13 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
         .show(ctx, |ui| {
             ui.set_min_width(320.0);
             ui.set_max_width(380.0);
-            dialog_contents(ui, action, save_error.as_ref(), &mut decision);
+            dialog_contents(
+                ui,
+                action,
+                current_path.as_deref(),
+                save_error.as_ref(),
+                &mut decision,
+            );
         });
     if !open && decision.is_none() {
         decision = Some(UnsavedDecision::Cancel);
@@ -984,6 +1004,7 @@ pub(crate) fn draw_unsaved_changes_dialog(app: &mut GrafitoApp, ctx: &egui::Cont
 fn dialog_contents(
     ui: &mut egui::Ui,
     action: DocumentAction,
+    current_path: Option<&std::path::Path>,
     save_error: Option<&String>,
     decision: &mut Option<UnsavedDecision>,
 ) {
@@ -994,9 +1015,9 @@ fn dialog_contents(
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(SPACE_XS);
-                // Single body — prompt_message already contains the specific action (New/Open/Exit)
+                // Single body — prompt_message incluye acción y current_path (lifecycle.rs:47)
                 ui.label(
-                    egui::RichText::new(action.prompt_message())
+                    egui::RichText::new(action.prompt_message(current_path))
                         .size(TYPE_SM)
                         .color(theme.text_primary),
                 );

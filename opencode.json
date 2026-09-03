@@ -8,10 +8,20 @@
     "reserved": 12000
   },
   "watcher": {
-    "ignore": ["target/**", "node_modules/**", ".git/**", "dist/**", "packaging/deb/**"]
+    "ignore": [
+      "target/**",
+      "node_modules/**",
+      ".git/**",
+      "dist/**",
+      "packaging/deb/**"
+    ]
   },
   "permission": "allow",
-  "instructions": ["AGENTS.md", "docs/architecture.md", ".jspace/WORKSPACE.md"],
+  "instructions": [
+    "AGENTS.md",
+    "docs/architecture.md",
+    ".jspace/WORKSPACE.md"
+  ],
   "agent": {
     "plan": {
       "description": "Planificador barato: arch, budgets, DAG",
@@ -45,6 +55,13 @@
       "mode": "subagent",
       "model": "opencode-go/deepseek-v4-flash",
       "temperature": 0.15
+    }
+  },
+  "provider": {
+    "opencode": {
+      "options": {
+        "setCacheKey": true
+      }
     }
   }
 }

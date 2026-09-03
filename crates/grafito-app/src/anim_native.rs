@@ -182,6 +182,8 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
     "universal"
 }
 
+/// Dispatcher `render_anim_for_concept`: 5 originales + 2 nuevos (euler, fourier) = 7
+/// Todos garantizan <2s incluso en debug (medición por Instant, early-break).
 /// Convierte punto matematico (x,y en [-3,3]^2) a pixel del buffer.
 fn to_pixel(width: usize, height: usize, x: f64, y: f64) -> (usize, usize) {
     let px = ((x + 3.0) / 6.0 * (width as f64)).round() as usize;
@@ -1020,9 +1022,199 @@ pub fn render_anim_for_concept(
         "conformal-map" => render_conformal_frames(width, height),
         "pitagoras" => render_pitagoras_frames(width, height),
         "derivative-slope" => render_native_animation_frames(width, height),
+        "euler" => render_euler_frames(width, height),
+        "fourier" => render_fourier_frames(width, height),
         "universal" => render_universal_youtube_frames(concept, width, height),
         _ => render_universal_youtube_frames(concept, width, height),
     }
+}
+
+/// Stub Euler: serie e^x parciales con fondo nativo, <2s garantizado.
+/// Usa la misma paleta y grid para no romper estilo; animación determinista.
+pub fn render_euler_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
+    // Partial sums of exp: S_n(x) = sum_{k=0..n} x^k/k!
+    let start = std::time::Instant::now();
+    let max_euler_ms: u128 = 1800;
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        if start.elapsed().as_millis() > max_euler_ms {
+            // fill remaining with last frame to honrar <2s sin romper len
+            let last = frames.last().cloned().unwrap_or_else(|| {
+                let mut b = [BG[0], BG[1], BG[2], 255].repeat(w * h);
+                // trivial fill if no frame yet
+                b.truncate(w * h * 4);
+                egui::ColorImage::from_rgba_unmultiplied([w, h], &b)
+            });
+            while frames.len() < NATIVE_ANIM_FRAME_COUNT {
+                frames.push(last.clone());
+            }
+            break;
+        }
+        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let terms = (1 + (t * 6.0) as usize).clamp(1, 7);
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h, "euler", t * 0.08);
+        draw_subtle_grid(&mut buf, w, h, t);
+        let axis = AXIS_COLOR;
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            to_pixel(w, h, -3.0, 0.0),
+            to_pixel(w, h, 3.0, 0.0),
+            axis,
+        );
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            to_pixel(w, h, 0.0, -3.0),
+            to_pixel(w, h, 0.0, 3.0),
+            axis,
+        );
+        // draw exp(x) target faint
+        for i in -60..60 {
+            let x0 = i as f64 / 20.0;
+            let x1 = (i + 1) as f64 / 20.0;
+            let y0 = x0.exp().clamp(-3.0, 3.0);
+            let y1 = x1.exp().clamp(-3.0, 3.0);
+            draw_line(
+                &mut buf,
+                w,
+                h,
+                to_pixel(w, h, x0, y0),
+                to_pixel(w, h, x1, y1),
+                [255, 255, 255, 35],
+            );
+        }
+        // draw partial sum
+        let factorial = |n: usize| -> f64 { (1..=n).fold(1.0, |a, b| a * b as f64) };
+        let partial = |x: f64| -> f64 {
+            (0..terms)
+                .map(|k| x.powi(k as i32) / factorial(k))
+                .sum::<f64>()
+                .clamp(-3.0, 3.0)
+        };
+        for i in -60..60 {
+            let x0 = i as f64 / 20.0;
+            let x1 = (i + 1) as f64 / 20.0;
+            let a = to_pixel(w, h, x0, partial(x0));
+            let b = to_pixel(w, h, x1, partial(x1));
+            draw_line(&mut buf, w, h, a, b, [66u8, 133, 244, 235]);
+        }
+        // indicator text terms
+        draw_text_block(
+            &mut buf,
+            w,
+            h,
+            w / 14,
+            h / 12,
+            &format!("e^x  n={}", terms - 1),
+            TEXT_COLOR,
+            1,
+        );
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+    }
+    frames
+}
+
+/// Stub Fourier: suma de armónicos de onda cuadrada, <2s garantizado.
+pub fn render_fourier_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    let (w, h) = {
+        let cw = width.clamp(64, 4096) as usize;
+        let ch = height.clamp(48, 4096) as usize;
+        match cw.checked_mul(ch).and_then(|v| v.checked_mul(4)) {
+            Some(_) => (cw, ch),
+            None => (640, 480),
+        }
+    };
+    let start = std::time::Instant::now();
+    let max_ms: u128 = 1800;
+    let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        if start.elapsed().as_millis() > max_ms {
+            let last = frames.last().cloned().unwrap_or_else(|| {
+                let b = [BG[0], BG[1], BG[2], 255].repeat(w * h);
+                egui::ColorImage::from_rgba_unmultiplied([w, h], &b[..w * h * 4])
+            });
+            while frames.len() < NATIVE_ANIM_FRAME_COUNT {
+                frames.push(last.clone());
+            }
+            break;
+        }
+        let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
+        let harmonics = (1 + (t * 5.0) as usize).clamp(1, 6);
+        let byte_len = w
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(640 * 480 * 4);
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h, "fourier", t * 0.08);
+        draw_subtle_grid(&mut buf, w, h, t);
+        let axis = AXIS_COLOR;
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            to_pixel(w, h, -3.0, 0.0),
+            to_pixel(w, h, 3.0, 0.0),
+            axis,
+        );
+        draw_line(
+            &mut buf,
+            w,
+            h,
+            to_pixel(w, h, 0.0, -3.0),
+            to_pixel(w, h, 0.0, 3.0),
+            axis,
+        );
+        let fourier = |x: f64| -> f64 {
+            let mut s = 0.0;
+            for k in 0..harmonics {
+                let n = (2 * k + 1) as f64;
+                s += (n * x).sin() / n;
+            }
+            (s * 4.0 / std::f64::consts::PI).clamp(-2.5, 2.5)
+        };
+        for i in -60..60 {
+            let x0 = i as f64 / 20.0;
+            let x1 = (i + 1) as f64 / 20.0;
+            let a = to_pixel(w, h, x0, fourier(x0));
+            let b = to_pixel(w, h, x1, fourier(x1));
+            draw_line(&mut buf, w, h, a, b, [235u8, 211, 84, 235]);
+        }
+        // Gibbs markers at discontinuities
+        for &cx in &[-std::f64::consts::PI, 0.0, std::f64::consts::PI] {
+            if cx.abs() <= 3.0 {
+                let p = to_pixel(w, h, cx, 0.0);
+                draw_filled_circle(&mut buf, w, h, p.0, p.1, 2, [255u8, 77, 77, 200]);
+            }
+        }
+        draw_text_block(
+            &mut buf,
+            w,
+            h,
+            w / 14,
+            h / 12,
+            &format!("fourier  k={}", harmonics),
+            TEXT_COLOR,
+            1,
+        );
+        frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+    }
+    frames
 }
 
 pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<egui::ColorImage> {
@@ -1036,6 +1228,8 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
             render_universal_youtube_frames("matem\u{00e1}tica", width, height)
         }
         "derivative-slope" | "ecuacion-anim" => render_native_animation_frames(width, height),
+        "euler" => render_euler_frames(width, height),
+        "fourier" => render_fourier_frames(width, height),
         _ => {
             // template desconocido -> universal con ese texto como concepto para no quedar vacio
             if template.trim().is_empty() {

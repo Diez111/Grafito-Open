@@ -260,6 +260,10 @@ impl FunctionComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Function Compute Pass"),
+                // Sin GPU timing: TIMESTAMP_QUERY es opcional y el readback es
+                // síncrono, así que el wait del lado CPU domina. Cablear
+                // wgpu-profiler aquí cuando TIMESTAMP_QUERY esté disponible
+                // (verificado en Renderer::new).
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.pipeline);
@@ -288,11 +292,14 @@ impl FunctionComputePipeline {
                 log::error!("Function compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (actualmente acotado a 1 intento por frame via MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs)
-        log::trace!("Function compute sync readback (Wait) — bloqueante, 1 intento por frame");
-        device.poll(wgpu::Maintain::Wait);
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Function compute sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
 
-        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        if !mapped {
             // `unmap` is idempotent: when `map_async` reported an
             // error the buffer was never mapped, so this is a no-op.
             self.values_readback.unmap();

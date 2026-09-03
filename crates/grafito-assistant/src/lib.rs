@@ -1307,15 +1307,25 @@ pub fn default_agent_tools() -> Vec<ToolSchema> {
 }
 
 /// System prompt base más las instrucciones locales de plugins, acotadas.
+///
+/// Mitigación prompt injection: delimita secciones con `--- SYSTEM ---` y `--- USER ---`
+/// para que el modelo distinga instrucciones privilegiadas (SYSTEM) del contenido
+/// del usuario/plugins (USER). Las instrucciones de plugins se envuelven en bloque
+/// USER delimitado, evitando que puedan suplantar directivas SYSTEM sin delimitador.
+///
+/// El prompt se acota además por `MAX_SYSTEM_INSTRUCTIONS_BYTES` (validado en
+/// `AssistantRequest::validate`) y se trimea antes de inyectar.
 fn remote_system_prompt(request: &AssistantRequest) -> String {
     let base = format!(
         "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
     );
     let instructions = request.system_instructions.trim();
     if instructions.is_empty() {
-        base
+        format!("--- SYSTEM ---\n{base}\n--- END SYSTEM ---")
     } else {
-        format!("{base}\n\nInstrucciones locales (plugins) para esta sesión:\n{instructions}")
+        format!(
+            "--- SYSTEM ---\n{base}\n--- USER ---\nInstrucciones locales (plugins) para esta sesión:\n{instructions}\n--- END ---"
+        )
     }
 }
 

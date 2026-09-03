@@ -1,5 +1,6 @@
 //! Document validation to mitigate untrusted save-file DoS.
 
+use crate::error::CoreError;
 use crate::{pencil::MAX_PENCIL_POINTS, Document, GeoObject};
 use grafito_geometry::{
     Color, Point2, Point3D, RegularPolytopeProjectionError, RegularPolytopeProjectionPlan,
@@ -46,20 +47,140 @@ pub const GEOM_EPS: f64 = 1e-12;
 /// snapshot al render. Migrar `HashMap` → `BTreeMap` en `Document` es la
 /// siguiente fase para determinismo total; por ahora el wrapper evita que un
 /// documento a medio mutar escape de `detached_clone` → `commit`.
+///
+/// # Cableado (3 sitios) — fail-closed
+///
+/// Este wrapper hoy tiene 0 call-sites directos. El cableado propuesto es:
+///
+/// ```ignore
+/// // 1) Document::commit (document.rs ~384):
+/// // antes: crate::validation::validate_document(&staged)?;
+/// // después:
+/// let _validated = ValidatedDocument::try_new_typed(staged.clone())?;
+/// // o: ValidatedDocument::try_new(staged.clone()).map_err(CoreError::Validation)?;
+///
+/// // 2) ChangeSet::restore (document.rs ~184):
+/// // antes: crate::validation::validate_document(snapshot)?;
+/// // después:
+/// let _validated = ValidatedDocument::try_new_typed(snapshot.clone())?;
+/// // El snapshot ya validado se usa para el restore; evita que un snapshot
+/// // corrupto entre al documento vivo.
+///
+/// // 3) persistence::serialize_document (persistence.rs ~54):
+/// // antes: validate_document(document).map_err(SemanticValidation)?;
+/// // después:
+/// let validated = ValidatedDocument::try_new_typed(document.clone())?;
+/// let envelope = DocumentEnvelope { document: validated.into_inner(), .. };
+/// // Alternativa sin clonar el documento si ya se valida por referencia:
+/// // validate_document_typed(document)?;
+///
+/// // Helper listo para persistencia sin tocar document.rs:
+/// // let json = validate_and_serialize(document)?;
+/// // let json = validate_and_serialize_envelope(document, version)?;
+/// ```
+///
+/// Si `document.rs` es owned por otro agente, no se edita directamente:
+/// en su lugar `validate_and_serialize` y `try_new_typed` quedan expuestos
+/// para que `persistence.rs` los use y document.rs pueda migrar después
+/// sin romper el lifecycle `Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting`.
 #[derive(Debug, Clone)]
 pub struct ValidatedDocument(pub crate::Document);
 
 impl ValidatedDocument {
+    /// Compat: retorna `String` para call-sites y tests legacy.
+    /// Nuevos call-sites deben preferir [`Self::try_new_typed`] que retorna [`CoreError`].
     pub fn try_new(doc: crate::Document) -> Result<Self, String> {
         validate_document(&doc)?;
         Ok(Self(doc))
     }
+
+    /// Variante tipada fail-closed: `String` → `CoreError::Validation`.
+    /// No rompe tests existentes (pueden usar `.unwrap()` igual) y permite `?`
+    /// propagar `CoreError` sin parsear texto.
+    pub fn try_new_typed(doc: crate::Document) -> Result<Self, CoreError> {
+        validate_document_typed(&doc)?;
+        Ok(Self(doc))
+    }
+
+    /// Valida por referencia sin consumir el documento (útil para `&Document`).
+    pub fn validate_ref(doc: &crate::Document) -> Result<(), CoreError> {
+        validate_document_typed(doc)
+    }
+
     pub fn inner(&self) -> &crate::Document {
         &self.0
     }
     pub fn into_inner(self) -> crate::Document {
         self.0
     }
+}
+
+/// Helper fail-closed para `persistence.rs` sin necesidad de tocar `document.rs`.
+///
+/// Valida el documento vía [`ValidatedDocument::try_new_typed`] y serializa el
+/// `Document` interno a JSON (no envelope). Para envelope versionado usar
+/// [`validate_and_serialize_envelope`]. Retorna `CoreError::Validation` si el
+/// documento no pasa `validate_document`, o `CoreError::Persistence` si la
+/// serialización falla o excede `MAX_DOCUMENT_SIZE_BYTES`.
+///
+/// # Uso en persistence.rs
+/// ```ignore
+/// use crate::validation::validate_and_serialize;
+///
+/// pub fn serialize_document(doc: &Document) -> Result<String, DocumentPersistenceError> {
+///     let json = validate_and_serialize(doc).map_err(|e| match e {
+///         CoreError::Validation(msg) => DocumentPersistenceError::SemanticValidation(msg),
+///         other => DocumentPersistenceError::SemanticValidation(other.to_string()),
+///     })?;
+///     // envolver en DocumentEnvelope si se necesita
+///     Ok(json)
+/// }
+/// ```
+pub fn validate_and_serialize(doc: &crate::Document) -> Result<String, CoreError> {
+    let validated = ValidatedDocument::try_new_typed(doc.clone())?;
+    let json = serde_json::to_string(&validated.into_inner())
+        .map_err(|error| CoreError::Persistence(error.to_string()))?;
+    if json.len() > MAX_DOCUMENT_SIZE_BYTES {
+        return Err(CoreError::Validation(format!(
+            "Document size {} exceeds maximum {}",
+            json.len(),
+            MAX_DOCUMENT_SIZE_BYTES
+        )));
+    }
+    Ok(json)
+}
+
+/// Variante que serializa directamente el envelope versionado. Evita duplicar
+/// lógica de `persistence::serialize_document` cuando el caller solo necesita
+/// un JSON listo para `write_atomic`.
+pub fn validate_and_serialize_envelope(
+    doc: &crate::Document,
+    schema_version: u32,
+    producer_version: String,
+) -> Result<String, CoreError> {
+    let validated = ValidatedDocument::try_new_typed(doc.clone())?;
+    let envelope = crate::persistence::DocumentEnvelope {
+        schema_version,
+        producer_version,
+        document: validated.into_inner(),
+    };
+    let json = serde_json::to_string_pretty(&envelope)
+        .map_err(|error| CoreError::Persistence(error.to_string()))?;
+    if json.len() > MAX_DOCUMENT_SIZE_BYTES {
+        return Err(CoreError::Validation(format!(
+            "Document size {} exceeds maximum {}",
+            json.len(),
+            MAX_DOCUMENT_SIZE_BYTES
+        )));
+    }
+    Ok(json)
+}
+
+/// Validador tipado: `String` → `CoreError::Validation`. Mantiene compat con
+/// call-sites que aún esperan `String` via `validate_document`, pero nuevos
+/// call-sites deben usar este para `?` con `CoreError`.
+pub fn validate_document_typed(doc: &Document) -> Result<(), CoreError> {
+    validate_document(doc).map_err(CoreError::Validation)
 }
 
 /// Validate the raw JSON before deserializing into a `Document`.

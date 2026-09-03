@@ -58,7 +58,7 @@ Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 ```
 Idle -> Thinking -> Verifying -> Animating{job_id} -> Done | Failed | Cancelled
 ```
-- Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input 4096, max_steps 24, timeout 15s).
+- Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input 8192, max_steps 8, timeout 15s).
 - I/O nunca en UI thread; UI solo renderiza &AssistantState.
 
 ### 4.4 Interval/ExprEval (grafito-geometry)
@@ -117,8 +117,11 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Anim | MAX_NODES | 200 | python |
 | Anim | line_cap | 64KB | engine.rs |
 | Anim | diagnostics cap | 64 lineas | engine.rs |
-| Assistant | RequestBudget max_input | 4096 | assistant-types |
-| Assistant | AttachmentLimits max_bytes | 5M | assistant-types |
+| Assistant | RequestBudget max_input | 8192 | assistant-types |
+| Assistant | RequestBudget max_steps | 8 | assistant-types |
+| Assistant | RequestBudget timeout | 15s | assistant-types |
+| Assistant | AttachmentLimits max_bytes | 512 KiB | assistant-types |
+| Assistant | AttachmentLimits max_total_bytes | 1 MiB | assistant-types |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs (is_compact_viewport) |
 | UI | PANEL_LEFT_DEFAULT | 260 (min 180, max 45% viewport via PANEL_LEFT_MAX_FRACTION) | tokens.rs + panels.rs/algebra.rs |
 | UI | PANEL_LEFT_MIN | 180 | tokens.rs |

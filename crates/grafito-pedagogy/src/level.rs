@@ -87,7 +87,9 @@ impl PedagogicalLevel {
     }
 
     /// Valor numérico del nivel para gamificación/progresión.
-    /// Primary 2, Secondary 8, University 15, UTN AM1 12, AM2 14, Álgebra 13, Probabilidad 14.
+    /// Primary 2, Secondary 8, University 15, UTN AM1 12, AM2 14, Álgebra 13, Probabilidad 15.
+    /// Antes AM2 y Probabilidad colisionaban en 14; ahora Probabilidad es 15
+    /// (comparte valor con University como tier terminal, distinguible por `UTNProgram`).
     pub const fn level_value(self) -> u32 {
         match self {
             Self::Primary => 2,
@@ -96,7 +98,7 @@ impl PedagogicalLevel {
             Self::UTN(UTNProgram::AM1) => 12,
             Self::UTN(UTNProgram::AM2) => 14,
             Self::UTN(UTNProgram::Algebra) => 13,
-            Self::UTN(UTNProgram::Probabilidad) => 14,
+            Self::UTN(UTNProgram::Probabilidad) => 15,
         }
     }
 
@@ -144,7 +146,11 @@ impl PedagogicalLevel {
 
     /// Helper gamificación: mapea valor numérico a nivel.
     /// 0..=4 => Primary, 5..=10 => Secondary, 11..=12 => UTN AM1, 13 => Álgebra, 14 => AM2, _ => University.
-    /// Nota: Probabilidad comparte 14 con AM2; `from_level_value(14)` retorna AM2.
+    /// Nota histórica: Probabilidad y AM2 colisionaban en 14; ahora Probabilidad es 15
+    /// (`level_value` 15). `from_level_value` mapea 15 a `University` genérico; para
+    /// distinguir Probabilidad usar `from_level_value_with_program` o construir
+    /// `UTN(Probabilidad)` directamente. Esta distinción conserva compatibilidad
+    /// con valores persistidos antiguos (14 sigue siendo AM2).
     pub fn from_level_value(value: u32) -> Self {
         match value {
             0..=4 => Self::Primary,
@@ -154,6 +160,15 @@ impl PedagogicalLevel {
             14 => Self::UTN(UTNProgram::AM2),
             _ => Self::University,
         }
+    }
+
+    /// Variante que distingue Probabilidad cuando se conoce el programa.
+    /// Si `program_hint` es `Some(Probabilidad)` y `value >= 15`, retorna `UTN(Probabilidad)`.
+    pub fn from_level_value_with_program(value: u32, program_hint: Option<UTNProgram>) -> Self {
+        if program_hint == Some(UTNProgram::Probabilidad) && value >= 15 {
+            return Self::UTN(UTNProgram::Probabilidad);
+        }
+        Self::from_level_value(value)
     }
 }
 
@@ -186,7 +201,7 @@ mod tests {
         assert_eq!(PedagogicalLevel::UTN(UTNProgram::Algebra).level_value(), 13);
         assert_eq!(
             PedagogicalLevel::UTN(UTNProgram::Probabilidad).level_value(),
-            14
+            15
         );
     }
     #[test]
@@ -232,6 +247,32 @@ mod tests {
         );
         assert_eq!(
             PedagogicalLevel::from_level_value(15),
+            PedagogicalLevel::University
+        );
+    }
+
+    #[test]
+    fn probabilidad_level_value_and_hint() {
+        assert_eq!(
+            PedagogicalLevel::UTN(UTNProgram::Probabilidad).level_value(),
+            15
+        );
+        // from_level_value(14) sigue siendo AM2 (compat retro), 15 es University genérico
+        assert_eq!(
+            PedagogicalLevel::from_level_value(14),
+            PedagogicalLevel::UTN(UTNProgram::AM2)
+        );
+        assert_eq!(
+            PedagogicalLevel::from_level_value(15),
+            PedagogicalLevel::University
+        );
+        // Con hint Probabilidad, 15 distingue correctamente
+        assert_eq!(
+            PedagogicalLevel::from_level_value_with_program(15, Some(UTNProgram::Probabilidad)),
+            PedagogicalLevel::UTN(UTNProgram::Probabilidad)
+        );
+        assert_eq!(
+            PedagogicalLevel::from_level_value_with_program(15, None),
             PedagogicalLevel::University
         );
     }

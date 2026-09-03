@@ -44,11 +44,16 @@ pub(crate) enum DocumentAction {
 }
 
 impl DocumentAction {
-    pub(crate) const fn prompt_message(self) -> &'static str {
+    pub(crate) fn prompt_message(self, current_path: Option<&Path>) -> String {
+        let file = current_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "Sin título".to_string());
         match self {
-            Self::New => "¿Guardar cambios?",
-            Self::Open => "¿Guardar cambios?",
-            Self::Exit => "¿Guardar cambios?",
+            Self::New => {
+                format!("¿Guardar cambios en \"{file}\" antes de crear un documento nuevo?")
+            }
+            Self::Open => format!("¿Guardar cambios en \"{file}\" antes de abrir otro documento?"),
+            Self::Exit => format!("¿Guardar cambios en \"{file}\" antes de salir?"),
         }
     }
 }

@@ -201,6 +201,291 @@ pub fn bkt_params_for_branch(branch_id: &str) -> BktParams {
     }
 }
 
+/// Mapeo fino por LO individual (43 LOs). `p_init` escala con `level_min`:
+/// primaria (level 1-2) → 0.40-0.35, secundaria (4-8) → 0.33-0.28,
+/// universidad (10-15) → 0.26-0.18. `p_learn` y `p_guess` se ajustan
+/// por bloque temático; `p_slip` crece con dificultad. Mantiene
+/// `bkt_params_for_branch` para compatibilidad con claves de perfil antiguas.
+pub fn bkt_params_for_lo(lo_id: &str) -> BktParams {
+    match lo_id {
+        // Primaria (5) — p_init alto, slip bajo
+        "pri-conteo" => BktParams {
+            p_init: 0.40,
+            p_learn: 0.35,
+            p_guess: 0.25,
+            p_slip: 0.08,
+        },
+        "pri-fracc-vis" => BktParams {
+            p_init: 0.38,
+            p_learn: 0.33,
+            p_guess: 0.24,
+            p_slip: 0.09,
+        },
+        "pri-perim-area" => BktParams {
+            p_init: 0.36,
+            p_learn: 0.32,
+            p_guess: 0.22,
+            p_slip: 0.09,
+        },
+        "pri-proporciones" => BktParams {
+            p_init: 0.36,
+            p_learn: 0.32,
+            p_guess: 0.23,
+            p_slip: 0.09,
+        },
+        "pri-datos" => BktParams {
+            p_init: 0.38,
+            p_learn: 0.33,
+            p_guess: 0.24,
+            p_slip: 0.08,
+        },
+
+        // Secundaria (11) — incluye sec-pitagoras
+        "sec-fracc" => BktParams {
+            p_init: 0.33,
+            p_learn: 0.30,
+            p_guess: 0.21,
+            p_slip: 0.10,
+        },
+        "sec-prop" => BktParams {
+            p_init: 0.32,
+            p_learn: 0.30,
+            p_guess: 0.20,
+            p_slip: 0.10,
+        },
+        "sec-ec" => BktParams {
+            p_init: 0.30,
+            p_learn: 0.29,
+            p_guess: 0.20,
+            p_slip: 0.11,
+        },
+        "sec-lineal" => BktParams {
+            p_init: 0.30,
+            p_learn: 0.29,
+            p_guess: 0.19,
+            p_slip: 0.11,
+        },
+        "sec-cuad" => BktParams {
+            p_init: 0.28,
+            p_learn: 0.28,
+            p_guess: 0.19,
+            p_slip: 0.12,
+        },
+        "sec-pend" => BktParams {
+            p_init: 0.30,
+            p_learn: 0.29,
+            p_guess: 0.19,
+            p_slip: 0.11,
+        },
+        "sec-area" => BktParams {
+            p_init: 0.30,
+            p_learn: 0.29,
+            p_guess: 0.20,
+            p_slip: 0.11,
+        },
+        "sec-trig" => BktParams {
+            p_init: 0.26,
+            p_learn: 0.27,
+            p_guess: 0.20,
+            p_slip: 0.13,
+        },
+        "sec-vect" => BktParams {
+            p_init: 0.28,
+            p_learn: 0.28,
+            p_guess: 0.19,
+            p_slip: 0.12,
+        },
+        "sec-prob" => BktParams {
+            p_init: 0.31,
+            p_learn: 0.30,
+            p_guess: 0.23,
+            p_slip: 0.10,
+        },
+        "sec-pitagoras" => BktParams {
+            p_init: 0.29,
+            p_learn: 0.28,
+            p_guess: 0.19,
+            p_slip: 0.12,
+        },
+
+        // AM1 (8)
+        "am1-func" => BktParams {
+            p_init: 0.26,
+            p_learn: 0.28,
+            p_guess: 0.22,
+            p_slip: 0.12,
+        },
+        "am1-lim" => BktParams {
+            p_init: 0.24,
+            p_learn: 0.27,
+            p_guess: 0.21,
+            p_slip: 0.13,
+        },
+        "am1-cont" => BktParams {
+            p_init: 0.24,
+            p_learn: 0.27,
+            p_guess: 0.21,
+            p_slip: 0.13,
+        },
+        "am1-der" => BktParams {
+            p_init: 0.22,
+            p_learn: 0.26,
+            p_guess: 0.22,
+            p_slip: 0.14,
+        },
+        "am1-der-aplic" => BktParams {
+            p_init: 0.21,
+            p_learn: 0.25,
+            p_guess: 0.22,
+            p_slip: 0.14,
+        },
+        "am1-int" => BktParams {
+            p_init: 0.22,
+            p_learn: 0.26,
+            p_guess: 0.22,
+            p_slip: 0.14,
+        },
+        "am1-int-aplic" => BktParams {
+            p_init: 0.21,
+            p_learn: 0.25,
+            p_guess: 0.22,
+            p_slip: 0.14,
+        },
+        "am1-sucesiones" => BktParams {
+            p_init: 0.24,
+            p_learn: 0.27,
+            p_guess: 0.20,
+            p_slip: 0.13,
+        },
+
+        // AM2 (7)
+        "am2-edo" => BktParams {
+            p_init: 0.20,
+            p_learn: 0.25,
+            p_guess: 0.21,
+            p_slip: 0.14,
+        },
+        "am2-series" => BktParams {
+            p_init: 0.20,
+            p_learn: 0.25,
+            p_guess: 0.20,
+            p_slip: 0.14,
+        },
+        "am2-taylor" => BktParams {
+            p_init: 0.18,
+            p_learn: 0.24,
+            p_guess: 0.19,
+            p_slip: 0.15,
+        },
+        "am2-multivariable" => BktParams {
+            p_init: 0.19,
+            p_learn: 0.25,
+            p_guess: 0.20,
+            p_slip: 0.14,
+        },
+        "am2-int-multi" => BktParams {
+            p_init: 0.18,
+            p_learn: 0.24,
+            p_guess: 0.19,
+            p_slip: 0.15,
+        },
+        "am2-campos" => BktParams {
+            p_init: 0.18,
+            p_learn: 0.24,
+            p_guess: 0.19,
+            p_slip: 0.15,
+        },
+        "am2-teoremas" => BktParams {
+            p_init: 0.17,
+            p_learn: 0.23,
+            p_guess: 0.18,
+            p_slip: 0.15,
+        },
+
+        // Álgebra (6)
+        "alg-vectores" => BktParams {
+            p_init: 0.25,
+            p_learn: 0.28,
+            p_guess: 0.19,
+            p_slip: 0.12,
+        },
+        "alg-rectas-planos" => BktParams {
+            p_init: 0.23,
+            p_learn: 0.27,
+            p_guess: 0.19,
+            p_slip: 0.13,
+        },
+        "alg-matrices" => BktParams {
+            p_init: 0.25,
+            p_learn: 0.28,
+            p_guess: 0.20,
+            p_slip: 0.12,
+        },
+        "alg-determinantes" => BktParams {
+            p_init: 0.23,
+            p_learn: 0.27,
+            p_guess: 0.19,
+            p_slip: 0.13,
+        },
+        "alg-conicas" => BktParams {
+            p_init: 0.22,
+            p_learn: 0.26,
+            p_guess: 0.19,
+            p_slip: 0.13,
+        },
+        "alg-transformaciones" => BktParams {
+            p_init: 0.20,
+            p_learn: 0.25,
+            p_guess: 0.18,
+            p_slip: 0.14,
+        },
+
+        // Probabilidad (6)
+        "prob-basica" => BktParams {
+            p_init: 0.26,
+            p_learn: 0.29,
+            p_guess: 0.23,
+            p_slip: 0.11,
+        },
+        "prob-var" => BktParams {
+            p_init: 0.24,
+            p_learn: 0.28,
+            p_guess: 0.23,
+            p_slip: 0.12,
+        },
+        "prob-distribuciones" => BktParams {
+            p_init: 0.23,
+            p_learn: 0.27,
+            p_guess: 0.22,
+            p_slip: 0.12,
+        },
+        "prob-inferencia" => BktParams {
+            p_init: 0.21,
+            p_learn: 0.26,
+            p_guess: 0.22,
+            p_slip: 0.13,
+        },
+        "prob-regresion" => BktParams {
+            p_init: 0.22,
+            p_learn: 0.26,
+            p_guess: 0.22,
+            p_slip: 0.13,
+        },
+        "prob-muestreo" => BktParams {
+            p_init: 0.21,
+            p_learn: 0.26,
+            p_guess: 0.22,
+            p_slip: 0.13,
+        },
+
+        // Compat: claves legacy de perfil / tests
+        "functions" | "algebra" | "geometry" | "geometry3d" | "trigonometry" | "calculus"
+        | "stats" | "complex" => bkt_params_for_branch(lo_id),
+
+        _ => BktParams::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +582,87 @@ mod tests {
         let s = BktState::new(0.85);
         assert!(s.is_mastered(0.8));
         assert!(!s.is_mastered(0.9));
+    }
+
+    #[test]
+    fn bkt_params_for_lo_covers_all_43_los_and_validates() {
+        let all_ids = [
+            "pri-conteo",
+            "pri-fracc-vis",
+            "pri-perim-area",
+            "pri-proporciones",
+            "pri-datos",
+            "sec-fracc",
+            "sec-prop",
+            "sec-ec",
+            "sec-lineal",
+            "sec-cuad",
+            "sec-pend",
+            "sec-area",
+            "sec-trig",
+            "sec-vect",
+            "sec-prob",
+            "sec-pitagoras",
+            "am1-func",
+            "am1-lim",
+            "am1-cont",
+            "am1-der",
+            "am1-der-aplic",
+            "am1-int",
+            "am1-int-aplic",
+            "am1-sucesiones",
+            "am2-edo",
+            "am2-series",
+            "am2-taylor",
+            "am2-multivariable",
+            "am2-int-multi",
+            "am2-campos",
+            "am2-teoremas",
+            "alg-vectores",
+            "alg-rectas-planos",
+            "alg-matrices",
+            "alg-determinantes",
+            "alg-conicas",
+            "alg-transformaciones",
+            "prob-basica",
+            "prob-var",
+            "prob-distribuciones",
+            "prob-inferencia",
+            "prob-regresion",
+            "prob-muestreo",
+        ];
+        assert_eq!(all_ids.len(), 43, "deben ser 43 LOs");
+        for id in all_ids {
+            let p = bkt_params_for_lo(id);
+            assert!(p.validate().is_ok(), "{id} debe validar: {p:?}");
+            // p_init decrece con nivel: primaria ~0.36-0.40, secundaria ~0.26-0.33, uni ~0.17-0.26
+            assert!(
+                (0.15..=0.45).contains(&p.p_init),
+                "{id} p_init fuera rango: {}",
+                p.p_init
+            );
+        }
+        // Unknown retorna default
+        assert_eq!(bkt_params_for_lo("no-existe"), BktParams::default());
+        // Legacy branch ids delegan
+        assert_eq!(
+            bkt_params_for_lo("calculus"),
+            bkt_params_for_branch("calculus")
+        );
+    }
+
+    #[test]
+    fn bkt_params_for_lo_p_init_monotonic_primary_gt_university() {
+        let pri = bkt_params_for_lo("pri-conteo").p_init;
+        let sec = bkt_params_for_lo("sec-fracc").p_init;
+        let uni = bkt_params_for_lo("am2-teoremas").p_init;
+        assert!(
+            pri > sec,
+            "primaria debe tener p_init mayor que secundaria: {pri} vs {sec}"
+        );
+        assert!(
+            sec > uni,
+            "secundaria debe tener p_init mayor que uni avanzada: {sec} vs {uni}"
+        );
     }
 }
