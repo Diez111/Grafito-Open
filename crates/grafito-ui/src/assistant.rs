@@ -824,7 +824,7 @@ impl AssistantPanelState {
     /// Añade una imagen ya importada sólo si cumple los límites del MVP.
     pub fn add_attachment(&mut self, attachment: ImageAttachment) -> Result<(), String> {
         if self.is_pending {
-            return Err("assistant attachments are frozen while a request is pending".into());
+            return Err("los adjuntos están bloqueados mientras hay una consulta en curso".into());
         }
         let limits = AttachmentLimits::default();
         attachment.validate(&limits)?;

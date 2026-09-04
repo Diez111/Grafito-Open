@@ -1416,6 +1416,8 @@ impl GrafitoApp {
             None => (None, None),
         };
         let mut request = AssistantRequest::remote(question.clone(), document_context);
+        // Idioma del selector del panel (auto/es/en) → directiva en el system prompt.
+        request.language = self.assistant.avatar.language.clone();
         request.focus = focus;
         let plugin_instructions = self.plugin_instructions_budgeted();
         let _plugin_instruction_bytes = if plugin_instructions.is_empty() {

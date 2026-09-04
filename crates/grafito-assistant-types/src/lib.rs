@@ -922,6 +922,10 @@ pub struct AssistantRequest {
     /// Instrucciones locales adicionales del usuario (plugins) para el system prompt.
     #[serde(default)]
     pub system_instructions: String,
+    /// Idioma de respuesta ("es", "en", "auto"/"" = español rioplatense).
+    /// El selector Idioma del panel (avatar.language) lo fija por pedido.
+    #[serde(default)]
+    pub language: String,
     /// Diagnóstico local, opcional y acotado, para una única reparación remota.
     #[serde(default)]
     pub repair_feedback: Option<AssistantRepairFeedback>,
@@ -947,6 +951,7 @@ impl AssistantRequest {
             conversation: Vec::new(),
             tool_catalog: String::new(),
             system_instructions: String::new(),
+            language: String::new(),
             repair_feedback: None,
             budget: RequestBudget::default(),
             attachments: Vec::new(),
@@ -969,6 +974,14 @@ impl AssistantRequest {
         }
         if self.system_instructions.len() > MAX_SYSTEM_INSTRUCTIONS_BYTES {
             return Err("assistant system instructions exceed the configured limit".into());
+        }
+        if self.language.len() > 8
+            || !self
+                .language
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric())
+        {
+            return Err("assistant language must be a short ASCII tag".into());
         }
         self.context.validate()?;
         self.budget.validate()?;

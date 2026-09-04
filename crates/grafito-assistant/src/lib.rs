@@ -1346,7 +1346,8 @@ pub fn build_fusion_audit_payload(
     messages.push(json!({
         "role": "system",
         "content": format!(
-            "{FUSION_AUDIT_SYSTEM_PROMPT}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
+            "{FUSION_AUDIT_SYSTEM_PROMPT}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{}",
+            response_language_directive(&request.language)
         )
     }));
     messages.push(json!({"role": "user", "content": audit_input}));
@@ -1403,9 +1404,23 @@ pub fn default_agent_tools() -> Vec<ToolSchema> {
 ///
 /// El prompt se acota además por `MAX_SYSTEM_INSTRUCTIONS_BYTES` (validado en
 /// `AssistantRequest::validate`) y se trimea antes de inyectar.
+///
+/// Directiva de idioma de respuesta según el selector Idioma del panel
+/// (`avatar.language`: "es"/"en"/"auto"/""). Auto y vacío resuelven a español
+/// rioplatense porque la app es español-primero. Los bloques ```grafito
+/// conservan su sintaxis original en inglés en ambos idiomas.
+fn response_language_directive(language: &str) -> &'static str {
+    if language.trim().eq_ignore_ascii_case("en") {
+        "Always respond in English. Keep ```grafito commands in their original syntax."
+    } else {
+        "Respondé siempre en español rioplatense (usá vos, no tú). Los comandos ```grafito se mantienen en su sintaxis original en inglés."
+    }
+}
+
 fn remote_system_prompt(request: &AssistantRequest) -> String {
     let base = format!(
-        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}"
+        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{}",
+        response_language_directive(&request.language)
     );
     let instructions = request.system_instructions.trim();
     if instructions.is_empty() {
@@ -2616,6 +2631,49 @@ mod tests {
         // mensaje claro, no como builder error en el transporte.
         assert!(sanitize_api_key("abc\ndef").is_err());
         assert!(sanitize_api_key("cláve-con-ñ").is_err());
+    }
+
+    #[test]
+    fn response_language_defaults_to_rioplatense_spanish() {
+        assert!(response_language_directive("").contains("rioplatense"));
+        assert!(response_language_directive("auto").contains("rioplatense"));
+        assert!(response_language_directive("es").contains("vos"));
+        assert!(response_language_directive("EN").starts_with("Always respond in English"));
+        assert!(response_language_directive("en").contains("```grafito"));
+    }
+
+    #[test]
+    fn system_prompt_carries_the_selected_language() {
+        let mut es = request("2 + 2");
+        es.language = "es".into();
+        assert!(remote_system_prompt(&es).contains("rioplatense"));
+
+        let mut en = request("2 + 2");
+        en.language = "en".into();
+        let prompt_en = remote_system_prompt(&en);
+        assert!(prompt_en.starts_with("--- SYSTEM ---"));
+        assert!(prompt_en.contains("Always respond in English"));
+        assert!(!prompt_en.contains("rioplatense"));
+
+        // Auto (selector "Auto") resuelve a español.
+        let auto = request("2 + 2");
+        assert!(remote_system_prompt(&auto).contains("rioplatense"));
+    }
+
+    #[test]
+    fn chat_and_responses_payloads_include_the_language_directive() {
+        let mut req = request("Graficá y = x^2");
+        req.privacy_mode = PrivacyMode::RemoteAllowed;
+        req.language = "es".into();
+        let chat = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "deepseek-v4-flash");
+        let chat_body = build_chat_completion_payload(&chat, &req)
+            .unwrap()
+            .to_string();
+        assert!(chat_body.contains("rioplatense"));
+        let responses_body = build_responses_payload(&spark_settings(), &req)
+            .unwrap()
+            .to_string();
+        assert!(responses_body.contains("rioplatense"));
     }
 
     fn spark_settings() -> ProviderSettings {
