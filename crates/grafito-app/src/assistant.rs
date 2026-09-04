@@ -2465,7 +2465,26 @@ impl GrafitoApp {
                                     self.assistant.complete_request(outcome.final_text);
                                 }
                                 Err(error) => {
-                                    self.fail_assistant_request(error);
+                                    // Modo agente + Spark: las tools aún no viajan por Responses API.
+                                    // Fallback sólo-sesión a deepseek (chat-compatible), preferencia intacta.
+                                    if error.contains("Responses API")
+                                        && job.model.contains("muse-spark")
+                                        && job.provider == ProviderProfile::OpenCodeGo
+                                    {
+                                        eprintln!("grafito: session-fallback agent spark -> deepseek-v4-flash (preferencia intacta)");
+                                        self.notify(
+                                            "Modo agente con Spark aún no soporta herramientas; reintentando con DeepSeek Flash…",
+                                            ToastKind::Info,
+                                        );
+                                        let question = self.assistant.problem.trim().to_owned();
+                                        self.start_remote_assistant_for(
+                                            ctx,
+                                            question,
+                                            Some("deepseek-v4-flash"),
+                                        );
+                                    } else {
+                                        self.fail_assistant_request(error);
+                                    }
                                 }
                             }
                         }
@@ -2572,8 +2591,7 @@ impl GrafitoApp {
                         }
                         Err(error) => {
                             // Compatibilidad total SÓLO-SESIÓN: si muse-spark falla con 500 o timeout
-                            // en OpenCodeGo (caída del proveedor, verificada: 500 en ~0.5s con
-                            // cualquier payload), se reintenta con deepseek SIN tocar la preferencia
+                            // en OpenCodeGo, se reintenta con deepseek SIN tocar la preferencia
                             // guardada. El próximo pedido reintenta spark (auto-recupera si vuelve).
                             let slow_or_down = error.contains("500") || error.contains("timed out");
                             if slow_or_down
@@ -2583,7 +2601,7 @@ impl GrafitoApp {
                             {
                                 eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                 self.notify(
-                                    "Muse Spark está caído del lado del proveedor (500). Respondiendo con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
+                                    "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
                                     ToastKind::Info,
                                 );
                                 // Reintentar la misma pregunta con el fallback, sin mostrar error
@@ -2893,6 +2911,8 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         "No se pudo preparar la consulta remota. Revisá la configuración avanzada.".into()
     } else if error.contains("could not be built") {
         "No se pudo armar la consulta: la API key o el endpoint tienen caracteres inválidos. Reingresá la clave en Configuración avanzada (sin espacios ni saltos de línea).".into()
+    } else if error.contains("Responses API") {
+        "Este modelo usa la Responses API: el modo agente con herramientas aún no está soportado. Usá el chat simple o cambiá a deepseek-v4-flash.".into()
     } else if error.contains("cancel") {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
@@ -2906,7 +2926,7 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         format!("La conexión tardó demasiado: {error}. Revisá tu conexión.")
     } else if error.contains("500") {
         if current_model.contains("muse-spark") {
-            "Muse Spark está caído del lado del proveedor (500 en ~0.5s con cualquier pedido, verificado 2026-09-03). Cambiá a deepseek-v4-flash, qwen3.8-max o kimi-k3 en Configuración → Modelo.".to_string()
+            "Muse Spark responde por la Responses API; si ves un 500 es transitorio del proveedor. Probá de nuevo o cambiá a deepseek-v4-flash, qwen3.8-max o kimi-k3 en Configuración → Modelo.".to_string()
         } else {
             format!(
                 "Error interno del proveedor (500) con modelo '{}'. Probá de nuevo en unos segundos o cambiá de modelo.",

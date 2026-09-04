@@ -25,14 +25,14 @@
   "agent": {
     "plan": {
       "description": "Planificador barato: arch, budgets, DAG",
-      "mode": "subagent",
+      "mode": "primary",
       "model": "opencode-go/deepseek-v4-flash",
       "temperature": 0.1,
       "permission": "allow"
     },
     "build": {
       "description": "Constructor principal Rust",
-      "mode": "subagent",
+      "mode": "primary",
       "model": "opencode-go/muse-spark-1.2-contributor",
       "temperature": 0.2,
       "permission": "allow"

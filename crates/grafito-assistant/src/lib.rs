@@ -47,6 +47,21 @@ const CUSTOM_API_KEY_SUFFIX: &str = "_API_KEY";
 const MAX_CUSTOM_API_KEY_REFERENCE_LEN: usize = 128;
 const OPENCODE_VISION_MODEL: &str = "mimo-2.5-vl";
 const OPENCODE_FUSION_MODEL: &str = "fusion";
+/// Muse Spark sólo responde por la Responses API (`POST {base}/responses`);
+/// por Chat Completions el proveedor devuelve 500 instantáneo con cualquier
+/// payload (verificado 2026-09-04 contra el endpoint real, 8 payloads).
+/// Se matchea por `contains` para cubrir futuras 1.x sin tocar el router.
+fn uses_responses_api(model: &str) -> bool {
+    model.contains("muse-spark")
+}
+/// `max_output_tokens` mínimo que exige el servidor en `/responses`.
+const RESPONSES_MIN_OUTPUT_TOKENS: usize = 16;
+/// Cap del cuerpo en la Responses API: los items `reasoning` traen
+/// `encrypted_content` opaco (se descarta) que supera el presupuesto de
+/// texto del usuario. 64 KiB transitorios por request (precedente: line_cap
+/// 64 KiB del motor de animaciones); el texto útil sigue acotado por
+/// `max_output_chars` en `completion_from_text`.
+const RESPONSES_MAX_BODY_BYTES: usize = 64 * 1024;
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
@@ -885,6 +900,12 @@ pub fn chat_completion_endpoint(settings: &ProviderSettings) -> Result<Url, Stri
     endpoint_with_path(settings, "chat/completions")
 }
 
+/// Deriva el endpoint Responses (OpenAI Responses API) desde la base validada.
+/// Lo usan los modelos que no responden por Chat Completions (Muse Spark).
+pub fn responses_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
+    endpoint_with_path(settings, "responses")
+}
+
 /// Deriva el endpoint Models desde una base de API validada.
 pub fn models_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
     endpoint_with_path(settings, "models")
@@ -895,9 +916,10 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
     endpoint_with_path(settings, "messages")
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RemoteProtocol {
     OpenAiChatCompletions,
+    OpenAiResponses,
     AnthropicMessages,
     Fusion,
 }
@@ -906,6 +928,7 @@ impl RemoteProtocol {
     fn name(self) -> &'static str {
         match self {
             Self::OpenAiChatCompletions => "chat_completions",
+            Self::OpenAiResponses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Fusion => "fusion",
         }
@@ -915,6 +938,9 @@ impl RemoteProtocol {
 fn remote_protocol(settings: &ProviderSettings) -> RemoteProtocol {
     if settings.profile != ProviderProfile::OpenCodeGo {
         return RemoteProtocol::OpenAiChatCompletions;
+    }
+    if uses_responses_api(&settings.model) {
+        return RemoteProtocol::OpenAiResponses;
     }
     match settings.model.as_str() {
         // MiMo 2.5-VL viaja con el protocolo Anthropic Messages del proveedor.
@@ -1119,7 +1145,7 @@ pub fn build_chat_completion_payload(
     request: &AssistantRequest,
 ) -> Result<Value, String> {
     if remote_protocol(settings) != RemoteProtocol::OpenAiChatCompletions {
-        return Err("selected OpenCode model requires a different request format".into());
+        return Err("selected OpenCode model requires the Responses API (`POST responses`), not Chat Completions".into());
     }
     settings.validate()?;
     let attachment_limits = AttachmentLimits::default();
@@ -1166,6 +1192,68 @@ pub fn build_chat_completion_payload(
         "stream": false,
         "max_tokens": completion_token_limit(&request.budget),
         "messages": messages,
+    }))
+}
+
+/// Construye el cuerpo OpenAI Responses API para Muse Spark sin incluir claves.
+///
+/// El system prompt viaja en `instructions` y los turnos en `input`
+/// (formato Responses: `{"role", "content"}`). Las imágenes usan el item
+/// `input_image` con data-URL, igual que en Chat Completions.
+/// Sin `stream`, sin `temperature`: se usan los defaults del servidor
+/// (verificado 2026-09-04: responde 200 en ~2s).
+pub fn build_responses_payload(
+    settings: &ProviderSettings,
+    request: &AssistantRequest,
+) -> Result<Value, String> {
+    if remote_protocol(settings) != RemoteProtocol::OpenAiResponses {
+        return Err("selected OpenCode model does not use the Responses API".into());
+    }
+    settings.validate()?;
+    let attachment_limits = AttachmentLimits::default();
+    request.validate(&attachment_limits)?;
+    if request.privacy_mode != PrivacyMode::RemoteAllowed {
+        return Err("remote assistant use requires explicit privacy consent".into());
+    }
+    if !request.attachments.is_empty() && !settings.capabilities.vision {
+        return Err("selected provider does not declare vision capability".into());
+    }
+    if !request.attachments.is_empty() && !request.image_upload_consent {
+        return Err("remote image upload requires separate explicit consent".into());
+    }
+    let sanitized_attachments = sanitized_attachments(request, &attachment_limits)?;
+    let prompt = remote_prompt(request)?;
+    if prompt.is_empty() {
+        return Err("remote assistant request has no reviewed problem text".into());
+    }
+
+    let mut final_content = vec![json!({"type": "input_text", "text": prompt})];
+    for attachment in &sanitized_attachments {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&attachment.bytes);
+        final_content.push(json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{encoded}", attachment.media_type),
+        }));
+    }
+
+    let mut input: Vec<Value> = request
+        .conversation
+        .iter()
+        .map(|turn| {
+            let role = match turn.role {
+                ConversationRole::User => "user",
+                ConversationRole::Assistant => "assistant",
+            };
+            json!({"role": role, "content": turn.content})
+        })
+        .collect();
+    input.push(json!({"role": "user", "content": final_content}));
+
+    Ok(json!({
+        "model": settings.model,
+        "instructions": remote_system_prompt(request),
+        "max_output_tokens": responses_token_limit_for_chars(request.budget.max_output_chars),
+        "input": input,
     }))
 }
 
@@ -1388,6 +1476,17 @@ fn completion_token_limit_for_chars(max_output_chars: usize) -> usize {
     (max_output_chars / 4).clamp(1, 8_192)
 }
 
+/// Límite `max_output_tokens` para la Responses API: incluye los tokens de
+/// razonamiento (verificado: un "ok" consume 61 reasoning + 0 output), así que
+/// se duplica el presupuesto de texto con piso 2048 y techo 16384.
+/// El servidor rechaza valores < 16.
+fn responses_token_limit_for_chars(max_output_chars: usize) -> usize {
+    // Piso 2048 >> mínimo 16 del servidor; el techo evita facturas sorpresa.
+    let limit = max_output_chars.saturating_mul(2).clamp(2_048, 16_384);
+    debug_assert!(limit >= RESPONSES_MIN_OUTPUT_TOKENS);
+    limit
+}
+
 /// Señal de cancelación cooperativa para una petición remota en segundo plano.
 ///
 /// No puede interrumpir bytes que ya fueron entregados a `send()`; el worker
@@ -1533,6 +1632,14 @@ fn request_remote(
             RemoteProtocol::OpenAiChatCompletions => request_openai_completion(
                 chat_completion_endpoint(&settings)?,
                 build_chat_completion_payload(&settings, &request)?,
+                api_key.as_deref(),
+                &cancellation,
+                timeout,
+                request.budget.max_output_chars,
+            ),
+            RemoteProtocol::OpenAiResponses => request_responses_completion(
+                responses_endpoint(&settings)?,
+                build_responses_payload(&settings, &request)?,
                 api_key.as_deref(),
                 &cancellation,
                 timeout,
@@ -1711,6 +1818,106 @@ fn request_openai_completion(
         call = call.bearer_auth(sanitize_api_key(key)?);
     }
     send_openai_request(call, cancellation, max_output_chars, Some(timeout))
+}
+
+/// POST a la Responses API (`{base}/responses`) con Bearer saneado.
+/// La usa Muse Spark, que por Chat Completions devuelve 500 instantáneo.
+fn request_responses_completion(
+    endpoint: Url,
+    payload: Value,
+    api_key: Option<&str>,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+    max_output_chars: usize,
+) -> Result<RemoteCompletion, String> {
+    let client = shared_http_client()?;
+    let mut call = client.post(endpoint).json(&payload).timeout(timeout);
+    if let Some(key) = api_key {
+        call = call.bearer_auth(sanitize_api_key(key)?);
+    }
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    let response = call
+        .send()
+        .map_err(|error| transport_error("remote assistant", &error, Some(timeout)))?;
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "<no body>".to_string())
+            .chars()
+            .take(500)
+            .collect::<String>();
+        return Err(format!("remote assistant returned HTTP {status}: {body}"));
+    }
+    let response_bytes = read_bounded_response_body(response, RESPONSES_MAX_BODY_BYTES)?;
+    let body: Value = serde_json::from_slice(&response_bytes)
+        .map_err(|_| "remote assistant response JSON is invalid".to_string())?;
+    let (text, truncated) = responses_completion_text(&body)?;
+    completion_from_text(&text, max_output_chars, truncated)
+}
+
+/// Extrae el texto de una respuesta OpenAI Responses API.
+///
+/// Junta los `output_text` de todos los items `message`; los items
+/// `reasoning`/`function_call` se ignoran (el razonamiento no se muestra).
+/// `status: "incomplete"` marca truncado pero igual devuelve el texto.
+/// `status: "failed"` o `error` no-nulo devuelven error con el mensaje del
+/// proveedor acotado (sin secretos: el servidor no ecoa la clave).
+fn responses_completion_text(body: &Value) -> Result<(String, bool), String> {
+    if let Some(error) = body.get("error") {
+        if !error.is_null() {
+            let detail = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider error");
+            let detail: String = detail.chars().take(200).collect();
+            return Err(response_schema_error(&format!(
+                "responses API returned an error: {detail}"
+            )));
+        }
+    }
+    let status = body.get("status").and_then(Value::as_str).unwrap_or("");
+    if status == "failed" || status == "cancelled" {
+        return Err(response_schema_error(
+            "responses API did not complete the response",
+        ));
+    }
+    let truncated = status == "incomplete";
+    let output = body
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| response_schema_error("response must include an output array"))?;
+    let mut texts = Vec::new();
+    for item in output {
+        if item.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let empty = Vec::new();
+        let content = item
+            .get("content")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        for part in content {
+            if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                continue;
+            }
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                texts.push(text.to_owned());
+            }
+        }
+    }
+    let text = texts.join("\n\n");
+    if text.trim().is_empty() && !truncated {
+        return Err(response_schema_error(
+            "response contained no displayable text",
+        ));
+    }
+    Ok((text, truncated))
 }
 
 fn request_anthropic_completion(
@@ -2409,6 +2616,91 @@ mod tests {
         assert!(sanitize_api_key("cláve-con-ñ").is_err());
     }
 
+    fn spark_settings() -> ProviderSettings {
+        ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "muse-spark-1.3-contributor")
+    }
+
+    #[test]
+    fn spark_models_route_to_responses_api() {
+        assert!(uses_responses_api("muse-spark-1.3-contributor"));
+        assert!(uses_responses_api("muse-spark-1.2-contributor"));
+        assert!(!uses_responses_api("deepseek-v4-flash"));
+        let spark = spark_settings();
+        assert_eq!(remote_protocol(&spark), RemoteProtocol::OpenAiResponses);
+        let deepseek =
+            ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "deepseek-v4-flash");
+        assert_eq!(
+            remote_protocol(&deepseek),
+            RemoteProtocol::OpenAiChatCompletions
+        );
+        assert!(responses_endpoint(&spark)
+            .unwrap()
+            .as_str()
+            .ends_with("/responses"));
+    }
+
+    #[test]
+    fn responses_payload_shape_matches_verified_wire_format() {
+        let mut req = request("Graficá y = x^2");
+        req.privacy_mode = PrivacyMode::RemoteAllowed;
+        let payload = build_responses_payload(&spark_settings(), &req).unwrap();
+        assert_eq!(payload["model"], "muse-spark-1.3-contributor");
+        assert!(payload
+            .get("instructions")
+            .and_then(Value::as_str)
+            .is_some());
+        assert!(payload.get("stream").is_none());
+        assert!(payload.get("max_tokens").is_none());
+        let max_out = payload["max_output_tokens"].as_u64().unwrap();
+        assert!((2_048..=16_384).contains(&max_out));
+        let input = payload["input"].as_array().unwrap();
+        assert!(!input.is_empty());
+        assert_eq!(input.last().unwrap()["role"], "user");
+        // Chat builder debe rechazar spark con mensaje que nombra Responses.
+        let err = build_chat_completion_payload(&spark_settings(), &req).unwrap_err();
+        assert!(err.contains("Responses"));
+    }
+
+    #[test]
+    fn responses_text_extraction_joins_messages_and_flags_truncation() {
+        let completed = json!({
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "status": "completed"},
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "Hola"},
+                    {"type": "output_text", "text": "mundo"},
+                ]},
+            ],
+        });
+        assert_eq!(
+            responses_completion_text(&completed).unwrap(),
+            ("Hola\n\nmundo".to_string(), false)
+        );
+        let incomplete = json!({
+            "status": "incomplete",
+            "output": [
+                {"type": "message", "content": [
+                    {"type": "output_text", "text": "parcial"},
+                ]},
+            ],
+        });
+        assert_eq!(
+            responses_completion_text(&incomplete).unwrap(),
+            ("parcial".to_string(), true)
+        );
+        let failed = json!({"status": "failed", "output": []});
+        assert!(responses_completion_text(&failed).is_err());
+        let with_error = json!({
+            "status": "completed",
+            "error": {"message": "boom"},
+            "output": [],
+        });
+        assert!(responses_completion_text(&with_error).is_err());
+        let empty = json!({"status": "completed", "output": []});
+        assert!(responses_completion_text(&empty).is_err());
+    }
+
     #[test]
     fn vision_payload_uses_validated_bytes_without_file_metadata() {
         let mut request = request("read this image");
@@ -2530,6 +2822,54 @@ mod tests {
         server.join().unwrap();
 
         assert_eq!(response.text, "draft");
+    }
+
+    #[test]
+    fn responses_wire_uses_bearer_and_response_shape() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..bytes]);
+            let lowered = request.to_ascii_lowercase();
+            assert!(lowered.starts_with("post /responses http/1.1"));
+            assert!(lowered.contains("authorization: bearer test-key"));
+            assert!(request.contains("\"model\":\"muse-spark-1.3-contributor\""));
+            assert!(request.contains("\"instructions\""));
+            assert!(!request.contains("max_tokens"));
+            assert!(request.contains("max_output_tokens"));
+            let body = r#"{"status":"completed","output":[{"type":"reasoning","status":"completed"},{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let mut wire_request = request("hola");
+        wire_request.privacy_mode = PrivacyMode::RemoteAllowed;
+        let payload = build_responses_payload(&spark_settings(), &wire_request).unwrap();
+        let response = request_responses_completion(
+            endpoint,
+            payload,
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(response.text, "listo");
+        assert!(!response.truncated);
     }
 
     #[test]

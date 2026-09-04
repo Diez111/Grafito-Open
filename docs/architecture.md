@@ -59,6 +59,7 @@ Empty -> Loading -> Validating -> Ready -> Mutating -> Persisting -> Ready
 Idle -> Thinking -> Verifying -> Animating{job_id} -> Done | Failed | Cancelled
 ```
 - Cada job (remote, proposal, model, image, agent, anim) en thread con CancellationToken y RequestBudget (max_input 8192, max_steps 8, timeout 60s).
+- Protocolos por modelo (OpenCodeGo): Chat Completions (default), Responses API `POST {base}/responses` para Muse Spark 1.2/1.3 (por Chat devuelven 500 instantáneo con cualquier payload, verificado 2026-09-04), Anthropic Messages para mimo-2.5-vl, Fusion (draft+audit) para `fusion`. Modo agente con tools aún no soportado en Spark → fallback sólo-sesión a deepseek.
 - I/O nunca en UI thread; UI solo renderiza &AssistantState.
 
 ### 4.4 Interval/ExprEval (grafito-geometry)

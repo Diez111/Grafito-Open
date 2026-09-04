@@ -878,7 +878,7 @@ fn request_agent_completion(
         return Err("assistant agent request was cancelled".into());
     }
     if crate::remote_protocol(settings) != crate::RemoteProtocol::OpenAiChatCompletions {
-        return Err("assistant agent requires an OpenAI-compatible chat endpoint".into());
+        return Err("assistant agent requires an OpenAI-compatible chat endpoint (Muse Spark usa Responses API: el modo agente con herramientas aún no está soportado, usá el chat simple o deepseek)".into());
     }
     let payload = build_agent_payload(settings, messages, tools, max_output_tokens)?;
     let client = crate::shared_http_client()?;

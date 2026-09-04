@@ -138,10 +138,11 @@ const OPENCODE_MODELS: &[&str] = &[
     "mimo-2.5-vl",
     "fusion",
     "glm-5.2",
-    // Verificados 2026-09-03 contra /chat/completions (200 en ~1-4s):
+    // Verificados 2026-09-03/04 contra el endpoint real (200 en ~1-4s):
     "qwen3.8-max",
     "kimi-k3",
-    // Anunciados por /models pero con 500 del proveedor (verificado 2026-09-03):
+    // Muse Spark viaja por la Responses API (verificado 2026-09-04: 200 en ~2s).
+    // El modo agente con herramientas aún no está soportado para Spark:
     // el fallback de sesión reintenta con deepseek sin tocar tu preferencia.
     "muse-spark-1.3-contributor",
     "muse-spark-1.2-contributor",
@@ -3138,7 +3139,7 @@ fn draw_assistant_settings_contents(
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, fusion (+ 17 más por descubrimiento). Muse Spark 1.2/1.3 con 500 del proveedor: el fallback responde con DeepSeek sin cambiar tu modelo.")
+            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento). Spark usa la Responses API; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.")
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
