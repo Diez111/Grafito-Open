@@ -45,6 +45,7 @@ pub mod depth_3d;
 pub mod domain_coloring_compute;
 pub mod fill_compute;
 pub mod function_compute;
+pub mod gpu_timing;
 pub mod implicit_compute;
 pub mod parametric_compute;
 pub mod vector_compute;
@@ -1080,13 +1081,14 @@ impl Renderer {
 
         let limits = device.limits();
         let has_compute_storage = limits.max_storage_buffers_per_shader_stage >= 3;
-        // Instrumentación de timing GPU: TIMESTAMP_QUERY es opcional. Cuando
-        // está disponible se puede cablear wgpu-profiler a los compute passes;
-        // hoy los passes mantienen `timestamp_writes: None` porque el readback
-        // es síncrono y el wait del lado CPU domina (ver cada módulo compute).
+        // Instrumentación de timing GPU: TIMESTAMP_QUERY es opcional y solo se
+        // cablea tras la feature `profiling` (ver `gpu_timing`). Sin la feature
+        // los passes mantienen `timestamp_writes: None` — cero costo en release.
+        // Con la feature activa, cada pipeline crea su query set 2 slots/pass y
+        // loguea el delta GPU en ns tras el readback síncrono.
         if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             log::debug!(
-                "GPU TIMESTAMP_QUERY disponible — habilitar wgpu-profiler para medir compute passes"
+                "GPU TIMESTAMP_QUERY disponible — habilitar feature `profiling` para medir compute passes"
             );
         } else {
             log::debug!(
@@ -1182,6 +1184,22 @@ impl Renderer {
             log::info!("Lazy init fill compute pipeline (128 MiB GPU buffers)");
             crate::fill_compute::FillComputePipeline::new(device, queue)
         })
+    }
+
+    /// Crea lazy el pipeline de fill compute SOLO si `document` contiene una
+    /// curva implícita rellenable (operador != `Eq`). Devuelve `None` si el
+    /// documento no necesita fill, dejando `self.fill_compute` en `None` y
+    /// ahorrando los ~128 MiB de buffers 4096×4096. No se invoca por frame.
+    pub fn ensure_fill_compute_for_document(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        document: &Document,
+    ) -> Option<&crate::fill_compute::FillComputePipeline> {
+        if !Self::document_needs_fill_compute(document) {
+            return None;
+        }
+        Some(self.ensure_fill_compute(device, queue))
     }
 
     /// Devuelve `true` si el documento contiene una curva implícita con

@@ -3,6 +3,30 @@
 //! Guarda el tema actual, pasos intentados y conteo de misconceptions
 //! para que el tutor socrático adapte preguntas y pistas sin tocar la
 //! memoria a largo plazo. Pura, acotada y testeable.
+//!
+//! # Protocolo de sincronización con el asistente (documentación, NO código)
+//!
+//! La fuente de verdad es `StudentProfile::working_memory` (este crate,
+//! capa hoja sin egui). El espejo de solo-lectura para la UI vive en
+//! `AssistantPanelState::working_memory` (`grafito-app/src/assistant.rs`).
+//! Dirección única perfil → asistente, en dos puntos (verificados, propiedad
+//! de otro agente — no duplicar lógica aquí):
+//!
+//! - `assistant.rs:559` (`sync_assistant_for_frame`, pestaña cerrada) y
+//!   `assistant.rs:567` (modo preview): `self.assistant.working_memory =
+//!   self.profile.working_memory.clone()` cada frame. Usa [`WorkingMemory::snapshot`]
+//!   si se migra a helper explícito.
+//! - `assistant.rs:1793-1797` (`record_learning`): cada feedback del usuario
+//!   alimenta la RAM episódica ANTES de clonar al espejo:
+//!   `record_attempt(misconception)` (`""` si acierto, `branch_id` si fallo),
+//!   `set_topic(name)`, `set_session_epoch(epoch)`.
+//!
+//! Invariantes que este crate garantiza (tests abajo):
+//! `snapshot()` es un clon profundo (`HashMap` propio); mutar el perfil
+//! después no afecta al espejo ya entregado. La UI nunca debe mutar el
+//! perfil directamente: todo intento pasa por `record_attempt` en el hilo
+//! del asistente y la persistencia va por `spawn_profile_save` (background,
+//! nunca en `Ui::`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -116,6 +140,15 @@ impl WorkingMemory {
             s.push_str(&parts.join(", "));
         }
         s
+    }
+
+    /// Espejo de solo-lectura para la UI (clon profundo).
+    ///
+    /// Punto de sincronización perfil → asistente documentado en el encabezado
+    /// del módulo: el caller clona y la UI lee el espejo sin mutar el perfil.
+    /// Sin pánicos, sin I/O.
+    pub fn snapshot(&self) -> Self {
+        self.clone()
     }
 
     /// Conteo total de misconceptions registradas.
@@ -250,6 +283,22 @@ mod tests {
         }
         assert_eq!(wm.misconception_counts.get("sign"), Some(&255));
         assert_eq!(wm.steps_tried, 300);
+    }
+
+    #[test]
+    fn snapshot_is_deep_clone_for_ui_mirror() {
+        // Invariante del protocolo de sync (ver docs del módulo): el espejo
+        // entregado a la UI no debe cambiar si el perfil sigue mutando.
+        let mut wm = WorkingMemory::new();
+        wm.set_topic("derivada");
+        wm.record_attempt("sign");
+        let mirror = wm.snapshot();
+        assert_eq!(mirror, wm);
+        wm.record_attempt("fraction");
+        wm.set_topic("integrales");
+        assert_ne!(mirror, wm, "el espejo debe conservar el estado clonado");
+        assert_eq!(mirror.current_topic.as_deref(), Some("derivada"));
+        assert!(!mirror.misconception_counts.contains_key("fraction"));
     }
 
     #[test]

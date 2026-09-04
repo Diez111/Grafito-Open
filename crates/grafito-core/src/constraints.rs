@@ -531,6 +531,11 @@ impl ConstraintGraph {
             .flatten()
             .copied()
             .collect();
+        // Determinismo explícito: ordenar pending para que la fase de
+        // descubrimiento no dependa del orden de inserción de dependents
+        // (HashMap iteration) ni del orden de `changed`.
+        pending.sort_unstable();
+        pending.dedup();
 
         // Discover the whole downstream subgraph iteratively. A valid document
         // may contain every allowed constraint in one dependency chain.
@@ -908,5 +913,62 @@ mod tests {
         assert!(graph.creator_of(&b).is_none());
         assert!(graph.creator_of(&c).is_none());
         assert!(graph.dependents_of(&b).is_none());
+    }
+
+    #[test]
+    fn get_update_order_is_deterministic_with_explicit_sort() {
+        let mut graph = ConstraintGraph::new();
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let c = ObjectId::new();
+        let out1 = ObjectId::new();
+        let out2 = ObjectId::new();
+        let out3 = ObjectId::new();
+        graph.add_free_object(a);
+        graph.add_free_object(b);
+        graph.add_free_object(c);
+        // Tres constraints independientes, sin dependencias entre sí.
+        let c1 = graph.add_constraint("C1", vec![a], vec![out1], HashMap::new());
+        let c2 = graph.add_constraint("C2", vec![b], vec![out2], HashMap::new());
+        let c3 = graph.add_constraint("C3", vec![c], vec![out3], HashMap::new());
+
+        // changed en orden permutado debe dar mismo resultado ordenado.
+        let order_abc = graph.get_update_order(&[a, b, c]);
+        let order_cba = graph.get_update_order(&[c, b, a]);
+        let order_bac = graph.get_update_order(&[b, a, c]);
+        let mut expected = vec![c1, c2, c3];
+        expected.sort_unstable();
+        let mut got_abc = order_abc.clone();
+        got_abc.sort_unstable();
+        assert_eq!(
+            got_abc, expected,
+            "orden debe ser determinista y sort explícito"
+        );
+        assert_eq!(
+            order_abc, order_cba,
+            "permutación de changed no debe cambiar orden"
+        );
+        assert_eq!(order_abc, order_bac);
+
+        // Además, el orden topológico debe ser estable ante múltiples llamadas.
+        let order_repeat = graph.get_update_order(&[a, b, c]);
+        assert_eq!(order_abc, order_repeat);
+
+        // DAG con dependencia: a -> b -> c debe respetar orden aunque ids no sean crecientes.
+        let mut graph2 = ConstraintGraph::new();
+        let s = ObjectId::new();
+        let m1 = ObjectId::new();
+        let m2 = ObjectId::new();
+        let m3 = ObjectId::new();
+        graph2.add_free_object(s);
+        let d1 = graph2.add_constraint("D1", vec![s], vec![m1], HashMap::new());
+        let d2 = graph2.add_constraint("D2", vec![m1], vec![m2], HashMap::new());
+        let d3 = graph2.add_constraint("D3", vec![m2], vec![m3], HashMap::new());
+        let order_chain = graph2.get_update_order(&[s]);
+        assert_eq!(
+            order_chain,
+            vec![d1, d2, d3],
+            "cadena debe ser topológica determinista"
+        );
     }
 }

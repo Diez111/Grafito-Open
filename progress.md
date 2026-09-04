@@ -85,3 +85,11 @@ Auditoría TOTAL de inicio a fin + mejoras + nuevas funciones, con foco en gener
 - F2: cancel() público + Cancelling estado + transiciones consume Self + templates progress real por frames + mp4
 - F3: mover I/O assistant a background thread formal, ThinkingOrb Statem, fix ViewMode
 - F4: packaging build-deb.sh release 45m + gpu WGPU_BACKEND=gl
+
+## Sync BUILD 2026-09-04 (docs↔código, ownership exclusivo)
+
+- **Números verificados por lectura directa** (no copiados): RequestBudget 8192/2048/8/60000ms (`assistant-types/src/lib.rs:198-209`), AttachmentLimits 512KiB/1MiB/1-2MiP/2 (`:245-255`), 238 `command!(` (registry `:228`, 199 visibles + 14 UI = 213 en paleta), 26 categorías visibles (30 raw con tildes duplicadas), 17 grupos toolbar 5/8/17 (`toolbar.rs:263-284`, tests `:1317-1319`), 73 `Tool`, 10 perspectivas (`lib.rs:90-111`), 16 crates, 17 jobs CI (`ci.yml:24-496`: +coverage 75%, +bench-regression >10%, +mutation semanal vs 14 documentados).
+- **Respuestas/Spark**: `uses_responses_api` = contains "muse-spark" (`assistant/src/lib.rs:54-56`), `responses_endpoint` (`:905-907`), `remote_protocol` (`:938-951`); default `deepseek-v4-flash` (`utils.rs:59-61`); fallback sesión spark→deepseek (`assistant.rs:2470-2485`, `:2595-2613`); qwen3.8-max/kimi-k3 sólo hint (`:2936`, sin tests).
+- **Fantasmas eliminados**: Ctrl+P/E y F8/F9 tenían etiqueta (toolbar) sin handler → handlers nuevos en `app.rs:4135-4144` + `:4268-4278`; Ctrl+T tema nuevo (`:4259-4267` + menú `ui.rs:209`). Verificación completa en architecture.md §13.
+- **Responsive**: rail 60px sólo Medium/Wide ≥1360 (colapsado <780 incluido); Inspector con max 440 (`panels.rs:2125-2132`, clamp `tokens.rs:207-210`); CAS muerto alineado a tokens; paleta footer "N de M" en español + test `paleta_expone_registro_mas_acciones_ui`.
+- Gates pendientes de corrida: fmt + clippy `-p grafito-app -p grafito-ui --all-targets --locked -- -D warnings` + tests lib ambos (ver §13).

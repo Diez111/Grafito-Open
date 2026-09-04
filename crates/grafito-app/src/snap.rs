@@ -507,11 +507,14 @@ fn snap_to_curve(
         if !obj.is_visible() {
             continue;
         }
-        // Solo intentamos proyección para objetos que tengan una
-        // representación curva. `PolarCurve` se trata aparte con un barrido
-        // dedicado porque `evaluate_curve_at` devuelve `None` para ella;
-        // `ImplicitCurve` devuelve `None` a propósito (requiere marching
-        // squares / Newton 2D, fuera del presupuesto por frame del snap).
+        // Solo intentamos proyección para objetos con representación curva:
+        // - `Pencil`: distancia a la polilínea con ventana local (ver
+        //   `closest_point_on_pencil_windowed`).
+        // - `PolarCurve`: barrido dedicado en t porque `evaluate_curve_at`
+        //   devuelve `None` para ella (ver `closest_point_on_polar`).
+        // - `ImplicitCurve`: `None` a propósito — proyectar exigiría marching
+        //   squares o Newton 2D sobre la grilla, fuera del presupuesto por
+        //   frame del snap (ver TODO en el brazo explícito de abajo).
         match obj {
             grafito_core::GeoObject::Function(_)
             | grafito_core::GeoObject::Circle(_)
@@ -532,6 +535,10 @@ fn snap_to_curve(
                 }
                 continue;
             }
+            // TODO: snap a implícita con marching squares cacheado
+            // (`ImplicitCurveObj::cached_segments`) + Newton 2D local; hoy
+            // devuelve `None` para no quemar el presupuesto por frame.
+            grafito_core::GeoObject::ImplicitCurve(_) => continue,
             _ => continue,
         }
         // Aproximación rápida: si el cursor está "razonablemente" cerca en
@@ -589,19 +596,18 @@ fn snap_to_curve(
                     }
                 }
             } else if let grafito_core::GeoObject::Pencil(p) = obj {
-                // `proj` es la distancia al segmento contiguo más cercano; el
-                // punto más cercano se recalcula con barrido lineal.
-                let d = proj;
-                if d * view_scale <= tol_screen {
-                    if let Some(pt) = closest_point_on_pencil(p, world) {
-                        if pt.distance(&world) * view_scale <= tol_screen {
-                            return Some(SnapResult {
-                                point: pt,
-                                kind: SnapKind::Curve,
-                                feature: None,
-                                label: format!("trazo({:.3}, {:.3})", pt.x, pt.y),
-                            });
-                        }
+                // Una sola pasada con ventana local: el AABB de cada segmento
+                // (expandido con el mejor radio) descarta lo lejano en O(1);
+                // evita el doble barrido O(n) anterior (`evaluate_curve_at`
+                // + `closest_point_on_pencil`). `tol` ya viene en mundo.
+                if let Some(pt) = closest_point_on_pencil_windowed(p, world, tol) {
+                    if pt.distance(&world) * view_scale <= tol_screen {
+                        return Some(SnapResult {
+                            point: pt,
+                            kind: SnapKind::Curve,
+                            feature: None,
+                            label: format!("trazo({:.3}, {:.3})", pt.x, pt.y),
+                        });
                     }
                 }
             } else if let grafito_core::GeoObject::ParametricCurve2D(c) = obj {
@@ -645,19 +651,41 @@ fn snap_to_curve(
     None
 }
 
-/// Punto más cercano sobre un trazo Pencil (barrido de segmentos con t
-/// clamped a [0, 1]; O(n) en puntos del trazo).
-fn closest_point_on_pencil(p: &grafito_core::PencilObj, world: Point2) -> Option<Point2> {
-    if p.points.is_empty() {
+/// Punto más cercano sobre un trazo Pencil con ventana local.
+///
+/// Cada segmento se rechaza en O(1) si su AABB —expandida con el mejor radio
+/// hallado hasta el momento (inicialmente `max_dist`)— no contiene al cursor:
+/// el punto más cercano del segmento vive dentro de su AABB, así que fuera de
+/// la ventana no puede mejorar el mejor. En trazos densos (miles de puntos)
+/// solo los segmentos vecinos al cursor pagan la proyección exacta con t
+/// clamped a [0, 1]; el resto se descarta por comparación de cajas.
+/// `max_dist` viene en unidades de mundo (tolerancia del snap).
+fn closest_point_on_pencil_windowed(
+    p: &grafito_core::PencilObj,
+    world: Point2,
+    max_dist: f64,
+) -> Option<Point2> {
+    if !max_dist.is_finite() || max_dist < 0.0 || p.points.is_empty() {
         return None;
     }
     if p.points.len() == 1 {
-        return Some(p.points[0]);
+        let pt = p.points[0];
+        return (pt.distance(&world) <= max_dist).then_some(pt);
     }
-    let mut best: Option<(f64, Point2)> = None;
+    let mut best: Option<Point2> = None;
+    let mut best_d2 = max_dist * max_dist;
     for w in p.points.windows(2) {
         let a = w[0];
         let b = w[1];
+        // Ventana local: AABB del segmento expandida con el mejor radio.
+        let r = best_d2.sqrt();
+        if world.x < a.x.min(b.x) - r
+            || world.x > a.x.max(b.x) + r
+            || world.y < a.y.min(b.y) - r
+            || world.y > a.y.max(b.y) + r
+        {
+            continue;
+        }
         let abx = b.x - a.x;
         let aby = b.y - a.y;
         let len2 = abx * abx + aby * aby;
@@ -668,21 +696,22 @@ fn closest_point_on_pencil(p: &grafito_core::PencilObj, world: Point2) -> Option
             let t = t.clamp(0.0, 1.0);
             (a.x + t * abx, a.y + t * aby)
         };
-        let d2 = (world.x - cx).powi(2) + (world.y - cy).powi(2);
-        let closer = match &best {
-            None => true,
-            Some((bd2, _)) => d2 < *bd2,
-        };
-        if closer {
-            best = Some((d2, Point2::new(cx, cy)));
+        let dx = world.x - cx;
+        let dy = world.y - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= best_d2 {
+            best_d2 = d2;
+            best = Some(Point2::new(cx, cy));
         }
     }
-    best.map(|(_, pt)| pt)
+    best
 }
 
-/// Punto más cercano sobre una curva polar r(t): barrido de 200 muestras
-/// t → (r·cos t, r·sin t). `evaluate_curve_at` no soporta Polar (→ None),
-/// de ahí el barrido dedicado.
+/// Punto más cercano sobre una curva polar r(t): pasada gruesa de 200
+/// muestras t → (r·cos t, r·sin t) más pasada fina de 32 muestras en la
+/// ventana ±1 paso grueso alrededor del mejor t (refinamiento local sin
+/// Jacobianos: barato por frame). `evaluate_curve_at` no soporta Polar
+/// (→ None), de ahí el barrido dedicado.
 fn closest_point_on_polar(
     c: &grafito_core::PolarCurveObj,
     world: Point2,
@@ -691,32 +720,205 @@ fn closest_point_on_polar(
     if !(c.t_min.is_finite() && c.t_max.is_finite()) || c.t_max <= c.t_min {
         return None;
     }
-    let n = 200;
-    let mut best: Option<(f64, Point2)> = None;
-    for i in 0..=n {
-        let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+    // Evalúa r(t) → punto cartesiano; `None` si no es finito.
+    let eval_pt = |t: f64| -> Option<Point2> {
         let r = grafito_geometry::expr::eval_batch_1d(&c.expr_r, "t", std::iter::once(t), vars)
             .ok()
-            .and_then(|mut v| v.pop().flatten());
-        if let Some(r) = r {
-            if !r.is_finite() {
-                continue;
-            }
-            let pt = Point2::new(r * t.cos(), r * t.sin());
-            if !pt.x.is_finite() || !pt.y.is_finite() {
-                continue;
-            }
-            let d2 = (pt.x - world.x).powi(2) + (pt.y - world.y).powi(2);
-            let closer = match &best {
-                None => true,
-                Some((bd2, _)) => d2 < *bd2,
-            };
-            if closer {
-                best = Some((d2, pt));
+            .and_then(|mut v| v.pop().flatten())?;
+        if !r.is_finite() {
+            return None;
+        }
+        let pt = Point2::new(r * t.cos(), r * t.sin());
+        (pt.x.is_finite() && pt.y.is_finite()).then_some(pt)
+    };
+    let dist2 = |pt: Point2| (pt.x - world.x).powi(2) + (pt.y - world.y).powi(2);
+    let n = 200;
+    let mut best: Option<(f64, f64)> = None; // (d2, t)
+    for i in 0..=n {
+        let t = c.t_min + (i as f64 / n as f64) * (c.t_max - c.t_min);
+        if let Some(pt) = eval_pt(t) {
+            let d2 = dist2(pt);
+            if best.as_ref().map(|b| d2 < b.0).unwrap_or(true) {
+                best = Some((d2, t));
             }
         }
     }
-    best.map(|(_, pt)| pt)
+    let (mut best_d2, t_best) = best?;
+    let mut best_pt = eval_pt(t_best);
+    let step = (c.t_max - c.t_min) / n as f64;
+    let lo = (t_best - step).max(c.t_min);
+    let hi = (t_best + step).min(c.t_max);
+    for k in 0..=32 {
+        let t = lo + (k as f64 / 32.0) * (hi - lo);
+        if let Some(pt) = eval_pt(t) {
+            let d2 = dist2(pt);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best_pt = Some(pt);
+            }
+        }
+    }
+    best_pt
+}
+
+// ── Fantasma tangente + normal ──────────────────────────────────────────
+//
+// Overlay al hover sobre una `Function`: segmento tangente y segmento normal
+// acotados a ±40 px alrededor del punto base `(x, f(x))`, pintados con acento
+// translúcido por `input.rs`. Toda la matemática vive aquí (pura,
+// determinista y testeada); `input.rs` solo la consulta cada frame y la
+// pinta —al salir del hover no hay función cercana y el overlay desaparece
+// solo, sin estado.
+
+/// Paso de la diferencia central para la pendiente fantasma.
+///
+/// Igual que `intersections.rs::newton` (`h = 1e-6`): error de truncado O(h²)
+/// ≈ 1e-12 en funciones suaves, sin el ruido de cancelación de pasos menores
+/// ni el sesgo de pasos mayores.
+pub const TANGENT_SLOPE_H: f64 = 1e-6;
+
+/// Semilongitud del segmento fantasma en píxeles de pantalla (±40 px): el
+/// overlay es una pista visual acotada, nunca una recta infinita.
+pub const TANGENT_GHOST_HALF_PX: f64 = 40.0;
+
+/// Distancia máxima cursor↔curva (en píxeles) para mostrar el fantasma.
+pub const TANGENT_HOVER_PX: f64 = 12.0;
+
+/// Overlay tangente + normal sobre una función explícita en `x0`.
+///
+/// `base` es el punto de la curva; (`tangent_a`, `tangent_b`) y (`normal_a`,
+/// `normal_b`) son los extremos ya acotados a ±40 px en unidades de mundo.
+#[derive(Debug, Clone, Copy)]
+pub struct TangentNormalGhost {
+    /// Punto de la curva bajo el cursor.
+    pub base: Point2,
+    /// Pendiente f'(x0) por diferencia central.
+    pub slope: f64,
+    /// Curvatura κ, solo cuando es accesible sin variables extra.
+    pub curvature: Option<f64>,
+    /// Extremos del segmento tangente (acotado a ±40 px).
+    pub tangent_a: Point2,
+    /// Extremos del segmento tangente (acotado a ±40 px).
+    pub tangent_b: Point2,
+    /// Extremos del segmento normal (acotado a ±40 px).
+    pub normal_a: Point2,
+    /// Extremos del segmento normal (acotado a ±40 px).
+    pub normal_b: Point2,
+}
+
+/// Pendiente f'(x) por diferencia central con h = 1e-6 (como
+/// `intersections.rs::newton`): `(f(x+h) − f(x−h)) / 2h`. Devuelve `None` si
+/// alguna evaluación no es finita (singularidad, dominio inválido).
+pub fn tangent_slope_central(expr: &str, x: f64, vars: &HashMap<String, f64>) -> Option<f64> {
+    if !x.is_finite() {
+        return None;
+    }
+    let h = TANGENT_SLOPE_H;
+    let fp = grafito_geometry::expr::eval_function_with_vars(expr, x + h, vars).ok()?;
+    let fm = grafito_geometry::expr::eval_function_with_vars(expr, x - h, vars).ok()?;
+    if !fp.is_finite() || !fm.is_finite() {
+        return None;
+    }
+    let m = (fp - fm) / (2.0 * h);
+    m.is_finite().then_some(m)
+}
+
+/// Curvatura κ = |f″| / (1 + f′²)^(3/2) vía `analysis::curvature_at`.
+///
+/// Solo es accesible sin variables extra del documento (`curvature_at` evalúa
+/// con entorno vacío); con variables (deslizadores) devuelve `None` en lugar
+/// de mentir con un número calculado en otro entorno.
+fn ghost_curvature(expr: &str, x: f64, vars: &HashMap<String, f64>) -> Option<f64> {
+    if !vars.is_empty() {
+        return None;
+    }
+    grafito_geometry::analysis::curvature_at(expr, x)
+        .ok()
+        .filter(|k| k.is_finite())
+}
+
+/// Segmento fantasma tangente + normal alrededor de `(x0, f(x0))`.
+///
+/// La dirección tangente unitaria es (1, m)/|(1, m)| y la normal (−m, 1)/|(1, m)|;
+/// ambas se acotan a ±40 px (`TANGENT_GHOST_HALF_PX / view_scale`). En un
+/// extremo (m ≈ 0) la tangente sale horizontal y la normal vertical.
+pub fn tangent_normal_ghost(
+    expr: &str,
+    x0: f64,
+    vars: &HashMap<String, f64>,
+    view_scale: f64,
+) -> Option<TangentNormalGhost> {
+    if !x0.is_finite() || !view_scale.is_finite() || view_scale <= 0.0 {
+        return None;
+    }
+    let y0 = grafito_geometry::expr::eval_function_with_vars(expr, x0, vars).ok()?;
+    let m = tangent_slope_central(expr, x0, vars)?;
+    if !y0.is_finite() || !m.is_finite() {
+        return None;
+    }
+    let base = Point2::new(x0, y0);
+    let t_len = (1.0 + m * m).sqrt();
+    let (tx, ty) = (1.0 / t_len, m / t_len);
+    let (nx, ny) = (-m / t_len, 1.0 / t_len);
+    let half = TANGENT_GHOST_HALF_PX / view_scale.max(1e-6);
+    if !half.is_finite() {
+        return None;
+    }
+    Some(TangentNormalGhost {
+        base,
+        slope: m,
+        curvature: ghost_curvature(expr, x0, vars),
+        tangent_a: Point2::new(base.x - tx * half, base.y - ty * half),
+        tangent_b: Point2::new(base.x + tx * half, base.y + ty * half),
+        normal_a: Point2::new(base.x - nx * half, base.y - ny * half),
+        normal_b: Point2::new(base.x + nx * half, base.y + ny * half),
+    })
+}
+
+/// Localiza la función explícita bajo el hover y devuelve su fantasma.
+///
+/// Recorre las `Function` visibles, respeta su dominio declarado y exige
+/// distancia vertical ≤ 12 px (`TANGENT_HOVER_PX`); ante varias candidatas
+/// gana la más cercana en píxeles. `None` = nada bajo el cursor (el llamador
+/// oculta el overlay).
+pub fn tangent_ghost_at_hover(
+    world: Point2,
+    document: &Document,
+    view_scale: f64,
+) -> Option<TangentNormalGhost> {
+    if !world.x.is_finite() || !world.y.is_finite() {
+        return None;
+    }
+    let vars: HashMap<String, f64> = document.variables.clone();
+    let mut best: Option<(f64, String)> = None; // (distancia_px, expr)
+    for (_, obj) in document.objects_iter() {
+        if let grafito_core::GeoObject::Function(f) = obj {
+            if !obj.is_visible() {
+                continue;
+            }
+            // Fuera del dominio declarado no hay curva que mostrar.
+            if let Some(lo) = f.domain_min {
+                if world.x < lo {
+                    continue;
+                }
+            }
+            if let Some(hi) = f.domain_max {
+                if world.x > hi {
+                    continue;
+                }
+            }
+            let y = match grafito_geometry::expr::eval_function_with_vars(&f.expr, world.x, &vars) {
+                Ok(y) if y.is_finite() => y,
+                _ => continue,
+            };
+            let d_px = (y - world.y).abs() * view_scale;
+            if d_px <= TANGENT_HOVER_PX && best.as_ref().map(|b| d_px < b.0).unwrap_or(true) {
+                best = Some((d_px, f.expr.clone()));
+            }
+        }
+    }
+    let (_, expr) = best?;
+    tangent_normal_ghost(&expr, world.x, &vars, view_scale)
 }
 
 fn snap_to_object(
@@ -804,7 +1006,10 @@ fn snap_to_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafito_core::{Document, FunctionObj, GeoObject, LineKind, LineObj, PointObj};
+    use grafito_core::{
+        Document, FunctionObj, GeoObject, ImplicitCurveObj, LineKind, LineObj, PencilObj, PointObj,
+        PolarCurveObj, RelationOperator,
+    };
     use grafito_geometry::Point2;
 
     fn empty_doc() -> Document {
@@ -966,5 +1171,177 @@ mod tests {
         )
         .expect("vertical function-line intersection should snap");
         assert_eq!(vertical.point, Point2::new(2.0, 2.0));
+    }
+
+    /// Configuración con solo snap a curva: aísla `snap_to_curve` del resto
+    /// de la jerarquía (características, objetos, ejes, cuadrícula).
+    fn curve_only_cfg() -> SnapConfig {
+        SnapConfig {
+            snap_to_features: false,
+            snap_to_objects: false,
+            snap_to_axis: false,
+            snap_to_grid: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tangente_horizontal_en_extremo_derivada_cero() {
+        let vars = std::collections::HashMap::new();
+        // y = x² tiene un extremo en x = 0 con f'(0) = 0 (tangente horizontal).
+        let m = tangent_slope_central("x^2", 0.0, &vars).expect("pendiente en el vértice");
+        assert!(m.abs() < 1e-4, "derivada en extremo ≈ 0, fue {m}");
+        let g = tangent_normal_ghost("x^2", 0.0, &vars, 50.0).expect("fantasma en el vértice");
+        // Tangente horizontal: ambos extremos a la altura de la base.
+        assert!((g.tangent_a.y - g.base.y).abs() < 1e-9);
+        assert!((g.tangent_b.y - g.base.y).abs() < 1e-9);
+        // Normal vertical: ambos extremos sobre la x de la base.
+        assert!((g.normal_a.x - g.base.x).abs() < 1e-9);
+        assert!((g.normal_b.x - g.base.x).abs() < 1e-9);
+        // Segmento acotado a ±40 px → 80 px de largo en mundo a escala 50.
+        let len_t = g.tangent_a.distance(&g.tangent_b);
+        assert!((len_t - 80.0 / 50.0).abs() < 1e-9, "largo tangente {len_t}");
+        let len_n = g.normal_a.distance(&g.normal_b);
+        assert!((len_n - 80.0 / 50.0).abs() < 1e-9, "largo normal {len_n}");
+        // Curvatura accesible sin variables: κ(0) = |2| / 1 = 2.
+        let k = g.curvature.expect("curvatura en el vértice");
+        assert!((k - 2.0).abs() < 1e-6, "curvatura {k}");
+    }
+
+    #[test]
+    fn fantasma_sigue_al_hover_y_se_oculta_lejos() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::Function(FunctionObj::new("x^2".to_string())));
+        // Hover a 2 px sobre la parábola en x = 1 (y = 1): hay fantasma con
+        // pendiente f'(1) = 2.
+        let g = tangent_ghost_at_hover(Point2::new(1.0, 1.04), &doc, 50.0)
+            .expect("el hover sobre la función muestra el fantasma");
+        assert!((g.slope - 2.0).abs() < 1e-4, "pendiente {}", g.slope);
+        // Lejos de la curva (> 12 px): el overlay se oculta.
+        assert!(tangent_ghost_at_hover(Point2::new(1.0, 5.0), &doc, 50.0).is_none());
+    }
+
+    #[test]
+    fn snap_a_curva_con_tolerancia_de_1px() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::Function(FunctionObj::new("x".to_string())));
+        let cfg = curve_only_cfg();
+        let scale = 50.0;
+        // 1 px en mundo a escala 50 sobre la recta y = x.
+        let one_px = 1.0 / scale;
+        let r = snap_point(
+            Point2::new(1.0, 1.0 + one_px),
+            &doc,
+            scale,
+            &cfg,
+            SnapOverrides::default(),
+            None,
+        );
+        assert_eq!(r.kind, SnapKind::Curve, "a 1 px debe enganchar la curva");
+        assert!((r.point.x - 1.0).abs() < 1e-9 && (r.point.y - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sin_snap_lejos_de_la_curva() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::Function(FunctionObj::new("x".to_string())));
+        let cfg = curve_only_cfg();
+        let scale = 50.0;
+        // A 200 px de la recta no hay proyección: la jerarquía cae a libre.
+        let r = snap_point(
+            Point2::new(1.0, 5.0),
+            &doc,
+            scale,
+            &cfg,
+            SnapOverrides::default(),
+            None,
+        );
+        assert_eq!(r.kind, SnapKind::Free);
+        assert!(snap_to_curve(Point2::new(1.0, 5.0), &doc, scale, 8.0 / scale).is_none());
+    }
+
+    #[test]
+    fn pares_de_interseccion_acotados_a_32_en_escena_densa() {
+        assert_eq!(
+            MAX_INTERSECTION_PAIRS_PER_FRAME, 32,
+            "el cap anti-O(n²) debe ser 32 pares por frame"
+        );
+        let mut doc = empty_doc();
+        for i in 0..10 {
+            doc.add_object(GeoObject::Line(LineObj::new_with_kind(
+                Point2::new(i as f64, -10.0),
+                Point2::new(i as f64, 10.0),
+                LineKind::Line,
+            )));
+            doc.add_object(GeoObject::Line(LineObj::new_with_kind(
+                Point2::new(-10.0, i as f64),
+                Point2::new(10.0, i as f64),
+                LineKind::Line,
+            )));
+        }
+        // 20 rectas → 190 pares candidatos, truncados a 32 por frame; los más
+        // cercanos al cursor sobreviven al orden por distancia media.
+        let r = snap_to_intersections(Point2::new(4.5, 4.5), &doc, 1.0, (-10.0, 10.0, -10.0, 10.0))
+            .expect("intersección cercana en escena densa");
+        assert!(r.point.x.is_finite() && r.point.y.is_finite());
+        assert!((r.point.x - 4.5).abs() <= 1.0 && (r.point.y - 4.5).abs() <= 1.0);
+        assert!(r.label.starts_with("Intersección"));
+    }
+
+    #[test]
+    fn snap_a_trazo_pencil_cercano() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::Pencil(PencilObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(2.0, 0.0),
+        ])));
+        // A 2.5 px del trazo: engancha por ventana local al punto (1, 0).
+        let r = snap_point(
+            Point2::new(1.0, 0.05),
+            &doc,
+            50.0,
+            &curve_only_cfg(),
+            SnapOverrides::default(),
+            None,
+        );
+        assert_eq!(r.kind, SnapKind::Curve);
+        assert!((r.point.x - 1.0).abs() < 1e-9 && r.point.y.abs() < 1e-9);
+        assert!(r.label.starts_with("trazo"));
+    }
+
+    #[test]
+    fn snap_a_curva_polar_cercana() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::PolarCurve(PolarCurveObj::new(
+            "1",
+            0.0,
+            std::f64::consts::TAU,
+        )));
+        // r = 1 es la circunferencia unidad; a 0.5 px de (1, 0) engancha.
+        let r = snap_point(
+            Point2::new(1.01, 0.0),
+            &doc,
+            50.0,
+            &curve_only_cfg(),
+            SnapOverrides::default(),
+            None,
+        );
+        assert_eq!(r.kind, SnapKind::Curve);
+        assert!((r.point.x - 1.0).abs() < 1e-6 && r.point.y.abs() < 1e-6);
+        assert!(r.label.starts_with("polar"));
+    }
+
+    #[test]
+    fn implicita_sin_snap_proyeccion_pendiente() {
+        let mut doc = empty_doc();
+        doc.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x^2 + y^2",
+            "1",
+            RelationOperator::Eq,
+        )));
+        // Aunque el cursor esté sobre la circunferencia, el snap a curva
+        // devuelve `None`: requiere marching squares + Newton 2D (TODO
+        // documentado en `snap_to_curve`), fuera del presupuesto por frame.
+        assert!(snap_to_curve(Point2::new(1.0, 0.0), &doc, 50.0, 8.0 / 50.0).is_none());
     }
 }

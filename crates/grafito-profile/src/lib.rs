@@ -12,7 +12,8 @@ pub mod working_memory;
 
 // Re-exportar tipos de avatar/mascota en la raíz
 pub use bkt::{
-    bkt_params_for_branch, bkt_params_for_lo, bkt_update, BktParams, BktState, BKT_DEFAULT_PARAMS,
+    bkt_params_for_branch, bkt_params_for_lo, bkt_params_for_lo_opt, bkt_update, is_known_lo,
+    BktParams, BktState, ALL_LO_IDS, BKT_DEFAULT_PARAMS,
 };
 pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{
@@ -341,6 +342,12 @@ impl StudentProfile {
 
     /// Ramas sin cubrir priorizando vencidas (due primero) y luego menor dominio/BKT.
     /// Mantiene compatibilidad: no cambia `recommend_next()` existente.
+    ///
+    /// Orden total aplicado:
+    /// 1. `due` (`next_review_epoch <= now`) antes que no vencidas;
+    /// 2. entre iguales, `next_review_epoch` más antiguo primero
+    ///    (`None` ordena antes que cualquier `Some`, igual que `Option::cmp`);
+    /// 3. desempate por menor `mastery` y luego menor `bkt_p_known`.
     pub fn recommend_next_with_scheduler(&self, now: u64) -> Vec<&BranchState> {
         let mut pending: Vec<&BranchState> = self.branches.iter().filter(|b| !b.covered).collect();
         pending.sort_by(|a, b| {
@@ -374,6 +381,31 @@ impl StudentProfile {
             }
         });
         pending
+    }
+
+    /// Helper Leitner listo para el asistente: vencidas primero.
+    ///
+    /// Equivale a `recommend_next_with_scheduler(now)` con nombre explícito
+    /// para la migración del caller: retorna las ramas **no cubiertas**
+    /// ordenadas con `due` (`next_review_epoch <= now`, ver
+    /// [`scheduler::is_due`]) primero y, dentro de cada grupo, por
+    /// `next_review_epoch` más antiguo, luego menor `mastery`/`bkt_p_known`.
+    /// Las ramas nunca practicadas (`next_review_epoch == None`) ordenan
+    /// antes que las futuras (orden `Option::cmp`) pero después de las
+    /// vencidas: son "nuevas", no "atrasadas".
+    ///
+    /// # Integración con `assistant.rs` (NO tocar desde este crate)
+    ///
+    /// `crates/grafito-app/src/assistant.rs:486,499,1704` ya llama a
+    /// `profile.recommend_next()`, que desde esta versión delega en
+    /// `recommend_next_with_scheduler(now_epoch)` — es decir, el asistente YA
+    /// consume Leitner (`next_review_epoch`/`box_level` vía `record_outcome`
+    /// y `scheduler::next_interval`) sin cambios. Si otro agente migra esos
+    /// call sites a reloj inyectado, el reemplazo directo es:
+    /// `profile.recommend_due_first(now)` (misma semántica, nombre intencional).
+    /// Puro y determinista dado `now`: sin I/O, sin reloj interno.
+    pub fn recommend_due_first(&self, now: u64) -> Vec<&BranchState> {
+        self.recommend_next_with_scheduler(now)
     }
 
     /// Schedules actuales por rama (para UI/debug).
@@ -805,6 +837,57 @@ mod tests {
         let ranked = p.recommend_next_with_scheduler(100);
         assert!(!ranked.is_empty());
         assert_eq!(ranked[0].id, "algebra", "vencida debe ir primero");
+    }
+
+    #[test]
+    fn recommend_due_first_matches_scheduler_and_orders_due_first() {
+        let mut p = StudentProfile::new("DueFirst");
+        p.record_outcome("algebra", "Álgebra", 0, false);
+        p.record_outcome("geometry", "Geometría", 0, true);
+        p.record_outcome("calculus", "Cálculo", 0, true);
+        for b in &mut p.branches {
+            if b.id == "algebra" {
+                b.mastery = 0.2;
+                b.next_review_epoch = Some(10);
+                b.box_level = 1;
+            } else if b.id == "geometry" {
+                b.mastery = 0.9;
+                b.next_review_epoch = Some(9_999_999);
+                b.box_level = 3;
+            } else if b.id == "calculus" {
+                b.mastery = 0.5;
+                b.next_review_epoch = Some(20);
+                b.box_level = 2;
+            }
+        }
+        // now=100: algebra (due, epoch 10) y calculus (due, epoch 20) vencidas;
+        // geometry futura. Due ordenadas por epoch más antiguo primero.
+        let ranked = p.recommend_due_first(100);
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].id, "algebra");
+        assert_eq!(ranked[1].id, "calculus");
+        assert_eq!(ranked[2].id, "geometry");
+        // Misma semántica que recommend_next_with_scheduler.
+        let via_scheduler = p.recommend_next_with_scheduler(100);
+        let ids_due_first: Vec<&str> = ranked.iter().map(|b| b.id.as_str()).collect();
+        let ids_sched: Vec<&str> = via_scheduler.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids_due_first, ids_sched);
+        // Determinista: repetir con el mismo now da el mismo orden.
+        let again = p.recommend_due_first(100);
+        let ids_again: Vec<&str> = again.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids_due_first, ids_again);
+    }
+
+    #[test]
+    fn recommend_due_first_excludes_covered_and_handles_empty() {
+        let empty = StudentProfile::new("Vacio");
+        assert!(empty.recommend_due_first(0).is_empty());
+        let mut p = StudentProfile::new("Cub");
+        for _ in 0..12 {
+            p.record_outcome("calculus", "Cálculo", 1, true);
+        }
+        assert!(p.branches[0].covered);
+        assert!(p.recommend_due_first(9_999_999).is_empty());
     }
 
     #[test]

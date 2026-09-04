@@ -10,7 +10,7 @@
 //! vía OpenCode Go sin salir del chat. Todas son puras, sin I/O ni mutación de Document.
 
 use crate::ProviderSettings;
-use grafito_agent::ledger::JSpaceLedger;
+use grafito_agent::ledger::{JSpaceLedger, MAX_LEDGER_RENDER_BYTES};
 use grafito_agent::loop_engine::{
     run_agent, run_agent_with_ledger, AgentBudget, AgentChatResponse, AgentCompleter, AgentOutcome,
     Cancellation, ToolDispatcher,
@@ -20,7 +20,7 @@ use grafito_agent::AgentEvent;
 use serde_json::{json, Value};
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Límite del cuerpo de la respuesta del agente.
 const MAX_AGENT_RESPONSE_BYTES: usize = 32 * 1024;
@@ -73,6 +73,27 @@ pub fn request_agent_on_worker(
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(128);
     let handle = std::thread::spawn(move || {
+        // Muse Spark sólo responde por Responses API; el resto de modelos sigue
+        // por Chat Completions vía `run_agent` (path intacto).
+        if uses_responses_agent_transport(&settings) {
+            let dispatcher = SafeGrafitoDispatcher;
+            return run_responses_agent_loop(
+                &settings,
+                api_key.as_deref(),
+                &system,
+                &user_messages,
+                &tools,
+                &budget,
+                None,
+                &dispatcher,
+                &cancellation,
+                |event| {
+                    // Bounded channel (128) evita crecimiento ilimitado si la UI no drena;
+                    // ante backpressure se abandona el envío (canal lleno o desconectado).
+                    let _ = sender.try_send(event);
+                },
+            );
+        }
         let completer = RemoteAgentCompleter::new(settings, api_key);
         let dispatcher = SafeGrafitoDispatcher;
         run_agent(
@@ -110,6 +131,24 @@ pub fn request_agent_on_worker_with_ledger(
 ) {
     let (sender, receiver) = std::sync::mpsc::sync_channel(128);
     let handle = std::thread::spawn(move || {
+        // Misma bifurcación que `request_agent_on_worker`: Spark por Responses.
+        if uses_responses_agent_transport(&settings) {
+            let dispatcher = SafeGrafitoDispatcher;
+            return run_responses_agent_loop(
+                &settings,
+                api_key.as_deref(),
+                &system,
+                &user_messages,
+                &tools,
+                &budget,
+                ledger.as_ref(),
+                &dispatcher,
+                &cancellation,
+                |event| {
+                    let _ = sender.try_send(event);
+                },
+            );
+        }
         let completer = RemoteAgentCompleter::new(settings, api_key);
         let dispatcher = SafeGrafitoDispatcher;
         run_agent_with_ledger(
@@ -877,6 +916,22 @@ fn request_agent_completion(
     if cancellation.is_cancelled() {
         return Err("assistant agent request was cancelled".into());
     }
+    // Muse Spark no responde por Chat Completions (500 instantáneo verificado
+    // contra el servidor real): se atiende por Responses API en un solo turno;
+    // el loop exterior (`run_agent`) o `run_responses_agent_loop` re-postea con
+    // los `function_call_output` hasta converger. El resto de modelos usa el
+    // path Chat Completions intacto de abajo.
+    if uses_responses_agent_transport(settings) {
+        return request_responses_agent_turn(
+            settings,
+            api_key,
+            messages,
+            tools,
+            max_output_tokens,
+            timeout,
+            cancellation,
+        );
+    }
     if crate::remote_protocol(settings) != crate::RemoteProtocol::OpenAiChatCompletions {
         return Err("assistant agent requires an OpenAI-compatible chat endpoint (Muse Spark usa Responses API: el modo agente con herramientas aún no está soportado, usá el chat simple o deepseek)".into());
     }
@@ -971,6 +1026,489 @@ fn parse_agent_completion(body: &Value) -> Result<AgentChatResponse, String> {
         content: text,
         truncated,
     })
+}
+
+// ── Transporte Responses API (Muse Spark) ────────────────────────────────────
+//
+// Muse Spark sólo responde por `POST {base}/responses` (por Chat Completions
+// el proveedor devuelve 500 instantáneo con cualquier payload, verificado
+// 2026-09-04 contra el servidor real). El formato verificado es:
+// request  `{model, instructions, input, tools:[{type:function,name,
+//            description,parameters}], max_output_tokens}`
+// response `{output:[{type:message,content:[{type:output_text,text}]},
+//            {type:function_call,call_id,name,arguments}]}`.
+// Cada `function_call` se despacha con el dispatcher existente de este archivo
+// (`dispatch_safe_tool` vía `ToolDispatcher`, sin inventar tools) y su
+// resultado vuelve como `{"type":"function_call_output","call_id","output"}`
+// que se agrega al `input` antes de re-postear.
+
+/// Cap del cuerpo en Responses API: los items `reasoning` traen
+/// `encrypted_content` opaco que supera el presupuesto de texto útil.
+/// 64 KiB transitorios por request (duplica `RESPONSES_MAX_BODY_BYTES` de
+/// `crate::` que es privado; el texto útil sigue acotado por el budget).
+const MAX_RESPONSES_BODY_BYTES: usize = 64 * 1024;
+
+/// Tope de argumentos serializados por `function_call`.
+/// Duplica `MAX_TOOL_RESULT_CHARS` (2048) de `grafito-agent::schema`.
+const MAX_RESPONSES_ARGS_CHARS: usize = 2_048;
+
+/// Resumen de args para `AgentEvent::ToolStarted` (paridad con el loop_engine).
+const MAX_RESPONSES_ARGS_SUMMARY_CHARS: usize = 160;
+
+/// ¿Este modelo viaja por Responses API en vez de Chat Completions?
+///
+/// Duplica la lógica mínima de `uses_responses_api` de `crate::` (privado en
+/// la raíz: `model.contains("muse-spark")`, que cubre futuras 1.x). No se toca
+/// `lib.rs`; el router Chat queda intacto para el resto de modelos.
+fn uses_responses_agent_transport(settings: &ProviderSettings) -> bool {
+    settings.model.contains("muse-spark")
+}
+
+/// Convierte los schemas al formato de tools de Responses API.
+///
+/// `ToolSchema::openai_tool()` emite `{type:function,function:{...}}` (Chat);
+/// Responses espera plano `{type:function,name,description,parameters}`.
+fn responses_agent_tools(tools: &[ToolSchema]) -> Result<Vec<Value>, String> {
+    let mut rendered = Vec::with_capacity(tools.len());
+    for tool in tools {
+        tool.validate()?;
+        rendered.push(json!({
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        }));
+    }
+    Ok(rendered)
+}
+
+/// Presupuesto `max_output_tokens` para Responses: incluye razonamiento
+/// (verificado: un "ok" consume 61 reasoning + 0 output). Duplica la lógica
+/// mínima de `responses_token_limit_for_chars` de `crate::` (privado).
+fn responses_agent_token_budget(max_output_chars: usize) -> usize {
+    max_output_chars.saturating_mul(2).clamp(2_048, 16_384)
+}
+
+/// Construye el payload Responses del agente con instructions+input+tools.
+///
+/// No se reutiliza `crate::build_responses_payload` (público pero ata a
+/// `AssistantRequest` y no admite tools); se duplica lo mínimo sin tocar
+/// `lib.rs`. Sin secretos: sólo `model`, texto e `input` ya saneados.
+fn build_responses_agent_payload(
+    settings: &ProviderSettings,
+    instructions: &str,
+    input: &[Value],
+    tools: &[ToolSchema],
+    max_output_tokens: usize,
+) -> Result<Value, String> {
+    settings.validate()?;
+    Ok(json!({
+        "model": settings.model,
+        "instructions": instructions,
+        "input": input,
+        "tools": responses_agent_tools(tools)?,
+        "max_output_tokens": max_output_tokens.max(16),
+    }))
+}
+
+/// Separa `instructions` (system) del `input` Responses.
+///
+/// Traduce el historial Chat del loop exterior al formato Responses:
+/// - `system` (string) → `instructions` (concatenado con `\n\n`).
+/// - `assistant` con `tool_calls` (Chat) → items `function_call`.
+/// - `tool` con `tool_call_id` → items `function_call_output`.
+/// - el resto (`user`, `assistant` de texto) se clona tal cual.
+fn split_responses_instructions_and_input(messages: &[Value]) -> (String, Vec<Value>) {
+    let mut instructions = Vec::new();
+    let mut input = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "system" {
+            if let Some(text) = message.get("content").and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    instructions.push(text.to_owned());
+                }
+            }
+            continue;
+        }
+        if role == "assistant" {
+            if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for call in calls {
+                    let id = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .or_else(|| call.get("call_id").and_then(Value::as_str))
+                        .unwrap_or_default();
+                    let (name, arguments) = call
+                        .get("function")
+                        .and_then(Value::as_object)
+                        .map(|function| {
+                            (
+                                function
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default(),
+                                function
+                                    .get("arguments")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| "{}".to_string()),
+                            )
+                        })
+                        .unwrap_or_default();
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": id,
+                        "name": name,
+                        "arguments": arguments,
+                    }));
+                }
+                if let Some(text) = message.get("content").and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        input.push(json!({"role": "assistant", "content": text}));
+                    }
+                }
+                continue;
+            }
+        }
+        if role == "tool" {
+            let id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .or_else(|| message.get("call_id").and_then(Value::as_str))
+                .or_else(|| message.get("id").and_then(Value::as_str))
+                .unwrap_or_default();
+            let output = match message.get("content") {
+                Some(Value::String(text)) => text.clone(),
+                Some(other) if other.is_null() => String::new(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": id,
+                "output": output,
+            }));
+            continue;
+        }
+        input.push(message.clone());
+    }
+    (instructions.join("\n\n"), input)
+}
+
+/// Parsea un `function_call` de Responses a `ToolCall` del dispatcher.
+///
+/// `arguments` llega como string JSON (o ya objeto); se acota a
+/// `MAX_RESPONSES_ARGS_CHARS` como el parser Chat.
+fn parse_responses_tool_call(item: &Value, index: usize) -> Result<ToolCall, String> {
+    let object = item
+        .as_object()
+        .ok_or_else(|| format!("assistant agent responses call {index} is not an object"))?;
+    let id = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .or_else(|| object.get("id").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_owned();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(format!(
+            "assistant agent responses call {index} has an invalid name"
+        ));
+    }
+    let raw_arguments = match object.get("arguments") {
+        None | Some(Value::Null) => "{}".to_string(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+    };
+    if raw_arguments.chars().count() > MAX_RESPONSES_ARGS_CHARS {
+        return Err(format!(
+            "assistant agent responses call {index} arguments exceed the budget"
+        ));
+    }
+    let arguments: Value = serde_json::from_str(&raw_arguments).map_err(|error| {
+        format!("assistant agent responses call {index} arguments JSON is invalid: {error}")
+    })?;
+    Ok(ToolCall {
+        id,
+        name,
+        arguments,
+    })
+}
+
+/// Parsea el `output` de Responses: acumula `output_text` y extrae calls.
+///
+/// Duplica lo mínimo de `responses_completion_text` de `crate::` (privado:
+/// junta `output_text` de items `message`, honra `error`/`failed`/`cancelled`
+/// e `incomplete` como truncado) y además extrae los items `function_call`.
+/// Los items `reasoning` se ignoran (no se muestran).
+/// Si hay texto y calls a la vez se devuelven los calls (el texto final llega
+/// en el turno de convergencia tras ejecutar las tools).
+fn parse_responses_agent_turn(body: &Value) -> Result<AgentChatResponse, String> {
+    if let Some(error) = body.get("error") {
+        if !error.is_null() {
+            let detail = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider error");
+            let detail: String = detail.chars().take(200).collect();
+            return Err(format!(
+                "assistant agent responses API returned an error: {detail}"
+            ));
+        }
+    }
+    let status = body.get("status").and_then(Value::as_str).unwrap_or("");
+    if status == "failed" || status == "cancelled" {
+        return Err("assistant agent responses API did not complete the response".into());
+    }
+    let truncated = status == "incomplete";
+    let output = body
+        .get("output")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "assistant agent responses response has no output array".to_string())?;
+    let mut texts = Vec::new();
+    let mut calls = Vec::new();
+    for (index, item) in output.iter().enumerate() {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                let empty = Vec::new();
+                let content = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .unwrap_or(&empty);
+                for part in content {
+                    if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                        continue;
+                    }
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        texts.push(text.to_owned());
+                    }
+                }
+            }
+            Some("function_call") => calls.push(parse_responses_tool_call(item, index)?),
+            _ => {}
+        }
+    }
+    if !calls.is_empty() {
+        return Ok(AgentChatResponse::ToolCalls { calls });
+    }
+    let text = texts.join("\n\n");
+    if text.trim().is_empty() && !truncated {
+        return Err("assistant agent responses response contained no displayable text".into());
+    }
+    Ok(AgentChatResponse::Text {
+        content: text,
+        truncated,
+    })
+}
+
+/// POST crudo a Responses API con bound de cuerpo y JSON parseado.
+///
+/// Reusa `crate::responses_endpoint` (público), `crate::sanitize_api_key` y
+/// `crate::transport_error` (`pub(crate)`), más el cliente compartido y la
+/// lectura acotada ya usados por el path Chat de este archivo.
+fn post_responses_output(
+    settings: &ProviderSettings,
+    api_key: Option<&str>,
+    payload: &Value,
+    timeout: Duration,
+    cancellation: &Cancellation,
+) -> Result<Value, String> {
+    if cancellation.is_cancelled() {
+        return Err("assistant agent request was cancelled".into());
+    }
+    let client = crate::shared_http_client()?;
+    let mut call = client
+        .post(crate::responses_endpoint(settings)?)
+        .json(payload)
+        .timeout(timeout);
+    if let Some(key) = api_key {
+        call = call.bearer_auth(crate::sanitize_api_key(key)?);
+    }
+    if cancellation.is_cancelled() {
+        return Err("assistant agent request was cancelled".into());
+    }
+    let response = call
+        .send()
+        .map_err(|error| crate::transport_error("assistant agent", &error, Some(timeout)))?;
+    if cancellation.is_cancelled() {
+        return Err("assistant agent request was cancelled".into());
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "assistant agent returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let response_bytes = crate::read_bounded_response_body(response, MAX_RESPONSES_BODY_BYTES)?;
+    serde_json::from_slice(&response_bytes)
+        .map_err(|_| "assistant agent responses response JSON is invalid".to_string())
+}
+
+/// Un turno Responses: traduce los mensajes Chat del loop a
+/// instructions+input, postea una vez y devuelve texto o tool calls.
+///
+/// Lo usa `RemoteAgentCompleter` para Spark dentro del loop exterior
+/// (`run_agent`, que ya respeta `AgentBudget` y cancelación turno a turno).
+#[allow(clippy::too_many_arguments)]
+fn request_responses_agent_turn(
+    settings: &ProviderSettings,
+    api_key: Option<&str>,
+    messages: &[Value],
+    tools: &[ToolSchema],
+    max_output_tokens: usize,
+    timeout: Duration,
+    cancellation: &Cancellation,
+) -> Result<AgentChatResponse, String> {
+    let (instructions, input) = split_responses_instructions_and_input(messages);
+    let payload =
+        build_responses_agent_payload(settings, &instructions, &input, tools, max_output_tokens)?;
+    let body = post_responses_output(settings, api_key, &payload, timeout, cancellation)?;
+    parse_responses_agent_turn(&body)
+}
+
+fn summarize_responses_args(arguments: &Value) -> String {
+    let summary = arguments.to_string();
+    if summary.chars().count() > MAX_RESPONSES_ARGS_SUMMARY_CHARS {
+        let mut clipped = summary
+            .chars()
+            .take(MAX_RESPONSES_ARGS_SUMMARY_CHARS.saturating_sub(1))
+            .collect::<String>();
+        clipped.push('…');
+        clipped
+    } else {
+        summary
+    }
+}
+
+/// Loop agente nativo por Responses API para Muse Spark.
+///
+/// Replica el contrato de `run_agent` con formato Responses en vez de Chat:
+/// POST → acumula `output_text` de items `message`; por cada item
+/// `function_call` despacha la tool existente (`ToolDispatcher`, en producción
+/// `SafeGrafitoDispatcher`) y agrega
+/// `{"type":"function_call_output","call_id","output"}` al `input` (junto al
+/// `function_call` que lo originó, para contexto stateless) antes de
+/// re-postear. Respeta `AgentBudget` (`max_tool_turns`, `per_turn_timeout`,
+/// `total_span`) y `Cancellation` en cada iteración.
+#[allow(clippy::too_many_arguments)]
+fn run_responses_agent_loop<D: ToolDispatcher>(
+    settings: &ProviderSettings,
+    api_key: Option<&str>,
+    system: &str,
+    user_messages: &[Value],
+    tools: &[ToolSchema],
+    budget: &AgentBudget,
+    ledger: Option<&JSpaceLedger>,
+    dispatcher: &D,
+    cancellation: &Cancellation,
+    mut on_event: impl FnMut(AgentEvent),
+) -> Result<AgentOutcome, String> {
+    for tool in tools {
+        tool.validate()?;
+    }
+    let mut instructions_owned = system.to_owned();
+    if let Some(ledger) = ledger {
+        ledger.validate()?;
+        let render = ledger.render_bounded(MAX_LEDGER_RENDER_BYTES);
+        if !render.trim().is_empty() {
+            on_event(AgentEvent::Ledger {
+                render: render.clone(),
+            });
+            instructions_owned.push_str("\n\nLedger de tarea:\n");
+            instructions_owned.push_str(&render);
+        }
+    }
+    let (extra_instructions, mut input) = split_responses_instructions_and_input(user_messages);
+    if !extra_instructions.trim().is_empty() {
+        if !instructions_owned.trim().is_empty() {
+            instructions_owned.push_str("\n\n");
+        }
+        instructions_owned.push_str(&extra_instructions);
+    }
+    let started = Instant::now();
+    let max_turns = budget.max_tool_turns.max(1);
+    for turn in 0..=max_turns {
+        if cancellation.is_cancelled() {
+            return Err("assistant agent request was cancelled".into());
+        }
+        let remaining = budget.total_span.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err("assistant agent loop exceeded its total span".into());
+        }
+        let per_turn_timeout = budget.per_turn_timeout.min(remaining);
+        let payload = build_responses_agent_payload(
+            settings,
+            &instructions_owned,
+            &input,
+            tools,
+            responses_agent_token_budget(budget.max_output_chars),
+        )?;
+        let body =
+            post_responses_output(settings, api_key, &payload, per_turn_timeout, cancellation)?;
+        match parse_responses_agent_turn(&body)? {
+            AgentChatResponse::Text { content, truncated } => {
+                on_event(AgentEvent::Finalized {
+                    text: content.clone(),
+                });
+                let lower = content.to_ascii_lowercase();
+                let verified = !lower.contains("pendiente")
+                    && !lower.contains("sin verificar")
+                    && !lower.contains("no pude");
+                return Ok(AgentOutcome {
+                    final_text: content,
+                    truncated,
+                    tool_turns: turn,
+                    verified,
+                });
+            }
+            AgentChatResponse::ToolCalls { calls } => {
+                if calls.is_empty() {
+                    return Err("assistant agent received an empty tool_calls list".into());
+                }
+                if turn == max_turns {
+                    return Err("assistant agent exceeded its tool-call turn budget".into());
+                }
+                // Eco stateless: el servidor no recuerda turnos, el `input`
+                // acumula los `function_call` y sus `function_call_output`.
+                for call in &calls {
+                    let arguments =
+                        serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string());
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": arguments,
+                    }));
+                }
+                for call in &calls {
+                    on_event(AgentEvent::ToolStarted {
+                        name: call.name.clone(),
+                        args_summary: summarize_responses_args(&call.arguments),
+                    });
+                    if cancellation.is_cancelled() {
+                        return Err("assistant agent request was cancelled".into());
+                    }
+                    let result = dispatcher.dispatch(call);
+                    on_event(AgentEvent::ToolFinished {
+                        name: call.name.clone(),
+                        ok: result.ok,
+                    });
+                    input.push(json!({
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": result.content,
+                    }));
+                }
+            }
+        }
+    }
+    Err("assistant agent loop did not converge".into())
 }
 
 #[cfg(test)]
@@ -1321,5 +1859,339 @@ mod tests {
                 result.content
             );
         }
+    }
+
+    // ── Tests Responses API (Muse Spark, sin imágenes) ───────────────────────
+
+    fn spark_stub_settings(port: u16) -> ProviderSettings {
+        ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "muse-spark-test")
+            .with_endpoint(format!("http://127.0.0.1:{port}/v1"))
+            .expect("loopback stub endpoint is valid")
+    }
+
+    fn spark_budget(per_turn: Duration, total: Duration) -> AgentBudget {
+        AgentBudget {
+            max_tool_turns: 4,
+            per_turn_timeout: per_turn,
+            total_span: total,
+            max_output_chars: 2_048,
+        }
+    }
+
+    /// Sirve `scripted` como respuestas 200 JSON en orden, guardando cada body.
+    fn spawn_responses_stub(
+        scripted: Vec<Value>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds loopback");
+        let port = listener.local_addr().expect("stub has addr").port();
+        let handle = std::thread::spawn(move || {
+            for body in scripted {
+                let (mut stream, _) = listener.accept().expect("stub accepts");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .expect("stub timeout");
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut chunk).expect("stub reads");
+                    if read == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&chunk[..read]);
+                    if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header_end = raw
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                    .unwrap_or(raw.len());
+                let headers = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+                let content_len: usize = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find_map(|(key, value)| {
+                        if key.trim().eq_ignore_ascii_case("content-length") {
+                            value.trim().parse().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                let mut body_bytes = raw[header_end..].to_vec();
+                while body_bytes.len() < content_len {
+                    let read = stream.read(&mut chunk).expect("stub reads body");
+                    if read == 0 {
+                        break;
+                    }
+                    body_bytes.extend_from_slice(&chunk[..read]);
+                }
+                seen.lock()
+                    .expect("stub lock")
+                    .push(String::from_utf8_lossy(&body_bytes).into_owned());
+                let payload = serde_json::to_string(&body).expect("stub json");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream.write_all(response.as_bytes()).expect("stub writes");
+                stream.flush().expect("stub flushes");
+            }
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn responses_router_matches_spark_only() {
+        let spark = ProviderSettings::for_profile(
+            crate::ProviderProfile::OllamaLocal,
+            "muse-spark-1.3-contributor",
+        );
+        assert!(uses_responses_agent_transport(&spark));
+        let deepseek =
+            ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "deepseek-v4-flash");
+        assert!(!uses_responses_agent_transport(&deepseek));
+    }
+
+    #[test]
+    fn responses_payload_uses_instructions_input_and_function_tools() {
+        let settings =
+            ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "muse-spark-test");
+        let tool = ToolSchema::new(
+            "evaluate_expr",
+            "Evalúa una expresión.",
+            json!({"type": "object", "properties": {"expression": {"type": "string"}}}),
+        );
+        let payload = build_responses_agent_payload(
+            &settings,
+            "sos un asistente",
+            &[json!({"role": "user", "content": "hola"})],
+            &[tool],
+            2_048,
+        )
+        .unwrap();
+        assert_eq!(payload["instructions"], "sos un asistente");
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["tools"][0]["type"], "function");
+        assert_eq!(payload["tools"][0]["name"], "evaluate_expr");
+        assert!(payload["tools"][0].get("function").is_none());
+        assert!(!payload.to_string().contains("api_key"));
+    }
+
+    #[test]
+    fn responses_turn_parses_text_and_function_calls() {
+        let text_body = json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hola final"}]
+            }]
+        });
+        match parse_responses_agent_turn(&text_body).unwrap() {
+            AgentChatResponse::Text { content, truncated } => {
+                assert_eq!(content, "hola final");
+                assert!(!truncated);
+            }
+            _ => panic!("expected text"),
+        }
+        let call_body = json!({
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "evaluate_expr",
+                "arguments": "{\"expression\":\"2+2\"}"
+            }]
+        });
+        match parse_responses_agent_turn(&call_body).unwrap() {
+            AgentChatResponse::ToolCalls { calls } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call-1");
+                assert_eq!(calls[0].name, "evaluate_expr");
+                assert_eq!(calls[0].arguments["expression"], "2+2");
+            }
+            _ => panic!("expected tool calls"),
+        }
+    }
+
+    #[test]
+    fn responses_loop_runs_function_call_output_then_final_text() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, stub) = spawn_responses_stub(
+            vec![
+                json!({
+                    "status": "completed",
+                    "output": [{
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "evaluate_expr",
+                        "arguments": "{\"expression\":\"2+2\"}"
+                    }]
+                }),
+                json!({
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "El resultado es 4"}]
+                    }]
+                }),
+            ],
+            seen.clone(),
+        );
+        let settings = spark_stub_settings(port);
+        let tools = vec![ToolSchema::new(
+            "evaluate_expr",
+            "Evalúa una expresión.",
+            json!({"type": "object", "properties": {"expression": {"type": "string"}}}),
+        )];
+        let dispatcher = SafeGrafitoDispatcher;
+        let mut events = Vec::new();
+        let outcome = run_responses_agent_loop(
+            &settings,
+            None,
+            "sos un asistente de matemática",
+            &[json!({"role": "user", "content": "cuánto es 2+2"})],
+            &tools,
+            &spark_budget(Duration::from_secs(10), Duration::from_secs(30)),
+            None,
+            &dispatcher,
+            &Cancellation::default(),
+            |event| events.push(event),
+        )
+        .expect("loop converges");
+        assert_eq!(outcome.final_text, "El resultado es 4");
+        assert_eq!(outcome.tool_turns, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolStarted { name, .. } if name == "evaluate_expr"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolFinished { name, ok: true } if name == "evaluate_expr"
+        )));
+        // El segundo POST lleva el output de la tool como function_call_output.
+        let bodies = seen.lock().expect("lock").clone();
+        assert_eq!(bodies.len(), 2);
+        let second: Value = serde_json::from_str(&bodies[1]).expect("json");
+        let input = second["input"].as_array().expect("input array");
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("function_call_output in second input");
+        assert_eq!(output["call_id"], "call-1");
+        assert!(output["output"].as_str().unwrap_or_default().contains('4'));
+        stub.join().expect("stub joins");
+    }
+
+    #[test]
+    fn responses_loop_cancels_mid_loop_after_first_dispatch() {
+        struct CancellingDispatcher {
+            cancellation: Cancellation,
+        }
+        impl ToolDispatcher for CancellingDispatcher {
+            fn dispatch(&self, call: &ToolCall) -> ToolResult {
+                self.cancellation.cancel();
+                dispatch_safe_tool(call)
+            }
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (port, _stub) = spawn_responses_stub(
+            vec![json!({
+                "status": "completed",
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "evaluate_expr",
+                    "arguments": "{\"expression\":\"2+2\"}"
+                }]
+            })],
+            seen,
+        );
+        let settings = spark_stub_settings(port);
+        let tools = vec![ToolSchema::new(
+            "evaluate_expr",
+            "Evalúa una expresión.",
+            json!({"type": "object", "properties": {"expression": {"type": "string"}}}),
+        )];
+        let cancellation = Cancellation::default();
+        let dispatcher = CancellingDispatcher {
+            cancellation: cancellation.clone(),
+        };
+        let result = run_responses_agent_loop(
+            &settings,
+            None,
+            "sistema",
+            &[json!({"role": "user", "content": "hola"})],
+            &tools,
+            &spark_budget(Duration::from_secs(10), Duration::from_secs(30)),
+            None,
+            &dispatcher,
+            &cancellation,
+            |_| {},
+        );
+        assert_eq!(
+            result.expect_err("mid-loop cancellation aborts"),
+            "assistant agent request was cancelled"
+        );
+    }
+
+    #[test]
+    fn responses_loop_reports_per_turn_timeout() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("stub binds loopback");
+        let port = listener.local_addr().expect("stub has addr").port();
+        let slow = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("stub accepts");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("stub timeout");
+            let mut chunk = [0_u8; 4096];
+            let mut raw = Vec::new();
+            loop {
+                let read = stream.read(&mut chunk).expect("stub reads");
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&chunk[..read]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // Supera por lejos el timeout por turno del test.
+            std::thread::sleep(Duration::from_millis(1_500));
+            let payload = "{\"status\":\"completed\",\"output\":[]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            stream.write_all(response.as_bytes()).expect("stub writes");
+        });
+        let settings = spark_stub_settings(port);
+        let tools = vec![ToolSchema::new(
+            "evaluate_expr",
+            "Evalúa una expresión.",
+            json!({"type": "object", "properties": {"expression": {"type": "string"}}}),
+        )];
+        let result = run_responses_agent_loop(
+            &settings,
+            None,
+            "sistema",
+            &[json!({"role": "user", "content": "hola"})],
+            &tools,
+            &spark_budget(Duration::from_millis(200), Duration::from_secs(30)),
+            None,
+            &SafeGrafitoDispatcher,
+            &Cancellation::default(),
+            |_| {},
+        );
+        let error = result.expect_err("slow turn times out");
+        assert!(
+            error.contains("timed out"),
+            "per-turn timeout surfaces transport timeout, got: {error}"
+        );
+        slow.join().expect("stub joins");
     }
 }

@@ -1,8 +1,11 @@
 //! Pizarra nativa en overlay (estilo macOS): lienzo a pantalla completa con
 //! toolbar flotante redondeada (pill) y herramientas de dibujo libres sobre
-//! `grafito_whiteboard`. No toca `Document`/`GeoObject`.
+//! `grafito_whiteboard`, sincronizada en ambas direcciones con
+//! `Document.whiteboard` (editar marca el documento sucio con snapshot undo;
+//! abrir/nuevo/undo/redo recarga la sesión).
 
 use egui::{pos2, vec2, Color32, Pos2, Rect, Sense, Stroke};
+use grafito_core::{ChangeSet, Document};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::current_theme;
 use grafito_ui::tokens::{
@@ -15,6 +18,82 @@ use grafito_whiteboard::{
     arrow_tip, smooth_stroke, WhiteboardDoc, WhiteboardElement, WhiteboardInteraction,
     WhiteboardTool,
 };
+use std::collections::VecDeque;
+
+/// Máximo de elementos por hoja de pizarra (alineado con `validation.rs:497`).
+pub const MAX_WHITEBOARD_ELEMENTS_PER_PAGE: usize = 500;
+/// Máximo de hojas del libro de pizarra.
+pub const MAX_WHITEBOARD_PAGES: usize = 32;
+/// Máximo de puntos por trazo libre (alineado con el cap de `smooth_stroke`).
+pub const MAX_WHITEBOARD_POINTS_PER_STROKE: usize = 4096;
+/// Máximo de caracteres por texto de pizarra.
+pub const MAX_WHITEBOARD_TEXT_CHARS: usize = 2000;
+
+fn finite_pair(point: (f64, f64)) -> bool {
+    point.0.is_finite() && point.1.is_finite()
+}
+
+/// Valida un elemento antes de insertarlo: cotas por hoja/trazo/texto con
+/// mensajes en español. Nunca hace panic; devuelve `Err` con el motivo.
+pub fn validate_whiteboard_element(
+    element: &WhiteboardElement,
+    current_len: usize,
+) -> Result<(), String> {
+    if current_len >= MAX_WHITEBOARD_ELEMENTS_PER_PAGE {
+        return Err(format!(
+            "La pizarra alcanzó el máximo de {MAX_WHITEBOARD_ELEMENTS_PER_PAGE} elementos por hoja; borrá algo o creá otra hoja"
+        ));
+    }
+    match element {
+        WhiteboardElement::Stroke { points, width, .. } => {
+            if points.len() > MAX_WHITEBOARD_POINTS_PER_STROKE {
+                return Err(format!(
+                    "El trazo supera el máximo de {MAX_WHITEBOARD_POINTS_PER_STROKE} puntos"
+                ));
+            }
+            if !width.is_finite() || *width <= 0.0 {
+                return Err("El grosor del trazo debe ser finito y positivo".to_string());
+            }
+            if points.iter().any(|point| !finite_pair(*point)) {
+                return Err("El trazo contiene coordenadas no finitas".to_string());
+            }
+        }
+        WhiteboardElement::Rectangle { min, max, .. } => {
+            if !finite_pair(*min) || !finite_pair(*max) {
+                return Err("El rectángulo contiene coordenadas no finitas".to_string());
+            }
+        }
+        WhiteboardElement::Ellipse { center, rx, ry } => {
+            if !finite_pair(*center) || !rx.is_finite() || !ry.is_finite() {
+                return Err("La elipse contiene valores no finitos".to_string());
+            }
+            if *rx <= 0.0 || *ry <= 0.0 {
+                return Err("La elipse necesita radios positivos".to_string());
+            }
+        }
+        WhiteboardElement::Arrow { from, to } => {
+            if !finite_pair(*from) || !finite_pair(*to) {
+                return Err("La flecha contiene coordenadas no finitas".to_string());
+            }
+        }
+        WhiteboardElement::Text { at, text, size } => {
+            if !finite_pair(*at) || !size.is_finite() || *size <= 0.0 {
+                return Err("El texto tiene posición o tamaño no válido".to_string());
+            }
+            if text.chars().count() > MAX_WHITEBOARD_TEXT_CHARS {
+                return Err(format!(
+                    "El texto supera el máximo de {MAX_WHITEBOARD_TEXT_CHARS} caracteres"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Compara pizarras por elementos (`WhiteboardDoc` no implementa `PartialEq`).
+pub fn whiteboard_docs_equal(first: &WhiteboardDoc, second: &WhiteboardDoc) -> bool {
+    first.elements() == second.elements()
+}
 
 /// Página individual de la pizarra (una “hoja” tipo Notepad).
 #[derive(Clone)]
@@ -68,10 +147,24 @@ impl WhiteboardBook {
     }
 
     pub fn create_page(&mut self) -> usize {
+        // Acotado sin panic: al llegar al tope se reutiliza la hoja actual.
+        if self.pages.len() >= MAX_WHITEBOARD_PAGES {
+            return self.current;
+        }
         let page = WhiteboardPage::new(self.next_id);
         self.next_id += 1;
         self.pages.push(page);
         self.pages.len() - 1
+    }
+
+    /// Crea una hoja o rechaza en español al superar `MAX_WHITEBOARD_PAGES`.
+    pub fn try_create_page(&mut self) -> Result<usize, String> {
+        if self.pages.len() >= MAX_WHITEBOARD_PAGES {
+            return Err(format!(
+                "La pizarra alcanzó el máximo de {MAX_WHITEBOARD_PAGES} hojas"
+            ));
+        }
+        Ok(self.create_page())
     }
 
     pub fn switch_to(&mut self, index: usize) -> bool {
@@ -131,6 +224,8 @@ pub struct WhiteboardSession {
     pub pen_color: Color32,
     pub pen_width: f32,
     pub show_palette: bool,
+    /// Último rechazo de cota en español (se muestra como toast y se limpia).
+    pub last_error: Option<String>,
 }
 
 impl Default for WhiteboardSession {
@@ -150,6 +245,7 @@ impl Default for WhiteboardSession {
             pen_color: grafito_ui::theme::LIGHT.text_primary,
             pen_width: 2.0,
             show_palette: false,
+            last_error: None,
         }
     }
 }
@@ -203,6 +299,32 @@ impl WhiteboardSession {
     pub fn clear(&mut self) {
         self.doc.clear();
         self.active_text = None;
+    }
+
+    /// Inserta un elemento respetando las cotas (500/hoja, 4096 pts, 2000
+    /// caracteres). Rechaza con mensaje en español en `Err` y lo guarda en
+    /// `last_error`; nunca hace panic.
+    pub fn try_add(&mut self, element: WhiteboardElement) -> Result<(), String> {
+        match validate_whiteboard_element(&element, self.doc.len()) {
+            Ok(()) => {
+                self.doc.add(element);
+                self.last_error = None;
+                Ok(())
+            }
+            Err(message) => {
+                self.last_error = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+
+    /// Reemplaza el contenido y resetea el estado transitorio de edición.
+    fn replace_doc(&mut self, doc: WhiteboardDoc) {
+        self.doc = doc;
+        self.active_text = None;
+        self.interaction = WhiteboardInteraction::Idle;
+        self.pencil_points.clear();
+        self.marquee = None;
     }
 
     pub fn zoom_at(&mut self, factor: f64, screen: Pos2, rect: Rect) {
@@ -277,11 +399,13 @@ impl WhiteboardSession {
                         return;
                     }
                     let c = self.pen_color;
-                    self.doc.add(WhiteboardElement::Stroke {
+                    if let Err(message) = self.try_add(WhiteboardElement::Stroke {
                         points,
                         color: (c.r(), c.g(), c.b()),
                         width: self.pen_width.clamp(1.0, 8.0) as f64,
-                    });
+                    }) {
+                        self.last_error = Some(message);
+                    }
                 }
                 self.pencil_points.clear();
             }
@@ -299,9 +423,16 @@ impl WhiteboardSession {
             }
             other => {
                 if let Some(element) = self.interaction.end() {
-                    self.doc.add(element);
-                    if other == WhiteboardTool::Text {
-                        self.active_text = Some(self.doc.len().saturating_sub(1));
+                    let is_text = other == WhiteboardTool::Text;
+                    match self.try_add(element) {
+                        Ok(()) => {
+                            if is_text {
+                                self.active_text = Some(self.doc.len().saturating_sub(1));
+                            }
+                        }
+                        Err(message) => {
+                            self.last_error = Some(message);
+                        }
                     }
                 }
             }
@@ -349,6 +480,12 @@ impl WhiteboardSession {
         if let Some(WhiteboardElement::Text { text, .. }) = self.doc.element_mut(index) {
             // Guard contra control chars que crashean layout (excepto \n)
             if character.is_control() && character != '\n' {
+                return;
+            }
+            if text.chars().count() >= MAX_WHITEBOARD_TEXT_CHARS {
+                self.last_error = Some(format!(
+                    "El texto supera el máximo de {MAX_WHITEBOARD_TEXT_CHARS} caracteres"
+                ));
                 return;
             }
             text.push(character);
@@ -805,9 +942,125 @@ fn draw_toolbar(ui: &mut egui::Ui, app: &mut crate::GrafitoApp) {
     }
 }
 
+/// Carga `Document.whiteboard` en la sesión y la hoja actual del libro.
+/// Se usa al abrir la pizarra, tras abrir/crear documento y tras undo/redo.
+pub fn load_whiteboard_into_session(
+    session: &mut WhiteboardSession,
+    book: &mut WhiteboardBook,
+    document: &Document,
+) {
+    let replacement = document.whiteboard.clone();
+    if let Some(page) = book.current_mut() {
+        page.doc = replacement.clone();
+    }
+    session.replace_doc(replacement);
+}
+
+/// Guarda la sesión en `Document.whiteboard` con snapshot undo previo.
+/// Marca el documento sucio vía baseline semántico (la pizarra se serializa
+/// en el documento). Devuelve `true` si hubo cambios que volcar.
+pub fn push_whiteboard_undo_and_store(
+    session_doc: &WhiteboardDoc,
+    document: &mut Document,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
+    undo_total_bytes: &mut usize,
+) -> bool {
+    if whiteboard_docs_equal(session_doc, &document.whiteboard) {
+        return false;
+    }
+    let snapshot = document.clone();
+    let bytes = snapshot.estimated_bytes();
+    undo_stack.push_back(snapshot);
+    redo_stack.clear();
+    *undo_total_bytes = undo_total_bytes.saturating_add(bytes);
+    while undo_stack.len() > crate::app::MAX_UNDO {
+        if let Some(front) = undo_stack.pop_front() {
+            *undo_total_bytes = undo_total_bytes.saturating_sub(front.estimated_bytes());
+        } else {
+            break;
+        }
+    }
+    while *undo_total_bytes > crate::app::MAX_UNDO_BYTES && undo_stack.len() > 1 {
+        if let Some(front) = undo_stack.pop_front() {
+            *undo_total_bytes = undo_total_bytes.saturating_sub(front.estimated_bytes());
+        } else {
+            break;
+        }
+    }
+    document.whiteboard = session_doc.clone();
+    document.bump_version();
+    document.invalidate_all_caches();
+    true
+}
+
+/// Recarga la sesión desde el documento si difieren (apertura, undo externo).
+pub fn sync_whiteboard_from_document(app: &mut crate::GrafitoApp) {
+    if whiteboard_docs_equal(&app.whiteboard.doc, &app.document.whiteboard) {
+        return;
+    }
+    load_whiteboard_into_session(&mut app.whiteboard, &mut app.whiteboard_book, &app.document);
+}
+
+/// Vuelca la sesión al documento si cambió respecto a `before` (foto tomada
+/// antes del input del frame). Hace snapshot undo y actualiza el libro.
+pub fn commit_whiteboard_to_document(
+    app: &mut crate::GrafitoApp,
+    before: &[WhiteboardElement],
+) -> bool {
+    if app.whiteboard.doc.elements() == before {
+        return false;
+    }
+    let session_doc = app.whiteboard.doc.clone();
+    let committed = push_whiteboard_undo_and_store(
+        &session_doc,
+        &mut app.document,
+        &mut app.undo_stack,
+        &mut app.redo_stack,
+        &mut app.undo_total_bytes,
+    );
+    if committed {
+        let cur = app.whiteboard.clone();
+        app.whiteboard_book.save_current_from_session(&cur);
+    }
+    committed
+}
+
+/// Undo/redo con la pizarra abierta: `update()` hace early-return en este modo
+/// y los atajos globales no llegan; se restauran sesión y libro desde el
+/// documento resultante.
+fn handle_whiteboard_history_shortcuts(app: &mut crate::GrafitoApp, ctx: &egui::Context) {
+    if ctx.wants_keyboard_input() {
+        return;
+    }
+    let (undo, redo) = ctx.input(|input| {
+        let undo =
+            input.key_pressed(egui::Key::Z) && input.modifiers.ctrl && !input.modifiers.shift;
+        let redo =
+            (input.key_pressed(egui::Key::Z) && input.modifiers.ctrl && input.modifiers.shift)
+                || (input.key_pressed(egui::Key::Y) && input.modifiers.ctrl);
+        (undo, redo)
+    });
+    if undo {
+        app.undo();
+        sync_whiteboard_from_document(app);
+    }
+    if redo {
+        app.redo();
+        sync_whiteboard_from_document(app);
+    }
+}
+
 pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     app.sync_assistant_for_frame(ctx);
+    // Sync bidireccional Session<->Document.whiteboard (cierra el dead-store):
+    // el documento manda al abrir o tras undo/redo externo; la sesión manda
+    // al final del frame vía `commit_whiteboard_to_document`.
+    sync_whiteboard_from_document(app);
+    handle_whiteboard_history_shortcuts(app, ctx);
+    // Foto previa para detectar edición en este frame.
+    let before_elements = app.whiteboard.doc.elements().to_vec();
     {
         let cur = app.whiteboard.clone();
         app.whiteboard_book.save_current_from_session(&cur);
@@ -1209,6 +1462,11 @@ pub fn draw_whiteboard_overlay(app: &mut crate::GrafitoApp, ctx: &egui::Context)
             app.whiteboard.backspace_text();
         }
     }
+    // Volcado Session->Document.whiteboard con snapshot undo (marca sucio).
+    commit_whiteboard_to_document(app, &before_elements);
+    if let Some(message) = app.whiteboard.last_error.take() {
+        app.notify(message, grafito_ui::toast::ToastKind::Error);
+    }
     let busy = ctx.input(|input| input.pointer.any_down());
     // F17: la pizarra hace early-return en `GrafitoApp::update`, así que el
     // scheduler unificado no corre en este modo; este es su scheduler local,
@@ -1274,5 +1532,105 @@ mod tests {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
         let world = session.world_from_screen(pos2(200.0, 150.0), rect);
         assert!(world.0.abs() < 1e-6 && world.1.abs() < 1e-6);
+    }
+
+    fn test_rectangle() -> WhiteboardElement {
+        WhiteboardElement::Rectangle {
+            min: (0.0, 0.0),
+            max: (1.0, 1.0),
+            fill: None,
+        }
+    }
+
+    #[test]
+    fn whiteboard_try_add_rejects_501st_element_in_spanish() {
+        let mut session = WhiteboardSession::default();
+        for _ in 0..MAX_WHITEBOARD_ELEMENTS_PER_PAGE {
+            session.try_add(test_rectangle()).expect("cupo disponible");
+        }
+        assert_eq!(session.doc.len(), MAX_WHITEBOARD_ELEMENTS_PER_PAGE);
+        let error = session
+            .try_add(test_rectangle())
+            .expect_err("el elemento 501 debe rechazarse");
+        assert!(
+            error.contains("500"),
+            "el mensaje debe citar la cota en español, fue: {error}"
+        );
+        assert_eq!(session.doc.len(), MAX_WHITEBOARD_ELEMENTS_PER_PAGE);
+        assert!(session.last_error.is_some());
+    }
+
+    #[test]
+    fn whiteboard_bounds_reject_oversized_stroke_text_and_pages() {
+        let mut session = WhiteboardSession::default();
+        let oversized = WhiteboardElement::Stroke {
+            points: vec![(0.0, 0.0); MAX_WHITEBOARD_POINTS_PER_STROKE + 1],
+            color: (0, 0, 0),
+            width: 2.0,
+        };
+        let error = session
+            .try_add(oversized)
+            .expect_err("trazo de 4097 puntos debe rechazarse");
+        assert!(error.contains("4096"), "fue: {error}");
+        assert!(session.doc.is_empty());
+
+        let long_text = WhiteboardElement::Text {
+            at: (0.0, 0.0),
+            text: "a".repeat(MAX_WHITEBOARD_TEXT_CHARS + 1),
+            size: 14.0,
+        };
+        let error = session
+            .try_add(long_text)
+            .expect_err("texto de 2001 caracteres debe rechazarse");
+        assert!(error.contains("2000"), "fue: {error}");
+
+        let mut book = WhiteboardBook::default();
+        for _ in 1..MAX_WHITEBOARD_PAGES {
+            book.try_create_page().expect("cupo de hojas disponible");
+        }
+        assert_eq!(book.len(), MAX_WHITEBOARD_PAGES);
+        let error = book
+            .try_create_page()
+            .expect_err("la hoja 33 debe rechazarse");
+        assert!(error.contains("32"), "fue: {error}");
+    }
+
+    #[test]
+    fn whiteboard_commit_stores_snapshot_and_reload_restores_session() {
+        use std::collections::VecDeque;
+
+        let mut document = grafito_core::Document::new();
+        let mut undo: VecDeque<grafito_core::Document> = VecDeque::new();
+        let mut redo: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+        let mut undo_bytes = 0usize;
+
+        let mut session = WhiteboardSession::default();
+        session.try_add(test_rectangle()).expect("try_add ok");
+        assert!(push_whiteboard_undo_and_store(
+            &session.doc,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        assert_eq!(document.whiteboard.len(), 1);
+        assert_eq!(undo.len(), 1);
+        // Sin cambios no hay nuevo snapshot.
+        assert!(!push_whiteboard_undo_and_store(
+            &session.doc,
+            &mut document,
+            &mut undo,
+            &mut redo,
+            &mut undo_bytes
+        ));
+        assert_eq!(undo.len(), 1);
+
+        // Simula undo: restaura el snapshot y recarga la sesión.
+        document = undo.pop_back().expect("snapshot disponible");
+        assert!(!whiteboard_docs_equal(&session.doc, &document.whiteboard));
+        let mut book = WhiteboardBook::default();
+        load_whiteboard_into_session(&mut session, &mut book, &document);
+        assert!(session.doc.is_empty());
+        assert!(whiteboard_docs_equal(&session.doc, &document.whiteboard));
     }
 }

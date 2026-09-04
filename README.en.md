@@ -181,8 +181,8 @@ All three pipelines compile a WGSL shader with the user's expression embedded at
 | Panel | Access | Purpose |
 |-------|--------|---------|
 | **Algebra** | Tab A | Object list, input bar, variables with sliders, animations, per-type filter |
-| **Toolbar** | Tab T | 16 groups (5/8/17 progressive), ~69 tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
-| **Command Palette** | Ctrl+K | 222 indexed commands (183 palette-visible) across 16 categories, arrow navigation, syntax template insertion |
+| **Toolbar** | Tab T | 17 groups (5/8/17 progressive), 73 tools with vector icons, contextual 2D/3D hiding, keyboard shortcuts |
+| **Command Palette** | Ctrl+K | 238 registered commands (199 palette-visible) across 26 categories + 14 UI actions, fuzzy bilingual search, arrow navigation, syntax template insertion |
 | **Math Keyboard** | Footer | 4 tabs: numeric, functions, letters, advanced |
 | **Properties** | Right panel | Type, editable label, visibility toggle, color picker, real-time measurements |
 | **Spreadsheet** | Tab S | Full grid editor, create points from cell coordinates |
@@ -274,11 +274,17 @@ grafito/
 | Select object | Click (Select tool) |
 | Deselect | Click on empty space |
 | Orbit 3D | Right-drag |
-| Undo / Redo | Ctrl+Z / Ctrl+Y |
+| Undo / Redo | Ctrl+Z / Ctrl+Y (Ctrl+Shift+Y: Y-Intercept) |
 | Delete | Delete key |
 | Command palette | Ctrl+K |
-| Tools | F1 (Select), F2 (Point), F3 (Line), F4 (Circle), F5 (Polygon), F6 (Function) |
-| Analysis shortcuts | R (Root), E (Extremum), N (Inflection), Ctrl+Shift+Y (Y-Intercept), Ctrl+A (Analyze) |
+| Tools | F1 (Select), F2 (Point), F3 (Line), F4 (Circle), F5 (Polygon), F6 (Function), F8 (Sphere 3D), F9 (Cube 3D) |
+| Single-key tools | R (Root), E (Extremum), I (X-Intercept), X (Intersect), N (Inflection), S (Segment), Y (Ray), V (Vector), M (Midpoint) |
+| Analysis | Ctrl+A (Analyze) |
+| Pencil / Eraser | Ctrl+P / Ctrl+E |
+| Theme | Ctrl+T (also View > Dark mode) |
+| Grid and axes | Shift+L (X log), Shift+K (Y log), Shift+J (both), G (snap) |
+| File | Ctrl+N New / Ctrl+O Open / Ctrl+S Save / Ctrl+Shift+S Save as |
+| Perspectives | Ctrl+Shift+1..9,0 (10 perspectives) |
 
 ---
 

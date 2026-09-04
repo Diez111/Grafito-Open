@@ -3,6 +3,7 @@
 use anyhow::{Context, Result as AnyResult};
 use grafito_core::{Document, GeoObject, LineKind, ObjectId, RelationOperator};
 use grafito_geometry::{Color, Point2, ViewTransform, AABB};
+use grafito_whiteboard::WhiteboardElement;
 #[cfg(test)]
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::collections::BTreeMap;
@@ -30,6 +31,9 @@ const MAX_PROJECTED_COORDINATE: f64 = 1.0e12;
 static NEXT_EXPORT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Formatos de exportacion profesional admitidos por la aplicacion.
+// TODO(2026-09-04): no existe export PDF; al añadir `ExportFormat::Pdf`,
+// incluir la pizarra (`Document.whiteboard`) como en SVG/PNG vía
+// `SceneBuilder::append_whiteboard` (vectorial con texto como <text>).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ExportFormat {
     Svg,
@@ -826,6 +830,19 @@ fn color_is_valid(color: Color) -> bool {
         .all(|component| component.is_finite() && (0.0..=1.0).contains(&component))
 }
 
+fn whiteboard_rgb_to_color(rgb: (u8, u8, u8)) -> Color {
+    Color::new(
+        f32::from(rgb.0) / 255.0,
+        f32::from(rgb.1) / 255.0,
+        f32::from(rgb.2) / 255.0,
+        1.0,
+    )
+}
+
+fn finite_whiteboard_pair(point: (f64, f64)) -> bool {
+    point.0.is_finite() && point.1.is_finite()
+}
+
 fn invalid_object(
     format: ExportFormat,
     item: &ExportItem,
@@ -1191,6 +1208,161 @@ impl<'a> SceneBuilder<'a> {
             .collect();
         self.push_path(item, primitives, points, true, None, Some(color))
     }
+
+    /// Vuelca `Document.whiteboard` a la escena: SVG vectorial (texto como
+    /// `<text>`) y PNG raster (compone escena + pizarra vía `render_png`).
+    /// Con pizarra vacía no añade nada (export geométrico intacto).
+    fn append_whiteboard(
+        &mut self,
+        objects: &mut Vec<SceneObject>,
+        object_types: &mut BTreeMap<String, usize>,
+    ) -> std::result::Result<(), ExportError> {
+        let elements = self.document.whiteboard.elements().to_vec();
+        if elements.is_empty() {
+            return Ok(());
+        }
+        let item = ExportItem {
+            object_type: "Whiteboard".to_string(),
+            label: "pizarra".to_string(),
+            object_id: "whiteboard".to_string(),
+        };
+        let mut primitives = Vec::new();
+        let mut included = 0usize;
+        for element in &elements {
+            let before = primitives.len();
+            self.push_whiteboard_element(&item, element, &mut primitives)?;
+            if primitives.len() > before {
+                included += 1;
+            }
+        }
+        if primitives.is_empty() {
+            return Ok(());
+        }
+        *object_types.entry(item.object_type.clone()).or_insert(0) += included;
+        objects.push(SceneObject { item, primitives });
+        Ok(())
+    }
+
+    fn push_whiteboard_element(
+        &mut self,
+        item: &ExportItem,
+        element: &WhiteboardElement,
+        primitives: &mut Vec<ScenePrimitive>,
+    ) -> std::result::Result<(), ExportError> {
+        // Tinta de formas/texto sin color propio: casi negro, legible sobre
+        // el fondo blanco del export (igual que `text_primary` en claro).
+        let shape_color = whiteboard_rgb_to_color((26, 26, 26));
+        match element {
+            WhiteboardElement::Stroke {
+                points,
+                color,
+                width,
+            } => {
+                let Ok(stroke) = validate_stroke(
+                    self.format,
+                    item,
+                    *width as f32,
+                    whiteboard_rgb_to_color(*color),
+                ) else {
+                    return Ok(());
+                };
+                self.push_world_polyline(
+                    item,
+                    primitives,
+                    points.iter().map(|&(x, y)| {
+                        (x.is_finite() && y.is_finite()).then_some(Point2::new(x, y))
+                    }),
+                    stroke,
+                    false,
+                )?;
+            }
+            WhiteboardElement::Rectangle { min, max, fill } => {
+                if !finite_whiteboard_pair(*min) || !finite_whiteboard_pair(*max) {
+                    return Ok(());
+                }
+                let Ok(stroke) = validate_stroke(self.format, item, 1.8, shape_color) else {
+                    return Ok(());
+                };
+                let Ok(fill) = validate_fill(self.format, item, fill.map(whiteboard_rgb_to_color))
+                else {
+                    return Ok(());
+                };
+                let corners = [
+                    Point2::new(min.0, min.1),
+                    Point2::new(max.0, min.1),
+                    Point2::new(max.0, max.1),
+                    Point2::new(min.0, max.1),
+                ];
+                self.push_closed_world_shape(item, primitives, &corners, stroke, fill)?;
+            }
+            WhiteboardElement::Ellipse { center, rx, ry } => {
+                if !finite_whiteboard_pair(*center)
+                    || !rx.is_finite()
+                    || !ry.is_finite()
+                    || *rx <= 0.0
+                    || *ry <= 0.0
+                {
+                    return Ok(());
+                }
+                let Ok(stroke) = validate_stroke(self.format, item, 1.8, shape_color) else {
+                    return Ok(());
+                };
+                let points = sampled_ellipse(Point2::new(center.0, center.1), *rx, *ry, 0.0);
+                self.push_closed_world_shape(item, primitives, &points, stroke, None)?;
+            }
+            WhiteboardElement::Arrow { from, to } => {
+                if !finite_whiteboard_pair(*from) || !finite_whiteboard_pair(*to) {
+                    return Ok(());
+                }
+                let Ok(stroke) = validate_stroke(self.format, item, 1.8, shape_color) else {
+                    return Ok(());
+                };
+                let start = Point2::new(from.0, from.1);
+                let end = Point2::new(to.0, to.1);
+                self.push_world_polyline(
+                    item,
+                    primitives,
+                    [Some(start), Some(end)],
+                    stroke,
+                    false,
+                )?;
+                for wing in [
+                    grafito_whiteboard::arrow_tip(*from, *to, 0.55).0,
+                    grafito_whiteboard::arrow_tip(*from, *to, 0.55).1,
+                ] {
+                    self.push_world_polyline(
+                        item,
+                        primitives,
+                        [Some(Point2::new(wing.0, wing.1)), Some(end)],
+                        stroke,
+                        false,
+                    )?;
+                }
+            }
+            WhiteboardElement::Text { at, text, size } => {
+                if text.is_empty() || !finite_whiteboard_pair(*at) {
+                    return Ok(());
+                }
+                if !size.is_finite() || *size <= 0.0 {
+                    return Ok(());
+                }
+                let Some(position) = self.view.project(Point2::new(at.0, at.1)) else {
+                    return Ok(());
+                };
+                if !self.view.contains_with_margin(position, *size) {
+                    return Ok(());
+                }
+                // `push_text` valida tamaño/color y genera `<text>` en SVG.
+                if self
+                    .push_text(item, primitives, position, text, *size as f32, shape_color)
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn clip_segment_to_canvas(
@@ -1380,6 +1552,7 @@ fn build_export_scene(
         *object_types.entry(item.object_type.clone()).or_insert(0) += 1;
         objects.push(SceneObject { item, primitives });
     }
+    builder.append_whiteboard(&mut objects, &mut object_types)?;
 
     Ok(ExportScene {
         width: options.width,
@@ -4314,6 +4487,98 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o640);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn whiteboard_fixture_document() -> Document {
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        document.view_mut().scale = 20.0;
+        document.whiteboard.add(WhiteboardElement::Text {
+            at: (0.0, 1.0),
+            text: "Hola pizarra".to_string(),
+            size: 14.0,
+        });
+        document.whiteboard.add(WhiteboardElement::Stroke {
+            points: vec![(-2.0, -1.0), (-1.0, 0.0), (0.0, -1.0)],
+            color: (26, 26, 26),
+            width: 2.0,
+        });
+        document
+    }
+
+    #[test]
+    fn document_whiteboard_roundtrips_through_serde_json() {
+        let document = whiteboard_fixture_document();
+        let json = serde_json::to_string(&document).expect("la pizarra debe serializar");
+        let restored: Document = serde_json::from_str(&json).expect("la pizarra debe deserializar");
+        assert_eq!(
+            restored.whiteboard.elements(),
+            document.whiteboard.elements()
+        );
+    }
+
+    #[test]
+    fn export_svg_includes_whiteboard_text_as_text_element() {
+        let document = whiteboard_fixture_document();
+        let path = temp_export_path("svg");
+        let report = export_document_with_options(
+            &document,
+            ExportFormat::Svg,
+            &path,
+            ExportOptions::new(320, 240),
+        )
+        .expect("la pizarra debe exportar a SVG");
+        assert_eq!(report.object_types.get("Whiteboard"), Some(&2));
+
+        let svg = std::fs::read_to_string(&path).expect("read SVG");
+        assert!(
+            svg.contains("data-grafito-type=\"Whiteboard\""),
+            "falta el grupo de pizarra"
+        );
+        assert!(svg.contains("<text"), "el texto debe ir como <text>");
+        assert!(svg.contains("Hola pizarra"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_png_composites_whiteboard_over_scene() {
+        let document = whiteboard_fixture_document();
+        let path = temp_export_path("png");
+        export_document_with_options(
+            &document,
+            ExportFormat::Png,
+            &path,
+            ExportOptions::new(320, 240),
+        )
+        .expect("la pizarra debe exportar a PNG");
+
+        let bytes = std::fs::read(&path).expect("export should exist");
+        let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .expect("PNG should decode")
+            .to_rgba8();
+        assert_eq!(image.dimensions(), (320, 240));
+        assert!(
+            image.pixels().any(|pixel| pixel.0 != [255, 255, 255, 255]),
+            "la pizarra debe componer píxeles sobre la escena"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_whiteboard_leaves_geometric_export_untouched() {
+        let document = common_2d_document();
+        assert!(document.whiteboard.is_empty());
+        let path = temp_export_path("svg");
+        let report = export_document_with_options(
+            &document,
+            ExportFormat::Svg,
+            &path,
+            ExportOptions::new(320, 240),
+        )
+        .expect("export sin pizarra");
+        assert_eq!(report.exported_objects, 19);
+        assert!(!report.object_types.contains_key("Whiteboard"));
         let _ = std::fs::remove_file(path);
     }
 }

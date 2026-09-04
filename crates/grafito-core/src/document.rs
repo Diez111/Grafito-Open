@@ -227,11 +227,18 @@ pub struct CasWorksheetEntry {
 
 /// The main document containing all geometric objects.
 // Migración P0 HashMap→BTreeMap: `objects` es BTreeMap para determinismo total
-// en serialización y hashing. `variables` y otros maps mantienen HashMap por
-// compatibilidad con 484 call-sites en grafito-command; determinismo se
-// garantiza vía `semantic_document_baseline` (BTreeMap sort en `to_value`)
-// y `ValidatedDocument`. Migración completa a BTreeMap queda como deuda P1
-// (requiere cambiar firmas en command/param sampling).
+// en serialización y hashing. `variables`/`variable_meta`/`live_sequences`/
+// `variables_assumptions`/`spreadsheet_coordinate_points` mantienen HashMap:
+// intento 2026-09-03 de migrar `variables:BTreeMap + variable_meta:BTreeMap +
+// live_sequences:BTreeMap + variables_assumptions:BTreeMap` rompe
+// `cargo check -p grafito-command` con 484 errores E0308 (mismatched types
+// BTreeMap vs HashMap en parse_numeric_arg/prepare_function_ast/etc.). Como
+// 484 > umbral 10, se revierte (BUILD gate). Determinismo se garantiza vía
+// `semantic_document_baseline` (BTreeMap sort en `to_value`) y
+// `ValidatedDocument`. Deuda P1: migrar requiere abstraer firmas
+// `&HashMap<String,f64>` → genérico `&BTreeMap`/`&dyn Map` o alias
+// `type VarMap = BTreeMap<...>` en 484 call-sites de grafito-command +
+// grafito-geometry param sampling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     objects: BTreeMap<ObjectId, GeoObject>,

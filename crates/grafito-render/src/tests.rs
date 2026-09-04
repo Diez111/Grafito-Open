@@ -2,7 +2,8 @@
 #[allow(clippy::module_inception, clippy::approx_constant)]
 mod tests {
     use grafito_core::{
-        CircleObj, Document, Fractal2DObj, GeoObject, LineObj, PointObj, PolygonObj,
+        CircleObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj, LineObj, PointObj,
+        PolygonObj, RelationOperator,
     };
     use grafito_geometry::{Camera3D, Point2, ViewTransform};
 
@@ -194,6 +195,44 @@ mod tests {
         assert_eq!(mesh.opaque_vertices[0].position, [1.0, -2.0, 3.5]);
         assert_eq!(mesh.opaque_indices, vec![0, 0, 0]);
         assert!(mesh.validate().is_ok());
+    }
+
+    #[test]
+    fn fill_compute_is_only_needed_when_a_document_has_a_fillable_implicit_curve() {
+        // El pipeline de fill reserva dos buffers 4096×4096 (~128 MiB), así que
+        // `document_needs_fill_compute` es la puerta que decide si
+        // `ensure_fill_compute_for_document` llega a crearlo. Sin implícitas
+        // rellenables el campo `fill_compute` permanece `None` (128 MiB
+        // ahorrados).
+        let empty = Document::new();
+        assert!(!crate::Renderer::document_needs_fill_compute(&empty));
+
+        let mut eq_only = Document::new();
+        eq_only.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x",
+            "y",
+            RelationOperator::Eq,
+        )));
+        assert!(
+            !crate::Renderer::document_needs_fill_compute(&eq_only),
+            "Eq es solo contorno — nunca necesita el pipeline de fill"
+        );
+
+        let mut fillable = Document::new();
+        fillable.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x",
+            "y",
+            RelationOperator::Less,
+        )));
+        assert!(crate::Renderer::document_needs_fill_compute(&fillable));
+
+        let mut greater_eq = Document::new();
+        greater_eq.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+            "x",
+            "y",
+            RelationOperator::GreaterEq,
+        )));
+        assert!(crate::Renderer::document_needs_fill_compute(&greater_eq));
     }
 
     #[test]

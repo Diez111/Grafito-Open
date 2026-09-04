@@ -375,7 +375,7 @@ impl GrafitoApp {
         }
     }
 
-    fn update_tool_ghost(&mut self, world: Point2) {
+    fn update_tool_ghost(&mut self, world: Point2, painter: &egui::Painter, canvas_rect: Rect) {
         self.tool_ghost = None;
         let pts = &self.tool_state.pending;
         match self.current_tool {
@@ -526,14 +526,84 @@ impl GrafitoApp {
             _ => {}
         }
         // Overlay fantasma tangente/normal: no pisa el ghost propio de la
-        // herramienta activa.
-        self.update_tangent_normal_ghost();
+        // herramienta activa (se dibuja solo si `tool_ghost` sigue vacío y
+        // el hover está sobre una función).
+        self.update_tangent_normal_ghost(world, painter, canvas_rect);
     }
 
-    fn update_tangent_normal_ghost(&mut self) {
-        // Ghost tangente/normal al hover sobre función: overlay no-objeto.
-        // Implementación completa requiere f'(x0) simbólica; stub para compilar.
-        // Ver snap.rs ghost overlay v2 y analysis::curvature_at.
+    /// Overlay fantasma de tangente + normal al hover sobre una `Function`.
+    ///
+    /// Algoritmo (toda la matemática en `crate::snap`, pura y testeada):
+    /// - `tangent_ghost_at_hover` localiza la función bajo el cursor
+    ///   (distancia vertical ≤ 12 px) y su punto base `(x, f(x))`.
+    /// - `tangent_slope_central` aproxima f'(x) por diferencia central con
+    ///   h = 1e-6 (igual que `intersections.rs::newton`); la curvatura κ sale
+    ///   de `analysis::curvature_at` cuando no hay variables extra.
+    /// - Los segmentos se acotan a ±40 px en unidades de mundo y se pintan
+    ///   con el color de acento translúcido.
+    ///
+    /// No toca `tool_ghost`: si la herramienta activa ya tiene su propio
+    /// fantasma, no se dibuja nada. Al salir del hover no hay función cercana
+    /// y el overlay desaparece solo (se recalcula cada frame, sin estado).
+    fn update_tangent_normal_ghost(
+        &mut self,
+        world: Point2,
+        painter: &egui::Painter,
+        canvas_rect: Rect,
+    ) {
+        if self.tool_ghost.is_some() {
+            return;
+        }
+        let scale = self.document.view().scale;
+        let Some(ghost) = crate::snap::tangent_ghost_at_hover(world, &self.document, scale) else {
+            return;
+        };
+        let view = *self.document.view();
+        let to_screen = |p: Point2| -> Option<egui::Pos2> {
+            if !p.x.is_finite() || !p.y.is_finite() {
+                return None;
+            }
+            let s = view.world_to_screen(p);
+            if !s.is_finite() {
+                return None;
+            }
+            Some(canvas_rect.min + egui::Vec2::new(s.x, s.y))
+        };
+        let (Some(ta), Some(tb), Some(na), Some(nb), Some(base)) = (
+            to_screen(ghost.tangent_a),
+            to_screen(ghost.tangent_b),
+            to_screen(ghost.normal_a),
+            to_screen(ghost.normal_b),
+            to_screen(ghost.base),
+        ) else {
+            return;
+        };
+        // Se oculta al salir del hover: base fuera del lienzo → nada.
+        if !canvas_rect.contains(base) {
+            return;
+        }
+        // Acento translúcido: tangente celeste, normal naranja.
+        let tangent_color = egui::Color32::from_rgba_unmultiplied(56, 189, 248, 150);
+        let normal_color = egui::Color32::from_rgba_unmultiplied(251, 146, 60, 150);
+        painter.line_segment([ta, tb], egui::Stroke::new(1.5, tangent_color));
+        painter.line_segment([na, nb], egui::Stroke::new(1.5, normal_color));
+        painter.circle_filled(base, 2.5, tangent_color);
+        // Etiqueta en español con pendiente y curvatura (se reconstruye cada
+        // frame desde el hover base, así que el sufijo no se acumula; al salir
+        // del hover el fantasma es `None` y la etiqueta vuelve a la base).
+        if let Some(hover) = self.hovered_analysis.as_mut() {
+            if !hover.label.contains("tangente") {
+                hover.label = match ghost.curvature {
+                    Some(k) => {
+                        format!(
+                            "{} · tangente f'≈{:.3}, κ≈{:.3}",
+                            hover.label, ghost.slope, k
+                        )
+                    }
+                    None => format!("{} · tangente f'≈{:.3}", hover.label, ghost.slope),
+                };
+            }
+        }
     }
 
     pub(crate) fn handle_canvas_input(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) {
@@ -1008,7 +1078,10 @@ impl GrafitoApp {
             } else if self.snap_to_grid {
                 world = snap_world_to_grid(world, self.document.view().scale);
             }
-            self.update_tool_ghost(world);
+            // El overlay tangente/normal pinta con acento translúcido sobre
+            // el lienzo; el pintor se recorta al canvas para no invadir paneles.
+            let overlay_painter = ui.painter().with_clip_rect(canvas_rect);
+            self.update_tool_ghost(world, &overlay_painter, canvas_rect);
         }
 
         // ── Cleanup drag state ───────────────────────────────────────────────

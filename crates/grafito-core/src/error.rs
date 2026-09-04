@@ -43,6 +43,12 @@ pub enum CoreError {
     #[error("operación no permitida: {0}")]
     IllegalOperation(String),
 
+    #[error("Transformed object nesting exceeds maximum {maximum} (depth {depth} > {maximum})")]
+    TransformDepthExceeded { depth: usize, maximum: usize },
+
+    #[error("Transformed Jacobian singular for '{expr}': {reason}")]
+    TransformJacobianSingular { expr: String, reason: String },
+
     #[error("{0}")]
     Other(String),
 }

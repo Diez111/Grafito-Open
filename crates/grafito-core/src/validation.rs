@@ -588,30 +588,67 @@ pub fn validate_object_candidate(doc: &Document, obj: &GeoObject) -> Result<(), 
     validate_geo_object(doc, obj, 0)
 }
 
+/// Variante tipada de `validate_object_candidate` para Transformed.
+pub fn validate_object_candidate_typed(doc: &Document, obj: &GeoObject) -> Result<(), CoreError> {
+    validate_geo_object_typed(doc, obj, 0)
+}
+
+fn validate_geo_object_typed(
+    doc: &Document,
+    obj: &GeoObject,
+    depth: usize,
+) -> Result<(), CoreError> {
+    for target in obj.referenced_object_ids() {
+        if target == obj.id() || doc.get_object(target).is_none() {
+            return Err(CoreError::Validation(format!(
+                "{} target {} is missing",
+                obj.name(),
+                target
+            )));
+        }
+    }
+
+    if let GeoObject::Transformed(o) = obj {
+        validate_transformed_depth_typed(depth)?;
+        validate_expr_typed(&o.complex_expr).map_err(|e| match e {
+            CoreError::Validation(msg) => CoreError::InvalidExpression {
+                expression: o.complex_expr.clone(),
+                reason: msg,
+            },
+            other => other,
+        })?;
+        if let Some(compiled) = &o.compiled_expr {
+            validate_expr_typed(compiled).map_err(|e| match e {
+                CoreError::Validation(msg) => CoreError::InvalidExpression {
+                    expression: compiled.clone(),
+                    reason: msg,
+                },
+                other => other,
+            })?;
+        }
+        validate_transformed_jacobian_typed(&o.complex_expr)?;
+        return validate_geo_object_typed(doc, &o.inner, depth + 1);
+    }
+
+    // Para objetos no-Transformed, delegar al match legacy completo
+    // y convertir el error String en CoreError::Validation para tipado.
+    validate_geo_object_legacy_match(doc, obj).map_err(CoreError::Validation)
+}
+
 fn validate_geo_object(doc: &Document, obj: &GeoObject, depth: usize) -> Result<(), String> {
+    validate_geo_object_typed(doc, obj, depth).map_err(|e| e.to_string())
+}
+
+fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(), String> {
     for target in obj.referenced_object_ids() {
         if target == obj.id() || doc.get_object(target).is_none() {
             return Err(format!("{} target {} is missing", obj.name(), target));
         }
     }
-
-    if let GeoObject::Transformed(o) = obj {
-        if depth >= MAX_TRANSFORM_DEPTH {
-            return Err(format!(
-                "Transformed object nesting exceeds maximum {}",
-                MAX_TRANSFORM_DEPTH
-            ));
-        }
-        validate_expr(&o.complex_expr)?;
-        if let Some(compiled) = &o.compiled_expr {
-            validate_expr(compiled)?;
-        }
-        // Valida el Jacobiano de la transformación compleja: det(J) no trivial.
-        // Usa muestreo numérico en 4 puntos y wrapper ValidatedMatrix para fail-closed.
-        validate_transformed_jacobian(&o.complex_expr)?;
-        return validate_geo_object(doc, &o.inner, depth + 1);
+    // Transformed ya handled en la capa tipada; si llega aquí siendo Transformed es bug.
+    if let GeoObject::Transformed(_) = obj {
+        return Ok(());
     }
-
     let label = obj.label();
     validate_string(label, "Object label")?;
     validate_color(obj.color(), &format!("{}.color", obj.name()))?;
@@ -1560,6 +1597,40 @@ fn validate_expr(expr: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_expr_typed(expr: &str) -> Result<(), CoreError> {
+    validate_expr(expr).map_err(CoreError::Validation)
+}
+
+/// Valida depth de anidamiento Transformed con error tipado.
+pub fn validate_transformed_depth_typed(depth: usize) -> Result<(), CoreError> {
+    if depth >= MAX_TRANSFORM_DEPTH {
+        return Err(CoreError::TransformDepthExceeded {
+            depth,
+            maximum: MAX_TRANSFORM_DEPTH,
+        });
+    }
+    Ok(())
+}
+
+/// Variante tipada de `validate_transformed_jacobian`.
+/// Retorna `CoreError::TransformJacobianSingular` o `CoreError::InvalidExpression`.
+pub fn validate_transformed_jacobian_typed(expr: &str) -> Result<(), CoreError> {
+    match validate_transformed_jacobian(expr) {
+        Ok(()) => Ok(()),
+        Err(msg) if msg.contains("Transformed Jacobian singular") => {
+            Err(CoreError::TransformJacobianSingular {
+                expr: expr.to_string(),
+                reason: msg,
+            })
+        }
+        Err(msg) if msg.contains("complex_expr") => Err(CoreError::InvalidExpression {
+            expression: expr.to_string(),
+            reason: msg,
+        }),
+        Err(msg) => Err(CoreError::Validation(msg)),
+    }
+}
+
 /// Valida que el Jacobiano de `complex_expr` no sea singular en muestreo.
 ///
 /// Compila la expresión compleja y evalúa `det(J)` numéricamente en 4 puntos
@@ -1688,5 +1759,90 @@ mod tests_transformed_jacobian {
             grafito_geometry::matrices::ValidatedMatrix::try_new(regular).is_ok(),
             "identidad no debe ser singular"
         );
+    }
+
+    #[test]
+    fn jacobian_typed_returns_core_error() {
+        let err = validate_transformed_jacobian_typed("0").unwrap_err();
+        match err {
+            crate::CoreError::TransformJacobianSingular { expr, reason } => {
+                assert_eq!(expr, "0");
+                assert!(reason.contains("Transformed Jacobian singular"));
+            }
+            other => panic!("esperaba TransformJacobianSingular, obtuvo {other:?}"),
+        }
+        assert!(validate_transformed_jacobian_typed("z").is_ok());
+        assert!(validate_transformed_jacobian_typed("exp(z)").is_ok());
+    }
+
+    #[test]
+    fn depth_typed_rejects_64_and_accepts_63() {
+        assert!(validate_transformed_depth_typed(63).is_ok());
+        assert!(validate_transformed_depth_typed(0).is_ok());
+        let err = validate_transformed_depth_typed(64).unwrap_err();
+        match err {
+            crate::CoreError::TransformDepthExceeded { depth, maximum } => {
+                assert_eq!(depth, 64);
+                assert_eq!(maximum, crate::validation::MAX_TRANSFORM_DEPTH);
+                assert_eq!(maximum, 64);
+            }
+            other => panic!("esperaba TransformDepthExceeded, obtuvo {other:?}"),
+        }
+        let err = validate_transformed_depth_typed(100).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::CoreError::TransformDepthExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn object_candidate_typed_maps_jacobian_and_depth() {
+        // jacobian singular a través de validate_object_candidate_typed
+        let doc = crate::Document::new();
+        let inner = crate::GeoObject::Point(crate::PointObj::new(grafito_geometry::Point2::new(
+            0.0, 0.0,
+        )));
+        let bad = crate::GeoObject::Transformed(crate::TransformedObj {
+            inner: Box::new(inner.clone()),
+            complex_expr: "0".to_string(),
+            compiled_expr: None,
+        });
+        let err = validate_object_candidate_typed(&doc, &bad).unwrap_err();
+        assert!(
+            matches!(err, crate::CoreError::TransformJacobianSingular { .. }),
+            "esperaba jacobian singular, obtuvo {err:?}"
+        );
+        // depth 64 anidado debe fallar con TransformDepthExceeded
+        let mut deep = inner;
+        for _ in 0..64 {
+            deep = crate::GeoObject::Transformed(crate::TransformedObj {
+                inner: Box::new(deep),
+                complex_expr: "z".to_string(),
+                compiled_expr: None,
+            });
+        }
+        // 64 niveles es el límite: depth 64 debe rechazar el siguiente
+        let deepest = crate::GeoObject::Transformed(crate::TransformedObj {
+            inner: Box::new(deep),
+            complex_expr: "z".to_string(),
+            compiled_expr: None,
+        });
+        let err = validate_object_candidate_typed(&doc, &deepest).unwrap_err();
+        assert!(
+            matches!(err, crate::CoreError::TransformDepthExceeded { .. }),
+            "esperaba depth exceeded, obtuvo {err:?}"
+        );
+        // 63 niveles debe ser ok
+        let mut ok_deep = crate::GeoObject::Point(crate::PointObj::new(
+            grafito_geometry::Point2::new(0.0, 0.0),
+        ));
+        for _ in 0..63 {
+            ok_deep = crate::GeoObject::Transformed(crate::TransformedObj {
+                inner: Box::new(ok_deep),
+                complex_expr: "z".to_string(),
+                compiled_expr: None,
+            });
+        }
+        assert!(validate_object_candidate_typed(&doc, &ok_deep).is_ok());
     }
 }

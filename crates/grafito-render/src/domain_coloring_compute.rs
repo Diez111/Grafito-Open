@@ -10,9 +10,16 @@ use std::collections::HashMap;
 use grafito_complex::math::complex_expr::ComplexExpr;
 use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
 
+/// Presupuesto de celdas por dispatch de domain coloring (500×500 = 250k).
+/// Ver `docs/architecture.md:8` — GPU domain_coloring_compute 250k cells/dispatch.
 const MAX_CELLS: usize = 250_000;
 const MAX_COMPLEX_CODE: usize = 4096;
 const GPU_COMPLEX_STACK_SIZE: usize = 32;
+
+/// Rechaza grids por encima del presupuesto [`MAX_CELLS`] antes de tocar la GPU.
+pub(crate) fn domain_cells_within_budget(cells: usize) -> bool {
+    cells <= MAX_CELLS
+}
 
 pub(crate) fn gpu_program_is_supported(code: &[u32]) -> bool {
     let mut stack_depth = 0usize;
@@ -58,6 +65,15 @@ mod tests {
 
         assert!(!super::gpu_program_is_supported(&code));
     }
+
+    #[test]
+    fn domain_cell_budget_rejects_over_250k_without_clamping() {
+        // MAX_CELLS 250k (500×500) es un presupuesto duro: por encima se
+        // rechaza (None) en vez de recortar silenciosamente.
+        assert!(super::domain_cells_within_budget(250_000));
+        assert!(super::domain_cells_within_budget(0));
+        assert!(!super::domain_cells_within_budget(250_001));
+    }
 }
 
 pub struct DomainColoringComputePipeline {
@@ -69,6 +85,8 @@ pub struct DomainColoringComputePipeline {
     in_buffer: wgpu::Buffer,
     out_buffer: wgpu::Buffer,
     out_readback: wgpu::Buffer,
+    /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
+    timing: crate::gpu_timing::GpuTimingHandle,
 }
 
 #[repr(C)]
@@ -224,6 +242,7 @@ impl DomainColoringComputePipeline {
             in_buffer,
             out_buffer,
             out_readback,
+            timing: crate::gpu_timing::create(device, queue, "Domain Coloring", 1),
         }
     }
 
@@ -243,7 +262,7 @@ impl DomainColoringComputePipeline {
             return Some(Vec::new());
         }
 
-        if points.len() > MAX_CELLS {
+        if !domain_cells_within_budget(points.len()) {
             return None;
         }
 
@@ -323,7 +342,9 @@ impl DomainColoringComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Domain Coloring Pass"),
-                timestamp_writes: None,
+                // GPU timing opt-in tras la feature `profiling` (ver gpu_timing);
+                // sin la feature esto es `None` — cero costo en release.
+                timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -332,6 +353,7 @@ impl DomainColoringComputePipeline {
         }
 
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &self.out_readback, 0, color_bytes);
+        crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.out_readback.slice(..color_bytes);
@@ -342,11 +364,15 @@ impl DomainColoringComputePipeline {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
-        log::trace!("Domain coloring sync readback (Wait) — bloqueante, 1 intento por frame");
-        device.poll(wgpu::Maintain::Wait);
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Domain coloring sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Domain Coloring");
 
-        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        if !mapped {
             self.out_readback.unmap();
             return None;
         }

@@ -279,7 +279,7 @@ const COMMANDS: &[CommandSpec] = &[
         "dynamic.animate",
         "Animate",
         ["animar"],
-        "Dinamica",
+        "Dinámica",
         "Anima un parametro local; sin argumentos crea una fase ciclica.",
         TransformsObject,
         Low,
@@ -294,7 +294,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "animation.generate",
         "GenerateAnimation",
-        ["GenerateAnimation"],
+        [],
         "Animaciones",
         "Genera una animación didáctica (placeholder o Manim) para el concepto dado.",
         CreatesObject,
@@ -475,7 +475,7 @@ const COMMANDS: &[CommandSpec] = &[
         "dynamic.locus",
         "Locus",
         ["lugar"],
-        "Dinamica",
+        "Dinámica",
         "Crea un lugar geometrico persistente: registra el objetivo despues de cada actualizacion local valida del driver, sin eventos de puntero ni tiempo.",
         AddsConstraint,
         Medium,
@@ -487,7 +487,7 @@ const COMMANDS: &[CommandSpec] = &[
         "dynamic.locus-equation",
         "LocusEquation",
         ["locus_equation", "ecuacionlocus", "ecuacion_locus"],
-        "Dinamica",
+        "Dinámica",
         "Aproxima eliminación Groebner (mock) a partir de muestreo de locus + regresión simbólica; genera curva implícita presupuestada.",
         CreatesObject,
         Medium,
@@ -812,7 +812,7 @@ const COMMANDS: &[CommandSpec] = &[
         "spreadsheet.fill-column",
         "FillColumn",
         ["fill_column", "fillcol"],
-        "Estadistica",
+        "Estadística",
         "Rellena una columna de la hoja iterando filas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE.",
         CreatesObject,
         Medium,
@@ -826,8 +826,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "spreadsheet.fill-cells",
         "FillCells",
-        ["fill_cells", "fillcells", "rellenar"],
-        "Estadistica",
+        ["fill_cells", "rellenar"],
+        "Estadística",
         "Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet.",
         CreatesObject,
         Medium,
@@ -842,7 +842,7 @@ const COMMANDS: &[CommandSpec] = &[
         "spreadsheet.cell-range",
         "CellRange",
         ["cell_range", "rango"],
-        "Estadistica",
+        "Estadística",
         "Resuelve un rango A1:B2 a array de valores evaluados; soporta A1:B2 o A1,B2.",
         ReadOnly,
         Low,
@@ -856,8 +856,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "spreadsheet.fill-row",
         "FillRow",
-        ["fill_row", "fillrow"],
-        "Estadistica",
+        ["fill_row"],
+        "Estadística",
         "Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE.",
         CreatesObject,
         Medium,
@@ -963,7 +963,7 @@ const COMMANDS: &[CommandSpec] = &[
         "conic.ellipse-by-foci",
         "EllipseByFoci",
         ["ellipse_by_foci"],
-        "Conicas",
+        "Cónicas",
         "Construye una elipse por focos.",
         AddsConstraint,
         Medium,
@@ -977,7 +977,7 @@ const COMMANDS: &[CommandSpec] = &[
         "conic.parabola-by-focus-directrix",
         "ParabolaByFocusDirectrix",
         ["parabola_by_focus_directrix"],
-        "Conicas",
+        "Cónicas",
         "Construye una parabola por foco y directriz.",
         AddsConstraint,
         Medium,
@@ -989,7 +989,7 @@ const COMMANDS: &[CommandSpec] = &[
         "conic.hyperbola-by-foci",
         "HyperbolaByFoci",
         ["hyperbola_by_foci"],
-        "Conicas",
+        "Cónicas",
         "Construye una hiperbola por focos.",
         AddsConstraint,
         Medium,
@@ -1003,7 +1003,7 @@ const COMMANDS: &[CommandSpec] = &[
         "conic.by-five-points",
         "ConicByFivePoints",
         ["conic_by_five_points"],
-        "Conicas",
+        "Cónicas",
         "Ajusta una conica por cinco puntos.",
         AddsConstraint,
         High,
@@ -1160,7 +1160,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.limit-above",
         "LimitAbove",
-        ["limite_superior", "limite_derecho", "limitabove"],
+        ["limite_superior", "limite_derecho"],
         "CAS",
         "Estima un límite lateral por la derecha (x→a⁺).",
         ReadOnly,
@@ -1174,7 +1174,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.limit-below",
         "LimitBelow",
-        ["limite_inferior", "limite_izquierdo", "limitbelow"],
+        ["limite_inferior", "limite_izquierdo"],
         "CAS",
         "Estima un límite lateral por la izquierda (x→a⁻).",
         ReadOnly,
@@ -1188,11 +1188,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.parametric-derivative",
         "ParametricDerivative",
-        [
-            "derivada_parametrica",
-            "derivadaParametrica",
-            "parametricderivative"
-        ],
+        ["derivada_parametrica", "derivadaParametrica"],
         "CAS",
         "Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente.",
         ReadOnly,
@@ -1207,7 +1203,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.asymptote",
         "Asymptote",
-        ["asintota", "asíntota", "asymptote"],
+        ["asintota", "asíntota"],
         "CAS",
         "Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x.",
         ReadOnly,
@@ -1222,13 +1218,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.groebner-degrevlex",
         "GroebnerDegRevLex",
-        [
-            "groebner",
-            "groebnerbasis",
-            "groebnerlex",
-            "groebner_basis",
-            "groebnerDegRevLex"
-        ],
+        ["groebner", "groebnerbasis", "groebnerlex", "groebner_basis"],
         "CAS",
         "Base de Groebner (stub: no implementado, use Eliminate).",
         ReadOnly,
@@ -1295,12 +1285,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.complete-square",
         "CompleteSquare",
-        [
-            "complete_square",
-            "completesquare",
-            "completarCuadrado",
-            "completar_cuadrado"
-        ],
+        ["complete_square", "completarCuadrado", "completar_cuadrado"],
         "CAS",
         "Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a).",
         ReadOnly,
@@ -1315,7 +1300,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.prime-factors",
         "PrimeFactors",
-        ["prime_factors", "primefactors", "factoresPrimos", "factores_primos"],
+        ["prime_factors", "factoresPrimos", "factores_primos"],
         "CAS",
         "Factoriza un entero n (2 <= n <= 1e12) en primos por trial division.",
         ReadOnly,
@@ -1327,7 +1312,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.ifactor",
         "IFactor",
-        ["ifactor", "ifactorizar", "factorEntero", "factor_entero"],
+        ["ifactorizar", "factorEntero", "factor_entero"],
         "CAS",
         "Factorización entera: si es entero usa PrimeFactors, si es polinomio extrae contenido entero y lo factoriza.",
         ReadOnly,
@@ -1342,7 +1327,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.assume",
         "Assume",
-        ["assume", "asumir", "suponer", "supone"],
+        ["asumir", "suponer", "supone"],
         "CAS",
         "Almacena hipótesis como x>0 (positive), x!=0 (nonzero), x real/integer; guarda en Document.variables_assumptions.",
         ReadOnly,
@@ -1355,7 +1340,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.root",
         "Root",
         ["raiz", "raices"],
-        "Analisis",
+        "Análisis",
         "Busca raices de una funcion.",
         CreatesObject,
         Medium,
@@ -1367,7 +1352,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.extremum",
         "Extremum",
         ["extremos", "max", "min"],
-        "Analisis",
+        "Análisis",
         "Busca extremos locales.",
         CreatesObject,
         Medium,
@@ -1379,7 +1364,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.inflection",
         "Inflection",
         ["inflexion"],
-        "Analisis",
+        "Análisis",
         "Busca puntos de inflexion.",
         CreatesObject,
         Medium,
@@ -1391,7 +1376,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.y-intercept",
         "YIntercept",
         ["interceptoy", "intercepto_y"],
-        "Analisis",
+        "Análisis",
         "Calcula el intercepto con el eje Y.",
         CreatesObject,
         Low,
@@ -1403,7 +1388,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.x-intercept",
         "XIntercept",
         ["interceptox", "intercepto_x"],
-        "Analisis",
+        "Análisis",
         "Calcula los interceptos con el eje X.",
         CreatesObject,
         Medium,
@@ -1415,7 +1400,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.intersect",
         "Intersect",
         ["interseccion"],
-        "Analisis",
+        "Análisis",
         "Calcula intersecciones entre curvas.",
         CreatesObject,
         Medium,
@@ -1427,7 +1412,7 @@ const COMMANDS: &[CommandSpec] = &[
         "analysis.analyze",
         "Analyze",
         ["analizar", "analisis"],
-        "Analisis",
+        "Análisis",
         "Ejecuta el analisis disponible de una funcion.",
         CreatesObject,
         Medium,
@@ -1750,7 +1735,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.histogram",
         "Histogram",
         ["histograma"],
-        "Estadistica",
+        "Estadística",
         "Crea un histograma.",
         CreatesObject,
         Medium,
@@ -1762,7 +1747,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.scatter-plot",
         "ScatterPlot",
         ["scatter"],
-        "Estadistica",
+        "Estadística",
         "Crea un grafico de dispersion.",
         CreatesObject,
         Medium,
@@ -1774,7 +1759,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.box-plot",
         "BoxPlot",
         [],
-        "Estadistica",
+        "Estadística",
         "Crea un diagrama de caja.",
         CreatesObject,
         Medium,
@@ -1786,7 +1771,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.linear-regression",
         "LinearRegression",
         ["regression", "regresion"],
-        "Estadistica",
+        "Estadística",
         "Calcula una regresion lineal.",
         CreatesObject,
         Medium,
@@ -1798,7 +1783,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.data-table",
         "DataTable",
         ["datos", "tabla"],
-        "Estadistica",
+        "Estadística",
         "Crea una tabla local de pares x/y y un gráfico de dispersión enlazado.",
         CreatesObject,
         Medium,
@@ -1810,7 +1795,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-linear",
         "FitLinear",
         ["ajuste lineal"],
-        "Estadistica",
+        "Estadística",
         "Ajusta una recta a una tabla local y muestra RMSE y R².",
         CreatesObject,
         Medium,
@@ -1822,7 +1807,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-polynomial",
         "FitPoly",
         ["ajuste polinomico"],
-        "Estadistica",
+        "Estadística",
         "Ajusta un polinomio de grado elegido a una tabla local.",
         CreatesObject,
         Medium,
@@ -1834,7 +1819,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-exponential",
         "FitExp",
         ["ajuste exponencial"],
-        "Estadistica",
+        "Estadística",
         "Ajusta y = a exp(bx) a una tabla local con y positiva.",
         CreatesObject,
         Medium,
@@ -1846,7 +1831,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-logarithmic",
         "FitLog",
         ["ajuste logaritmico"],
-        "Estadistica",
+        "Estadística",
         "Ajusta y = a ln(x) + b a una tabla local con x positiva.",
         CreatesObject,
         Medium,
@@ -1858,7 +1843,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-power",
         "FitPow",
         ["ajuste potencia"],
-        "Estadistica",
+        "Estadística",
         "Ajusta y = a x^b a una tabla local con x e y positivas.",
         CreatesObject,
         Medium,
@@ -1870,7 +1855,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-sinusoidal",
         "FitSin",
         ["ajuste sinusoidal"],
-        "Estadistica",
+        "Estadística",
         "Ajusta una senoide local con una búsqueda de frecuencia acotada.",
         CreatesObject,
         High,
@@ -1882,7 +1867,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-logistic",
         "FitLogistic",
         ["fit_logistic", "logistica", "ajuste logistico"],
-        "Estadistica",
+        "Estadística",
         "Ajusta a/(1+b*exp(-c*x)) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6; genera función y métricas RMSE/R².",
         CreatesObject,
         Medium,
@@ -1894,7 +1879,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-growth",
         "FitGrowth",
         ["fit_growth", "crecimiento", "ajuste crecimiento"],
-        "Estadistica",
+        "Estadística",
         "Ajusta a*exp(b*x) con Gauss-Newton acotado MAX_ITER 100 y tolerancia 1e-6.",
         CreatesObject,
         Medium,
@@ -1906,7 +1891,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.fit-implicit",
         "FitImplicit",
         ["fit_implicit", "implicit_fit", "ajuste implicito"],
-        "Estadistica",
+        "Estadística",
         "Ajuste implícito genérico Gauss-Newton: FitImplicit[tabla, exprConParams, a0, b0, ...] minimiza y - expr(x; params).",
         CreatesObject,
         High,
@@ -1921,7 +1906,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.mean",
         "Mean",
         ["media"],
-        "Estadistica",
+        "Estadística",
         "Calcula la media.",
         ReadOnly,
         Low,
@@ -1933,7 +1918,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.median",
         "Median",
         ["mediana"],
-        "Estadistica",
+        "Estadística",
         "Calcula la mediana.",
         ReadOnly,
         Low,
@@ -1945,7 +1930,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.std-dev",
         "StdDev",
         ["desviacion"],
-        "Estadistica",
+        "Estadística",
         "Calcula el desvio estandar.",
         ReadOnly,
         Low,
@@ -1957,7 +1942,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.correlation",
         "Correlation",
         ["correlacion"],
-        "Estadistica",
+        "Estadística",
         "Calcula una correlacion.",
         ReadOnly,
         Low,
@@ -1968,12 +1953,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-normal",
         "InverseNormal",
-        [
-            "inverse_normal",
-            "inversenormal",
-            "cuantilnormal",
-            "cuantil_normal"
-        ],
+        ["inverse_normal", "cuantilnormal", "cuantil_normal"],
         "Probabilidad",
         "Cuantil normal: InverseNormal[p, mu, sigma] (p en (0,1), sigma>0); con un arg usa N(0,1).",
         ReadOnly,
@@ -1988,7 +1968,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-t",
         "InverseT",
-        ["inverse_t", "inverset", "cuantilt", "cuantil_t"],
+        ["inverse_t", "cuantilt", "cuantil_t"],
         "Probabilidad",
         "Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0).",
         ReadOnly,
@@ -2000,12 +1980,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-chi-squared",
         "InverseChiSquared",
-        [
-            "inverse_chi_squared",
-            "inversechisquared",
-            "inversachicuadrado",
-            "cuantilchicuadrado"
-        ],
+        ["inverse_chi_squared", "inversachicuadrado", "cuantilchicuadrado"],
         "Probabilidad",
         "Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0).",
         ReadOnly,
@@ -2017,7 +1992,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "probability.inverse-f",
         "InverseF",
-        ["inverse_f", "inversef", "cuantilf", "cuantil_f"],
+        ["inverse_f", "cuantilf", "cuantil_f"],
         "Probabilidad",
         "Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0).",
         ReadOnly,
@@ -2030,7 +2005,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.frequency-table",
         "FrequencyTable",
         ["frequency_table", "frecuencia", "tabl frecuencias"],
-        "Estadistica",
+        "Estadística",
         "Tabla de frecuencias: FrequencyTable[{datos}].",
         ReadOnly,
         Low,
@@ -2042,7 +2017,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.stem-plot",
         "StemPlot",
         ["stem_plot", "stemleaf", "tallo_hoja", "diagrama_tallo"],
-        "Estadistica",
+        "Estadística",
         "Diagrama tallo-hoja: StemPlot[{datos}] texto.",
         ReadOnly,
         Low,
@@ -2053,8 +2028,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.residual-plot",
         "ResidualPlot",
-        ["residual_plot", "residuos", "grafico_residuos"],
-        "Estadistica",
+        ["residual_plot", "grafico_residuos"],
+        "Estadística",
         "Residuos de regresión lineal: ResidualPlot[{xs}, {ys}] o ResidualPlot[tabla].",
         ReadOnly,
         Low,
@@ -2068,8 +2043,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.t-test",
         "TTest",
-        ["ttest", "t_test", "prueba_t"],
-        "Estadistica",
+        ["t_test", "prueba_t"],
+        "Estadística",
         "Prueba t de una muestra: TTest[{datos}, mu0].",
         ReadOnly,
         Low,
@@ -2080,8 +2055,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.t-test-two-sample",
         "TTest2",
-        ["ttest2", "t_test2", "prueba_t2"],
-        "Estadistica",
+        ["t_test2", "prueba_t2"],
+        "Estadística",
         "Prueba t de dos muestras independientes: TTest2[{a}, {b}].",
         ReadOnly,
         Low,
@@ -2093,7 +2068,7 @@ const COMMANDS: &[CommandSpec] = &[
         "statistics.t-test-paired",
         "TTestPaired",
         ["ttest_paired", "t_paired", "prueba_t_pareada", "ttestpareado"],
-        "Estadistica",
+        "Estadística",
         "Prueba t pareada: TTestPaired[{antes}, {despues}].",
         ReadOnly,
         Low,
@@ -2104,8 +2079,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.z-test",
         "ZTest",
-        ["ztest", "z_test", "prueba_z"],
-        "Estadistica",
+        ["z_test", "prueba_z"],
+        "Estadística",
         "Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma].",
         ReadOnly,
         Low,
@@ -2116,8 +2091,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.chi-squared-test",
         "ChiSqTest",
-        ["chisqtest", "chi2test", "prueba_chi2", "chi_cuadrado"],
-        "Estadistica",
+        ["chi2test", "prueba_chi2", "chi_cuadrado"],
+        "Estadística",
         "Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}].",
         ReadOnly,
         Low,
@@ -2128,8 +2103,8 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "statistics.anova",
         "ANOVA",
-        ["anova", "anova_oneway"],
-        "Estadistica",
+        ["anova_oneway"],
+        "Estadística",
         "ANOVA de un factor: ANOVA[{g1}, {g2}, ...].",
         ReadOnly,
         Low,
@@ -2140,7 +2115,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.rate",
         "Rate",
-        ["rate", "tasa", "tipo"],
+        ["tasa", "tipo"],
         "Financiera",
         "Calcula la tasa periodica (tipo 0=anual) resolviendo TVM con exp/log; 4-5 args.",
         ReadOnly,
@@ -2155,7 +2130,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.nper",
         "Nper",
-        ["nper", "n_per", "periodos", "plazo"],
+        ["n_per", "periodos", "plazo"],
         "Financiera",
         "Calcula numero de periodos via TVM con exp/log; usa log((pmt*(1+r*tipo)-fv*r)/(pmt*(1+r*tipo)+pv*r))/log(1+r).",
         ReadOnly,
@@ -2170,7 +2145,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.pmt",
         "Pmt",
-        ["pmt", "pago", "cuota"],
+        ["pago", "cuota"],
         "Financiera",
         "Calcula el pago periodico TVM; 4-5 args con tipo 0/1.",
         ReadOnly,
@@ -2185,7 +2160,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.pv",
         "PV",
-        ["pv", "va", "valoractual", "presentvalue"],
+        ["va", "valoractual", "presentvalue"],
         "Financiera",
         "Calcula valor presente TVM; usa exp/log para (1+rate)^nper.",
         ReadOnly,
@@ -2200,7 +2175,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "finance.fv",
         "FV",
-        ["fv", "vf", "valorfuturo", "futurevalue"],
+        ["vf", "valorfuturo", "futurevalue"],
         "Financiera",
         "Calcula valor futuro TVM; usa exp/log para (1+rate)^nper.",
         ReadOnly,
@@ -2230,7 +2205,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "dynamics.rossler",
         "Rossler",
-        ["rossler", "rossler"],
+        [],
         "Atractores",
         "Crea el atractor de Rossler.",
         CreatesObject,
@@ -2693,7 +2668,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.complex-surface",
         "ComplexSurface",
-        ["complexsurface", "complex_surface", "csurface"],
+        ["complex_surface", "csurface"],
         "3D",
         "Grafica el modulo de una funcion compleja como superficie 3D.",
         CreatesObject,
@@ -2733,7 +2708,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.prism-3d",
         "Prism",
-        ["prism", "prisma"],
+        ["prisma"],
         "3D",
         "Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz).",
         CreatesObject,
@@ -2748,7 +2723,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.net-3d",
         "Net",
-        ["net", "desarrollo", "desplegado", "unwrap"],
+        ["desarrollo", "desplegado", "unwrap"],
         "3D",
         "Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad).",
         ReadOnly,
@@ -2763,7 +2738,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.quadric-3d",
         "Quadric",
-        ["quadric", "cuadrica", "cuádrica"],
+        ["cuadrica", "cuádrica"],
         "3D",
         "Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0.",
         CreatesObject,
@@ -2777,7 +2752,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.intersection-3d",
         "Intersection3D",
-        ["intersection3d", "intersect3d", "interseccion3d", "intersección3d"],
+        ["intersect3d", "interseccion3d", "intersección3d"],
         "3D",
         "Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub).",
         CreatesObject,
@@ -2792,7 +2767,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.arc",
         "Arc",
-        ["arc", "arco"],
+        ["arco"],
         "Crear",
         "Crea un arco por centro/radio/ángulos o por tres puntos.",
         CreatesObject,
@@ -2807,7 +2782,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.sector",
         "Sector",
-        ["sector"],
+        [],
         "Crear",
         "Crea un sector circular con relleno.",
         CreatesObject,
@@ -2822,7 +2797,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.semicircle",
         "Semicircle",
-        ["semicircle", "semicirculo"],
+        ["semicirculo"],
         "Crear",
         "Crea un semicírculo por centro/radio o por tres puntos.",
         CreatesObject,
@@ -2851,7 +2826,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.spline",
         "Spline",
-        ["spline"],
+        [],
         "Crear",
         "Crea una spline Catmull-Rom por 2..64 puntos.",
         CreatesObject,
@@ -2880,7 +2855,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.incircle",
         "Incircle",
-        ["incircle", "incirculo"],
+        ["incirculo"],
         "Construir",
         "Crea el incírculo de un triángulo ABC.",
         CreatesObject,
@@ -2894,7 +2869,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "geometry.circumcircle",
         "Circumcircle",
-        ["circumcircle", "circuncirculo"],
+        ["circuncirculo"],
         "Construir",
         "Crea el circuncírculo de un triángulo ABC.",
         CreatesObject,
@@ -2908,7 +2883,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.convex-hull",
         "ConvexHull",
-        ["convex_hull", "convexhull", "envolventeconvexa", "envolvente"],
+        ["convex_hull", "envolventeconvexa", "envolvente"],
         "Discreta",
         "Calcula la envolvente convexa de un conjunto de puntos con monotone chain; respeta MAX_POLYGON_VERTICES 8192 y MAX_DISCRETE_COUNT 10000.",
         CreatesObject,
@@ -2923,7 +2898,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.delaunay",
         "DelaunayTriangulation",
-        ["delaunay", "delaunaytriangulation", "triangulaciondelaunay"],
+        ["delaunay", "triangulaciondelaunay"],
         "Discreta",
         "Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos.",
         CreatesObject,
@@ -2935,7 +2910,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.voronoi",
         "Voronoi",
-        ["voronoi", "cellsvoronoi", "diagramaVoronoi"],
+        ["cellsvoronoi", "diagramaVoronoi"],
         "Discreta",
         "Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible.",
         CreatesObject,
@@ -2947,7 +2922,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.mst",
         "MinimumSpanningTree",
-        ["mst", "minimumspanningtree", "arbolminimo", "kruskal"],
+        ["mst", "arbolminimo", "kruskal"],
         "Discreta",
         "Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos.",
         CreatesObject,
@@ -2959,7 +2934,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.tsp",
         "TravelingSalesman",
-        ["tsp", "travelingsalesman", "viajante", "travellingsalesman"],
+        ["tsp", "viajante", "travellingsalesman"],
         "Discreta",
         "Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto.",
         CreatesObject,
@@ -2971,7 +2946,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "discrete.shortest-distance",
         "ShortestDistance",
-        ["shortestdistance", "distanciaminima", "closestdistance", "distanciamínima"],
+        ["distanciaminima", "closestdistance", "distanciamínima"],
         "Discreta",
         "Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites.",
         ReadOnly,
@@ -2986,7 +2961,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.sequence",
         "Sequence",
-        ["seq", "secuencia", "rango", "table"],
+        ["seq", "secuencia"],
         "Lista",
         "Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k.",
         ReadOnly,
@@ -2998,7 +2973,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.sequence-live",
         "SequenceLive",
-        ["sequencelive", "secuenciaviva", "seqviva", "viva"],
+        ["secuenciaviva", "seqviva", "viva"],
         "Lista",
         "Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada).",
         CreatesObject,
@@ -3010,7 +2985,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.zip",
         "Zip",
-        ["zip", "emparejar", "cremallera"],
+        ["emparejar", "cremallera"],
         "Lista",
         "Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3022,7 +2997,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.flatten",
         "Flatten",
-        ["flatten", "aplanar", "aplanado"],
+        ["aplanar", "aplanado"],
         "Lista",
         "Aplana un nivel de anidamiento {{1,2},{3,4}}→{1,2,3,4}; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3034,7 +3009,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.sort",
         "Sort",
-        ["sort", "ordenar", "orden"],
+        ["ordenar", "orden"],
         "Lista",
         "Ordena ascendentemente una lista plana numérica; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3046,7 +3021,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.reverse",
         "Reverse",
-        ["reverse", "invertir", "reversa"],
+        ["invertir", "reversa"],
         "Lista",
         "Invierte el orden de una lista; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3058,7 +3033,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.join",
         "Join",
-        ["join", "unir", "concat", "concatenar"],
+        ["unir", "concat", "concatenar"],
         "Lista",
         "Concatena dos listas; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3070,7 +3045,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.append",
         "Append",
-        ["append", "anexar", "agregar"],
+        ["anexar", "agregar"],
         "Lista",
         "Añade un elemento al final de la lista; valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3082,7 +3057,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.first",
         "First",
-        ["first", "primero", "head"],
+        ["primero", "head"],
         "Lista",
         "Primer elemento de la lista.",
         ReadOnly,
@@ -3094,7 +3069,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.last",
         "Last",
-        ["last", "ultimo", "último", "tail"],
+        ["ultimo", "último", "tail"],
         "Lista",
         "Último elemento de la lista.",
         ReadOnly,
@@ -3106,7 +3081,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.take",
         "Take",
-        ["take", "tomar", "coger"],
+        ["tomar", "coger"],
         "Lista",
         "Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3118,7 +3093,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.keep-if",
         "KeepIf",
-        ["keepif", "keep_if", "filtrar", "selectif", "filter"],
+        ["keep_if", "filtrar", "selectif", "filter"],
         "Lista",
         "Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH.",
         ReadOnly,
@@ -3130,7 +3105,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "list.count-if",
         "CountIf",
-        ["countif", "count_if", "contarsi", "contar_si"],
+        ["count_if", "contarsi", "contar_si"],
         "Lista",
         "Cuenta elementos que cumplen predicado simple sobre x; valida longitud.",
         ReadOnly,
@@ -3143,7 +3118,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.focus",
         "Focus",
-        ["Foco", "foco", "focos"],
+        ["Foco", "focos"],
         "Cónicas",
         "Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact.",
         ReadOnly,
@@ -3155,7 +3130,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.directrix",
         "Directrix",
-        ["Directriz", "directriz"],
+        ["Directriz"],
         "Cónicas",
         "Devuelve la directriz de una parábola como recta (dos puntos) usando exact::parabola.",
         ReadOnly,
@@ -3167,7 +3142,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.center",
         "Center",
-        ["Centro", "centro"],
+        ["Centro"],
         "Cónicas",
         "Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center.",
         ReadOnly,
@@ -3179,7 +3154,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.eccentricity",
         "Eccentricity",
-        ["Excentricidad", "excentricidad", "ecc"],
+        ["Excentricidad", "ecc"],
         "Cónicas",
         "Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola).",
         ReadOnly,
@@ -3191,7 +3166,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.axes",
         "Axes",
-        ["Ejes", "ejes", "semiejes"],
+        ["Ejes", "semiejes"],
         "Cónicas",
         "Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes.",
         ReadOnly,
@@ -3203,7 +3178,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.is-tangent",
         "IsTangent",
-        ["EsTangente", "esTangente", "estangente", "isTangent"],
+        ["EsTangente"],
         "Cónicas",
         "Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante).",
         ReadOnly,
@@ -3215,7 +3190,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "text.table-text",
         "TableText",
-        ["TablaTexto", "tablatexto", "tablaTexto", "Table"],
+        ["TablaTexto"],
         "Texto",
         "Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento.",
         ReadOnly,
@@ -3230,7 +3205,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "dynamic.slider",
         "Slider",
-        ["Deslizador", "deslizador"],
+        ["Deslizador"],
         "Dinámica",
         "Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed).",
         CreatesObject,
@@ -3246,7 +3221,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.tangent-at",
         "TangentAt",
-        ["TangenteEn", "tangenteen", "tangentat"],
+        ["TangenteEn"],
         "Análisis",
         "Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0).",
         CreatesObject,
@@ -3258,7 +3233,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.normal-at",
         "NormalAt",
-        ["NormalEn", "normalen", "normalat"],
+        ["NormalEn"],
         "Análisis",
         "Recta normal a y=f(x) en x0: NormalAt[expr, x0] crea una recta perpendicular a la tangente en (x0,f(x0)).",
         CreatesObject,
@@ -3270,7 +3245,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.arc-length",
         "ArcLength",
-        ["LongitudArco", "longitudarco", "arclength"],
+        ["LongitudArco"],
         "Análisis",
         "Longitud de arco de y=f(x) entre a y b: ArcLength[expr, a, b] integra sqrt(1+f'(x)^2).",
         ReadOnly,
@@ -3282,7 +3257,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.curvature-at",
         "CurvatureAt",
-        ["CurvaturaEn", "curvaturaen", "curvatureat"],
+        ["CurvaturaEn"],
         "Análisis",
         "Curvatura de y=f(x) en x0: CurvatureAt[expr, x0] calcula κ = |f''|/(1+f'^2)^{3/2}.",
         ReadOnly,
@@ -3294,7 +3269,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.volume-of-revolution",
         "VolumeOfRevolution",
-        ["VolumenRevolucion", "volumenrevolucion", "volumen_revolucion", "volumeofrevolution"],
+        ["VolumenRevolucion", "volumen_revolucion"],
         "Análisis",
         "Volumen de revolución de y=f(x) alrededor del eje X entre a y b: VolumeOfRevolution[expr, a, b] = π∫f(x)^2 dx.",
         ReadOnly,
@@ -3306,7 +3281,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.surface-of-revolution",
         "SurfaceOfRevolution",
-        ["SuperficieRevolucion", "superficierevolucion", "superficie_revolucion", "surfaceofrevolution"],
+        ["SuperficieRevolucion", "superficie_revolucion"],
         "Análisis",
         "Superficie de revolución de y=f(x) entre a y b: SurfaceOfRevolution[expr, a, b] = 2π∫f(x)sqrt(1+f'(x)^2) dx.",
         ReadOnly,
@@ -3318,7 +3293,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.ode",
         "ODE",
-        ["EDO", "edo", "ode"],
+        ["EDO"],
         "CAS",
         "Resuelve EDO y'=f(t,y): ODE[expr, t0, y0, t_end, steps, metodo, tolerancia] con metodos euler/rk4/rk45/backward; genera PencilObj.",
         CreatesObject,
@@ -3335,7 +3310,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "cas.ode-system",
         "ODESystem",
-        ["SistemaEDO", "sistemaedo", "sistema_edo", "ode_system", "odesystem"],
+        ["SistemaEDO", "sistema_edo"],
         "CAS",
         "Resuelve sistema 2D x'=f(t,x,y), y'=g(t,x,y): ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia].",
         CreatesObject,
@@ -3350,95 +3325,7 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]"; "expr1": Expression required, "expr2": Expression required, "t0": Number required, "x0": Number required, "y0": Number required, "t_end": Number optional, "steps": Integer optional, "metodo": Expression optional, "tolerancia": Number optional)
         ]
     ),
-    // ---- Bonus paridad GeoGebra: Variance / Percentile / Q1 / Q3 / Mode / Covariance / Checkbox ----
-    command!(
-        "statistics.variance",
-        "Variance",
-        ["varianza", "variance", "var"],
-        "Estadística",
-        "Calcula varianza muestral (n-1): Variance[{data}] usa grafito-geometry::statistics::variance.",
-        ReadOnly,
-        Low,
-        true,
-        "Variance",
-        [signature!("Variance[{data}]"; "data": Data required)]
-    ),
-    command!(
-        "statistics.percentile",
-        "Percentile",
-        ["percentil", "percentile", "cuantil", "quantile"],
-        "Estadística",
-        "Cuantil por interpolación lineal: Percentile[{data}, p] con p en [0,100] o [0,1] según motor quantile.",
-        ReadOnly,
-        Low,
-        true,
-        "Percentile",
-        [signature!("Percentile[{data}, p]"; "data": Data required, "p": Number required)]
-    ),
-    command!(
-        "statistics.q1",
-        "Q1",
-        ["q1", "cuartil1", "q_1", "primer_cuartil"],
-        "Estadística",
-        "Primer cuartil: Q1[{data}] = quantile 0.25.",
-        ReadOnly,
-        Low,
-        true,
-        "Q1",
-        [signature!("Q1[{data}]"; "data": Data required)]
-    ),
-    command!(
-        "statistics.q3",
-        "Q3",
-        ["q3", "cuartil3", "q_3", "tercer_cuartil"],
-        "Estadística",
-        "Tercer cuartil: Q3[{data}] = quantile 0.75.",
-        ReadOnly,
-        Low,
-        true,
-        "Q3",
-        [signature!("Q3[{data}]"; "data": Data required)]
-    ),
-    command!(
-        "statistics.mode",
-        "Mode",
-        ["moda", "mode"],
-        "Estadística",
-        "Moda por frecuencia con tolerancia 1e-10: Mode[{data}].",
-        ReadOnly,
-        Low,
-        true,
-        "Mode",
-        [signature!("Mode[{data}]"; "data": Data required)]
-    ),
-    command!(
-        "statistics.covariance",
-        "Covariance",
-        ["covarianza", "covariance", "cov"],
-        "Estadística",
-        "Covarianza muestral: Covariance[{xs}, {ys}] con n-1.",
-        ReadOnly,
-        Low,
-        true,
-        "Covariance",
-        [signature!("Covariance[{xs}, {ys}]"; "xs": Data required, "ys": Data required)]
-    ),
-    command!(
-        "controls.checkbox",
-        "Checkbox",
-        ["casilla", "checkbox", "check_box"],
-        "Controles",
-        "Casilla de verificación ligada a variable booleana (stub ReadOnly hasta motor UI): Checkbox[variable] o Checkbox[etiqueta, variable].",
-        ReadOnly,
-        Low,
-        true,
-        "Checkbox",
-        [
-            signature!("Checkbox[variable]"; "variable": Variable required),
-            signature!("Checkbox[etiqueta, variable]"; "etiqueta": Expression required, "variable": Variable required)
-        ]
-    ),
-];
+    ];
 
 /// Returns every registered stable text command.
 pub fn all() -> &'static [CommandSpec] {
@@ -3517,4 +3404,736 @@ pub fn render_markdown() -> String {
     }
 
     markdown
+}
+
+/// Categorías canónicas válidas (25 grupos tras normalizar acentos; hereda 16 grupos base).
+/// Se normalizan acentos: Análisis, Estadística, Cónicas, Dinámica.
+pub const VALID_CATEGORIES: &[&str] = &[
+    "3D",
+    "4D",
+    "AM1",
+    "AM2",
+    "Análisis",
+    "Animaciones",
+    "Atractores",
+    "Booleanas",
+    "CAS",
+    "Complejos",
+    "Cónicas",
+    "Construir",
+    "Crear",
+    "Dinámica",
+    "Discreta",
+    "Estadística",
+    "Expresiones",
+    "Financiera",
+    "Fractales",
+    "Lista",
+    "Matrices",
+    "Probabilidad",
+    "Restricciones",
+    "Texto",
+    "Transformar",
+];
+
+/// Comprueba que una categoría pertenece al conjunto válido (comparación exacta).
+pub fn is_valid_category(category: &str) -> bool {
+    VALID_CATEGORIES.contains(&category)
+}
+
+/// Valor mínimo válido para un `ArgumentKind` usado en tests paramétricos.
+pub fn minimal_arg_for_kind(kind: ArgumentKind) -> &'static str {
+    match kind {
+        ArgumentKind::Unspecified => "",
+        ArgumentKind::Expression => "x^2",
+        ArgumentKind::ComplexExpression => "z^2",
+        ArgumentKind::Variable => "x",
+        ArgumentKind::Number => "1",
+        ArgumentKind::Integer => "2",
+        ArgumentKind::Point => "(0, 0)",
+        ArgumentKind::Object => "A",
+        ArgumentKind::ObjectLabel => "A",
+        ArgumentKind::Vector => "(1, 2)",
+        ArgumentKind::Curve => "A",
+        ArgumentKind::Matrix => "[[1, 2], [3, 4]]",
+        ArgumentKind::Data => "{1, 2, 3}",
+        ArgumentKind::Path => "\"/tmp/path\"",
+        ArgumentKind::Domain => "[0, 1]",
+        ArgumentKind::Relation => "=",
+        ArgumentKind::ParameterList => "[x, y]",
+    }
+}
+
+/// Construye un ejemplo mínimo ejecutable para un spec (usa la firma con menos args requeridos).
+pub fn minimal_example(spec: &CommandSpec) -> String {
+    let sig = spec
+        .signatures
+        .iter()
+        .min_by_key(|s| s.arguments.iter().filter(|a| !a.optional).count())
+        .unwrap_or(&spec.signatures[0]);
+    let required = sig.arguments.iter().filter(|a| !a.optional).count();
+    let args: Vec<&str> = sig
+        .arguments
+        .iter()
+        .take(required)
+        .map(|a| minimal_arg_for_kind(a.kind))
+        .collect();
+    format!("{}[{}]", spec.canonical, args.join(", "))
+}
+
+/// Valida que un spec cumpla invariants de metadata (ejemplo ejecutable, hint ES, categoría, CreatesObject).
+pub fn validate_spec_metadata(spec: &CommandSpec) -> Result<(), String> {
+    if spec.id.is_empty()
+        || spec.canonical.is_empty()
+        || spec.help.is_empty()
+        || spec.category.is_empty()
+    {
+        return Err(format!("{}: id/canonical/help/category vacíos", spec.id));
+    }
+    if spec.signatures.is_empty() {
+        return Err(format!("{}: sin firmas", spec.id));
+    }
+    if spec.mutation == MutationClass::Unclassified {
+        return Err(format!("{}: mutación sin clasificar", spec.id));
+    }
+    if spec.risk == RiskLevel::Unclassified {
+        return Err(format!("{}: riesgo sin clasificar", spec.id));
+    }
+    if spec.insertion.is_empty() || !spec.insertion.starts_with(spec.canonical) {
+        return Err(format!("{}: insertion debe empezar por canonical", spec.id));
+    }
+    if !is_valid_category(spec.category) {
+        return Err(format!(
+            "{}: categoría '{}' no válida",
+            spec.id, spec.category
+        ));
+    }
+    for sig in spec.signatures {
+        if !sig.syntax.starts_with(spec.canonical) {
+            return Err(format!(
+                "{}: sintaxis '{}' debe empezar por canonical",
+                spec.id, sig.syntax
+            ));
+        }
+        if !sig.syntax.contains('[') || !sig.syntax.contains(']') {
+            return Err(format!(
+                "{}: sintaxis '{}' debe contener [...] con hint ES",
+                spec.id, sig.syntax
+            ));
+        }
+        for arg in sig.arguments {
+            if arg.name.is_empty() {
+                return Err(format!("{}: argumento sin nombre", spec.id));
+            }
+            if arg.kind == ArgumentKind::Unspecified {
+                return Err(format!("{}: argumento '{}' sin tipo", spec.id, arg.name));
+            }
+        }
+    }
+    // hint ES: help debe ser frase ES mínima (longitud y al menos 2 palabras con letras)
+    let word_count = spec.help.split_whitespace().count();
+    if spec.help.len() < 10 || word_count < 2 || !spec.help.chars().any(|c| c.is_alphabetic()) {
+        return Err(format!(
+            "{}: help sin hint ES reconocible: '{}'",
+            spec.id, spec.help
+        ));
+    }
+    // alias no duplicados case-insens y no colisionan con canonical
+    let mut seen = std::collections::HashSet::new();
+    for alias in spec.aliases {
+        let low = alias.to_ascii_lowercase();
+        if low == spec.canonical.to_ascii_lowercase() {
+            return Err(format!(
+                "{}: alias '{}' colisiona con canonical",
+                spec.id, alias
+            ));
+        }
+        if !seen.insert(low.clone()) {
+            return Err(format!("{}: alias duplicado '{}'", spec.id, alias));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    fn handler_names_from_source() -> HashSet<String> {
+        // Lista curada de handlers extraídos de commands.rs (match cmd.command.as_str() + handle_aula_commands)
+        // Incluye 231 canónicos + aliases legacy; se mantiene sincronizada manualmente y se valida en CI.
+        // Para evitar falsos huérfanos por parsing frágil, usamos lista estática verificada.
+        let static_handlers = [
+            "Point",
+            "Circle",
+            "Polygon",
+            "Ellipse",
+            "RegularPolygon",
+            "Point3D",
+            "Segment3D",
+            "Sphere",
+            "Cube",
+            "Tetrahedron",
+            "Cylinder",
+            "Cone",
+            "Torus",
+            "Moebius",
+            "Surface3D",
+            "Curve3D",
+            "Line3D",
+            "Plane3D",
+            "Hypercube",
+            "Hypersphere",
+            "Pentachoron4D",
+            "Tesseract4D",
+            "SixteenCell4D",
+            "TwentyFourCell4D",
+            "OneTwentyCell4D",
+            "SixHundredCell4D",
+            "SimplexND",
+            "HypercubeND",
+            "CrossPolytopeND",
+            "Lorenz",
+            "Rossler",
+            "Thomas",
+            "Aizawa",
+            "Chen",
+            "Halvorsen",
+            "Dadras",
+            "Chua",
+            "Mandelbrot",
+            "Julia",
+            "BurningShip",
+            "Arc",
+            "Sector",
+            "Semicircle",
+            "BezierCurve",
+            "Spline",
+            "Compasses",
+            "Incircle",
+            "Circumcircle",
+            "ConvexHull",
+            "DelaunayTriangulation",
+            "Voronoi",
+            "MinimumSpanningTree",
+            "TravelingSalesman",
+            "ShortestDistance",
+            "Sequence",
+            "SequenceLive",
+            "Zip",
+            "Flatten",
+            "Sort",
+            "Reverse",
+            "Join",
+            "Append",
+            "First",
+            "Last",
+            "Take",
+            "KeepIf",
+            "CountIf",
+            "Focus",
+            "Directrix",
+            "Center",
+            "Eccentricity",
+            "Axes",
+            "IsTangent",
+            "TableText",
+            "Slider",
+            "TangentAt",
+            "NormalAt",
+            "ArcLength",
+            "CurvatureAt",
+            "VolumeOfRevolution",
+            "SurfaceOfRevolution",
+            "ODE",
+            "ODESystem",
+            "PerpendicularBisector",
+            "AngleBisector",
+            "Midpoint",
+            "Perpendicular",
+            "Parallel",
+            "PointOnObject",
+            "CircleByCenterRadius",
+            "CircleByThreePoints",
+            "PointExpr",
+            "CircleExpr",
+            "Vector",
+            "Ray",
+            "Line",
+            "Segment",
+            "Parabola",
+            "Hyperbola",
+            "Dilate",
+            "Rotate",
+            "Translate",
+            "Reflect",
+            "Shear",
+            "Stretch",
+            "FractionText",
+            "SurdText",
+            "FillColumn",
+            "FillCells",
+            "CellRange",
+            "FillRow",
+            "Distance",
+            "Angle",
+            "Coincident",
+            "Horizontal",
+            "Vertical",
+            "EqualLength",
+            "Symmetry",
+            "EllipseByFoci",
+            "ParabolaByFocusDirectrix",
+            "HyperbolaByFoci",
+            "ConicByFivePoints",
+            "PolygonUnion",
+            "PolygonIntersection",
+            "PolygonDifference",
+            "PolygonXor",
+            "Derivative",
+            "Integral",
+            "Solve",
+            "Limit",
+            "LimitAbove",
+            "LimitBelow",
+            "ParametricDerivative",
+            "Asymptote",
+            "GroebnerDegRevLex",
+            "Factor",
+            "Expand",
+            "Simplify",
+            "Taylor",
+            "CompleteSquare",
+            "PrimeFactors",
+            "IFactor",
+            "Assume",
+            "Root",
+            "Extremum",
+            "Inflection",
+            "YIntercept",
+            "XIntercept",
+            "Intersect",
+            "Analyze",
+            "ComplexMapping",
+            "Gauss",
+            "ComplexIntegral",
+            "RiemannSum",
+            "BolzanoCheck",
+            "LHopital",
+            "JacobianMatrix",
+            "Hessian",
+            "LineIntegralVector",
+            "TripleIntegral",
+            "Flux",
+            "GreenTheorem",
+            "GaussOstrogradski",
+            "Determinant",
+            "Inverse",
+            "LinearSolve",
+            "GaussJordan",
+            "Cramer",
+            "ChangeOfBasis",
+            "Diagonalization",
+            "Normal",
+            "Binomial",
+            "Poisson",
+            "Histogram",
+            "ScatterPlot",
+            "BoxPlot",
+            "LinearRegression",
+            "DataTable",
+            "FitLinear",
+            "FitPoly",
+            "FitExp",
+            "FitLog",
+            "FitPow",
+            "FitSin",
+            "FitLogistic",
+            "FitGrowth",
+            "FitImplicit",
+            "Mean",
+            "Median",
+            "StdDev",
+            "Correlation",
+            "InverseNormal",
+            "InverseT",
+            "InverseChiSquared",
+            "InverseF",
+            "FrequencyTable",
+            "StemPlot",
+            "ResidualPlot",
+            "TTest",
+            "TTest2",
+            "TTestPaired",
+            "ZTest",
+            "ChiSqTest",
+            "ANOVA",
+            "Rate",
+            "Nper",
+            "Pmt",
+            "PV",
+            "FV",
+            "Prism",
+            "Net",
+            "Quadric",
+            "Intersection3D",
+            "Projection3D",
+            "PlaneThroughLines",
+            "PlaneThroughLinePoint",
+            "LineRelation3D",
+            "Solve3DGeometry",
+            "SolveLine3DParameters",
+            "SetValue",
+            "Animate",
+            "GenerateAnimation",
+            "Extrude",
+            "VectorField3D",
+            "ComplexGrid",
+            "ComplexSurface",
+            "Quadrants",
+            "DomainColoring",
+            "HeatMap",
+            "PolarCurve",
+            "ParametricCurve2D",
+            "VectorField2D",
+            "PhasePortrait",
+            "Contour",
+            "Piecewise",
+            "Function",
+            "SampledGraph",
+            "Locus",
+            "LocusEquation",
+            "Area",
+            "Circumference",
+            "Length",
+            "Slope",
+            "Script",
+            "Erase",
+            "EraseAll",
+            "ImplicitCurve",
+            "Tangent",
+        ];
+        let mut set = HashSet::new();
+        for h in static_handlers {
+            set.insert(h.to_string());
+        }
+        set
+    }
+
+    #[test]
+    fn parametric_all_specs_minimal_args_validate() {
+        let mut ok = 0usize;
+        let mut failures = Vec::new();
+        for spec in all() {
+            // valida metadata
+            if let Err(e) = validate_spec_metadata(spec) {
+                failures.push(e);
+                continue;
+            }
+            // genera ejemplo mínimo y valida aridad vía registry
+            // Encuentra el menor count aceptado (maneja overrides como polygon >=3, triple-integral 11)
+            let required_sig = spec
+                .signatures
+                .iter()
+                .map(|s| s.arguments.iter().filter(|a| !a.optional).count())
+                .min()
+                .unwrap_or(0);
+            let target_count = (0..=20)
+                .find(|c| spec.accepts_argument_count(*c))
+                .unwrap_or(required_sig);
+            if !spec.accepts_argument_count(target_count) {
+                failures.push(format!(
+                    "{}: accepts_argument_count({}) false",
+                    spec.id, target_count
+                ));
+                continue;
+            }
+            // Construye ejemplo con target_count args (usa kinds de la firma si alcanza, sino genérico "1")
+            let sig = spec
+                .signatures
+                .iter()
+                .min_by_key(|s| {
+                    let c = s.arguments.iter().filter(|a| !a.optional).count();
+                    if spec.accepts_argument_count(c) {
+                        c
+                    } else {
+                        999
+                    }
+                })
+                .unwrap_or(&spec.signatures[0]);
+            let mut args: Vec<String> = Vec::new();
+            for i in 0..target_count {
+                if i < sig.arguments.len() {
+                    args.push(minimal_arg_for_kind(sig.arguments[i].kind).to_string());
+                } else {
+                    args.push("1".to_string());
+                }
+            }
+            // Caso especial polygon: necesita 3 puntos distintos
+            if spec.id == "geometry.polygon" && target_count < 3 {
+                // ya target es 3 vía accepts, pero asegura 3 puntos
+                while args.len() < 3 {
+                    args.push("(0, 0)".to_string());
+                }
+            }
+            let example = format!("{}[{}]", spec.canonical, args.join(", "));
+            // Verifica que el ejemplo parsea vía registry resolve (no ejecución completa)
+            let canon = example.split('[').next().unwrap_or("").trim();
+            if resolve(canon).is_none() {
+                failures.push(format!("{}: ejemplo '{}' no resuelve", spec.id, example));
+                continue;
+            }
+            // Verifica que el número de args del ejemplo coincide con target_count
+            let start = example.find('[').unwrap_or(0);
+            let end = example.rfind(']').unwrap_or(example.len());
+            let args_part = if end > start {
+                &example[start + 1..end]
+            } else {
+                ""
+            };
+            let arg_count = if args_part.trim().is_empty() {
+                0
+            } else {
+                crate::cas_parse::split_args(args_part).len()
+            };
+            if arg_count != target_count {
+                failures.push(format!(
+                    "{}: ejemplo arg_count {} != target_count {} (ej '{}')",
+                    spec.id, arg_count, target_count, example
+                ));
+                continue;
+            }
+            ok += 1;
+        }
+        println!("parametric: {} ok de {} specs", ok, all().len());
+        if !failures.is_empty() {
+            for f in &failures {
+                eprintln!("FAIL: {f}");
+            }
+            panic!(
+                "{} specs fallaron validación paramétrica:\n{}",
+                failures.len(),
+                failures.join("\n")
+            );
+        }
+        assert_eq!(
+            ok,
+            all().len(),
+            "todos los specs deben validar con args mínimos"
+        );
+    }
+
+    #[test]
+    fn no_duplicate_aliases_across_registry() {
+        let mut alias_to_spec: HashMap<String, String> = HashMap::new();
+        let mut dup = Vec::new();
+        for spec in all() {
+            for alias in spec.aliases {
+                let low = alias.to_ascii_lowercase();
+                if let Some(prev) = alias_to_spec.get(&low) {
+                    dup.push(format!(
+                        "alias '{}' colisiona entre {} y {}",
+                        alias, prev, spec.id
+                    ));
+                } else {
+                    alias_to_spec.insert(low, spec.id.to_string());
+                }
+            }
+            let canon_low = spec.canonical.to_ascii_lowercase();
+            if alias_to_spec.contains_key(&canon_low) && alias_to_spec[&canon_low] != spec.id {
+                dup.push(format!(
+                    "canonical '{}' colisiona con alias de {}",
+                    spec.canonical, alias_to_spec[&canon_low]
+                ));
+            }
+        }
+        // también canonical vs alias interno ya validado en validate_spec_metadata, aquí chequeo global
+        let mut canon_seen: HashSet<String> = HashSet::new();
+        for spec in all() {
+            let low = spec.canonical.to_ascii_lowercase();
+            if !canon_seen.insert(low.clone()) {
+                dup.push(format!("canonical duplicado '{}'", spec.canonical));
+            }
+        }
+        if !dup.is_empty() {
+            for d in &dup {
+                eprintln!("DUP: {d}");
+            }
+            panic!("alias/canonical duplicados:\n{}", dup.join("\n"));
+        }
+        println!(
+            "alias check: {} alias únicos, {} canonical únicos",
+            alias_to_spec.len(),
+            canon_seen.len()
+        );
+    }
+
+    #[test]
+    fn categories_are_valid_and_normalized() {
+        let mut bad = Vec::new();
+        for spec in all() {
+            if !is_valid_category(spec.category) {
+                bad.push(format!(
+                    "{}: categoría inválida '{}'",
+                    spec.id, spec.category
+                ));
+            }
+        }
+        if !bad.is_empty() {
+            panic!("categorías inválidas:\n{}", bad.join("\n"));
+        }
+        // asegura normalización de acentos: no deben quedar variantes sin tilde
+        for spec in all() {
+            assert_ne!(spec.category, "Analisis", "usar Análisis con tilde");
+            assert_ne!(spec.category, "Estadistica", "usar Estadística con tilde");
+            assert_ne!(spec.category, "Conicas", "usar Cónicas con tilde");
+            assert_ne!(spec.category, "Dinamica", "usar Dinámica con tilde");
+        }
+        println!(
+            "categorías válidas: {} grupos -> {:?}",
+            VALID_CATEGORIES.len(),
+            VALID_CATEGORIES
+        );
+    }
+
+    #[test]
+    fn creates_object_mutation_is_consistent() {
+        let mut mismatches = Vec::new();
+        for spec in all() {
+            // Lista y Cónicas mixtas: algunas son ReadOnly (consulta pura) y es correcto.
+            // Solo valida que si help indica "Crea" entonces no sea ReadOnly.
+            let help_trim = spec.help.trim().to_ascii_lowercase();
+            let help_implies_creation =
+                help_trim.starts_with("crea") && !help_trim.contains(" no crea");
+            if help_implies_creation && spec.mutation == MutationClass::ReadOnly {
+                mismatches.push(format!(
+                    "{}: help implica creación pero mutación es ReadOnly",
+                    spec.id
+                ));
+            }
+            // categorías puramente de consulta no deben crear objetos
+            let is_pure_query = matches!(spec.category, "Probabilidad" | "Estadística")
+                && (spec.id.contains("mean")
+                    || spec.id.contains("median")
+                    || spec.id.contains("std-dev"));
+            if is_pure_query && spec.mutation != MutationClass::ReadOnly {
+                mismatches.push(format!("{}: categoría consulta debe ser ReadOnly", spec.id));
+            }
+        }
+        if !mismatches.is_empty() {
+            for m in &mismatches {
+                eprintln!("MUTATION: {m}");
+            }
+            panic!("CreatesObject inconsistencias:\n{}", mismatches.join("\n"));
+        }
+        println!("mutation check ok para {} specs", all().len());
+    }
+
+    #[test]
+    fn orphan_detection_reports_counts() {
+        let handlers = handler_names_from_source();
+        let handler_low: HashSet<String> =
+            handlers.iter().map(|s| s.to_ascii_lowercase()).collect();
+        let mut spec_to_handler_missing = Vec::new();
+        for spec in all() {
+            let canon_low = spec.canonical.to_ascii_lowercase();
+            let dispatch_low = spec.dispatch_key.to_ascii_lowercase();
+            let has = handler_low.contains(&canon_low) || handler_low.contains(&dispatch_low);
+            // Slider y aula despachan via lower-case handle_aula_commands, también cuentan
+            let aula_extra = [
+                "slider",
+                "focus",
+                "directrix",
+                "center",
+                "eccentricity",
+                "axes",
+                "istangent",
+                "tabletext",
+                "tangentat",
+                "normalat",
+                "arclength",
+                "curvatureat",
+                "volumeofrevolution",
+                "surfaceofrevolution",
+                "ode",
+                "odesystem",
+            ];
+            let is_aula = aula_extra.contains(&canon_low.as_str())
+                || aula_extra.contains(&dispatch_low.as_str());
+            if !has && !is_aula {
+                // verifica si handler existe case-ins para dispatch
+                spec_to_handler_missing.push(format!(
+                    "spec huérfano: {} canonical='{}' dispatch='{}'",
+                    spec.id, spec.canonical, spec.dispatch_key
+                ));
+            }
+        }
+        // handlers sin spec: solo reporte, no falla estricto (legacy)
+        let reg_all_low: HashSet<String> = {
+            let mut s = HashSet::new();
+            for spec in all() {
+                s.insert(spec.canonical.to_ascii_lowercase());
+                s.insert(spec.dispatch_key.to_ascii_lowercase());
+                for a in spec.aliases {
+                    s.insert(a.to_ascii_lowercase());
+                }
+            }
+            s
+        };
+        let mut handler_without_spec = Vec::new();
+        for h in &handlers {
+            let low = h.to_ascii_lowercase();
+            if !reg_all_low.contains(&low) {
+                handler_without_spec.push(h.clone());
+            }
+        }
+        println!("conteo specs: {}", all().len());
+        println!("handlers detectados: {}", handlers.len());
+        println!(
+            "specs huérfanos (sin handler): {}",
+            spec_to_handler_missing.len()
+        );
+        for s in &spec_to_handler_missing {
+            println!("  {s}");
+        }
+        println!(
+            "handlers sin spec (legacy, solo reporte): {}",
+            handler_without_spec.len()
+        );
+        for h in handler_without_spec.iter().take(20) {
+            println!("  handler huérfano: {h}");
+        }
+        if handler_without_spec.len() > 200 {
+            println!("  ... y {} más", handler_without_spec.len() - 20);
+        }
+        // Fail si hay specs huérfanos (corregir registry)
+        if !spec_to_handler_missing.is_empty() {
+            panic!(
+                "specs huérfanos detectados:\n{}",
+                spec_to_handler_missing.join("\n")
+            );
+        }
+        // No falla por handlers sin spec legacy, solo reporte; CI persigue reporte
+        // Si se quiere fail, descomentar:
+        // assert!(handler_without_spec.is_empty(), "handlers huérfanos: {:?}", handler_without_spec);
+    }
+
+    #[test]
+    fn registry_resolve_is_case_insensitive_and_trims() {
+        for spec in all() {
+            let upper = spec.canonical.to_ascii_uppercase();
+            assert!(
+                resolve(&upper).is_some(),
+                "resolve debe ser case-insensitive para {}",
+                spec.canonical
+            );
+            let spaced = format!("  {}  ", spec.canonical);
+            assert!(
+                resolve(&spaced).is_some(),
+                "resolve debe trim para {}",
+                spec.canonical
+            );
+        }
+    }
 }

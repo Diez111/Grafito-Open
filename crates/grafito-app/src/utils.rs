@@ -5,6 +5,7 @@
 
 use egui::Color32;
 use grafito_assistant_types::ProviderProfile;
+use grafito_core::persistence::AUTOSAVE_DEBOUNCE_SECS;
 use grafito_geometry::Color;
 
 use crate::snap::SnapConfig;
@@ -147,6 +148,76 @@ pub(crate) fn save_config(config: &AppConfig) {
     }
 }
 
+/// Debounce de autosave para la UI (estado puro, sin I/O ni relojes internos).
+///
+/// El documento se escribe al sidecar `.autosave` (ver
+/// `grafito_core::persistence::{write_autosave_sidecar, AUTOSAVE_DEBOUNCE_SECS}`)
+/// solo tras [`AUTOSAVE_DEBOUNCE_SECS`] segundos sin edición, para no
+/// re-serializar y re-validar el documento en cada keystroke. El caller pasa
+/// `now` explícito (epoch segundos) para que sea testeable y determinista.
+///
+/// TODO(app.rs — otro agente): instanciar un `AutosaveDebouncer` en el estado
+/// de la app; llamar `mark_dirty(now)` en cada mutación del documento; en el
+/// tick (nunca en `Ui::`), si `should_autosave(now)` → escribir el sidecar en
+/// background thread y llamar `mark_saved()`; tras `write_document_atomic`
+/// exitoso → `mark_saved()` + borrar el sidecar. Recovery al arranque con
+/// `grafito_core::persistence::load_autosave_candidate` + diálogo modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // TODO otro agente: instanciar en app.rs
+pub(crate) struct AutosaveDebouncer {
+    /// Epoch de la última edición pendiente de autosave (`None` = limpio).
+    last_dirty_epoch: Option<u64>,
+    /// Segundos de inactividad requeridos (default [`AUTOSAVE_DEBOUNCE_SECS`]).
+    delay_secs: u64,
+}
+
+#[allow(dead_code)] // TODO otro agente: instanciar en app.rs
+impl AutosaveDebouncer {
+    pub(crate) fn new() -> Self {
+        Self {
+            last_dirty_epoch: None,
+            delay_secs: AUTOSAVE_DEBOUNCE_SECS,
+        }
+    }
+
+    pub(crate) fn with_delay(delay_secs: u64) -> Self {
+        Self {
+            last_dirty_epoch: None,
+            delay_secs,
+        }
+    }
+
+    /// Marca el documento como editado en `now_epoch` (reinicia la espera).
+    pub(crate) fn mark_dirty(&mut self, now_epoch: u64) {
+        self.last_dirty_epoch = Some(now_epoch);
+    }
+
+    /// ¿Pasó suficiente inactividad para escribir el sidecar?
+    /// `false` si está limpio. Reloj sesgado (`now < dirty`) → `false`
+    /// (saturating, nunca ofrece con tiempo negativo).
+    pub(crate) fn should_autosave(&self, now_epoch: u64) -> bool {
+        match self.last_dirty_epoch {
+            None => false,
+            Some(dirty) => now_epoch.saturating_sub(dirty) >= self.delay_secs,
+        }
+    }
+
+    /// Limpia el estado tras escribir el sidecar o guardar el documento.
+    pub(crate) fn mark_saved(&mut self) {
+        self.last_dirty_epoch = None;
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.last_dirty_epoch.is_some()
+    }
+}
+
+impl Default for AutosaveDebouncer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +231,43 @@ mod tests {
         assert_eq!(config.assistant_provider, ProviderProfile::OpenCodeGo);
         assert_eq!(config.assistant_model, "deepseek-v4-flash");
         assert!(!config.allow_fusion_fallback);
+    }
+
+    #[test]
+    fn autosave_debouncer_waits_for_inactivity_then_offers_once() {
+        let mut debouncer = AutosaveDebouncer::with_delay(5);
+        assert!(!debouncer.should_autosave(100), "limpio nunca ofrece");
+        assert!(!debouncer.is_dirty());
+
+        debouncer.mark_dirty(100);
+        assert!(debouncer.is_dirty());
+        assert!(!debouncer.should_autosave(100), "recién editado no ofrece");
+        assert!(!debouncer.should_autosave(104), "4s < 5s no ofrece");
+        assert!(debouncer.should_autosave(105), "5s de inactividad ofrece");
+
+        // Nueva edición reinicia la espera.
+        debouncer.mark_dirty(200);
+        assert!(!debouncer.should_autosave(204));
+        assert!(debouncer.should_autosave(205));
+
+        // Tras guardar queda limpio hasta la próxima edición.
+        debouncer.mark_saved();
+        assert!(!debouncer.is_dirty());
+        assert!(!debouncer.should_autosave(1_000_000));
+    }
+
+    #[test]
+    fn autosave_debouncer_default_delay_matches_core_const() {
+        let debouncer = AutosaveDebouncer::new();
+        assert_eq!(debouncer.delay_secs, AUTOSAVE_DEBOUNCE_SECS);
+        assert_eq!(AutosaveDebouncer::default(), debouncer);
+        // Reloj sesgado hacia atrás nunca ofrece (saturating).
+        let mut skewed = AutosaveDebouncer::with_delay(5);
+        skewed.mark_dirty(100);
+        assert!(!skewed.should_autosave(50));
+        // Delay 0 ofrece de inmediato (útil en tests de integración).
+        let mut immediate = AutosaveDebouncer::with_delay(0);
+        immediate.mark_dirty(77);
+        assert!(immediate.should_autosave(77));
     }
 }

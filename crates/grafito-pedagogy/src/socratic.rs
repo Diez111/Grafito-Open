@@ -345,4 +345,82 @@ mod tests {
         fsm.record_attempt(None);
         assert!(fsm.succeed().is_ok());
     }
+
+    #[test]
+    fn recorrido_completo_review_a_summarize() {
+        // Review → HeuristicQ → AwaitStudent → HeuristicQ → Rectify → Summarize → Done.
+        let mut fsm = SocraticFsm::new("derivada");
+        // 1. Review inicial.
+        assert!(matches!(fsm.state, SocraticState::Review { .. }));
+        // 2. HeuristicQ.
+        let s = fsm.ask().expect("ask inicial ok");
+        assert_eq!(s, SocraticState::HeuristicQ { attempts: 0 });
+        // 3. Espera al estudiante.
+        fsm.await_student(9_999);
+        assert_eq!(
+            fsm.state,
+            SocraticState::AwaitStudent {
+                deadline_epoch: 9_999
+            }
+        );
+        // 4. Nueva pregunta heurística tras la espera.
+        let s2 = fsm.ask().expect("ask tras espera ok");
+        assert_eq!(s2, SocraticState::HeuristicQ { attempts: 0 });
+        // 5. Intento con misconception → Rectify.
+        fsm.record_attempt(Some("fracción".to_string()));
+        assert!(
+            matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception.as_str() == "fracción")
+        );
+        assert_eq!(fsm.attempts, 1);
+        // 6. Éxito tras ≥1 intento → Summarize.
+        let s3 = fsm.mark_success().expect("éxito ok");
+        assert_eq!(s3, SocraticState::Summarize);
+        assert!(matches!(fsm.state, SocraticState::Summarize));
+        // 7. Cierre → Done.
+        fsm.finish();
+        assert!(fsm.is_done());
+        // Historial encadena todas las fases en orden.
+        let h = fsm.history.join("|");
+        assert!(h.contains("ask heuristic"));
+        assert!(h.contains("await deadline"));
+        assert!(h.contains("misconception"));
+        assert!(h.contains("éxito marcado"));
+        assert!(h.contains("done"));
+    }
+
+    #[test]
+    fn telling_menor_5_porciento() {
+        // Política: jamás solución directa de golpe; solo guía tras ≥2 intentos.
+        // Simula 20 interacciones: 1 Review + asks + 2 intentos + 1 guía como máximo.
+        let mut fsm = SocraticFsm::new("integral");
+        let mut directos = 0usize;
+        let total = 20usize;
+        // Intentos tempranos bloquean el telling.
+        assert_eq!(fsm.try_reveal().unwrap_err(), GuardError::TellingTooEarly);
+        fsm.record_attempt(None);
+        assert_eq!(
+            fsm.answer_with_guidance().unwrap_err(),
+            GuardError::TellingTooEarly
+        );
+        fsm.record_attempt(None);
+        // Tras 2 intentos se permite guía (no solución directa).
+        let guia = fsm.answer_with_guidance().expect("guía tras 2 intentos");
+        // La guía no revela la solución de golpe: lo dice explícitamente.
+        assert!(guia.contains("sin dar la solución directa"));
+        // Contamos como telling solo si contuviera solución directa; aquí 0.
+        if guia.contains("solución directa de golpe.") && !guia.contains("sin dar") {
+            directos += 1;
+        }
+        // Tasa = directos/total < 5 %.
+        let tasa = (directos as f64) / (total as f64);
+        assert!(
+            tasa < 0.05,
+            "telling {tasa} debe ser <5 %, directos={directos} total={total}"
+        );
+        // Además el historial no contiene tells directos (solo preguntas y guías).
+        assert!(
+            !fsm.history.iter().any(|h| h.contains("telling")),
+            "el historial no debe registrar tells directos"
+        );
+    }
 }

@@ -201,13 +201,76 @@ pub fn bkt_params_for_branch(branch_id: &str) -> BktParams {
     }
 }
 
-/// Mapeo fino por LO individual (43 LOs). `p_init` escala con `level_min`:
-/// primaria (level 1-2) → 0.40-0.35, secundaria (4-8) → 0.33-0.28,
-/// universidad (10-15) → 0.26-0.18. `p_learn` y `p_guess` se ajustan
-/// por bloque temático; `p_slip` crece con dificultad. Mantiene
-/// `bkt_params_for_branch` para compatibilidad con claves de perfil antiguas.
-pub fn bkt_params_for_lo(lo_id: &str) -> BktParams {
-    match lo_id {
+/// IDs de los 43 LOs del currículum cubiertos por [`bkt_params_for_lo_opt`].
+///
+/// Espejo manual de `Curriculum::all()` en
+/// `grafito-pedagogy/src/curriculum.rs`: 5 primaria, 11 secundaria, 8 AM1,
+/// 7 AM2, 6 Álgebra y 6 Probabilidad = 43 en total (ver test `all_counts`
+/// allí).
+/// `grafito-profile` no depende de `grafito-pedagogy` (hoja sin ciclos), así
+/// que la cobertura se verifica contra esta lista: si el currículum añade,
+/// renombra o quita un LO hay que actualizar esta constante Y el `match` de
+/// [`bkt_params_for_lo_opt`]; el test `all_los_covered_against_mirror` falla
+/// en caso contrario (longitud + `is_some` por ID).
+pub const ALL_LO_IDS: [&str; 43] = [
+    "pri-conteo",
+    "pri-fracc-vis",
+    "pri-perim-area",
+    "pri-proporciones",
+    "pri-datos",
+    "sec-fracc",
+    "sec-prop",
+    "sec-ec",
+    "sec-lineal",
+    "sec-cuad",
+    "sec-pend",
+    "sec-area",
+    "sec-trig",
+    "sec-vect",
+    "sec-prob",
+    "sec-pitagoras",
+    "am1-func",
+    "am1-lim",
+    "am1-cont",
+    "am1-der",
+    "am1-der-aplic",
+    "am1-int",
+    "am1-int-aplic",
+    "am1-sucesiones",
+    "am2-edo",
+    "am2-series",
+    "am2-taylor",
+    "am2-multivariable",
+    "am2-int-multi",
+    "am2-campos",
+    "am2-teoremas",
+    "alg-vectores",
+    "alg-rectas-planos",
+    "alg-matrices",
+    "alg-determinantes",
+    "alg-conicas",
+    "alg-transformaciones",
+    "prob-basica",
+    "prob-var",
+    "prob-distribuciones",
+    "prob-inferencia",
+    "prob-regresion",
+    "prob-muestreo",
+];
+
+/// Mapeo fino por LO individual (43 LOs) con distinción conocido/desconocido.
+///
+/// Fuente única de verdad para [`bkt_params_for_lo`] e [`is_known_lo`]: los
+/// 43 brazos retornan `BktParams` y el `match` completo se envuelve en
+/// `Some(...)`; cualquier otro ID usa `return None` temprano. Si se añade un
+/// LO en `grafito-pedagogy/src/curriculum.rs`, añadir su brazo aquí Y su ID
+/// en [`ALL_LO_IDS`].
+///
+/// `p_init` escala con `level_min`: primaria (1-2) → 0.40-0.35, secundaria
+/// (4-8) → 0.33-0.28, universidad (10-15) → 0.26-0.18. `p_learn`/`p_guess`
+/// por bloque temático; `p_slip` crece con dificultad.
+pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
+    Some(match lo_id {
         // Primaria (5) — p_init alto, slip bajo
         "pri-conteo" => BktParams {
             p_init: 0.40,
@@ -478,11 +541,42 @@ pub fn bkt_params_for_lo(lo_id: &str) -> BktParams {
             p_slip: 0.13,
         },
 
-        // Compat: claves legacy de perfil / tests
-        "functions" | "algebra" | "geometry" | "geometry3d" | "trigonometry" | "calculus"
-        | "stats" | "complex" => bkt_params_for_branch(lo_id),
+        // Cualquier otro ID es desconocido para el currículum. Incluye las
+        // claves legacy de perfil (`functions`/`algebra`/`geometry`/
+        // `geometry3d`/`trigonometry`/`calculus`/`stats`/`complex`), que NO
+        // son LOs: `bkt_params_for_lo` las resuelve vía `bkt_params_for_branch`
+        // para compatibilidad con perfiles antiguos. Se usa `return` temprano
+        // para no contaminar el `Some(match ...)` que envuelve los 43 LOs.
+        _ => return None,
+    })
+}
 
-        _ => BktParams::default(),
+/// ¿El ID corresponde a uno de los 43 LOs del currículum?
+///
+/// Equivale a `bkt_params_for_lo_opt(lo_id).is_some()`. Retorna `false` para
+/// claves legacy de rama (`algebra`, `calculus`, …) aunque
+/// [`bkt_params_for_lo`] les dé parámetros: esas no son LOs.
+pub fn is_known_lo(lo_id: &str) -> bool {
+    bkt_params_for_lo_opt(lo_id).is_some()
+}
+
+/// Parámetros BKT por LO con fallback compatible.
+///
+/// - LO conocido (ver [`ALL_LO_IDS`]) → parámetros diferenciados.
+/// - Clave legacy de rama (`functions`, `algebra`, `geometry`, `geometry3d`,
+///   `trigonometry`, `calculus`, `stats`, `complex`) → delega en
+///   [`bkt_params_for_branch`] (perfiles antiguos).
+/// - Cualquier otro ID → [`BktParams::default`].
+///
+/// Sin pánicos: todo `match`, ningún `unwrap`/`expect`.
+pub fn bkt_params_for_lo(lo_id: &str) -> BktParams {
+    match bkt_params_for_lo_opt(lo_id) {
+        Some(params) => params,
+        None => match lo_id {
+            "functions" | "algebra" | "geometry" | "geometry3d" | "trigonometry" | "calculus"
+            | "stats" | "complex" => bkt_params_for_branch(lo_id),
+            _ => BktParams::default(),
+        },
     }
 }
 
@@ -585,54 +679,32 @@ mod tests {
     }
 
     #[test]
-    fn bkt_params_for_lo_covers_all_43_los_and_validates() {
-        let all_ids = [
-            "pri-conteo",
-            "pri-fracc-vis",
-            "pri-perim-area",
-            "pri-proporciones",
-            "pri-datos",
-            "sec-fracc",
-            "sec-prop",
-            "sec-ec",
-            "sec-lineal",
-            "sec-cuad",
-            "sec-pend",
-            "sec-area",
-            "sec-trig",
-            "sec-vect",
-            "sec-prob",
-            "sec-pitagoras",
-            "am1-func",
-            "am1-lim",
-            "am1-cont",
-            "am1-der",
-            "am1-der-aplic",
-            "am1-int",
-            "am1-int-aplic",
-            "am1-sucesiones",
-            "am2-edo",
-            "am2-series",
-            "am2-taylor",
-            "am2-multivariable",
-            "am2-int-multi",
-            "am2-campos",
-            "am2-teoremas",
-            "alg-vectores",
-            "alg-rectas-planos",
-            "alg-matrices",
-            "alg-determinantes",
-            "alg-conicas",
-            "alg-transformaciones",
-            "prob-basica",
-            "prob-var",
-            "prob-distribuciones",
-            "prob-inferencia",
-            "prob-regresion",
-            "prob-muestreo",
-        ];
-        assert_eq!(all_ids.len(), 43, "deben ser 43 LOs");
-        for id in all_ids {
+    fn all_lo_ids_mirror_has_43_entries() {
+        // Espejo de `Curriculum::all().len()` (ver
+        // `grafito-pedagogy/src/curriculum.rs::all_counts`): si el currículum
+        // cambia de tamaño, actualizar `ALL_LO_IDS` + `bkt_params_for_lo_opt`.
+        assert_eq!(ALL_LO_IDS.len(), 43, "deben ser 43 LOs");
+        // Sin duplicados.
+        let mut sorted = ALL_LO_IDS;
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert_ne!(pair[0], pair[1], "ID duplicado en ALL_LO_IDS: {}", pair[0]);
+        }
+    }
+
+    #[test]
+    fn all_los_covered_against_mirror() {
+        // Verifica por ID que cada LO del espejo tiene parámetros conocidos y
+        // válidos. Falla si falta un brazo en `bkt_params_for_lo_opt` (opt
+        // retornaría `None`) o si algún parámetro es inválido.
+        assert_eq!(ALL_LO_IDS.len(), 43, "deben ser 43 LOs");
+        for id in ALL_LO_IDS {
+            assert!(
+                is_known_lo(id),
+                "{id} debe ser un LO conocido (falta brazo en bkt_params_for_lo_opt)"
+            );
+            let opt = bkt_params_for_lo_opt(id);
+            assert!(opt.is_some(), "{id} debe tener parámetros Some");
             let p = bkt_params_for_lo(id);
             assert!(p.validate().is_ok(), "{id} debe validar: {p:?}");
             // p_init decrece con nivel: primaria ~0.36-0.40, secundaria ~0.26-0.33, uni ~0.17-0.26
@@ -642,13 +714,20 @@ mod tests {
                 p.p_init
             );
         }
-        // Unknown retorna default
+        // Desconocido retorna None + fallback default.
+        assert!(!is_known_lo("no-existe"));
+        assert!(bkt_params_for_lo_opt("no-existe").is_none());
         assert_eq!(bkt_params_for_lo("no-existe"), BktParams::default());
-        // Legacy branch ids delegan
-        assert_eq!(
-            bkt_params_for_lo("calculus"),
-            bkt_params_for_branch("calculus")
-        );
+        // Claves legacy de rama NO son LOs (opt None) pero mantienen delegación.
+        for legacy in ["algebra", "calculus", "geometry3d", "stats", "complex"] {
+            assert!(!is_known_lo(legacy), "{legacy} no es un LO");
+            assert!(bkt_params_for_lo_opt(legacy).is_none());
+            assert_eq!(
+                bkt_params_for_lo(legacy),
+                bkt_params_for_branch(legacy),
+                "{legacy} debe delegar en branch"
+            );
+        }
     }
 
     #[test]

@@ -64,6 +64,22 @@ const RESPONSES_MIN_OUTPUT_TOKENS: usize = 16;
 const RESPONSES_MAX_BODY_BYTES: usize = 64 * 1024;
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
+/// Truncado del cuerpo de error HTTP en mensajes: 500 chars sin secretos.
+/// El cuerpo es dato del proveedor (nunca incluye la API key); se acota para
+/// no saturar el log `assistant_remote_event` ni la UI.
+const MAX_ERROR_BODY_CHARS: usize = 500;
+/// Clamp de `Retry-After` en 429: 1s evita busy-retry, 120s evita bloquear la
+/// sesión. Nunca se duerme el worker (es cancelable vía `CancellationToken`);
+/// sólo se informa "reintentá en Ns" y la UI decide cuándo reintentar.
+const RETRY_AFTER_MIN_SECS: u64 = 1;
+const RETRY_AFTER_MAX_SECS: u64 = 120;
+/// Timeouts remotos: simple 60s (`RequestBudget::default`), agente 30s por
+/// turno (`AgentBudget::default` en grafito-agent/loop_engine.rs:43). Piso
+/// 100ms = mínimo válido de `RequestBudget::validate`; techo 120s = cap
+/// absoluto. Ningún path construye `Duration` 0 ni >120s (ver
+/// `effective_remote_timeout`).
+const REMOTE_TIMEOUT_MIN_MS: u64 = 100;
+const REMOTE_TIMEOUT_MAX_MS: u64 = 120_000;
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
 const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
@@ -916,6 +932,32 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
     endpoint_with_path(settings, "messages")
 }
 
+/// Matriz de fallback por familia OpenCodeGo (router `remote_protocol`).
+///
+/// | Familia / modelo | Protocolo (`RemoteProtocol`) | Endpoint `POST` | Auth |
+/// |---|---|---|---|
+/// | `muse-spark-*` (1.2/1.3, futuras 1.x por `contains`) | `OpenAiResponses` | `{base}/responses` | Bearer (`sanitize_api_key`) |
+/// | `mimo-2.5-vl` (visión) | `AnthropicMessages` | `{base}/messages` | `x-api-key` + `anthropic-version: 2023-06-01` |
+/// | `fusion` | `Fusion` | draft `{base}/messages` (shape mimo, sin historial) + audit `{base}/chat/completions` (`deepseek-v4-pro`) | draft `x-api-key`, audit Bearer |
+/// | resto OpenCodeGo (`deepseek-*`, `glm-*`, …) + `DeepSeek`/`OllamaLocal`/`Custom` | `OpenAiChatCompletions` | `{base}/chat/completions` (`stream:false`) | Bearer u omitida (Ollama local) |
+///
+/// Comportamiento ante fallos (sin reintento automático en este crate; el
+/// worker es cancelable y dormir bloquearía la cancelación):
+///
+/// | Fallo | chat (`send_openai_request`) | responses (`request_responses_completion`) | anthropic (`request_anthropic_completion`) | fusion (`request_fusion_completion_with_endpoints`) |
+/// |---|---|---|---|---|
+/// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 64 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
+/// | HTTP 429 | mismo formato + ` (reintentá en {N}s)` con `Retry-After` parseado (entero o fecha HTTP, clamp 1..120s) | ídem | ídem | ídem por fase (draft/audit); el mensaje final conserva el prefijo Fusion |
+/// | timeout/transporte | `transport_error`: `timed out after {N}s` / `could not connect` / `request failed`, sin URL ni clave | ídem | ídem (requiere clave, si falta: `API key is unavailable`) | draft usa mitad del timeout, audit el resto (`checked_sub`, nunca 0); timeout total conserva `effective_remote_timeout` |
+/// | cuerpo largo | truncado a `MAX_ERROR_BODY_CHARS` 500 chars, sin eco de secretos | ídem | ídem | ídem |
+/// | `status:incomplete` / `stop:max_tokens` | N/A (`finish_reason` debe ser `stop`, si es `length` → schema error sin eco) | `RemoteCompletion{truncated:true}` con el texto parcial | `stop_reason:max_tokens` → `truncated:true` | se propaga `truncated` del audit final |
+///
+/// Fallback de sesión (no en este crate): `grafito-app/src/assistant.rs`
+/// reintenta una vez `muse-spark --500/timeout--> deepseek-v4-flash` sin tocar
+/// la preferencia guardada. Modo agente con tools (`agent.rs`): sólo soporta
+/// `OpenAiChatCompletions`; Spark/Fusion devuelven error explícito que sugiere
+/// chat simple o deepseek; su `HTTP {status}` aún no incluye `Retry-After`
+/// (deuda documentada).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RemoteProtocol {
     OpenAiChatCompletions,
@@ -948,6 +990,287 @@ fn remote_protocol(settings: &ProviderSettings) -> RemoteProtocol {
         OPENCODE_FUSION_MODEL => RemoteProtocol::Fusion,
         _ => RemoteProtocol::OpenAiChatCompletions,
     }
+}
+
+/// Timeout efectivo para un turno simple: clamp `100ms..=120s`.
+///
+/// `RequestBudget::default` es 60s; el modo agente usa 30s por turno
+/// (`AgentBudget::default.per_turn_timeout`). El clamp garantiza que ningún
+/// path construye `Duration::ZERO` (reqwest lo trataría como timeout
+/// inmediato / sin espera útil) ni supera el cap absoluto de 120s. El worker
+/// conserva este timeout y chequea `CancellationToken` antes y después de
+/// `send()`; no se duerme dentro del turno.
+fn effective_remote_timeout_ms(timeout_ms: u64) -> u64 {
+    timeout_ms.clamp(REMOTE_TIMEOUT_MIN_MS, REMOTE_TIMEOUT_MAX_MS)
+}
+
+fn effective_remote_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(effective_remote_timeout_ms(timeout_ms))
+}
+
+/// Trunca el cuerpo de error a `MAX_ERROR_BODY_CHARS` por chars (no bytes)
+/// para no partir UTF-8. El cuerpo nunca contiene la API key (sólo dato del
+/// proveedor); el truncado evita saturar logs/UI.
+fn truncate_error_body(body: &str) -> String {
+    body.chars().take(MAX_ERROR_BODY_CHARS).collect()
+}
+
+/// Parsea `Retry-After` (segundos enteros o fecha HTTP) con clamp 1..=120s.
+///
+/// Acepta `Delay-Seconds` (`"7"`, `"0"` → 1, `"3600"` → 120, negativos → 1)
+/// y los tres formatos de fecha HTTP (IMF-fixdate, RFC 850, asctime); una
+/// fecha futura se convierte en delta vs `now`, una pasada en 1s. Retorna
+/// `None` si el valor es ilegible (el 429 se informa igual, sin sugerencia).
+/// Puro y sin I/O: el worker nunca duerme, sólo anota "reintentá en Ns".
+fn parse_retry_after_secs(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = trimmed.parse::<i64>() {
+        let clamped = secs.clamp(RETRY_AFTER_MIN_SECS as i64, RETRY_AFTER_MAX_SECS as i64);
+        return Some(clamped as u64);
+    }
+    parse_http_date_to_system_time(trimmed).map(|when| {
+        let now = std::time::SystemTime::now();
+        match when.duration_since(now) {
+            Ok(delta) => delta
+                .as_secs()
+                .clamp(RETRY_AFTER_MIN_SECS, RETRY_AFTER_MAX_SECS),
+            Err(_) => RETRY_AFTER_MIN_SECS,
+        }
+    })
+}
+
+fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after_secs)
+}
+
+/// Error HTTP con cuerpo truncado y, sólo en 429 con `Retry-After` legible,
+/// sufijo ` (reintentá en {N}s)`. No incluye URL, headers ni claves.
+fn http_status_error(status: u16, body: &str, retry_after_secs: Option<u64>) -> String {
+    let snippet = truncate_error_body(body);
+    if status == 429 {
+        if let Some(secs) = retry_after_secs {
+            return format!("remote assistant returned HTTP 429: {snippet} (reintentá en {secs}s)");
+        }
+    }
+    format!("remote assistant returned HTTP {status}: {snippet}")
+}
+
+fn month_number(month: &str) -> Option<u32> {
+    match month {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
+}
+
+/// Días desde 1970-01-01 (algoritmo civil de Howard Hinnant, sólo fechas
+/// Gregorianas; suficiente para `Retry-After` que siempre es futuro cercano).
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400) as u64;
+    let mp = (month as i64 + 9).rem_euclid(12) as u64;
+    let doy = (153 * mp + 2) / 5 + u64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    Some(days)
+}
+
+fn parse_hms(text: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = text.split(':');
+    let hour: u64 = parts.next()?.parse().ok()?;
+    let minute: u64 = parts.next()?.parse().ok()?;
+    let second: u64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
+fn http_date_to_system_time(
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u64,
+    minute: u64,
+    second: u64,
+) -> Option<std::time::SystemTime> {
+    let days = days_from_civil(year, month, day)?;
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add((hour * 3_600 + minute * 60 + second) as i64)?;
+    if secs < 0 {
+        return None;
+    }
+    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
+}
+
+/// Parsea una fecha HTTP en los tres formatos (`IMF-fixdate`, `RFC 850`,
+/// `asctime`) a `SystemTime`. Sin dependencias nuevas (httpdate no es dep
+/// directa); sólo lo usa `parse_retry_after_secs`.
+fn parse_http_date_to_system_time(value: &str) -> Option<std::time::SystemTime> {
+    let value = value.trim();
+    // IMF-fixdate: "Sun, 06 Nov 1994 08:49:37 GMT".
+    if let Some(rest) = value.split_once(',') {
+        let rest = rest.1.trim();
+        // Distingue RFC 850 ("06-Nov-94 ...") por el guion en la fecha.
+        if rest.chars().take(7).any(|c| c == '-') {
+            // RFC 850: "Sunday, 06-Nov-94 08:49:37 GMT".
+            let mut parts = rest.split_whitespace();
+            let date = parts.next()?;
+            let time = parts.next()?;
+            let zone = parts.next()?;
+            if zone != "GMT" || parts.next().is_some() {
+                return None;
+            }
+            let mut date_parts = date.split('-');
+            let day: u32 = date_parts.next()?.parse().ok()?;
+            let month = month_number(date_parts.next()?)?;
+            let year2: i64 = date_parts.next()?.parse().ok()?;
+            if date_parts.next().is_some() {
+                return None;
+            }
+            let year = if (70..=99).contains(&year2) {
+                1900 + year2
+            } else {
+                2000 + year2
+            };
+            let (hour, minute, second) = parse_hms(time)?;
+            return http_date_to_system_time(year, month, day, hour, minute, second);
+        }
+        // IMF-fixdate: "06 Nov 1994 08:49:37 GMT".
+        let mut parts = rest.split_whitespace();
+        let day: u32 = parts.next()?.parse().ok()?;
+        let month = month_number(parts.next()?)?;
+        let year: i64 = parts.next()?.parse().ok()?;
+        let (hour, minute, second) = parse_hms(parts.next()?)?;
+        if parts.next()? != "GMT" || parts.next().is_some() {
+            return None;
+        }
+        return http_date_to_system_time(year, month, day, hour, minute, second);
+    }
+    // asctime: "Sun Nov  6 08:49:37 1994" (día con padding de espacio).
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() == 5 {
+        let month = month_number(parts[1])?;
+        let day: u32 = parts[2].parse().ok()?;
+        let (hour, minute, second) = parse_hms(parts[3])?;
+        let year: i64 = parts[4].parse().ok()?;
+        return http_date_to_system_time(year, month, day, hour, minute, second);
+    }
+    None
+}
+
+// ADR-001 — Streaming SSE para Responses API (`response.stream=true`).
+//
+// Estado actual (2026-09-04): transporte NO-streaming (`stream` ausente en el
+// payload, `max_output_tokens` con piso 2048). Verificado contra el endpoint
+// real: 200 en ~2s para "ok". Se mantiene así en este turno para no romper el
+// wire format ni la cancelación cooperativa (el worker sólo chequea
+// `CancellationToken` antes/después de `send()`).
+//
+// Diseño futuro (no cableado; helpers puros abajo como primer paso):
+//  1. Payload: `{"model","instructions","input","max_output_tokens","stream":true}`
+//     + header `Accept: text/event-stream`.
+//  2. Lectura: `reqwest::blocking::Response::chunk()` en bucle con deadline
+//     absoluta (`effective_remote_timeout`) y poll de cancelación cada ~200ms
+//     (precedente: `grafito-anim` engine poll 200ms). Cada chunk se acumula en
+//     un buffer con cap (p.ej. `RESPONSES_MAX_BODY_BYTES`); líneas parciales se
+//     reensamblan por `\n` antes de parsear.
+//  3. Parser: líneas `event: <tipo>` + `data: <json>`; tipos relevantes
+//     `response.output_text.delta` (acumula `delta`), `response.completed`
+//     (cierra con `truncated:false`), `response.incomplete` (cierra con
+//     `truncated:true`), `response.failed` (error acotado 200 chars).
+//     `data: [DONE]` termina el stream. Ver `responses_sse_delta_text` y
+//     `collect_responses_sse_text`.
+//  4. Progreso opcional: `Option<&mut dyn FnMut(&str)>` invocada sólo con el
+//     texto acumulado acotado (`max_output_chars`); nunca bloquea ni duerme:
+//     si el callback pisa cancelación, el loop aborta en el próximo poll.
+//  5. Fallback: cualquier error de stream (content-type inesperado, JSON
+//     inválido, timeout) cae a un único error `schema`/`transport` sin eco de
+//     secretos, idéntico al path no-streaming. No se reintenta en el worker.
+//  6. Puerta de activación: feature o parámetro `stream: bool` en
+//     `RequestBudget`/payload builder, con el default actual `false` hasta que
+//     la UI necesite render progresivo. Cuando se active, el test stub debe
+//     servir `Content-Type: text/event-stream` con deltas fragmentados en
+//     varios `write_all` + `flush` para probar reensamblado y cancelación.
+//
+// Decisión de este turno: NO se cambia el wire (sin `stream:true`, sin
+// `progress` en el path de red). Sólo se agregan los parsers puros + tests
+// unitarios para dejar el diseño verificado sin riesgo.
+/// Callback de progreso para futuro streaming SSE (ADR-001, aún no cableado
+/// al transporte: el wire sigue siendo no-streaming para no romper el formato
+/// verificado). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
+pub type ResponsesProgressCallback<'a> = dyn FnMut(&str) + Send + 'a;
+
+/// Extrae el delta de texto de un evento SSE de Responses.
+///
+/// Acepta el JSON de una línea `data:` con `type: "response.output_text.delta"`
+/// (y alias `"response.text.delta"`) y devuelve `delta`. Retorna `None` para
+/// eventos de control (`response.completed`, `response.failed`, …) o JSON
+/// ilegible. Puro, sin I/O: primer paso del ADR-001.
+pub fn responses_sse_delta_text(event_data_json: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(event_data_json.trim()).ok()?;
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    if event_type == "response.output_text.delta" || event_type == "response.text.delta" {
+        value
+            .get("delta")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+/// Junta deltas SSE de un cuerpo `text/event-stream` completo (helper futuro).
+///
+/// Itera líneas `data: <json>`, ignora `:ping`/`event:` y `data: [DONE]`,
+/// concatena `responses_sse_delta_text` y detecta `response.incomplete` para
+/// marcar `truncated`. Puro y acotado por el llamante; el transporte real aún
+/// no lo usa (ADR-001).
+pub fn collect_responses_sse_text(sse_body: &str) -> (String, bool) {
+    let mut text = String::new();
+    let mut truncated = false;
+    for line in sse_body.lines() {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        if data.contains("\"response.incomplete\"") {
+            truncated = true;
+            continue;
+        }
+        if data.contains("\"response.failed\"") {
+            continue;
+        }
+        if let Some(delta) = responses_sse_delta_text(data) {
+            text.push_str(&delta);
+        }
+    }
+    (text, truncated)
 }
 
 fn endpoint_with_path(settings: &ProviderSettings, suffix: &str) -> Result<Url, String> {
@@ -1598,10 +1921,19 @@ pub fn request_remote_models_with_api_key_on_worker(
             return Err("remote model request was cancelled".into());
         }
         if !response.status().is_success() {
-            return Err(format!(
-                "remote model request returned HTTP {}",
-                response.status().as_u16()
-            ));
+            let status = response.status().as_u16();
+            // 429 informa "reintentá en Ns" sin dormir el worker (cancelable).
+            let retry_after = if status == 429 {
+                retry_after_secs_from_headers(response.headers())
+            } else {
+                None
+            };
+            if let Some(secs) = retry_after {
+                return Err(format!(
+                    "remote model request returned HTTP 429 (reintentá en {secs}s)"
+                ));
+            }
+            return Err(format!("remote model request returned HTTP {status}"));
         }
         let response_bytes = read_bounded_response_body(response, MAX_MODELS_RESPONSE_BYTES)?;
         let body: Value = serde_json::from_slice(&response_bytes)
@@ -1642,7 +1974,9 @@ fn request_remote(
         if cancellation.is_cancelled() {
             return Err("remote assistant request was cancelled".into());
         }
-        let timeout = Duration::from_millis(request.budget.timeout_ms.min(120_000));
+        // Clamp 100ms..=120s: nunca 0 ni >120s (simple 60s default, agente
+        // 30s/turno en grafito-agent/loop_engine.rs). Ver `effective_remote_timeout`.
+        let timeout = effective_remote_timeout(request.budget.timeout_ms);
         match protocol {
             RemoteProtocol::OpenAiChatCompletions => request_openai_completion(
                 chat_completion_endpoint(&settings)?,
@@ -1863,13 +2197,15 @@ fn request_responses_completion(
     }
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<no body>".to_string())
-            .chars()
-            .take(500)
-            .collect::<String>();
-        return Err(format!("remote assistant returned HTTP {status}: {body}"));
+        // Retry-After sólo en 429; no se duerme el worker cancelable, sólo se
+        // anota "reintentá en Ns" (clamp 1..120s, entero o fecha HTTP).
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
     }
     let response_bytes = read_bounded_response_body(response, RESPONSES_MAX_BODY_BYTES)?;
     let body: Value = serde_json::from_slice(&response_bytes)
@@ -1968,13 +2304,13 @@ fn request_anthropic_completion(
     }
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<no body>".to_string())
-            .chars()
-            .take(500)
-            .collect::<String>();
-        return Err(format!("remote assistant returned HTTP {status}: {body}"));
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
     }
     let response_bytes =
         read_bounded_response_body(response, response_body_limit(max_output_chars))?;
@@ -2041,13 +2377,13 @@ fn send_openai_request(
     }
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response
-            .text()
-            .unwrap_or_else(|_| "<no body>".to_string())
-            .chars()
-            .take(500)
-            .collect::<String>();
-        return Err(format!("remote assistant returned HTTP {status}: {body}"));
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
     }
     let response_bytes =
         read_bounded_response_body(response, response_body_limit(max_output_chars))?;
@@ -3040,5 +3376,223 @@ mod tests {
             result.unwrap_err(),
             "Fusion could not complete the audit; its draft was discarded."
         );
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_with_clamp_1_to_120() {
+        assert_eq!(parse_retry_after_secs("7"), Some(7));
+        assert_eq!(parse_retry_after_secs("  45  "), Some(45));
+        assert_eq!(parse_retry_after_secs("0"), Some(1));
+        assert_eq!(parse_retry_after_secs("-5"), Some(1));
+        assert_eq!(parse_retry_after_secs("3600"), Some(120));
+        assert_eq!(parse_retry_after_secs(""), None);
+        assert_eq!(parse_retry_after_secs("not-a-date"), None);
+    }
+
+    #[test]
+    fn retry_after_parses_http_dates_with_clamp() {
+        // Futuro lejano → techo 120s; pasado → piso 1s. Sin dormir el worker.
+        assert_eq!(
+            parse_retry_after_secs("Wed, 21 Oct 2030 07:28:00 GMT"),
+            Some(120)
+        );
+        assert_eq!(
+            parse_retry_after_secs("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(1)
+        );
+        // RFC 850 pasado → 1s.
+        assert_eq!(
+            parse_retry_after_secs("Sunday, 06-Nov-94 08:49:37 GMT"),
+            Some(1)
+        );
+        // asctime futuro → 120s.
+        assert_eq!(
+            parse_retry_after_secs("Wed Oct 21 07:28:00 2030"),
+            Some(120)
+        );
+        assert_eq!(parse_retry_after_secs("Tomorrow, never"), None);
+    }
+
+    #[test]
+    fn http_status_error_truncates_body_and_announces_retry_without_secrets() {
+        let long = "x".repeat(2_000);
+        let error = http_status_error(500, &long, None);
+        assert!(error.starts_with("remote assistant returned HTTP 500: "));
+        let snippet = error
+            .strip_prefix("remote assistant returned HTTP 500: ")
+            .unwrap();
+        assert_eq!(snippet.chars().count(), MAX_ERROR_BODY_CHARS);
+        assert!(!error.contains("test-key"));
+
+        let rate_limited = http_status_error(429, "busy", Some(7));
+        assert!(rate_limited.contains("429"));
+        assert!(rate_limited.contains("reintentá en 7s"));
+
+        let without_hint = http_status_error(429, "busy", None);
+        assert!(without_hint.contains("429"));
+        assert!(!without_hint.contains("reintentá"));
+    }
+
+    #[test]
+    fn effective_timeout_never_uses_zero_or_above_120s() {
+        // Simple 60s default y agente 30s/turno caben; 0 y >120s se clampean.
+        assert_eq!(effective_remote_timeout_ms(0), REMOTE_TIMEOUT_MIN_MS);
+        assert_eq!(effective_remote_timeout_ms(60_000), 60_000);
+        assert_eq!(effective_remote_timeout_ms(30_000), 30_000);
+        assert_eq!(
+            effective_remote_timeout_ms(1_000_000),
+            REMOTE_TIMEOUT_MAX_MS
+        );
+        assert!(!effective_remote_timeout(0).is_zero());
+        assert!(effective_remote_timeout(u64::MAX) <= Duration::from_secs(120));
+        assert!(effective_remote_timeout(60_000) == Duration::from_secs(60));
+    }
+
+    #[test]
+    fn sse_delta_parser_extracts_only_text_deltas() {
+        assert_eq!(
+            responses_sse_delta_text(r#"{"type":"response.output_text.delta","delta":"Hola"}"#)
+                .as_deref(),
+            Some("Hola")
+        );
+        assert_eq!(
+            responses_sse_delta_text(r#"{"type":"response.text.delta","delta":"mundo"}"#)
+                .as_deref(),
+            Some("mundo")
+        );
+        assert_eq!(
+            responses_sse_delta_text(r#"{"type":"response.completed"}"#),
+            None
+        );
+        assert_eq!(responses_sse_delta_text("not-json"), None);
+    }
+
+    #[test]
+    fn sse_collector_joins_deltas_and_flags_incomplete() {
+        let body = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: [DONE]\n";
+        assert_eq!(
+            collect_responses_sse_text(body),
+            ("Hola mundo".to_string(), false)
+        );
+        let truncated = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"parcial\"}\ndata: {\"type\":\"response.incomplete\"}\n";
+        assert_eq!(
+            collect_responses_sse_text(truncated),
+            ("parcial".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn responses_stub_reports_429_with_retry_after_without_sleeping() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = "busy";
+            write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 7\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let error = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("429"), "{error}");
+        assert!(error.contains("reintentá en 7s"), "{error}");
+        assert!(!error.contains("test-key"), "{error}");
+    }
+
+    #[test]
+    fn responses_stub_truncates_long_500_body_without_secrets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let long_body = "y".repeat(2_000);
+        let server_body = long_body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let _ = stream.read(&mut buffer);
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                server_body.len(),
+                server_body
+            )
+            .unwrap();
+        });
+        let error = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(
+            error.starts_with("remote assistant returned HTTP 500: "),
+            "{error}"
+        );
+        let snippet = error
+            .strip_prefix("remote assistant returned HTTP 500: ")
+            .unwrap();
+        assert_eq!(snippet.chars().count(), MAX_ERROR_BODY_CHARS);
+        assert!(!error.contains("test-key"));
+        assert!(long_body.starts_with(snippet));
+    }
+
+    #[test]
+    fn responses_stub_marks_incomplete_as_truncated_with_partial_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/responses",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 8192];
+            let _ = stream.read(&mut buffer);
+            let body = r#"{"status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"parcial"}]}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let completion = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(1),
+            64,
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "parcial");
+        assert!(completion.truncated);
     }
 }

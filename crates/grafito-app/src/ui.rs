@@ -206,7 +206,7 @@ fn draw_edit_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
 fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     ui.menu_button("Vista", |ui| {
         ui.checkbox(&mut app.show_grid, "Mostrar cuadrícula");
-        ui.checkbox(&mut app.dark_mode, "Modo oscuro")
+        ui.checkbox(&mut app.dark_mode, "Modo oscuro (Ctrl+T)")
             .clicked()
             .then(|| {
                 if app.dark_mode {

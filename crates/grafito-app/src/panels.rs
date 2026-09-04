@@ -10,9 +10,9 @@ use grafito_geometry::{Color, RegularPolychoron, RegularPolytopeFamily};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
-    CARD_SPACING, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION, PANEL_LEFT_MIN, RADIUS_LG,
-    RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_LG,
-    TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
+    CARD_SPACING, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, PANEL_LEFT_DEFAULT, PANEL_LEFT_MAX_FRACTION,
+    PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM,
+    SPACE_XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS, ZOOM_ICON_HIT,
 };
 use std::collections::VecDeque;
 use std::fs::File;
@@ -959,8 +959,8 @@ pub(crate) fn draw_cas_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     egui::SidePanel::left("cas_panel")
         .show_separator_line(false)
         .default_width(260.0)
-        .min_width(180.0)
-        .max_width((ctx.available_rect().width() * 0.45).max(200.0))
+        .min_width(PANEL_LEFT_MIN)
+        .max_width((ctx.available_rect().width() * PANEL_LEFT_MAX_FRACTION).max(200.0))
         .resizable(true)
         .frame(
             egui::Frame::none()
@@ -2127,7 +2127,8 @@ pub(crate) fn draw_right_properties_panel(app: &mut GrafitoApp, ctx: &egui::Cont
     egui::SidePanel::right("right_properties")
         .show_separator_line(false)
         .default_width(340.0)
-        .min_width(292.0)
+        .min_width(DRAWER_RIGHT_MIN)
+        .max_width(DRAWER_RIGHT_MAX)
         .resizable(true)
         .frame(
             egui::Frame::none()

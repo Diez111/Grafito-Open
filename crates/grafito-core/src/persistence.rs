@@ -629,6 +629,164 @@ fn create_temporary_file(
     ))
 }
 
+/// Autosave con sidecar `.autosave` (parte pura; el cableado UI va en app.rs).
+///
+/// Diseño:
+/// - Por cada documento `ruta`, el sidecar es `ruta` + [`AUTOSAVE_SUFFIX`]
+///   (p. ej. `nota.grafito` → `nota.grafito.autosave`; ver
+///   [`autosave_sidecar_path`]). La escritura es atómica vía `write_atomic`
+///   (temp + fsync + rename, mismas garantías que el guardado normal).
+/// - Debounce del lado UI: no escribir en cada keystroke; esperar
+///   [`AUTOSAVE_DEBOUNCE_SECS`] segundos de inactividad antes de llamar a
+///   [`write_autosave_sidecar`]. El helper de estado `AutosaveDebouncer`
+///   vive en `grafito-app/src/utils.rs` (capa Piel).
+/// - Recovery al arranque: [`load_autosave_candidate`] compara mtimes y solo
+///   retorna `Some` si el sidecar es ESTRICTAMENTE más nuevo que el
+///   documento (`>`; igualdad = el sidecar espeja el último guardado, nada
+///   que recuperar) o si el documento falta (crasheo antes del primer
+///   guardado). La lectura reutiliza `read_document_file`, así que el
+///   sidecar hereda el hardening TOCTOU (`O_NOFOLLOW`, rechazo de symlinks).
+///   Sidecar corrupto → `Err` para que la UI ofrezca descartarlo.
+/// - Tras un guardado normal o una recuperación aceptada, la UI debe borrar
+///   el sidecar (`fs::remove_file`, ignorando `NotFound`).
+///
+/// TODO(app.rs — otro agente, NO implementar en este crate):
+/// 1. Al arranque con ruta conocida `P`: llamar `load_autosave_candidate(P)`;
+///    si `Some(c)`, diálogo modal "Se encontró un autosave más nuevo
+///    (sidecar {c.sidecar_modified_epoch} > documento
+///    {c.main_modified_epoch:?})" con [Recuperar autosave] (cargar
+///    `c.document`, luego borrar el sidecar) y [Descartar] (borrar sidecar,
+///    cargar `P`). Si `Err`, diálogo de sidecar corrupto con [Descartar].
+/// 2. En cada edición: `AutosaveDebouncer::mark_dirty(now)`; en el tick de la
+///    UI, si `should_autosave(now)` → `write_autosave_sidecar(&doc, P)` en
+///    background thread + `mark_saved()`. Nunca I/O en `Ui::`.
+/// 3. Tras `write_document_atomic` exitoso → borrar el sidecar si existe.
+pub const AUTOSAVE_SUFFIX: &str = ".autosave";
+
+/// Segundos de inactividad tras una edición antes de escribir el sidecar.
+///
+/// 5 s: suficientemente largo para no martillar el disco en cada keystroke
+/// (el sidecar re-serializa y re-valida todo el documento vía
+/// `serialize_document`), suficientemente corto para que un crasheo pierda
+/// como máximo ~5 s de trabajo. La UI implementa la espera con
+/// `AutosaveDebouncer` (`grafito-app/src/utils.rs`); esta constante es la
+/// fuente única del retardo por defecto.
+pub const AUTOSAVE_DEBOUNCE_SECS: u64 = 5;
+
+/// Calcula la ruta del sidecar de autosave para un documento (`ruta` +
+/// `.autosave`). Retorna `None` si la ruta no tiene nombre de archivo
+/// (p. ej. `""` o un directorio raíz). Pura, sin I/O, sin pánicos.
+pub fn autosave_sidecar_path(main_path: impl AsRef<Path>) -> Option<PathBuf> {
+    let main = main_path.as_ref();
+    let file_name = main.file_name()?;
+    let mut sidecar_name = file_name.to_owned();
+    sidecar_name.push(AUTOSAVE_SUFFIX);
+    Some(main.with_file_name(&sidecar_name))
+}
+
+/// Escribe el sidecar de autosave de forma atómica. Retorna la ruta del
+/// sidecar escrito. Falla cerrado si el documento no valida.
+pub fn write_autosave_sidecar(
+    document: &Document,
+    main_path: impl AsRef<Path>,
+) -> Result<PathBuf, DocumentPersistenceError> {
+    let main = main_path.as_ref();
+    let sidecar = autosave_sidecar_path(main).ok_or_else(|| {
+        DocumentPersistenceError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "autosave sidecar needs a document path with a file name",
+        ))
+    })?;
+    let json = serialize_document(document)?;
+    write_atomic(&sidecar, json.as_bytes()).map_err(DocumentPersistenceError::Io)?;
+    Ok(sidecar)
+}
+
+/// Candidato de recuperación: sidecar más nuevo ya validado y deserializado.
+#[derive(Debug)]
+pub struct AutosaveCandidate {
+    /// Ruta del documento principal (puede no existir aún).
+    pub main_path: PathBuf,
+    /// Ruta del sidecar del que se cargó `document`.
+    pub sidecar_path: PathBuf,
+    /// Documento del sidecar, validado vía `read_document_file`.
+    pub document: Document,
+    /// mtime del documento principal como epoch (display; `None` si falta).
+    pub main_modified_epoch: Option<u64>,
+    /// mtime del sidecar como epoch (display; la comparación de recencia usa
+    /// `SystemTime` preciso en [`should_offer_autosave`]).
+    pub sidecar_modified_epoch: u64,
+}
+
+/// ¿Debe la UI ofrecer recuperación? Pura y determinista para tests.
+/// Compara `SystemTime` con precisión completa (nanosegundos), NO segundos
+/// truncados: el sidecar y el documento pueden escribirse dentro del mismo
+/// segundo y el truncado a `u64` los declararía iguales.
+/// - documento ausente (`None`) → sí (crasheo antes del primer guardado);
+/// - sidecar estrictamente más nuevo → sí;
+/// - en otro caso (igual o más viejo) → no.
+pub fn should_offer_autosave(
+    main_modified: Option<std::time::SystemTime>,
+    sidecar_modified: std::time::SystemTime,
+) -> bool {
+    match main_modified {
+        None => true,
+        Some(main) => sidecar_modified > main,
+    }
+}
+
+/// mtime de un archivo con precisión completa. `None` si no existe o si la
+/// plataforma no reporta mtime (en ese caso el caller actúa conservador).
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Epoch segundos para mostrar en UI/diálogos (solo display; la comparación
+/// usa `SystemTime` preciso en [`should_offer_autosave`]).
+fn system_time_epoch_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Detecta un sidecar de autosave más nuevo y lo carga validado.
+///
+/// Retorna `Ok(None)` si no hay nada que recuperar (sin sidecar, sidecar sin
+/// mtime legible, o sidecar no más nuevo que el documento) y `Err` si el
+/// sidecar existe y es candidato pero está corrupto (la UI debe ofrecer
+/// descartarlo). Pura en el sentido UI: solo fs + validación, sin egui,
+/// sin diálogos (esos van en app.rs, ver TODO del módulo).
+pub fn load_autosave_candidate(
+    main_path: impl AsRef<Path>,
+) -> Result<Option<AutosaveCandidate>, DocumentPersistenceError> {
+    let main = main_path.as_ref().to_path_buf();
+    let sidecar = match autosave_sidecar_path(&main) {
+        Some(path) => path,
+        None => return Ok(None),
+    };
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+    let sidecar_mtime = match file_mtime(&sidecar) {
+        Some(mtime) => mtime,
+        // Sin mtime no se puede probar que sea más nuevo: no ofrecer.
+        None => return Ok(None),
+    };
+    let main_mtime = file_mtime(&main);
+    if !should_offer_autosave(main_mtime, sidecar_mtime) {
+        return Ok(None);
+    }
+    let document = read_document_file(&sidecar)?;
+    Ok(Some(AutosaveCandidate {
+        main_path: main,
+        sidecar_path: sidecar,
+        document,
+        main_modified_epoch: main_mtime.map(system_time_epoch_secs),
+        sidecar_modified_epoch: system_time_epoch_secs(sidecar_mtime),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1624,5 +1782,121 @@ mod tests {
 
         fs::remove_file(link).expect("remove link");
         fs::remove_file(target).expect("remove target document");
+    }
+
+    #[test]
+    fn autosave_sidecar_path_appends_suffix() {
+        assert_eq!(
+            autosave_sidecar_path("nota.grafito"),
+            Some(PathBuf::from("nota.grafito.autosave"))
+        );
+        assert_eq!(
+            autosave_sidecar_path(Path::new("/tmp/x/nota.json")),
+            Some(PathBuf::from("/tmp/x/nota.json.autosave"))
+        );
+        assert_eq!(AUTOSAVE_SUFFIX, ".autosave");
+        // Sin nombre de archivo no hay sidecar.
+        assert_eq!(autosave_sidecar_path(""), None);
+        assert_eq!(autosave_sidecar_path("/"), None);
+    }
+
+    #[test]
+    fn should_offer_autosave_only_when_sidecar_is_newer_or_main_missing() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_000);
+        // Nanosegundos cuentan: mismo segundo, sidecar posterior ⇒ se ofrece.
+        let t0_plus_nanos = t0 + Duration::from_nanos(1);
+        assert!(should_offer_autosave(None, t0));
+        assert!(should_offer_autosave(Some(t0), t0_plus_nanos));
+        assert!(should_offer_autosave(Some(t0), t0 + Duration::from_secs(5)));
+        // Igualdad = el sidecar espeja el último guardado: no ofrecer.
+        assert!(!should_offer_autosave(Some(t0), t0));
+        assert!(!should_offer_autosave(Some(t0_plus_nanos), t0));
+    }
+
+    #[test]
+    fn load_autosave_candidate_returns_none_without_sidecar() {
+        let main = temporary_path("no_autosave.json");
+        assert!(!main.exists());
+        let candidate = load_autosave_candidate(&main).expect("sin sidecar es Ok(None)");
+        assert!(candidate.is_none());
+    }
+
+    #[test]
+    fn load_autosave_candidate_recovers_when_main_is_missing() {
+        let main = temporary_path("crash_before_save.json");
+        assert!(!main.exists());
+        let sidecar =
+            write_autosave_sidecar(&sample_document(), &main).expect("write autosave sidecar");
+        assert_eq!(sidecar, autosave_sidecar_path(&main).expect("sidecar path"));
+
+        let candidate = load_autosave_candidate(&main).expect("sidecar sin main debe ofrecerse");
+        let candidate = candidate.expect("debe haber candidato");
+        assert_eq!(candidate.document.object_count(), 2);
+        assert_eq!(candidate.main_modified_epoch, None);
+        assert!(candidate.sidecar_modified_epoch > 0);
+
+        fs::remove_file(sidecar).expect("remove test sidecar");
+    }
+
+    #[test]
+    fn load_autosave_candidate_offers_newer_sidecar_and_ignores_older() {
+        let main = temporary_path("recovery_order.json");
+        // Documento principal guardado primero...
+        write_document_atomic(&sample_document(), &main).expect("write main document");
+        // ...sidecar escrito después ⇒ más nuevo ⇒ se ofrece.
+        let sidecar =
+            write_autosave_sidecar(&sample_document(), &main).expect("write newer sidecar");
+        let newer = load_autosave_candidate(&main).expect("newer sidecar loads");
+        assert!(newer.is_some(), "sidecar más nuevo debe ofrecerse");
+        assert_eq!(newer.expect("candidato").document.object_count(), 2);
+
+        // Reescribir el principal ⇒ pasa a ser más nuevo (o igual) que el
+        // sidecar ⇒ ya no se ofrece. La igualdad también da `None` por el
+        // `>` estricto, así que el test es determinista aunque el FS
+        // tuviera granularidad gruesa de mtime.
+        write_document_atomic(&sample_document(), &main).expect("rewrite main document");
+        let stale = load_autosave_candidate(&main).expect("stale sidecar loads");
+        assert!(
+            stale.is_none(),
+            "sidecar igual o más viejo no debe ofrecerse"
+        );
+
+        fs::remove_file(sidecar).expect("remove test sidecar");
+        fs::remove_file(main).expect("remove test document");
+    }
+
+    #[test]
+    fn load_autosave_candidate_rejects_corrupt_sidecar() {
+        let main = temporary_path("corrupt_sidecar.json");
+        let sidecar = autosave_sidecar_path(&main).expect("sidecar path");
+        fs::write(&sidecar, "{ not valid json").expect("seed corrupt sidecar");
+        let error = load_autosave_candidate(&main).expect_err("sidecar corrupto debe ser Err");
+        assert!(
+            matches!(
+                error,
+                DocumentPersistenceError::InvalidJson(_) | DocumentPersistenceError::Json(_)
+            ),
+            "sidecar corrupto debe mapear a error de JSON: {error}"
+        );
+
+        fs::remove_file(sidecar).expect("remove test sidecar");
+    }
+
+    #[test]
+    fn write_autosave_sidecar_rejects_invalid_documents() {
+        let main = temporary_path("invalid_autosave.json");
+        let mut document = Document::new();
+        document.variables.insert("a".to_string(), f64::NAN);
+        let error = write_autosave_sidecar(&document, &main)
+            .expect_err("documento inválido no debe escribir sidecar");
+        assert!(matches!(
+            error,
+            DocumentPersistenceError::SemanticValidation(_)
+        ));
+        assert!(
+            autosave_sidecar_path(&main).is_some_and(|sidecar| !sidecar.exists()),
+            "fail-closed: no debe quedar sidecar a medias"
+        );
     }
 }

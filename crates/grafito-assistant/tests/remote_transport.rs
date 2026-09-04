@@ -874,3 +874,126 @@ fn remote_worker_does_not_follow_redirects() {
     assert!(matches!(result, Err(message) if message.contains("HTTP 302")));
     assert_eq!(target_hits.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn chat_completions_429_includes_retry_after_seconds_without_sleeping() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        let body = "busy";
+        write!(
+            stream,
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 7\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let started = Instant::now();
+    let result = request_remote_with_api_key_on_worker(
+        ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local")
+            .with_endpoint(endpoint)
+            .unwrap(),
+        remote_request("2 + 2"),
+        Some("test-key".into()),
+        CancellationToken::default(),
+    )
+    .join()
+    .unwrap();
+    server.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert!(error.contains("429"), "{error}");
+    assert!(error.contains("reintentá en 7s"), "{error}");
+    assert!(!error.contains("test-key"), "{error}");
+    // Sin dormir el worker: un 429 con Retry-After 7s debe fallar rápido.
+    assert!(
+        started.elapsed() < Duration::from_secs(7),
+        "worker slept on Retry-After"
+    );
+}
+
+#[test]
+fn chat_completions_429_parses_http_date_retry_after_with_clamp() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        let body = "slow down";
+        // Fecha muy futura → clamp a 120s (sin dormir el worker).
+        write!(
+            stream,
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: Wed, 21 Oct 2030 07:28:00 GMT\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+
+    let result = request_remote_with_api_key_on_worker(
+        ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local")
+            .with_endpoint(endpoint)
+            .unwrap(),
+        remote_request("2 + 2"),
+        Some("test-key".into()),
+        CancellationToken::default(),
+    )
+    .join()
+    .unwrap();
+    server.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert!(error.contains("429"), "{error}");
+    assert!(error.contains("reintentá en 120s"), "{error}");
+    assert!(!error.contains("test-key"), "{error}");
+}
+
+#[test]
+fn chat_completions_500_truncates_long_body_without_secrets() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    // Cuerpo largo del proveedor (2000 chars): debe truncarse a 500 sin eco de clave.
+    let long_body = "E".repeat(2_000);
+    let server_body = long_body.clone();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            server_body.len(),
+            server_body
+        )
+        .unwrap();
+    });
+
+    let result = request_remote_with_api_key_on_worker(
+        ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local")
+            .with_endpoint(endpoint)
+            .unwrap(),
+        remote_request("2 + 2"),
+        Some("test-key".into()),
+        CancellationToken::default(),
+    )
+    .join()
+    .unwrap();
+    server.join().unwrap();
+
+    let error = result.unwrap_err();
+    assert!(
+        error.starts_with("remote assistant returned HTTP 500: "),
+        "{error}"
+    );
+    let snippet = error
+        .strip_prefix("remote assistant returned HTTP 500: ")
+        .unwrap();
+    assert_eq!(snippet.chars().count(), 500, "{error}");
+    assert!(long_body.starts_with(snippet), "{error}");
+    assert!(!error.contains("test-key"), "{error}");
+    // El cuerpo completo (2000) nunca viaja entero al mensaje.
+    assert!(error.len() < long_body.len(), "{error}");
+}

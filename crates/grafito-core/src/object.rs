@@ -4014,39 +4014,57 @@ impl TransformedObj {
     /// Crea un Transformed validado (type-safe). Valida que la expresión sea parseable
     /// y que no sea singular trivial (p. ej. "0" que colapsa el objeto).
     pub fn try_new(inner: GeoObject, expr: &str) -> Result<Self, String> {
+        Self::try_new_typed(inner, expr).map_err(|e| e.to_string())
+    }
+
+    /// Variante tipada que retorna `CoreError` para matching sin parsear texto.
+    /// Valida depth via `validate_transformed_depth_typed(0)` (depth 0 en construcción)
+    /// y Jacobiano via `validate_transformed_jacobian_typed`.
+    pub fn try_new_typed(inner: GeoObject, expr: &str) -> Result<Self, crate::CoreError> {
+        use crate::CoreError;
         if expr.len() > crate::validation::MAX_EXPR_LENGTH {
-            return Err(format!(
-                "complex_expr exceeds {} chars",
-                crate::validation::MAX_EXPR_LENGTH
-            ));
+            return Err(CoreError::LimitExceeded {
+                what: "Transformed.complex_expr".into(),
+                provided: expr.len(),
+                maximum: crate::validation::MAX_EXPR_LENGTH,
+            });
         }
         if expr.is_empty() {
-            return Err("complex_expr cannot be empty".into());
+            return Err(CoreError::InvalidExpression {
+                expression: expr.to_string(),
+                reason: "complex_expr cannot be empty".into(),
+            });
         }
-        // Validar que la expresión sea sintácticamente válida como función de z
-        // y detectar singularidades que colapsan todo a un punto.
+        // Profundidad 0 en construcción aislada; la profundidad real se valida en Document.
+        crate::validation::validate_transformed_depth_typed(0)?;
         let ast = grafito_geometry::expr::prepare_function_ast(
             expr,
             &std::collections::HashMap::new(),
             &["z"],
         )
-        .map_err(|reason| format!("complex_expr inválida: {reason}"))?;
-        // Detecta 0*z, (z-z), sin(0)*z, constantes, etc. Evaluando en dos puntos.
+        .map_err(|reason| CoreError::InvalidExpression {
+            expression: expr.to_string(),
+            reason,
+        })?;
         let v0 = ast.eval_at("z", 0.0);
         let v1 = ast.eval_at("z", 1.0);
         if v0.is_finite() && v1.is_finite() {
             let max_abs = v0.abs().max(v1.abs());
             if max_abs < crate::validation::GEOM_EPS || (v1 - v0).abs() < 1e-12 {
-                return Err("complex_expr singular: colapsa el objeto".into());
+                return Err(CoreError::TransformJacobianSingular {
+                    expr: expr.to_string(),
+                    reason:
+                        "complex_expr singular: colapsa el objeto (evaluación en 0 y 1 coincide)"
+                            .into(),
+                });
             }
         } else if !v0.is_finite() && !v1.is_finite() {
-            // Ambas evaluaciones no finitas -> también singular para el muestreo.
-            return Err("complex_expr singular: colapsa el objeto".into());
+            return Err(CoreError::TransformJacobianSingular {
+                expr: expr.to_string(),
+                reason: "complex_expr singular: evaluaciones no finitas".into(),
+            });
         }
-        // Validación Jacobiana no trivial: compila como expresión compleja y
-        // evalúa det(J) en muestreo. Si |det|<GEOM_EPS o no finito -> singular.
-        crate::validation::validate_transformed_jacobian(expr)?;
-        // Validar anidamiento: Document::validate ya limita MAX_TRANSFORM_DEPTH, aquí solo check básico
+        crate::validation::validate_transformed_jacobian_typed(expr)?;
         Ok(Self {
             inner: Box::new(inner),
             complex_expr: expr.to_string(),

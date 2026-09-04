@@ -97,8 +97,8 @@ impl std::fmt::Display for AssistantError {
 impl std::error::Error for AssistantError {}
 
 const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 400.0;
-const ASSISTANT_PANEL_MIN_WIDTH: f32 = 340.0;
-const ASSISTANT_PANEL_MAX_WIDTH: f32 = 460.0;
+const ASSISTANT_PANEL_MIN_WIDTH: f32 = 300.0;
+const ASSISTANT_PANEL_MAX_WIDTH: f32 = 520.0;
 const ASSISTANT_MIN_CANVAS_WIDTH: f32 = 440.0;
 const ASSISTANT_SIDE_PANEL_MIN_VIEWPORT_WIDTH: f32 =
     ASSISTANT_MIN_CANVAS_WIDTH + ASSISTANT_PANEL_MIN_WIDTH;
@@ -118,6 +118,12 @@ const ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT: f32 = 112.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_ROW_HEIGHT: f32 = 30.0;
 const ASSISTANT_COMPOSER_ATTACHMENT_MESSAGE_HEIGHT: f32 = 20.0;
 const ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT: f32 = 20.0;
+/// Ancho bajo el cual el composer colapsa a 1 línea + botón (responsive 300..520).
+const ASSISTANT_PANEL_NARROW_WIDTH: f32 = 360.0;
+/// Alto de viewport bajo el cual el composer colapsa y el historial acota su scroll.
+const ASSISTANT_SHORT_VIEWPORT_HEIGHT: f32 = 600.0;
+/// Alto del editor colapsado: 1 línea (28 = base 4).
+const ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT: f32 = 28.0;
 #[allow(dead_code)] // TODO P2: remover cuando se use header dedicado en panel compacto (reservado para layout 780px)
 const ASSISTANT_HEADER_HEIGHT: f32 = 40.0;
 const ASSISTANT_REVEAL_BASE_SECONDS: f64 = 0.28;
@@ -829,7 +835,7 @@ impl AssistantPanelState {
         let limits = AttachmentLimits::default();
         attachment.validate(&limits)?;
         if self.attachments.len() >= limits.max_attachments {
-            return Err("assistant attachment count exceeds the configured limit".into());
+            return Err("se alcanzó el límite de adjuntos configurado".into());
         }
         self.attachments.push(attachment);
         self.image_upload_consent = false;
@@ -1200,7 +1206,7 @@ impl AssistantPanelState {
 
 fn pending_attachment_status(state: &AssistantPanelState) -> &'static str {
     if state.image_upload_consent {
-        "Estos adjuntos corresponden al payload en curso y están bloqueados."
+        "Estos adjuntos corresponden al envío en curso y están bloqueados."
     } else {
         "Las imágenes se conservan localmente y no se enviarán con la corrección."
     }
@@ -1811,6 +1817,9 @@ fn assistant_composer_height(state: &AssistantPanelState) -> f32 {
             height += ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT;
         }
     }
+    if state.is_pending && state.attachments.is_empty() {
+        height += ASSISTANT_COMPOSER_PENDING_ATTACHMENT_HEIGHT;
+    }
     height
 }
 
@@ -1904,7 +1913,7 @@ pub fn draw_assistant_settings_window(
                 ui.separator();
                 ui.add_space(crate::tokens::SPACE_SM);
                 egui::ScrollArea::vertical()
-                    .id_salt("assistant_settings_scroll")
+                    .id_salt("assistant_settings_scroll_angosto")
                     .auto_shrink([false, false])
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
@@ -1932,7 +1941,7 @@ pub fn draw_assistant_settings_window(
                         egui::Layout::top_down(egui::Align::LEFT),
                         |ui| {
                             egui::ScrollArea::vertical()
-                                .id_salt("assistant_settings_scroll")
+                                .id_salt("assistant_settings_scroll_ancho")
                                 .auto_shrink([false, false])
                                 .max_height(avail_h)
                                 .show(ui, |ui| {
@@ -2036,7 +2045,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         // Acento centrado profesional: pill con dot + nombre — una sola etiqueta centrada
         let rgb = state.avatar.accent_color();
         let accent_name = if state.avatar.accent_custom.is_some() {
-            "Custom"
+            "Personalizado"
         } else {
             grafito_profile::AvatarConfig::accent_palette(state.avatar.accent_preset).0
         };
@@ -2079,7 +2088,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         ui.add_space(crate::tokens::SPACE_XS);
         // Metadatos condensados en una línea wrap, centrada
         let bg_label = if state.avatar.bg_color.is_some() {
-            "fondo custom"
+            "fondo personalizado"
         } else {
             "fondo tema"
         };
@@ -2201,10 +2210,12 @@ fn draw_perfil_settings_contents(
         let count = state.avatar.assistant_name.chars().count();
         let max = grafito_profile::MAX_NAME;
         ui.label(
-            egui::RichText::new(format!("{count}/{max}  ·  visible en header y saludo"))
-                .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary)
-                .weak(),
+            egui::RichText::new(format!(
+                "{count}/{max}  ·  visible en el encabezado y el saludo"
+            ))
+            .size(crate::tokens::TYPE_XS)
+            .color(theme.text_tertiary)
+            .weak(),
         );
     }
     ui.add_space(crate::tokens::SPACE_MD);
@@ -2289,7 +2300,7 @@ fn draw_perfil_settings_contents(
             egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
         });
         let btn = egui::Button::new(
-            egui::RichText::new("Custom")
+            egui::RichText::new("Personalizado")
                 .size(crate::tokens::TYPE_XS)
                 .color(if custom_sel {
                     egui::Color32::WHITE
@@ -2324,7 +2335,7 @@ fn draw_perfil_settings_contents(
         }
         ui.label(
             egui::RichText::new(format!(
-                "#{:02X}{:02X}{:02X}  ·  click para editar",
+                "#{:02X}{:02X}{:02X}  ·  tocá para editar",
                 col.r(),
                 col.g(),
                 col.b()
@@ -2658,7 +2669,7 @@ fn draw_personality_settings_contents(
     );
     ui.label(
         egui::RichText::new(
-            "Elige un estilo base y afiná el tono. Todo se inyecta en el system prompt.",
+            "Elige un estilo base y afiná el tono. Todo se inyecta en la indicación del sistema.",
         )
         .size(crate::tokens::TYPE_XS)
         .color(theme.text_secondary)
@@ -2842,7 +2853,7 @@ fn draw_personality_settings_contents(
         );
         egui::ComboBox::from_id_salt("avatar_language")
             .selected_text(if state.avatar.language.is_empty() {
-                "Auto"
+                "Automático"
             } else {
                 &state.avatar.language
             })
@@ -2851,7 +2862,13 @@ fn draw_personality_settings_contents(
                 for lang in ["auto", "es", "en"] {
                     let sel = state.avatar.language == lang
                         || (state.avatar.language.is_empty() && lang == "auto");
-                    if ui.selectable_label(sel, lang).clicked() {
+                    let label = match lang {
+                        "auto" => "Automático",
+                        "es" => "Español",
+                        "en" => "Inglés",
+                        _ => lang,
+                    };
+                    if ui.selectable_label(sel, label).clicked() {
                         state.avatar.language = if lang == "auto" {
                             String::new()
                         } else {
@@ -3139,7 +3156,7 @@ fn draw_assistant_settings_contents(
                 .size(TYPE_XS),
         );
         ui.label(
-            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento). Spark usa la Responses API; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.")
+            egui::RichText::new("Modelos OpenCode Go verificados: deepseek-v4-flash, deepseek-v4-pro, mimo-2.5-vl, glm-5.2, qwen3.8-max, kimi-k3, muse-spark-1.3-contributor, fusion (+ 17 más por descubrimiento). Spark usa la API de respuestas; el modo agente con herramientas reintenta con DeepSeek sin cambiar tu modelo.")
                 .color(theme.text_tertiary)
                 .size(TYPE_XS)
                 .weak(),
@@ -3181,7 +3198,7 @@ fn draw_assistant_settings_contents(
             .changed();
         ui.label(
             egui::RichText::new(
-                "DeepSeek Flash razona y corrige sin adjuntos ni Apply automático; MiMo 2.5-VL cubre visión/video.",
+                "DeepSeek Flash razona y corrige sin adjuntos ni aplicación automática; MiMo 2.5-VL cubre visión/video.",
             )
             .color(theme.text_tertiary)
             .size(TYPE_XS),
@@ -3214,7 +3231,7 @@ fn draw_assistant_settings_contents(
     let agent_changed = ui
         .checkbox(&mut agent_mode, "Modo agente (herramientas y actividad)")
         .on_hover_text(
-            "Usa el loop agéntico con herramientas locales y muestra su actividad en el chat (requiere un proveedor compatible con tool calling).",
+            "Usa el ciclo agéntico con herramientas locales y muestra su actividad en el chat (requiere un proveedor compatible con llamado a herramientas).",
         )
         .changed();
     if agent_changed && agent_mode != state.agent_mode {
@@ -3582,6 +3599,8 @@ fn draw_panel_contents(
     // wrap via TextEdit::multiline (desired_rows 2) — el TopBottomPanel ya limita altura.
     // La barra sólo aparece si las attachments exceden el máximo.
     let available = ui.available_height().max(120.0);
+    let collapsed_composer = ui.available_width() < ASSISTANT_PANEL_NARROW_WIDTH
+        || available < ASSISTANT_SHORT_VIEWPORT_HEIGHT;
     let max_composer = (available * 0.38).clamp(88.0, 260.0);
     let visible_composer_height = if compact {
         (available - 64.0)
@@ -3605,9 +3624,12 @@ fn draw_panel_contents(
                 )),
         )
         .show_inside(ui, |ui| {
-            // Sin ScrollArea envolvente: el composer ya tiene editor de altura fija (44px)
+            // Sin ScrollArea envolvente: el editor (44px, 28px colapsado a 1 línea)
             // y los botones quedan siempre visibles; la barra del panel no desborda el card.
-            retain_first_assistant_action(&mut action, draw_assistant_composer(ui, state));
+            retain_first_assistant_action(
+                &mut action,
+                draw_assistant_composer(ui, state, collapsed_composer),
+            );
         });
 
     egui::ScrollArea::vertical()
@@ -3695,6 +3717,7 @@ fn draw_panel_contents(
                         action = draw_conversation_turn(
                             ui,
                             turn,
+                            turn_index,
                             proposal_state,
                             reveal_here,
                             cache,
@@ -3707,6 +3730,7 @@ fn draw_panel_contents(
                         let _ = draw_conversation_turn(
                             ui,
                             turn,
+                            turn_index,
                             proposal_state,
                             reveal_here,
                             cache,
@@ -3867,18 +3891,24 @@ fn draw_remote_authorization_card(
                     .strong(),
             );
             ui.add_space(SPACE_XS);
-            ui.label(
-                egui::RichText::new(reason)
-                    .color(theme.text_primary)
-                    .size(TYPE_SM),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(reason)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                )
+                .wrap(),
             );
             ui.add_space(SPACE_SM);
-            ui.label(
-                egui::RichText::new(
-                    "Podés autorizar una consulta remota. El transcript mostrará sólo “Consulta remota autorizada”.",
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Podés autorizar una consulta remota. El historial mostrará sólo “Consulta remota autorizada”.",
+                    )
+                    .color(theme.text_secondary)
+                    .size(TYPE_XS),
                 )
-                .color(theme.text_secondary)
-                .size(TYPE_XS),
+                .wrap(),
             );
             if attachment_count > 0 {
                 ui.add_space(SPACE_SM);
@@ -3943,16 +3973,22 @@ fn draw_proposed_plan_card(
                     .size(TYPE_SM)
                     .strong(),
             );
-            ui.label(
-                egui::RichText::new(&plan.summary)
-                    .color(theme.text_primary)
-                    .size(TYPE_SM),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&plan.summary)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                )
+                .wrap(),
             );
             for change in &state.proposed_plan_changes {
-                ui.label(
-                    egui::RichText::new(format!("- {change}"))
-                        .color(theme.text_secondary)
-                        .size(TYPE_XS),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("- {change}"))
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS),
+                    )
+                    .wrap(),
                 );
             }
             ui.add_space(SPACE_XS);
@@ -4274,10 +4310,28 @@ fn draw_assistant_header(
 fn draw_assistant_composer(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
+    collapsed: bool,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let attachment_limits = AttachmentLimits::default();
     let mut action = None;
+    // Contador visible vs max_input + modo colapsado (1 línea + botón).
+    // Enter envía, Shift+Enter salta de línea (ver should_submit_on_enter).
+    let budget = RequestBudget::default().max_input_chars;
+    let used = state.input_bytes();
+    let over_budget = used > budget;
+    let near_budget = used > budget * 3 / 4;
+    let editor_height = if collapsed {
+        ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT
+    } else {
+        ASSISTANT_COMPOSER_EDITOR_HEIGHT
+    };
+    let editor_rows = if collapsed { 1 } else { 2 };
+    let editor_hint = if collapsed {
+        "Escribí tu pregunta"
+    } else {
+        "Escribí tu pregunta · Enter envía, Shift+Enter salta"
+    };
 
     if let Some(focus) = &state.focus {
         egui::Frame::none()
@@ -4307,7 +4361,8 @@ fn draw_assistant_composer(
     }
 
     // Composer Scandinavian: input limpio hairline 10%, radio 12, sin outer_margin oscuro
-    // F5 quiet: TextEdit::multiline con wrap (default egui) y altura fija 44px — no requiere ScrollArea envolvente.
+    // F5 quiet: TextEdit::multiline con wrap (default egui) y altura fija 44px
+    // (28px y 1 línea cuando colapsa en paneles angostos o bajos) — no requiere ScrollArea envolvente.
     egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
@@ -4315,16 +4370,21 @@ fn draw_assistant_composer(
         .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
             ui.vertical(|ui| {
-                let editor = ui.add_sized(
-                    egui::vec2(ui.available_width(), ASSISTANT_COMPOSER_EDITOR_HEIGHT),
-                    egui::TextEdit::multiline(&mut state.problem)
-                        .id_source("grafito_assistant_problem")
-                        .hint_text("Escribí tu pregunta")
-                        .text_color(theme.input_text)
-                        .frame(false)
-                        .desired_rows(2)
-                        .margin(egui::vec2(4.0, 6.0)),
-                );
+                let editor = ui
+                    .add_enabled_ui(!state.is_pending, |ui| {
+                        ui.add_sized(
+                            egui::vec2(ui.available_width(), editor_height),
+                            egui::TextEdit::multiline(&mut state.problem)
+                                .id_source("grafito_assistant_problem")
+                                .hint_text(editor_hint)
+                                .text_color(theme.input_text)
+                                .frame(false)
+                                .desired_rows(editor_rows)
+                                .margin(egui::vec2(4.0, 6.0)),
+                        )
+                    })
+                    .inner
+                    .on_hover_text("Enter para enviar · Shift+Enter para salto de línea");
                 let submit_on_enter = should_submit_on_enter(
                     editor.has_focus(),
                     ui.input(|input| input.key_pressed(egui::Key::Enter)),
@@ -4362,6 +4422,24 @@ fn draw_assistant_composer(
                             .size(crate::tokens::TYPE_XS),
                         );
                     }
+                    let counter_color = if over_budget {
+                        theme.danger
+                    } else if near_budget {
+                        theme.warning
+                    } else {
+                        theme.text_tertiary
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{used}/{budget}"))
+                                .color(counter_color)
+                                .size(crate::tokens::TYPE_XS),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(
+                        "Caracteres usados del límite de entrada · Enter envía, Shift+Enter salta",
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if state.is_pending {
                             if state.is_cancelling {
@@ -4409,6 +4487,31 @@ fn draw_assistant_composer(
                             }
                         }
                     });
+                    if state.is_pending {
+                        ui.add_space(crate::tokens::SPACE_XS);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    "Estoy pensando… esperá que termine para mandar otra pregunta.",
+                                )
+                                .color(theme.text_secondary)
+                                .size(crate::tokens::TYPE_XS),
+                            )
+                            .wrap(),
+                        );
+                    } else if over_budget {
+                        ui.add_space(crate::tokens::SPACE_XS);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    "Te pasaste del límite… acortá la pregunta para enviar.",
+                                )
+                                .color(theme.danger)
+                                .size(crate::tokens::TYPE_XS),
+                            )
+                            .wrap(),
+                        );
+                    }
                 });
             });
         });
@@ -4563,6 +4666,7 @@ fn should_show_stepwise(blocks: &[AssistantMessageBlock], content: &str) -> bool
 fn draw_conversation_turn(
     ui: &mut egui::Ui,
     turn: &ConversationTurn,
+    turn_index: usize,
     proposal_state: AssistantProposalRenderState<'_>,
     reveal_clip: Option<RevealClip>,
     cache: &mut AssistantBlocksCache,
@@ -4629,7 +4733,14 @@ fn draw_conversation_turn(
                 );
             });
             ui.add_space(SPACE_XS);
-            action = draw_assistant_response(ui, &turn.content, proposal_state, reveal_clip, cache);
+            action = draw_assistant_response(
+                ui,
+                &turn.content,
+                proposal_state,
+                reveal_clip,
+                turn_index,
+                cache,
+            );
             // Integración de animación dentro del mensaje: progreso o media del último turno
             if is_last {
                 if state.anim_progress {
@@ -4789,6 +4900,7 @@ fn draw_assistant_response(
     content: &str,
     proposal_state: AssistantProposalRenderState<'_>,
     reveal_clip: Option<RevealClip>,
+    turn_index: usize,
     cache: &mut AssistantBlocksCache,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
@@ -4851,14 +4963,16 @@ fn draw_assistant_response(
                                 .strong(),
                         );
                         egui::ScrollArea::horizontal()
-                            .id_salt(ui.make_persistent_id(("assistant_math", index)))
+                            .id_salt(ui.make_persistent_id(("assistant_math", turn_index, index)))
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 let _ = draw_math(ui, math);
                             });
                     });
             }
-            AssistantMessageBlock::Table(rows) => draw_markdown_table(ui, rows, index),
+            AssistantMessageBlock::Table(rows) => {
+                draw_markdown_table(ui, rows, turn_index, index);
+            }
             AssistantMessageBlock::Code { language, text } => {
                 let current_code_block_index = code_block_index;
                 code_block_index += 1;
@@ -4870,26 +4984,42 @@ fn draw_assistant_response(
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
-                        if !language.is_empty() {
-                            ui.label(
-                                egui::RichText::new(language.to_uppercase())
-                                    .color(theme.text_tertiary)
-                                    .size(TYPE_XS)
-                                    .strong(),
-                            );
-                            ui.add_space(SPACE_XS);
-                        }
-                        egui::ScrollArea::horizontal()
-                            .id_salt(ui.make_persistent_id(("assistant_code", index)))
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
+                        let code_lang = language.trim().to_ascii_lowercase();
+                        let is_grafito_code =
+                            code_lang == "grafito" || code_lang == "grafito-scene";
+                        ui.horizontal(|ui| {
+                            if !language.is_empty() {
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(text).monospace().size(TYPE_SM),
+                                        egui::RichText::new(language.to_uppercase())
+                                            .color(theme.text_tertiary)
+                                            .size(TYPE_XS)
+                                            .strong(),
                                     )
-                                    .extend(),
+                                    .truncate(),
                                 );
-                            });
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("Copiar")
+                                        .on_hover_text("Copiar código al portapapeles")
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(text.clone());
+                                    }
+                                },
+                            );
+                        });
+                        ui.add_space(SPACE_XS);
+                        // Wrap + clip: sin scroll horizontal en paneles de 300..520.
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text).monospace().size(TYPE_SM),
+                            )
+                            .wrap(),
+                        );
                         // Acción integrada bajo la casilla — siempre mostrar Aplicar para cualquier grafito
                         let mut has_shown_primary = false;
                         if let Some(proposal_index) = candidate_index_for_code_block(
@@ -4904,8 +5034,41 @@ fn draw_assistant_response(
                                 proposal_state.proposal_results_available,
                             ) {
                                 Some(AssistantProposalCardState::Ready(verified)) => {
-                                    rendered_candidate_indices.push(verified.candidate_index);
-                                    has_shown_primary = true;
+                                    let dismiss_id = ui.make_persistent_id((
+                                        "assistant_proposal_dismissed",
+                                        verified.candidate_index,
+                                    ));
+                                    let dismissed = ui
+                                        .data(|data| {
+                                            data.get_temp::<bool>(dismiss_id).unwrap_or(false)
+                                        });
+                                    if dismissed {
+                                        ui.add_space(SPACE_SM);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new("Propuesta rechazada.")
+                                                        .color(theme.text_tertiary)
+                                                        .size(TYPE_XS),
+                                                )
+                                                .wrap(),
+                                            );
+                                            if ui
+                                                .small_button("Mostrar")
+                                                .on_hover_text("Volver a mostrar la propuesta")
+                                                .clicked()
+                                            {
+                                                ui.data_mut(|data| {
+                                                    data.insert_temp(dismiss_id, false);
+                                                });
+                                            }
+                                        });
+                                        rendered_candidate_indices
+                                            .push(verified.candidate_index);
+                                        has_shown_primary = true;
+                                    } else {
+                                        rendered_candidate_indices.push(verified.candidate_index);
+                                        has_shown_primary = true;
                                     ui.add_space(SPACE_SM);
                                     // Hairline que separa código de acción — contable pero sutil
                                     let sep_y = ui.cursor().min.y;
@@ -4941,6 +5104,44 @@ fn draw_assistant_response(
                                             )),
                                         );
                                     }
+                                    // Secundarios siempre visibles sin scroll horizontal:
+                                    // copiar, rechazar (oculta local) y detalle colapsable.
+                                    ui.add_space(SPACE_XS);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing =
+                                            egui::vec2(SPACE_SM, SPACE_XS);
+                                        if ui
+                                            .small_button("Copiar código")
+                                            .on_hover_text("Copiar el código de la propuesta")
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(text.clone());
+                                        }
+                                        if ui
+                                            .small_button("Rechazar")
+                                            .on_hover_text("Ocultar esta propuesta")
+                                            .clicked()
+                                        {
+                                            ui.data_mut(|data| {
+                                                data.insert_temp(dismiss_id, true);
+                                            });
+                                        }
+                                    });
+                                    egui::CollapsingHeader::new(format!(
+                                        "Detalle · propuesta {}",
+                                        verified.candidate_index
+                                    ))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(proposal_detail_text(verified))
+                                                    .color(theme.text_secondary)
+                                                    .size(TYPE_XS),
+                                            )
+                                            .wrap(),
+                                        );
+                                    });
                                     // Secundario: Editar en entrada solo para comandos simples
                                     if let grafito_command::assistant_proposals::AssistantProposal::Command(_) =
                                         &verified.proposal
@@ -4972,6 +5173,7 @@ fn draw_assistant_response(
                                                     )),
                                                 );
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -5021,6 +5223,18 @@ fn draw_assistant_response(
                                         ),
                                     );
                                     // Aun si fue rechazada, ofrecer Aplicar raw para forzar ejecución
+                                    ui.add_space(SPACE_XS);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing =
+                                            egui::vec2(SPACE_SM, SPACE_XS);
+                                        if ui
+                                            .small_button("Copiar código")
+                                            .on_hover_text("Copiar el código para revisarlo")
+                                            .clicked()
+                                        {
+                                            ui.ctx().copy_text(text.clone());
+                                        }
+                                    });
                                 }
                                 Some(AssistantProposalCardState::NotPreflighted) => {
                                     ui.add_space(SPACE_SM);
@@ -5034,9 +5248,7 @@ fn draw_assistant_response(
                         }
                         // Fallback universal: cualquier bloque grafito/grafito-scene obtiene Aplicar
                         // si aún no se mostró uno primario (garantiza "si le pido algo en 3d, lo aplique")
-                        let lang = language.trim().to_ascii_lowercase();
-                        let is_grafito = lang == "grafito" || lang == "grafito-scene";
-                        if is_grafito && !text.trim().is_empty() && !has_shown_primary {
+                        if is_grafito_code && !text.trim().is_empty() && !has_shown_primary {
                             ui.add_space(SPACE_SM);
                             let sep_y = ui.cursor().min.y;
                             let sep_rect = egui::Rect::from_min_max(
@@ -5168,21 +5380,32 @@ fn draw_rejected_assistant_proposal(
         .rounding(RADIUS_SM)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Esta propuesta no superó la comprobación local.")
-                    .color(theme.warning)
-                    .size(TYPE_SM)
-                    .strong(),
-            );
-            ui.label(
-                egui::RichText::new(
-                    "Sólo se habilitan acciones verificadas de la respuesta actual.",
+            ui.set_min_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Esta propuesta no superó la comprobación local.")
+                        .color(theme.warning)
+                        .size(TYPE_SM)
+                        .strong(),
                 )
-                .color(theme.text_secondary)
-                .size(TYPE_XS),
+                .wrap(),
             );
-            correction_clicked =
-                correction_available && ui.button("Pedir una corrección").clicked();
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(
+                        "Sólo se habilitan acciones verificadas de la respuesta actual.",
+                    )
+                    .color(theme.text_secondary)
+                    .size(TYPE_XS),
+                )
+                .wrap(),
+            );
+            ui.add_space(SPACE_XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                correction_clicked =
+                    correction_available && ui.button("Pedir una corrección").clicked();
+            });
         });
     rejected_proposal_action(correction_available, correction_clicked)
 }
@@ -5195,18 +5418,25 @@ fn draw_unpreflighted_assistant_proposal(ui: &mut egui::Ui, preflight_candidate_
         .rounding(RADIUS_SM)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Propuesta sin comprobar")
-                    .color(theme.text_primary)
-                    .size(TYPE_SM)
-                    .strong(),
+            ui.set_min_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Propuesta sin comprobar")
+                        .color(theme.text_primary)
+                        .size(TYPE_SM)
+                        .strong(),
+                )
+                .wrap(),
             );
-            ui.label(
-                egui::RichText::new(format!(
-                    "La comprobación se limitó a las primeras {preflight_candidate_count} propuesta(s) de esta respuesta."
-                ))
-                .color(theme.text_secondary)
-                .size(TYPE_XS),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "La comprobación se limitó a las primeras {preflight_candidate_count} propuesta(s) de esta respuesta."
+                    ))
+                    .color(theme.text_secondary)
+                    .size(TYPE_XS),
+                )
+                .wrap(),
             );
         });
 }
@@ -5225,15 +5455,32 @@ fn draw_applied_assistant_proposal(
             .rounding(RADIUS_SM)
             .inner_margin(egui::Margin::same(SPACE_SM))
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt(ui.make_persistent_id((
-                        "assistant_applied_proposal",
-                        applied.candidate_index,
-                    )))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(commands).monospace().size(TYPE_SM));
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Código")
+                                .color(theme.text_tertiary)
+                                .size(TYPE_XS),
+                        )
+                        .truncate(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("Copiar")
+                            .on_hover_text("Copiar código al portapapeles")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(commands.clone());
+                        }
                     });
+                });
+                ui.add_space(SPACE_XS);
+                // Wrap + clip: sin scroll horizontal en paneles de 300..520.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(commands).monospace().size(TYPE_SM))
+                        .wrap(),
+                );
             });
     }
     egui::Frame::none()
@@ -5264,6 +5511,34 @@ fn rejected_proposal_action(
         .then_some(AssistantUiAction::RetryProposalCorrection)
 }
 
+/// Texto corto de detalle para la propuesta (botón Detalle de la tarjeta).
+fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
+    let base = match &verified.proposal {
+        AssistantProposal::Command(_) => {
+            if verified.prerequisite_parameters.is_empty() {
+                "Comando comprobado listo para aplicar al documento."
+            } else {
+                "Comando comprobado con sus parámetros necesarios."
+            }
+        }
+        AssistantProposal::Scene(_) => "Escena 3D comprobada; se aplica de forma atómica.",
+        AssistantProposal::Parameter(_) => "Parámetro comprobado listo para aplicar.",
+    };
+    if verified.prerequisite_parameters.is_empty() {
+        base.to_string()
+    } else {
+        format!(
+            "{base} Parámetros: {}.",
+            verified
+                .prerequisite_parameters
+                .iter()
+                .map(AssistantParameterAssignment::canonical_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 fn draw_verified_assistant_proposal(
     ui: &mut egui::Ui,
     verified: &VerifiedAssistantProposal,
@@ -5278,15 +5553,32 @@ fn draw_verified_assistant_proposal(
             .rounding(RADIUS_SM)
             .inner_margin(egui::Margin::same(SPACE_SM))
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt(ui.make_persistent_id((
-                        "assistant_verified_proposal",
-                        verified.candidate_index,
-                    )))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(commands).monospace().size(TYPE_SM));
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("Código")
+                                .color(theme.text_tertiary)
+                                .size(TYPE_XS),
+                        )
+                        .truncate(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("Copiar")
+                            .on_hover_text("Copiar código al portapapeles")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(commands.clone());
+                        }
                     });
+                });
+                ui.add_space(SPACE_XS);
+                // Wrap + clip: sin scroll horizontal en paneles de 300..520.
+                ui.add(
+                    egui::Label::new(egui::RichText::new(commands).monospace().size(TYPE_SM))
+                        .wrap(),
+                );
             });
     }
 
@@ -5315,25 +5607,34 @@ fn draw_verified_assistant_proposal(
         }
         AssistantProposal::Parameter(_) => "Parámetro comprobado localmente antes de mostrarse.",
     };
+    let detail_commands = verified.proposal.canonical_text();
     let card = egui::Frame::none()
         .fill(theme.accent_muted)
         .stroke(egui::Stroke::new(1.0, theme.accent))
         .rounding(RADIUS_SM)
         .inner_margin(egui::Margin::same(SPACE_SM))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Lista para aplicar")
-                    .color(theme.accent_strong)
-                    .size(TYPE_SM)
-                    .strong(),
+            ui.set_min_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("Lista para aplicar")
+                        .color(theme.accent_strong)
+                        .size(TYPE_SM)
+                        .strong(),
+                )
+                .wrap(),
             );
             ui.add_space(SPACE_XS);
-            ui.label(
-                egui::RichText::new(description)
-                    .color(theme.text_primary)
-                    .size(TYPE_SM),
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(description)
+                        .color(theme.text_primary)
+                        .size(TYPE_SM),
+                )
+                .wrap(),
             );
             ui.add_space(SPACE_SM);
+            // Aplicar siempre visible a ancho completo, sin scroll horizontal.
             if ui
                 .add_sized(
                     egui::vec2(ui.available_width(), 28.0),
@@ -5345,17 +5646,33 @@ fn draw_verified_assistant_proposal(
             {
                 action = Some(AssistantUiAction::ApplyProposal(verified.candidate_index));
             }
-            if let AssistantProposal::Command(_) = &verified.proposal {
-                if verified.prerequisite_parameters.is_empty()
-                    && ui.small_button("Editar en la entrada").clicked()
-                {
-                    action = Some(AssistantUiAction::InsertCommand(verified.candidate_index));
+            ui.add_space(SPACE_XS);
+            // Secundarios en fila envuelta: nunca piden scroll horizontal.
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+                if let AssistantProposal::Command(_) = &verified.proposal {
+                    if verified.prerequisite_parameters.is_empty()
+                        && ui.small_button("Editar en la entrada").clicked()
+                    {
+                        action = Some(AssistantUiAction::InsertCommand(verified.candidate_index));
+                    }
                 }
-            }
-            ui.label(
-                egui::RichText::new(status)
-                    .color(theme.text_primary)
-                    .size(TYPE_XS),
+                if ui
+                    .small_button("Copiar")
+                    .on_hover_text("Copiar código al portapapeles")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(detail_commands.clone());
+                }
+            });
+            ui.add_space(SPACE_XS);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(status)
+                        .color(theme.text_primary)
+                        .size(TYPE_XS),
+                )
+                .wrap(),
             );
         });
     if card.response.hovered() {
@@ -5367,18 +5684,21 @@ fn draw_verified_assistant_proposal(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if !verified.prerequisite_parameters.is_empty() {
-        ui.label(
-            egui::RichText::new(format!(
-                "Al aplicar también se establecerá: {}.",
-                verified
-                    .prerequisite_parameters
-                    .iter()
-                    .map(AssistantParameterAssignment::canonical_text)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-            .color(theme.text_secondary)
-            .size(TYPE_XS),
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "Al aplicar también se establecerá: {}.",
+                    verified
+                        .prerequisite_parameters
+                        .iter()
+                        .map(AssistantParameterAssignment::canonical_text)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .color(theme.text_secondary)
+                .size(TYPE_XS),
+            )
+            .wrap(),
         );
     }
     action
@@ -5403,7 +5723,12 @@ fn unrendered_verified_proposals<'a>(
         .collect()
 }
 
-fn draw_markdown_table(ui: &mut egui::Ui, rows: &[Vec<String>], index: usize) {
+fn draw_markdown_table(
+    ui: &mut egui::Ui,
+    rows: &[Vec<String>],
+    turn_index: usize,
+    block_index: usize,
+) {
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.panel_bg)
@@ -5412,26 +5737,30 @@ fn draw_markdown_table(ui: &mut egui::Ui, rows: &[Vec<String>], index: usize) {
         .inner_margin(egui::Margin::same(SPACE_XS))
         .show(ui, |ui| {
             egui::ScrollArea::horizontal()
-                .id_salt(ui.make_persistent_id(("assistant_table_scroll", index)))
+                .id_salt(ui.make_persistent_id(("assistant_table_scroll", turn_index, block_index)))
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    egui::Grid::new(ui.make_persistent_id(("assistant_table", index)))
-                        .striped(true)
-                        .min_col_width(44.0)
-                        .show(ui, |ui| {
-                            for (row_index, row) in rows.iter().enumerate() {
-                                for cell in row {
-                                    let text = egui::RichText::new(cell)
-                                        .color(theme.text_primary)
-                                        .size(TYPE_SM);
-                                    if row_index == 0 {
-                                        ui.label(text.strong());
-                                    } else {
-                                        ui.label(text);
-                                    }
+                    egui::Grid::new(ui.make_persistent_id((
+                        "assistant_table",
+                        turn_index,
+                        block_index,
+                    )))
+                    .striped(true)
+                    .min_col_width(44.0)
+                    .show(ui, |ui| {
+                        for (row_index, row) in rows.iter().enumerate() {
+                            for cell in row {
+                                let text = egui::RichText::new(cell)
+                                    .color(theme.text_primary)
+                                    .size(TYPE_SM);
+                                if row_index == 0 {
+                                    ui.label(text.strong());
+                                } else {
+                                    ui.label(text);
                                 }
                             }
-                        });
+                        }
+                    });
                 });
         });
 }
@@ -6333,20 +6662,20 @@ mod tests {
     fn command_proposal(text: &str) -> AssistantProposal {
         AssistantProposal::Command(
             grafito_command::assistant_proposals::parse_assistant_command(text)
-                .expect("test command must be a recognized assistant action"),
+                .expect("el comando de prueba debe ser una acción reconocida del asistente"),
         )
     }
 
     fn parameter_proposal(text: &str) -> AssistantProposal {
         AssistantProposal::Parameter(
             grafito_command::assistant_proposals::parse_assistant_parameter(text)
-                .expect("test parameter must be finite"),
+                .expect("el parámetro de prueba debe ser finito"),
         )
     }
 
     fn parameter_assignment(text: &str) -> AssistantParameterAssignment {
         grafito_command::assistant_proposals::parse_assistant_parameter(text)
-            .expect("test parameter must be finite")
+            .expect("el parámetro de prueba debe ser finito")
     }
 
     fn scene_proposal(commands: &[&str]) -> AssistantProposal {
@@ -6355,7 +6684,7 @@ mod tests {
                 .iter()
                 .map(|command| {
                     grafito_command::assistant_proposals::parse_assistant_command(command)
-                        .expect("test scene command must be recognized")
+                        .expect("el comando de escena de prueba debe ser reconocido")
                 })
                 .collect(),
         )
@@ -6555,15 +6884,15 @@ mod tests {
     #[test]
     fn destination_changes_discard_history_that_could_be_forwarded_remotely() {
         let mut state = AssistantPanelState::default();
-        state.begin_request("private question for the first model".into());
-        state.complete_request("private answer from the first model".into());
+        state.begin_request("pregunta privada para el primer modelo".into());
+        state.complete_request("respuesta privada del primer modelo".into());
         state.verified_proposals.push(VerifiedAssistantProposal {
             candidate_index: 0,
             proposal: command_proposal("Function[x]"),
             prerequisite_parameters: Vec::new(),
         });
         state.offer_proposal_correction(
-            "private question for the first model".into(),
+            "pregunta privada para el primer modelo".into(),
             grafito_assistant_types::AssistantRepairFeedback {
                 failures: Vec::new(),
             },
@@ -6577,15 +6906,15 @@ mod tests {
         assert!(!state.proposal_correction_available);
         assert!(state.proposal_correction_feedback.is_none());
 
-        state.begin_request("private question for the first provider".into());
-        state.complete_request("private answer from the first provider".into());
+        state.begin_request("pregunta privada para el primer proveedor".into());
+        state.complete_request("respuesta privada del primer proveedor".into());
         state.select_provider(ProviderProfile::OllamaLocal);
 
         assert!(state.conversation.is_empty());
         assert!(state.verified_proposals.is_empty());
 
-        state.begin_request("private question before restored preferences".into());
-        state.complete_request("private answer before restored preferences".into());
+        state.begin_request("pregunta privada antes de restaurar preferencias".into());
+        state.complete_request("respuesta privada antes de restaurar preferencias".into());
         state.apply_preferences(ProviderProfile::OpenCodeGo, "glm-5.2");
 
         assert!(state.conversation.is_empty());
@@ -6646,7 +6975,7 @@ mod tests {
         state.image_upload_consent = true;
         state.begin_request("interpretá la imagen".into());
 
-        assert!(pending_attachment_status(&state).contains("payload en curso"));
+        assert!(pending_attachment_status(&state).contains("envío en curso"));
 
         state.image_upload_consent = false;
         assert!(pending_attachment_status(&state).contains("no se enviarán"));
@@ -6816,7 +7145,7 @@ mod tests {
     #[test]
     fn model_choices_merge_catalog_discovery_and_current_selection_without_duplicates() {
         let mut state = AssistantPanelState {
-            model: "kept-model".into(),
+            model: "modelo-conservado".into(),
             ..Default::default()
         };
         state.set_available_models(vec![
@@ -6829,7 +7158,7 @@ mod tests {
 
         let choices = state.model_choices();
 
-        assert!(choices.contains(&"kept-model".to_string()));
+        assert!(choices.contains(&"modelo-conservado".to_string()));
         assert!(choices.contains(&"deepseek-v4-pro".to_string()));
         assert!(choices.contains(&"mimo-2.5-vl".to_string()));
         assert!(choices.contains(&"fusion".to_string()));
@@ -6909,7 +7238,7 @@ mod tests {
                 value: 2.0,
             }],
         );
-        state.stage_proposed_plan(plan, vec!["Set variable a = 2".into()]);
+        state.stage_proposed_plan(plan, vec!["Definir variable a = 2".into()]);
 
         assert!(state.proposed_plan().is_some());
         assert!(!state.finish_proposed_plan_application(false));
@@ -7158,6 +7487,7 @@ mod tests {
                                 let _ = draw_conversation_turn(
                                     ui,
                                     &turn,
+                                    0,
                                     AssistantProposalRenderState {
                                         verified_proposals: &[],
                                         applied_proposals: &[],
@@ -7183,7 +7513,7 @@ mod tests {
 
         assert!(
             turn_height < transcript_height * 0.35,
-            "short turn height {turn_height} consumed too much of the {transcript_height}px transcript"
+            "el turno corto de {turn_height} ocupó demasiado del historial de {transcript_height}px"
         );
     }
 
@@ -7196,7 +7526,7 @@ mod tests {
         // Reuso por contenido idéntico sin re-parseo (misma cantidad de bloques).
         let again = cache.blocks(content);
         assert_eq!(first.len(), again.len());
-        let mutated = cache.blocks(&format!("{content} extra"));
+        let mutated = cache.blocks(&format!("{content} agregado"));
         assert!(mutated.len() >= first.len());
         let mut empty = AssistantBlocksCache::default();
         assert!(empty.blocks("").is_empty());
@@ -7209,17 +7539,17 @@ mod tests {
         assert!(state.agent_ledger.is_none());
 
         for index in 0..20 {
-            state.push_agent_activity(format!("tool {index}"));
+            state.push_agent_activity(format!("herramienta {index}"));
         }
         assert!(state.agent_activity.len() <= 12);
-        assert_eq!(state.agent_activity.last().unwrap().text, "tool 19");
+        assert_eq!(state.agent_activity.last().unwrap().text, "herramienta 19");
 
-        state.set_agent_ledger(Some("Goal: resolver".into()));
-        assert_eq!(state.agent_ledger.as_deref(), Some("Goal: resolver"));
+        state.set_agent_ledger(Some("Objetivo: resolver".into()));
+        assert_eq!(state.agent_ledger.as_deref(), Some("Objetivo: resolver"));
         state.set_agent_ledger(Some("   ".into()));
         assert!(state.agent_ledger.is_none());
 
-        state.set_agent_ledger(Some("Goal: resolver".into()));
+        state.set_agent_ledger(Some("Objetivo: resolver".into()));
         state.clear_agent_progress();
         assert!(state.agent_activity.is_empty());
         assert!(state.agent_ledger.is_none());
@@ -7230,7 +7560,7 @@ mod tests {
         let context = egui::Context::default();
         let mut state = AssistantPanelState::default();
         let media = AssistantMedia {
-            title: "probe".into(),
+            title: "prueba".into(),
             frames: vec![egui::ColorImage::new([4, 4], egui::Color32::WHITE)],
         };
         state.set_media(Some(media), &context);
@@ -7350,7 +7680,7 @@ mod tests {
                 assert!(armed.reveal_started_at.is_some());
                 assert!(
                     armed.reveal_started_at.unwrap().is_finite(),
-                    "reveal clock must remain finite"
+                    "el reloj de revelado debe seguir siendo finito"
                 );
             });
         });
@@ -7430,7 +7760,7 @@ mod tests {
 
         let (question, stored_feedback) = state
             .take_proposal_correction()
-            .expect("an explicit correction must retain its safe feedback");
+            .expect("una corrección explícita debe conservar su devolución segura");
         assert_eq!(question, "graficá una curva");
         assert_eq!(stored_feedback.prompt_text(), feedback.prompt_text());
     }
@@ -7645,9 +7975,9 @@ mod tests {
     #[test]
     fn assistant_width_preserves_a_canvas_budget_before_reaching_its_default_width() {
         let (minimum, maximum, default) = assistant_panel_widths(960.0);
-        assert_eq!(minimum, 340.0);
+        assert_eq!(minimum, 300.0);
         assert_eq!(default, 400.0);
-        assert!((400.0..=404.0).contains(&maximum), "maximum {maximum}");
+        assert!((400.0..=404.0).contains(&maximum), "máximo {maximum}");
 
         let (minimum, maximum, default) = assistant_panel_widths(600.0);
         assert!(minimum <= maximum);
@@ -7669,13 +7999,13 @@ mod tests {
     fn bare_math_fraction_chain_renders_with_checkmark() {
         let src = r"\frac{2}{3} \cdot \frac{9}{4} = \frac{18}{12} = \frac{3}{2} \quad (\checkmark \, 1.5)";
         let plain = math_to_plain(src);
-        assert!(plain.contains("2 / 3"), "plain was {plain}");
-        assert!(plain.contains("·"), "cdot missing in {plain}");
-        assert!(plain.contains("✓"), "checkmark missing in {plain}");
-        assert!(plain.contains("1.5"), "1.5 missing in {plain}");
+        assert!(plain.contains("2 / 3"), "el texto plano era {plain}");
+        assert!(plain.contains("·"), "falta cdot en {plain}");
+        assert!(plain.contains("✓"), "falta checkmark en {plain}");
+        assert!(plain.contains("1.5"), "falta 1.5 en {plain}");
         // Bare detection should find fragment
         let frag = find_bare_math_fragment(src);
-        assert!(frag.is_some(), "bare fragment not detected for {src}");
+        assert!(frag.is_some(), "fragmento simple no detectado para {src}");
         // DisplayMath promotion heuristic
         assert!(is_bare_display_math(src));
         // Block parsing should promote to DisplayMath
@@ -7684,7 +8014,7 @@ mod tests {
             blocks
                 .iter()
                 .any(|b| matches!(b, AssistantMessageBlock::DisplayMath(_))),
-            "blocks were {blocks:?}"
+            "los bloques eran {blocks:?}"
         );
     }
 
@@ -7712,5 +8042,128 @@ mod tests {
         assert!(minimum <= maximum);
         assert!(maximum <= 480.0);
         assert!(default <= maximum);
+    }
+
+    #[test]
+    fn panel_widths_support_300_to_520_range() {
+        assert_eq!(ASSISTANT_PANEL_MIN_WIDTH, 300.0);
+        assert_eq!(ASSISTANT_PANEL_MAX_WIDTH, 520.0);
+        let (minimum, maximum, default) = assistant_panel_widths(1400.0);
+        assert_eq!(minimum, 300.0);
+        assert_eq!(maximum, 520.0);
+        assert_eq!(default, 400.0);
+        // Angosto y ancho intermedios siguen usables sin aplastar el canvas.
+        let (narrow_min, narrow_max, _) = assistant_panel_widths(700.0);
+        assert!(narrow_min <= narrow_max);
+        let (wide_min, wide_max, _) = assistant_panel_widths(1100.0);
+        assert!(wide_min <= wide_max);
+        assert!(wide_max <= 520.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn collapsed_composer_thresholds_cover_narrow_and_short_viewports() {
+        assert_eq!(ASSISTANT_PANEL_NARROW_WIDTH, 360.0);
+        assert_eq!(ASSISTANT_SHORT_VIEWPORT_HEIGHT, 600.0);
+        assert_eq!(ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT, 28.0);
+        // El editor colapsado es 1 línea frente a las 2 del normal.
+        assert!(ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT < ASSISTANT_COMPOSER_EDITOR_HEIGHT);
+    }
+
+    #[test]
+    fn composer_counter_tracks_input_vs_budget() {
+        let budget = RequestBudget::default().max_input_chars;
+        let mut state = AssistantPanelState {
+            problem: "2 + 2".into(),
+            ..Default::default()
+        };
+        assert!(state.input_bytes() <= budget);
+        assert!(state.can_submit());
+        state.problem = "x".repeat(budget + 1);
+        assert!(state.input_bytes() > budget);
+        assert!(!state.can_submit());
+        // En pending el envío se bloquea con mensaje claro.
+        state.problem = "2 + 2".into();
+        state.begin_request("2 + 2".into());
+        assert!(!state.can_submit());
+    }
+
+    #[test]
+    fn proposal_detail_text_is_spanish_and_mentions_params() {
+        let verified = VerifiedAssistantProposal {
+            candidate_index: 0,
+            proposal: command_proposal("Function[sin(x)]"),
+            prerequisite_parameters: vec![parameter_assignment("a = 1")],
+        };
+        let detail = proposal_detail_text(&verified);
+        assert!(detail.contains("Parámetros"));
+        assert!(!detail.contains("Apply"));
+        let simple = VerifiedAssistantProposal {
+            candidate_index: 1,
+            proposal: command_proposal("Function[x]"),
+            prerequisite_parameters: Vec::new(),
+        };
+        assert!(proposal_detail_text(&simple).contains("aplicar"));
+    }
+
+    #[test]
+    fn narrow_composer_and_proposal_cards_render_without_panicking() {
+        let context = egui::Context::default();
+        let mut state = AssistantPanelState {
+            problem: "graficá sin(x)".into(),
+            ..Default::default()
+        };
+        state.begin_request("graficá sin(x)".into());
+        state.complete_request("```grafito\nFunction[sin(x)]\n```".into());
+        state.set_proposal_preflight_results(
+            vec![VerifiedAssistantProposal {
+                candidate_index: 0,
+                proposal: command_proposal("Function[sin(x)]"),
+                prerequisite_parameters: Vec::new(),
+            }],
+            1,
+            vec![0],
+        );
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 500.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = draw_assistant_composer(ui, &mut state, true);
+                    let _ = draw_assistant_composer(ui, &mut state, false);
+                    let proposal_state = AssistantProposalRenderState {
+                        verified_proposals: &state.verified_proposals,
+                        applied_proposals: &state.applied_proposals,
+                        preflight_candidate_count: state.preflight_candidate_count,
+                        proposal_code_block_indices: &state.proposal_code_block_indices,
+                        proposal_results_available: true,
+                        correction_available: false,
+                    };
+                    let mut cache = AssistantBlocksCache::default();
+                    // Mismo bloque en dos turnos: los IDs no deben cruzarse.
+                    let _ = draw_assistant_response(
+                        ui,
+                        "```grafito\nFunction[sin(x)]\n```",
+                        proposal_state,
+                        None,
+                        0,
+                        &mut cache,
+                    );
+                    let _ = draw_assistant_response(
+                        ui,
+                        "```grafito\nFunction[sin(x)]\n```",
+                        proposal_state,
+                        None,
+                        1,
+                        &mut cache,
+                    );
+                });
+            },
+        );
     }
 }

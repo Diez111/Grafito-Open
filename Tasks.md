@@ -38,3 +38,10 @@
 - [x] F5.1 docs/architecture.md + README + CHANGELOG (architecture.md creado)
 - [x] F5.2 progress.md evidencia CI + riesgos (RUSTSEC 2026-12-31, HashMap, etc.)
 - [x] F5.3 Handoff: menu decisiones vibecoder-guide si algo fallo (este archivo)
+
+## F6 — Sync BUILD docs↔código 2026-09-04 — DONE
+- [x] F6.1 Presupuestos con file:line (8192/2048/8/60s/512KiB-1MiB, assistant-types/src/lib.rs:198-255) + Responses Spark (assistant/src/lib.rs:50-56,905-951) + modelos (default deepseek utils.rs:59-61, fallback assistant.rs:2470-2613, qwen/kimi sólo hint :2936)
+- [x] F6.2 Comandos 238 (`command!(`, registry:228), 199 paleta + 14 UI = 213, 26 categorías visibles; grupos toolbar 17 (5/8/17, toolbar.rs:263-284); 73 tools; 10 perspectivas; 16 crates; CI 17 jobs (coverage 75%, bench >10%, mutation semanal)
+- [x] F6.3 app.rs: Ctrl+T tema (:4259-4267) + Ctrl+P/E (:4268-4278) + F8/F9 (:4135-4144) — cero fantasmas; onboarding gating `!onboarding_completed` (:1763, :4922-5033, utils.rs:46-48), botón [No mostrar]
+- [x] F6.4 Responsive: rail 60px Medium/Wide (ui.rs:549-552), drawer clamp 292..440 (tokens.rs:207-210, panels.rs:2125-2132), panel izq 180+45% (panels.rs:1201-1206); paleta footer "N de M" es (command_palette.rs:394-403)
+- [x] F6.5 README.md/README.en.md Controles corregidos (Shift+L/K/J = X/Y/ambos, F8/F9, Ctrl+T/P/E); tabla doc→código §13 en architecture.md

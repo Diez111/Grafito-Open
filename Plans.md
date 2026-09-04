@@ -128,3 +128,9 @@ grafito-profile/pedagogy/plugins/assistant-types
 - docs/architecture.md (DAG, statems, budgets)
 - README.md / PROGRESS, CHANGELOG promoción
 - Riesgos residuales y next steps (RUSTSEC 2026-12-31, etc.)
+
+### Fase 6 — Sync BUILD docs↔código 2026-09-04 [DONE]
+- Todo número con `file:line` verificada por lectura directa (tabla en docs/architecture.md §13).
+- app.rs: Ctrl+T tema + Ctrl+P/E + F8/F9 (cero fantasmas) + onboarding gating `onboarding_completed` (420px, 3 bullets, [Probar ejemplo][Empezar vacío][No mostrar]).
+- Responsive: rail 60px Medium/Wide, drawer clamp 292..440, panel izq 180+45%; paleta fuzzy+footer "N de M" es.
+- Gates: `cargo fmt`, `cargo clippy -p grafito-app -p grafito-ui --all-targets --locked -- -D warnings`, tests lib ambos.

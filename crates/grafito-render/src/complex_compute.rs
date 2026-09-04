@@ -96,6 +96,8 @@ pub struct ComplexComputePipeline {
     out_buffer: wgpu::Buffer,
     out_readback: wgpu::Buffer,
     max_vertices: usize,
+    /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
+    timing: crate::gpu_timing::GpuTimingHandle,
 }
 
 #[repr(C)]
@@ -253,6 +255,7 @@ impl ComplexComputePipeline {
             out_buffer,
             out_readback,
             max_vertices: MAX_VERTICES,
+            timing: crate::gpu_timing::create(device, queue, "Complex Compute", 1),
         }
     }
 
@@ -351,7 +354,9 @@ impl ComplexComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Complex Compute Pass"),
-                timestamp_writes: None,
+                // GPU timing opt-in tras la feature `profiling` (ver gpu_timing);
+                // sin la feature esto es `None` — cero costo en release.
+                timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -360,6 +365,7 @@ impl ComplexComputePipeline {
         }
 
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &self.out_readback, 0, vertex_bytes);
+        crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.out_readback.slice(..vertex_bytes);
@@ -370,11 +376,15 @@ impl ComplexComputePipeline {
                 map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
-        log::trace!("Complex compute sync readback (Wait) — bloqueante, 1 intento por frame");
-        device.poll(wgpu::Maintain::Wait);
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Complex compute sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Complex Compute");
 
-        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        if !mapped {
             // `unmap` is idempotent: when `map_async` reported an
             // error the buffer was never mapped, so this is a no-op.
             self.out_readback.unmap();

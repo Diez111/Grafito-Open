@@ -37,3 +37,10 @@ harness = false
 [lints]
 workspace = true
 
+
+[features]
+# GPU timestamp queries (wgpu TIMESTAMP_QUERY) para medir compute passes con
+# wgpu-profiler/puffin. Sin costo en release: con la feature desactivada cada
+# helper de `gpu_timing` compila a no-op y los passes mantienen
+# `timestamp_writes: None`.
+profiling = []

@@ -876,4 +876,105 @@ mod tests {
         assert!(lo.tags.is_empty());
         assert!((lo.estimated_hours - 2.0).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn cuarenta_y_tres_los_dag_valido() {
+        // 43 LOs: 5 primaria + 11 secundaria + 8 AM1 + 7 AM2 + 6 Álgebra + 6 Prob.
+        let todos = Curriculum::all();
+        assert_eq!(todos.len(), 43, "el currículum debe tener 43 LOs");
+        // Sin IDs duplicados.
+        let mut vistos = std::collections::HashSet::new();
+        for lo in &todos {
+            assert!(vistos.insert(lo.id.clone()), "LO duplicado: {}", lo.id);
+            assert!(!lo.title.trim().is_empty(), "título vacío en {}", lo.id);
+            assert!(
+                !lo.description.trim().is_empty(),
+                "descripción vacía en {}",
+                lo.id
+            );
+        }
+        // Todo prerequisito existe (DAG sin dangling).
+        let ids: std::collections::HashSet<&str> = todos.iter().map(|lo| lo.id.as_str()).collect();
+        for lo in &todos {
+            for req in &lo.requires {
+                assert!(
+                    ids.contains(req.as_str()),
+                    "prerequisito '{}' de '{}' no existe",
+                    req,
+                    lo.id
+                );
+            }
+        }
+        // Orden topológico sin ciclos y respeta aristas.
+        let orden = Curriculum::topological_order().expect("sin ciclos");
+        assert_eq!(orden.len(), 43);
+        let mut pos: HashMap<String, usize> = HashMap::new();
+        for (i, lo) in orden.iter().enumerate() {
+            pos.insert(lo.id.clone(), i);
+        }
+        for lo in &todos {
+            let p = pos[&lo.id];
+            for req in &lo.requires {
+                let rp = pos.get(req).expect("prerequisito en orden");
+                assert!(*rp < p, "prerequisito {req} debe estar antes que {}", lo.id);
+            }
+        }
+    }
+
+    #[test]
+    fn level_min_coherente_con_prerequisitos() {
+        // Coherencia: level_min(dependiente) >= level_min(prerequisito).
+        let todos = Curriculum::all();
+        let por_id: HashMap<&str, &LearningObjective> =
+            todos.iter().map(|lo| (lo.id.as_str(), lo)).collect();
+        for lo in &todos {
+            for req in &lo.requires {
+                let pre = por_id.get(req.as_str()).expect("prerequisito debe existir");
+                assert!(
+                    lo.level_min >= pre.level_min,
+                    "level_min incoherente: {} ({}) < prerequisito {} ({})",
+                    lo.id,
+                    lo.level_min,
+                    req,
+                    pre.level_min
+                );
+            }
+            // level_min dentro de rango pedagógico 1..=15.
+            assert!(
+                (1..=15).contains(&lo.level_min),
+                "level_min fuera de rango en {}: {}",
+                lo.id,
+                lo.level_min
+            );
+        }
+        // Hitos por programa: primaria ≤2, secundaria ≤8, AM1 10..=12, AM2 13..=14.
+        let pri_max = Curriculum::primary()
+            .iter()
+            .map(|lo| lo.level_min)
+            .max()
+            .unwrap_or(0);
+        assert!(pri_max <= 2, "primaria level_min máximo {pri_max} > 2");
+        let sec_max = Curriculum::secondary()
+            .iter()
+            .map(|lo| lo.level_min)
+            .max()
+            .unwrap_or(0);
+        assert!(sec_max <= 8, "secundaria level_min máximo {sec_max} > 8");
+        for lo in Curriculum::utn_am1() {
+            assert!(
+                (10..=12).contains(&lo.level_min),
+                "AM1 {} level_min {} fuera de 10..=12",
+                lo.id,
+                lo.level_min
+            );
+        }
+        for lo in Curriculum::utn_am2() {
+            assert!(
+                (13..=14).contains(&lo.level_min),
+                "AM2 {} level_min {} fuera de 13..=14",
+                lo.id,
+                lo.level_min
+            );
+        }
+    }
 }

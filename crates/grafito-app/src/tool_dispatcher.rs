@@ -374,11 +374,12 @@ pub fn dispatch_tool(
                 reset_tool: true,
             }
         }
-        _ => ToolResult {
-            objects: vec![],
-            message: None,
-            reset_tool: false,
-        },
+        _ => unavailable_tool(
+            state,
+            &format!(
+                "La herramienta {tool:?} aún no está disponible desde el lienzo; usá la paleta (Ctrl+K) o el comando CAS."
+            ),
+        ),
     }
 }
 

@@ -559,6 +559,30 @@ fn reserve_gpu_3d_resources(
     true
 }
 
+/// Lado máximo (en píxeles físicos) del target offscreen 3D.
+///
+/// Un canvas 8K (7680×4320) a DPI 2.0 pediría un target de 15360×8640
+/// (~530 MB solo color+depth), que excede el límite de textura 2D de la
+/// mayoría de GPUs y puede agotar la memoria de una iGPU. Se escala el lado
+/// mayor a este tope preservando el aspect ratio; el composite egui estira el
+/// resultado al canvas real (trade-off de calidad aceptable, el fallback CPU
+/// sigue renderizando a resolución completa).
+const MAX_3D_OFFSCREEN_TARGET_DIMENSION: u32 = 4096;
+
+/// Acota el tamaño del target offscreen 3D para resize 0/1px/8K sin panic ni
+/// OOM. Devuelve al menos 1×1 y nunca excede `MAX_3D_OFFSCREEN_TARGET_DIMENSION`
+/// en ningún eje, preservando el aspect ratio.
+fn cap_offscreen_target_size(width: u32, height: u32) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let max_dim = MAX_3D_OFFSCREEN_TARGET_DIMENSION;
+    let scale = (width.max(height) as f64 / max_dim as f64).max(1.0);
+    (
+        ((width as f64 / scale).ceil() as u32).clamp(1, max_dim),
+        ((height as f64 / scale).ceil() as u32).clamp(1, max_dim),
+    )
+}
+
 pub struct CanvasCallback {
     pub document: Arc<Document>,
     pub dark_mode: bool,
@@ -593,6 +617,17 @@ impl CallbackTrait for CanvasCallback {
             transient_revision: self.transient_revision,
         };
 
+        // Resize defensivo: un canvas colapsado a 0×0 (o 1px) no debe construir
+        // geometría degenerada ni una MVP con división por cero. `plan_2d_scene`
+        // ya evita programar el callback con tamaño 0, pero el resize puede
+        // ocurrir entre el plan y este prepare.
+        let sw = self.document.view().screen_size.x;
+        let sh = self.document.view().screen_size.y;
+        if !sw.is_finite() || !sh.is_finite() || sw <= 0.0 || sh <= 0.0 {
+            resources.scene_readiness.mark_2d_cpu_only(current_key);
+            return vec![];
+        }
+
         if resources.buffers_2d.as_ref().is_some_and(|buffers| {
             completed_2d_buffer_matches_scene(buffers.completed_key.as_ref(), &current_key)
         }) && resources.cache_2d.as_ref() == Some(&current_key)
@@ -612,8 +647,6 @@ impl CallbackTrait for CanvasCallback {
                 return vec![]; // Still compiling in background
             };
 
-            let sw = self.document.view().screen_size.x;
-            let sh = self.document.view().screen_size.y;
             let mvp = glam::Mat4::orthographic_rh(0.0, sw, sh, 0.0, -1.0, 1.0);
             renderer.update_mvp(queue, mvp);
 
@@ -959,13 +992,26 @@ impl CallbackTrait for Canvas3DCallback {
             screen_h: self.screen_h,
         };
 
-        let target_width = (self.screen_w * screen_descriptor.pixels_per_point).ceil() as u32;
-        let target_height = (self.screen_h * screen_descriptor.pixels_per_point).ceil() as u32;
+        // Resize defensivo: canvas 0×0 no debe crear target ni geometría.
+        if !self.screen_w.is_finite()
+            || !self.screen_h.is_finite()
+            || self.screen_w <= 0.0
+            || self.screen_h <= 0.0
+        {
+            resources.scene_readiness.mark_3d_cpu_only(current_key);
+            return vec![];
+        }
+        // 8K/DPI alto: acota el target offscreen para no alocar cientos de MB
+        // en iGPU (ver `cap_offscreen_target_size`).
+        let (target_width, target_height) = cap_offscreen_target_size(
+            (self.screen_w * screen_descriptor.pixels_per_point).ceil() as u32,
+            (self.screen_h * screen_descriptor.pixels_per_point).ceil() as u32,
+        );
         let target_ready = resources
             .buffers_3d
             .as_ref()
             .and_then(|buffers| buffers.depth_target_3d.as_ref())
-            .is_some_and(|target| target.matches_size(target_width.max(1), target_height.max(1)));
+            .is_some_and(|target| target.matches_size(target_width, target_height));
         if resources.buffers_3d.is_some()
             && target_ready
             && resources.cache_3d.as_ref() == Some(&current_key)
@@ -1078,9 +1124,10 @@ impl CallbackTrait for Canvas3DCallback {
                 resources.scene_readiness.mark_3d_cpu_only(current_key);
                 return vec![];
             }
-            buffers.depth_target_3d.as_ref().is_none_or(|target| {
-                !target.matches_size(target_width.max(1), target_height.max(1))
-            })
+            buffers
+                .depth_target_3d
+                .as_ref()
+                .is_none_or(|target| !target.matches_size(target_width, target_height))
         };
         if needs_target {
             let Ok(renderer_lock) = resources.renderer.read() else {
@@ -1705,5 +1752,37 @@ mod tests {
         assert_eq!(planned.len(), 16);
         assert!(ids[..16].iter().all(|id| planned.contains(id)));
         assert!(ids[16..].iter().all(|id| !planned.contains(id)));
+    }
+
+    #[test]
+    fn offscreen_target_cap_handles_zero_one_pixel_and_8k_without_oom() {
+        // 0×0 → nunca un target de 0 (wgpu rechaza texturas vacías).
+        assert_eq!(super::cap_offscreen_target_size(0, 0), (1, 1));
+        // 1px se mantiene.
+        assert_eq!(super::cap_offscreen_target_size(1, 1), (1, 1));
+        // Resolución normal no se toca.
+        assert_eq!(super::cap_offscreen_target_size(1920, 1080), (1920, 1080));
+        // 8K a DPI 2.0 (15360×8640) se escala al tope preservando aspect.
+        let (w, h) = super::cap_offscreen_target_size(15360, 8640);
+        assert!(w <= super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert!(h <= super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert_eq!(w, super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert!((h as f64 / w as f64 - 8640.0 / 15360.0).abs() < 0.01);
+        // 8K a DPI 1.0 (7680×4320) también se acota.
+        let (w, h) = super::cap_offscreen_target_size(7680, 4320);
+        assert!(w <= super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert!(h <= super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        // Valores extremos (u32::MAX) no desbordan ni devuelven 0.
+        let (w, h) = super::cap_offscreen_target_size(u32::MAX, u32::MAX);
+        assert_eq!(w, super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert_eq!(h, super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+    }
+
+    #[test]
+    fn offscreen_target_cap_preserves_aspect_ratio_for_ultrawide() {
+        let (w, h) = super::cap_offscreen_target_size(15360, 2160);
+        assert_eq!(w, super::MAX_3D_OFFSCREEN_TARGET_DIMENSION);
+        assert!((h as f64 / w as f64 - 2160.0 / 15360.0).abs() < 0.01);
+        assert!(h >= 1);
     }
 }

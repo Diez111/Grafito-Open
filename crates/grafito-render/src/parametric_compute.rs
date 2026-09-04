@@ -19,8 +19,19 @@ use grafito_core::object::{
 use grafito_core::parametric_sampling;
 use std::collections::HashMap;
 
+/// Presupuesto de muestras por curva paramétrica: una curva densa se evalúa en
+/// UN solo dispatch de `steps + 1 <= MAX_CURVE_STEPS + 1` workgroups (64 hilos
+/// por workgroup). Ver `docs/architecture.md:8` — MAX_CURVE_STEPS 4000.
 const MAX_CURVE_STEPS: usize = 4000;
+/// Presupuesto de resolución por superficie 3D (grid `(res+1)²`, 129×129 máx).
+/// Ver `docs/architecture.md:8` — MAX_SURFACE_RES 128.
 const MAX_SURFACE_RES: usize = 128;
+
+/// Rechaza resoluciones por encima del presupuesto [`MAX_SURFACE_RES`] antes de
+/// tocar la GPU. `res == 0` se normaliza a 1 por el caller.
+fn surface_res_within_budget(res: usize) -> bool {
+    (1..=MAX_SURFACE_RES).contains(&res)
+}
 // `exp(88.8)` is near `f32::MAX`; leave a margin so results do not depend on
 // whether an individual GPU backend saturates or produces infinity.
 const MAX_SAFE_F32_EXP_ARGUMENT: f64 = 88.0;
@@ -154,6 +165,206 @@ fn surface_expression_has_unsafe_f32_exp(
     })
 }
 
+/// One parametric curve preflighted and compiled for a batched GPU dispatch.
+struct PreparedCurve {
+    params: ParametricParamsUniform,
+    prog: BytecodeProgram,
+    output_count: usize,
+}
+
+fn prepare_curve_2d(
+    pc: &ParametricCurve2DObj,
+    steps: usize,
+    max_curve_samples: usize,
+    variables: &HashMap<String, f64>,
+) -> Option<PreparedCurve> {
+    let steps = steps.clamp(1, max_curve_samples);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    if curve_expression_has_unsafe_f32_exp(&pc.expr_x, "t", (t_min, t_max), variables)
+        || curve_expression_has_unsafe_f32_exp(&pc.expr_y, "t", (t_min, t_max), variables)
+    {
+        return None;
+    }
+    let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+    if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
+        return None;
+    }
+    let mut prog = BytecodeProgram::default();
+    ParametricComputePipeline::compile_parametric_expr(&pc.expr_x, variables, "t", &mut prog)
+        .ok()?;
+    ParametricComputePipeline::compile_parametric_expr(&pc.expr_y, variables, "t", &mut prog)
+        .ok()?;
+    let params = ParametricParamsUniform {
+        mode: 0,
+        n: (steps + 1) as u32,
+        m: 0,
+        t_min: t_min as f32,
+        t_max: t_max as f32,
+        x_min: 0.0,
+        x_max: 0.0,
+        y_min: 0.0,
+        y_max: 0.0,
+        code_len: prog.code.len() as u32,
+        _pad: [0; 2],
+    };
+    Some(PreparedCurve {
+        params,
+        prog,
+        output_count: (steps + 1) * 2,
+    })
+}
+
+fn prepare_curve_3d(
+    pc: &ParametricCurve3DObj,
+    steps: usize,
+    max_curve_samples: usize,
+    variables: &HashMap<String, f64>,
+) -> Option<PreparedCurve> {
+    let steps = steps.clamp(1, max_curve_samples);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    if curve_expression_has_unsafe_f32_exp(
+        &pc.expr_x,
+        pc.parameter.as_str(),
+        (t_min, t_max),
+        variables,
+    ) || curve_expression_has_unsafe_f32_exp(
+        &pc.expr_y,
+        pc.parameter.as_str(),
+        (t_min, t_max),
+        variables,
+    ) || curve_expression_has_unsafe_f32_exp(
+        &pc.expr_z,
+        pc.parameter.as_str(),
+        (t_min, t_max),
+        variables,
+    ) {
+        return None;
+    }
+    let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+    if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
+        return None;
+    }
+    let prog = compile_curve_3d_program(pc, variables).ok()?;
+    if !curve_3d_samples_preserve_f32_resolution(pc, steps, variables) {
+        return None;
+    }
+    let params = ParametricParamsUniform {
+        mode: 1,
+        n: (steps + 1) as u32,
+        m: 0,
+        t_min: t_min as f32,
+        t_max: t_max as f32,
+        x_min: 0.0,
+        x_max: 0.0,
+        y_min: 0.0,
+        y_max: 0.0,
+        code_len: prog.code.len() as u32,
+        _pad: [0; 2],
+    };
+    Some(PreparedCurve {
+        params,
+        prog,
+        output_count: (steps + 1) * 3,
+    })
+}
+
+fn prepare_polar(
+    pol: &PolarCurveObj,
+    steps: usize,
+    max_curve_samples: usize,
+    variables: &HashMap<String, f64>,
+) -> Option<PreparedCurve> {
+    let steps = steps.clamp(1, max_curve_samples);
+    let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    if curve_expression_has_unsafe_f32_exp(&pol.expr_r, "t", (t_min, t_max), variables) {
+        return None;
+    }
+    let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
+    if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
+        return None;
+    }
+    let mut prog = BytecodeProgram::default();
+    ParametricComputePipeline::compile_parametric_expr(&pol.expr_r, variables, "t", &mut prog)
+        .ok()?;
+    let params = ParametricParamsUniform {
+        mode: 2,
+        n: (steps + 1) as u32,
+        m: 0,
+        t_min: t_min as f32,
+        t_max: t_max as f32,
+        x_min: 0.0,
+        x_max: 0.0,
+        y_min: 0.0,
+        y_max: 0.0,
+        code_len: prog.code.len() as u32,
+        _pad: [0; 2],
+    };
+    Some(PreparedCurve {
+        params,
+        prog,
+        output_count: (steps + 1) * 2,
+    })
+}
+
+fn curve_2d_from_values(values: &[f32]) -> Curve2DSamples {
+    values
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| {
+            let x = if c[0].is_finite() {
+                c[0] as f64
+            } else {
+                f64::NAN
+            };
+            let y = if c[1].is_finite() {
+                c[1] as f64
+            } else {
+                f64::NAN
+            };
+            (x, y)
+        })
+        .collect()
+}
+
+fn curve_3d_from_values(values: &[f32]) -> Curve3DSamples {
+    values
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| {
+            let x = if c[0].is_finite() {
+                c[0] as f64
+            } else {
+                f64::NAN
+            };
+            let y = if c[1].is_finite() {
+                c[1] as f64
+            } else {
+                f64::NAN
+            };
+            let z = if c[2].is_finite() {
+                c[2] as f64
+            } else {
+                f64::NAN
+            };
+            (x, y, z)
+        })
+        .collect()
+}
+
 /// GPU resources needed to evaluate parametric objects.
 pub struct ParametricComputePipeline {
     pipeline: wgpu::ComputePipeline,
@@ -165,6 +376,8 @@ pub struct ParametricComputePipeline {
     values_readback: wgpu::Buffer,
     max_curve_samples: usize,
     max_surface_res: usize,
+    /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
+    timing: crate::gpu_timing::GpuTimingHandle,
 }
 
 #[repr(C)]
@@ -317,6 +530,7 @@ impl ParametricComputePipeline {
             values_readback,
             max_curve_samples,
             max_surface_res,
+            timing: crate::gpu_timing::create(device, queue, "Parametric Compute", 1),
         }
     }
 
@@ -365,7 +579,9 @@ impl ParametricComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Parametric Compute Pass"),
-                timestamp_writes: None,
+                // GPU timing opt-in tras la feature `profiling` (ver gpu_timing);
+                // sin la feature esto es `None` — cero costo en release.
+                timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -386,6 +602,7 @@ impl ParametricComputePipeline {
             0,
             (output_count * std::mem::size_of::<f32>()) as u64,
         );
+        crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         let slice = self.values_readback.slice(..);
@@ -398,11 +615,15 @@ impl ParametricComputePipeline {
                 log::error!("Parametric compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
-        log::trace!("Parametric compute sync readback (Wait) — bloqueante, 1 intento por frame");
-        device.poll(wgpu::Maintain::Wait);
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Parametric compute sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Parametric Compute");
 
-        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        if !mapped {
             // `unmap` is idempotent: when `map_async` reported an
             // error the buffer was never mapped, so this is a no-op.
             self.values_readback.unmap();
@@ -451,63 +672,15 @@ impl ParametricComputePipeline {
         steps: usize,
         variables: &HashMap<String, f64>,
     ) -> Option<Curve2DSamples> {
-        let steps = steps.clamp(1, self.max_curve_samples);
-        let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
-        let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
-            return None;
-        }
-        if curve_expression_has_unsafe_f32_exp(&pc.expr_x, "t", (t_min, t_max), variables)
-            || curve_expression_has_unsafe_f32_exp(&pc.expr_y, "t", (t_min, t_max), variables)
-        {
-            return None;
-        }
-        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
-        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
-            return None;
-        }
-
-        let mut prog = BytecodeProgram::default();
-        Self::compile_parametric_expr(&pc.expr_x, variables, "t", &mut prog).ok()?;
-        Self::compile_parametric_expr(&pc.expr_y, variables, "t", &mut prog).ok()?;
-
-        let params = ParametricParamsUniform {
-            mode: 0,
-            n: (steps + 1) as u32,
-            m: 0,
-            t_min: t_min as f32,
-            t_max: t_max as f32,
-            x_min: 0.0,
-            x_max: 0.0,
-            y_min: 0.0,
-            y_max: 0.0,
-            code_len: prog.code.len() as u32,
-            _pad: [0; 2],
-        };
-
-        let output_count = (steps + 1) * 2;
-        let values = self.dispatch_and_readback(device, queue, params, &prog, output_count)?;
-
-        Some(
-            values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| {
-                    let x = if c[0].is_finite() {
-                        c[0] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    let y = if c[1].is_finite() {
-                        c[1] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    (x, y)
-                })
-                .collect(),
-        )
+        let prepared = prepare_curve_2d(pc, steps, self.max_curve_samples, variables)?;
+        let values = self.dispatch_and_readback(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )?;
+        Some(curve_2d_from_values(&values))
     }
 
     /// Evaluate a 3D parametric curve on the GPU.
@@ -519,82 +692,15 @@ impl ParametricComputePipeline {
         steps: usize,
         variables: &HashMap<String, f64>,
     ) -> Option<Curve3DSamples> {
-        let steps = steps.clamp(1, self.max_curve_samples);
-        let t_min = Self::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
-        let t_max = Self::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
-            return None;
-        }
-        if curve_expression_has_unsafe_f32_exp(
-            &pc.expr_x,
-            pc.parameter.as_str(),
-            (t_min, t_max),
-            variables,
-        ) || curve_expression_has_unsafe_f32_exp(
-            &pc.expr_y,
-            pc.parameter.as_str(),
-            (t_min, t_max),
-            variables,
-        ) || curve_expression_has_unsafe_f32_exp(
-            &pc.expr_z,
-            pc.parameter.as_str(),
-            (t_min, t_max),
-            variables,
-        ) {
-            return None;
-        }
-        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
-        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
-            return None;
-        }
-
-        let prog = compile_curve_3d_program(pc, variables).ok()?;
-        if !curve_3d_samples_preserve_f32_resolution(pc, steps, variables) {
-            return None;
-        }
-
-        let params = ParametricParamsUniform {
-            mode: 1,
-            n: (steps + 1) as u32,
-            m: 0,
-            t_min: t_min as f32,
-            t_max: t_max as f32,
-            x_min: 0.0,
-            x_max: 0.0,
-            y_min: 0.0,
-            y_max: 0.0,
-            code_len: prog.code.len() as u32,
-            _pad: [0; 2],
-        };
-
-        let output_count = (steps + 1) * 3;
-        let values = self.dispatch_and_readback(device, queue, params, &prog, output_count)?;
-
-        Some(
-            values
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|c| {
-                    let x = if c[0].is_finite() {
-                        c[0] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    let y = if c[1].is_finite() {
-                        c[1] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    let z = if c[2].is_finite() {
-                        c[2] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    (x, y, z)
-                })
-                .collect(),
-        )
+        let prepared = prepare_curve_3d(pc, steps, self.max_curve_samples, variables)?;
+        let values = self.dispatch_and_readback(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )?;
+        Some(curve_3d_from_values(&values))
     }
 
     /// Evaluate a polar curve on the GPU.
@@ -606,60 +712,15 @@ impl ParametricComputePipeline {
         steps: usize,
         variables: &HashMap<String, f64>,
     ) -> Option<Curve2DSamples> {
-        let steps = steps.clamp(1, self.max_curve_samples);
-        let t_min = Self::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
-        let t_max = Self::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
-        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
-            return None;
-        }
-        if curve_expression_has_unsafe_f32_exp(&pol.expr_r, "t", (t_min, t_max), variables) {
-            return None;
-        }
-        let min_step = (t_max - t_min).abs() / steps.max(1) as f64;
-        if !f32_bounds_have_precision(&[t_min, t_max], min_step) {
-            return None;
-        }
-
-        let mut prog = BytecodeProgram::default();
-        Self::compile_parametric_expr(&pol.expr_r, variables, "t", &mut prog).ok()?;
-
-        let params = ParametricParamsUniform {
-            mode: 2,
-            n: (steps + 1) as u32,
-            m: 0,
-            t_min: t_min as f32,
-            t_max: t_max as f32,
-            x_min: 0.0,
-            x_max: 0.0,
-            y_min: 0.0,
-            y_max: 0.0,
-            code_len: prog.code.len() as u32,
-            _pad: [0; 2],
-        };
-
-        let output_count = (steps + 1) * 2;
-        let values = self.dispatch_and_readback(device, queue, params, &prog, output_count)?;
-
-        Some(
-            values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| {
-                    let x = if c[0].is_finite() {
-                        c[0] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    let y = if c[1].is_finite() {
-                        c[1] as f64
-                    } else {
-                        f64::NAN
-                    };
-                    (x, y)
-                })
-                .collect(),
-        )
+        let prepared = prepare_polar(pol, steps, self.max_curve_samples, variables)?;
+        let values = self.dispatch_and_readback(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )?;
+        Some(curve_2d_from_values(&values))
     }
 
     /// Evaluate a 3D parametric surface on the GPU.
@@ -674,7 +735,11 @@ impl ParametricComputePipeline {
         if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
             return None;
         }
-        let res = res.clamp(1, self.max_surface_res);
+        let res = res.max(1);
+        if res > self.max_surface_res {
+            return None;
+        }
+        debug_assert!(surface_res_within_budget(res));
         let x_min = Self::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
         let x_max = Self::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
         let y_min = Self::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
@@ -734,6 +799,236 @@ impl ParametricComputePipeline {
             grid.push(row);
         }
         Some(grid)
+    }
+
+    /// Evaluate multiple 2D parametric curves in a single GPU submit.
+    ///
+    /// Cada curva densa se despacha en un solo dispatch de
+    /// `steps + 1 <= MAX_CURVE_STEPS + 1` workgroups (64 hilos/workgroup), pero
+    /// todas las curvas comparten un único encoder, un único `submit` y un
+    /// único poll de readback acotado — en vez de N submits + N polls. Devuelve
+    /// una entrada por curva de entrada; `None` si la curva falla el preflight
+    /// o el readback del batch falla.
+    pub fn evaluate_curves_2d_batched(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        curves: &[(&ParametricCurve2DObj, usize)],
+        variables: &HashMap<String, f64>,
+    ) -> Vec<Option<Curve2DSamples>> {
+        let jobs: Vec<Option<PreparedCurve>> = curves
+            .iter()
+            .map(|(pc, steps)| prepare_curve_2d(pc, *steps, self.max_curve_samples, variables))
+            .collect();
+        let prepared: Vec<&PreparedCurve> = jobs.iter().flatten().collect();
+        let results = self.dispatch_batch(device, queue, &prepared);
+        let mut results_iter = results.into_iter();
+        jobs.into_iter()
+            .map(|job| {
+                job?;
+                let values = results_iter.next().flatten()?;
+                Some(curve_2d_from_values(&values))
+            })
+            .collect()
+    }
+
+    /// Evaluate multiple 3D parametric curves in a single GPU submit. Misma
+    /// semántica de batch que [`Self::evaluate_curves_2d_batched`].
+    pub fn evaluate_curves_3d_batched(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        curves: &[(&ParametricCurve3DObj, usize)],
+        variables: &HashMap<String, f64>,
+    ) -> Vec<Option<Curve3DSamples>> {
+        let jobs: Vec<Option<PreparedCurve>> = curves
+            .iter()
+            .map(|(pc, steps)| prepare_curve_3d(pc, *steps, self.max_curve_samples, variables))
+            .collect();
+        let prepared: Vec<&PreparedCurve> = jobs.iter().flatten().collect();
+        let results = self.dispatch_batch(device, queue, &prepared);
+        let mut results_iter = results.into_iter();
+        jobs.into_iter()
+            .map(|job| {
+                job?;
+                let values = results_iter.next().flatten()?;
+                Some(curve_3d_from_values(&values))
+            })
+            .collect()
+    }
+
+    /// Evaluate multiple polar curves in a single GPU submit. Misma semántica
+    /// de batch que [`Self::evaluate_curves_2d_batched`].
+    pub fn evaluate_polars_batched(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        curves: &[(&PolarCurveObj, usize)],
+        variables: &HashMap<String, f64>,
+    ) -> Vec<Option<Curve2DSamples>> {
+        let jobs: Vec<Option<PreparedCurve>> = curves
+            .iter()
+            .map(|(pol, steps)| prepare_polar(pol, *steps, self.max_curve_samples, variables))
+            .collect();
+        let prepared: Vec<&PreparedCurve> = jobs.iter().flatten().collect();
+        let results = self.dispatch_batch(device, queue, &prepared);
+        let mut results_iter = results.into_iter();
+        jobs.into_iter()
+            .map(|job| {
+                job?;
+                let values = results_iter.next().flatten()?;
+                Some(curve_2d_from_values(&values))
+            })
+            .collect()
+    }
+
+    /// Recorda `jobs` en un único encoder (un dispatch por curva), un único
+    /// submit y un único poll de readback acotado. Devuelve una entrada por
+    /// job; `None` si el readback del batch falla.
+    #[allow(clippy::let_unit_value)] // `timing` es `()` sin la feature `profiling`
+    fn dispatch_batch(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        jobs: &[&PreparedCurve],
+    ) -> Vec<Option<Vec<f32>>> {
+        if jobs.is_empty() {
+            return Vec::new();
+        }
+        let total_outputs: usize = jobs.iter().map(|job| job.output_count).sum();
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Parametric Batch Readback"),
+            size: (total_outputs * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Cada curva enlaza su propio set de buffers params/bytecode/constants:
+        // `queue.write_buffer` encola todos los writes antes del submit, así que
+        // con buffers compartidos el último write pisaría a los anteriores antes
+        // de que los passes los lean. Buffers por curva mantienen el orden
+        // correcto (wgpu 22 no expone `CommandEncoder::write_buffer`).
+        let mut per_curve_buffers: Vec<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)> =
+            Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Parametric Batch Params"),
+                size: std::mem::size_of::<ParametricParamsUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bytecode_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Parametric Batch Bytecode"),
+                size: 4096 * std::mem::size_of::<u32>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let constants_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Parametric Batch Constants"),
+                size: 256 * std::mem::size_of::<f32>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&params_buffer, 0, bytemuck::cast_slice(&[job.params]));
+            queue.write_buffer(&bytecode_buffer, 0, bytemuck::cast_slice(&job.prog.code));
+            queue.write_buffer(
+                &constants_buffer,
+                0,
+                bytemuck::cast_slice(&job.prog.constants),
+            );
+            per_curve_buffers.push((params_buffer, bytecode_buffer, constants_buffer));
+        }
+
+        let timing =
+            crate::gpu_timing::create(device, queue, "Parametric Batch", jobs.len() as u32);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Parametric Batch Encoder"),
+        });
+        let mut byte_offset = 0u64;
+        for (pass_index, (job, (params_buffer, bytecode_buffer, constants_buffer))) in
+            jobs.iter().zip(&per_curve_buffers).enumerate()
+        {
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Parametric Batch Bind Group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: params_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: bytecode_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: constants_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.values_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Parametric Batch Pass"),
+                    timestamp_writes: crate::gpu_timing::timestamp_writes(
+                        &timing,
+                        pass_index as u32,
+                    ),
+                });
+                cpass.set_pipeline(&self.pipeline);
+                cpass.set_bind_group(0, &bind_group, &[]);
+                let wg = job.params.n.div_ceil(64).max(1);
+                cpass.dispatch_workgroups(wg, 1, 1);
+            }
+            let copy_bytes = (job.output_count * std::mem::size_of::<f32>()) as u64;
+            encoder.copy_buffer_to_buffer(
+                &self.values_buffer,
+                0,
+                &readback,
+                byte_offset,
+                copy_bytes,
+            );
+            byte_offset += copy_bytes;
+        }
+        crate::gpu_timing::resolve(&timing, &mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let map_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map_ok_clone = map_ok.clone();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if result.is_ok() {
+                map_ok_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                log::error!("Parametric batch readback failed: {:?}", result.err());
+            }
+        });
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Parametric batch sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&timing, device, "Parametric Batch");
+
+        if !mapped {
+            readback.unmap();
+            return jobs.iter().map(|_| None).collect();
+        }
+        let data = slice.get_mapped_range();
+        let values_f32: &[f32] = bytemuck::cast_slice(&data);
+        let mut results = Vec::with_capacity(jobs.len());
+        let mut offset = 0usize;
+        for job in jobs {
+            results.push(Some(values_f32[offset..offset + job.output_count].to_vec()));
+            offset += job.output_count;
+        }
+        drop(data);
+        readback.unmap();
+        results
     }
 }
 
@@ -1021,7 +1316,10 @@ pub fn maybe_compute_surface_on_gpu(
     if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
         return false;
     }
-    let res = res.min(MAX_SURFACE_RES);
+    let res = res.max(1);
+    if !surface_res_within_budget(res) {
+        return false;
+    }
     let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
     let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
     let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
@@ -1065,6 +1363,236 @@ pub fn maybe_compute_surface_on_gpu(
         p.into_inner()
     }) = Some(key);
     true
+}
+
+/// Batch entry for [`maybe_compute_curves_2d_on_gpu_batched`].
+struct Curve2DBatchEntry<'a> {
+    curve: &'a ParametricCurve2DObj,
+    steps: usize,
+    key: grafito_core::ParametricCacheKey,
+}
+
+/// Batch entry for [`maybe_compute_curves_3d_on_gpu_batched`].
+struct Curve3DBatchEntry<'a> {
+    curve: &'a ParametricCurve3DObj,
+    steps: usize,
+    key: grafito_core::ParametricCacheKey,
+}
+
+/// Batch entry for [`maybe_compute_polars_on_gpu_batched`].
+struct PolarBatchEntry<'a> {
+    curve: &'a PolarCurveObj,
+    steps: usize,
+    key: grafito_core::ParametricCacheKey,
+}
+
+/// Try to populate the 2D parametric curve caches for many curves in a single
+/// GPU submit (un encoder, un submit, un poll). Devuelve un bool por curva de
+/// entrada: `true` cuando la GPU pobló (o ya tenía) la caché. Cada curva densa
+/// sigue siendo un solo dispatch de `steps + 1 <= MAX_CURVE_STEPS + 1` muestras.
+pub fn maybe_compute_curves_2d_on_gpu_batched(
+    compute: &ParametricComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    curves: &[(&ParametricCurve2DObj, usize)],
+    variables: &HashMap<String, f64>,
+) -> Vec<bool> {
+    let mut results = vec![false; curves.len()];
+    let mut batch: Vec<Curve2DBatchEntry<'_>> = Vec::new();
+    let mut batch_indices: Vec<usize> = Vec::new();
+    for (index, (pc, steps)) in curves.iter().enumerate() {
+        let steps = (*steps).min(MAX_CURVE_STEPS);
+        let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+        let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            continue;
+        }
+        let key = grafito_core::ParametricCacheKey {
+            t_domain: (t_min, t_max),
+            steps,
+            expr_hash: parametric_sampling::curve_2d_expr_hash(pc),
+            variables_hash: parametric_sampling::variables_hash(variables),
+        };
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(&key) {
+            results[index] = true;
+            continue;
+        }
+        drop(cached_key);
+        batch.push(Curve2DBatchEntry {
+            curve: pc,
+            steps,
+            key,
+        });
+        batch_indices.push(index);
+    }
+    if batch.is_empty() {
+        return results;
+    }
+    let batch_refs: Vec<(&ParametricCurve2DObj, usize)> = batch
+        .iter()
+        .map(|entry| (entry.curve, entry.steps))
+        .collect();
+    let samples = compute.evaluate_curves_2d_batched(device, queue, &batch_refs, variables);
+    for (batch_index, entry) in batch.into_iter().enumerate() {
+        let Some(samples) = &samples[batch_index] else {
+            continue;
+        };
+        if !nonfinite_curve_2d_samples_match_cpu(samples, entry.curve, entry.steps, variables) {
+            continue;
+        }
+        *entry.curve.cached_samples.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = samples.clone();
+        *entry.curve.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = Some(entry.key);
+        results[batch_indices[batch_index]] = true;
+    }
+    results
+}
+
+/// Try to populate the 3D parametric curve caches for many curves in a single
+/// GPU submit. Misma semántica que [`maybe_compute_curves_2d_on_gpu_batched`].
+pub fn maybe_compute_curves_3d_on_gpu_batched(
+    compute: &ParametricComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    curves: &[(&ParametricCurve3DObj, usize)],
+    variables: &HashMap<String, f64>,
+) -> Vec<bool> {
+    let mut results = vec![false; curves.len()];
+    let mut batch: Vec<Curve3DBatchEntry<'_>> = Vec::new();
+    let mut batch_indices: Vec<usize> = Vec::new();
+    for (index, (pc, steps)) in curves.iter().enumerate() {
+        let steps = (*steps).min(MAX_CURVE_STEPS);
+        let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+        let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            continue;
+        }
+        let key = grafito_core::ParametricCacheKey {
+            t_domain: (t_min, t_max),
+            steps,
+            expr_hash: parametric_sampling::curve_3d_expr_hash(pc),
+            variables_hash: parametric_sampling::variables_hash(variables),
+        };
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(&key) {
+            results[index] = true;
+            continue;
+        }
+        drop(cached_key);
+        batch.push(Curve3DBatchEntry {
+            curve: pc,
+            steps,
+            key,
+        });
+        batch_indices.push(index);
+    }
+    if batch.is_empty() {
+        return results;
+    }
+    let batch_refs: Vec<(&ParametricCurve3DObj, usize)> = batch
+        .iter()
+        .map(|entry| (entry.curve, entry.steps))
+        .collect();
+    let samples = compute.evaluate_curves_3d_batched(device, queue, &batch_refs, variables);
+    for (batch_index, entry) in batch.into_iter().enumerate() {
+        let Some(samples) = &samples[batch_index] else {
+            continue;
+        };
+        if !nonfinite_curve_3d_samples_match_cpu(samples, entry.curve, entry.steps, variables) {
+            continue;
+        }
+        *entry.curve.cached_samples.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = samples.clone();
+        *entry.curve.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = Some(entry.key);
+        results[batch_indices[batch_index]] = true;
+    }
+    results
+}
+
+/// Try to populate the polar curve caches for many curves in a single GPU
+/// submit. Misma semántica que [`maybe_compute_curves_2d_on_gpu_batched`].
+pub fn maybe_compute_polars_on_gpu_batched(
+    compute: &ParametricComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    curves: &[(&PolarCurveObj, usize)],
+    variables: &HashMap<String, f64>,
+) -> Vec<bool> {
+    let mut results = vec![false; curves.len()];
+    let mut batch: Vec<PolarBatchEntry<'_>> = Vec::new();
+    let mut batch_indices: Vec<usize> = Vec::new();
+    for (index, (pol, steps)) in curves.iter().enumerate() {
+        let steps = (*steps).min(MAX_CURVE_STEPS);
+        let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
+        let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+        if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+            continue;
+        }
+        let key = grafito_core::ParametricCacheKey {
+            t_domain: (t_min, t_max),
+            steps,
+            expr_hash: parametric_sampling::polar_expr_hash(pol),
+            variables_hash: parametric_sampling::variables_hash(variables),
+        };
+        let cached_key = pol.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(&key) {
+            results[index] = true;
+            continue;
+        }
+        drop(cached_key);
+        batch.push(PolarBatchEntry {
+            curve: pol,
+            steps,
+            key,
+        });
+        batch_indices.push(index);
+    }
+    if batch.is_empty() {
+        return results;
+    }
+    let batch_refs: Vec<(&PolarCurveObj, usize)> = batch
+        .iter()
+        .map(|entry| (entry.curve, entry.steps))
+        .collect();
+    let samples = compute.evaluate_polars_batched(device, queue, &batch_refs, variables);
+    for (batch_index, entry) in batch.into_iter().enumerate() {
+        let Some(samples) = &samples[batch_index] else {
+            continue;
+        };
+        if !nonfinite_polar_samples_match_cpu(samples, entry.curve, entry.steps, variables) {
+            continue;
+        }
+        *entry.curve.cached_samples.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = samples.clone();
+        *entry.curve.cached_key.write().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        }) = Some(entry.key);
+        results[batch_indices[batch_index]] = true;
+    }
+    results
 }
 
 #[cfg(test)]
@@ -1115,5 +1643,48 @@ mod tests {
         let gpu = vec![vec![grafito_geometry::Point3D::new(1.0, 1.0, f64::NAN)]];
 
         assert!(!surface_samples_are_finite(&gpu));
+    }
+
+    #[test]
+    fn surface_resolution_budget_rejects_over_128_without_clamping() {
+        // MAX_SURFACE_RES 128 es un presupuesto duro: por encima se rechaza
+        // (None / false) en vez de recortar silenciosamente a 128.
+        assert!(surface_res_within_budget(1));
+        assert!(surface_res_within_budget(MAX_SURFACE_RES));
+        assert!(!surface_res_within_budget(MAX_SURFACE_RES + 1));
+        assert!(
+            !surface_res_within_budget(0),
+            "res 0 se normaliza a 1 por el caller"
+        );
+    }
+
+    #[test]
+    fn curve_steps_budget_is_documented_at_4000_and_clamped_per_curve() {
+        // MAX_CURVE_STEPS 4000: una curva densa se evalúa en un solo dispatch
+        // de `steps + 1` muestras; el preflight recorta a 4000 sin rechazar.
+        let curve = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
+        let prepared = prepare_curve_2d(&curve, MAX_CURVE_STEPS + 500, 4000, &HashMap::new())
+            .expect("steps por encima del presupuesto se recortan a 4000");
+        assert_eq!(prepared.params.n, (MAX_CURVE_STEPS + 1) as u32);
+        assert_eq!(prepared.output_count, (MAX_CURVE_STEPS + 1) * 2);
+    }
+
+    #[test]
+    fn batch_preflight_keeps_one_entry_per_input_curve() {
+        let circle = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+        let line = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
+        let reversed = ParametricCurve2DObj::new("t", "t", 1.0, 0.0);
+
+        let jobs: Vec<Option<PreparedCurve>> = [&circle, &line, &reversed]
+            .iter()
+            .map(|pc| prepare_curve_2d(pc, 8, 4000, &HashMap::new()))
+            .collect();
+
+        assert!(jobs[0].is_some());
+        assert!(jobs[1].is_some());
+        assert!(
+            jobs[2].is_none(),
+            "dominio invertido se rechaza en preflight"
+        );
     }
 }

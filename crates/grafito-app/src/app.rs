@@ -1205,7 +1205,7 @@ pub struct GrafitoApp {
     /// Ver `crate::controllers::DocumentController::undo_total_bytes`.
     pub undo_total_bytes: usize,
     /// Ventana onboarding Scandinavian 30s — true si `config.onboarding_completed` es false.
-    /// Se muestra una vez con 3 bullets + [Probar ejemplo][Empezar vacío][No mostrar más].
+    /// Se muestra una vez con 3 bullets + [Probar ejemplo][Empezar vacío][No mostrar].
     pub show_onboarding: bool,
     /// Jobs de I/O en background para no bloquear UI thread (60fps) — save/open/export.
     /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
@@ -4132,6 +4132,16 @@ impl eframe::App for GrafitoApp {
                 self.current_tool = Tool::Function;
                 self.tool_ghost = None;
             }
+            if ctx.input(|i| i.key_pressed(Key::F8)) {
+                self.current_tool = Tool::Sphere3D;
+                self.tool_ghost = None;
+                self.reset_tool_input();
+            }
+            if ctx.input(|i| i.key_pressed(Key::F9)) {
+                self.current_tool = Tool::Cube3D;
+                self.tool_ghost = None;
+                self.reset_tool_input();
+            }
             if ctx.input(|i| i.key_pressed(Key::R) && !i.modifiers.ctrl && !i.modifiers.alt) {
                 self.current_tool = Tool::Root;
                 self.tool_ghost = None;
@@ -4245,6 +4255,26 @@ impl eframe::App for GrafitoApp {
                 self.command_palette.open = true;
                 self.command_palette.search.clear();
                 self.command_palette.selected_index = 0;
+            }
+            // Ctrl+T: alternar tema claro/oscuro (mismo efecto que Vista > Modo oscuro).
+            if ctx.input(|i| i.key_pressed(Key::T) && i.modifiers.ctrl && !i.modifiers.shift) {
+                self.dark_mode = !self.dark_mode;
+                if self.dark_mode {
+                    DARK.apply(ctx);
+                } else {
+                    LIGHT.apply(ctx);
+                }
+            }
+            // Ctrl+P / Ctrl+E: Lápiz y Borrador (etiquetas de toolbar.rs GROUP_PENCIL/GROUP_ERASER).
+            if ctx.input(|i| i.key_pressed(Key::P) && i.modifiers.ctrl && !i.modifiers.shift) {
+                self.current_tool = Tool::Pencil;
+                self.tool_ghost = None;
+                self.reset_tool_input();
+            }
+            if ctx.input(|i| i.key_pressed(Key::E) && i.modifiers.ctrl && !i.modifiers.shift) {
+                self.current_tool = Tool::Eraser;
+                self.tool_ghost = None;
+                self.reset_tool_input();
             }
         }
 
@@ -4888,7 +4918,7 @@ impl eframe::App for GrafitoApp {
 impl GrafitoApp {
     /// Ventana onboarding 30s Scandinavian — gating `AppConfig::onboarding_completed` (utils.rs:46-48).
     /// 420px, 3 bullets progressive disclosure (5/8/17 grupos), botones [Probar ejemplo][Empezar vacío][No mostrar].
-    /// Si no se alcanza UI completa, al menos Window stub con “No mostrar más” que setea `onboarding_completed=true`.
+    /// Si no se alcanza UI completa, al menos Window stub con “No mostrar” que setea `onboarding_completed=true`.
     pub(crate) fn draw_onboarding_window(&mut self, ctx: &egui::Context) {
         if !self.show_onboarding {
             return;
@@ -4978,7 +5008,7 @@ impl GrafitoApp {
                         .add_sized(
                             egui::vec2(120.0, 32.0),
                             egui::Button::new(
-                                egui::RichText::new("No mostrar más")
+                                egui::RichText::new("No mostrar")
                                     .size(12.0)
                                     .color(theme.text_secondary),
                             )

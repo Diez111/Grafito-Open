@@ -10,9 +10,14 @@
 pub mod engine;
 pub mod protocol;
 
-pub use engine::{run_job, AnimEngine, EngineConfig, JobEvent};
+pub use engine::{
+    run_job, AnimEngine, EngineConfig, JobEvent, CANCEL_GRACE, DEFAULT_IDLE_TIMEOUT_SECS,
+    DEFAULT_JOB_TIMEOUT_SECS, DEFAULT_LINE_CAP_BYTES, MAX_IDLE_TIMEOUT_SECS, MAX_JOB_TIMEOUT_SECS,
+    MAX_LINE_CAP_BYTES, MIN_IDLE_TIMEOUT_SECS, MIN_JOB_TIMEOUT_SECS, MIN_LINE_CAP_BYTES,
+};
 pub use protocol::{
-    downcast, kinds, normalize_concept, request_for_concept, sanitize_template,
-    template_for_concept, AnimDuration, AnimJobId, AnimParams, AnimRequest, AnimResult,
-    ExportFormat, RenderProgress, Resolution, WireMessage,
+    downcast, kinds, localize_worker_error, normalize_concept, request_for_concept,
+    sanitize_error_code, sanitize_template, template_for_concept, truncate_worker_message,
+    AnimDuration, AnimJobId, AnimParams, AnimRequest, AnimResult, ExportFormat, RenderProgress,
+    Resolution, WireMessage, WorkerError, MAX_ERROR_CODE_LEN, MAX_WORKER_MESSAGE_LEN,
 };

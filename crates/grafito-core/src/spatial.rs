@@ -71,12 +71,13 @@ impl SpatialIndex {
     /// unbounded. Those IDs are conservatively returned for every point query.
     /// Items with non-finite bounds are silently dropped to keep `bulk_load` sound
     /// (NaN would corrupt R-tree ordering and break `locate_in_envelope`).
+    /// El bulk_load es determinista: ordena por ObjectId antes de construir el R-tree.
     pub fn rebuild_with_unbounded(
         &mut self,
         items: Vec<(ObjectId, f64, f64, f64, f64)>,
         mut unbounded: Vec<ObjectId>,
     ) {
-        let sp: Vec<_> = items
+        let mut sp: Vec<_> = items
             .into_iter()
             .filter(|(_, min_x, min_y, max_x, max_y)| {
                 min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()
@@ -86,10 +87,40 @@ impl SpatialIndex {
                 aabb: AABB::from_corners([min_x, min_y], [max_x, max_y]),
             })
             .collect();
+        // Determinismo: ordenar por ObjectId para que bulk_load no dependa del
+        // orden de iteración de HashMap/BTreeMap del Document.
+        sp.sort_by_key(|item| item.id);
         self.tree = rstar::RTree::bulk_load(sp);
         unbounded.sort_unstable();
         unbounded.dedup();
         self.unbounded = unbounded;
+    }
+
+    /// Variante fallible que rechaza AABB no-finito con error tipado.
+    /// Retorna `Err` si algún bound es NaN/Inf; de lo contrario hace bulk_load determinista.
+    pub fn try_rebuild_with_unbounded(
+        &mut self,
+        items: Vec<(ObjectId, f64, f64, f64, f64)>,
+        unbounded: Vec<ObjectId>,
+    ) -> Result<(), String> {
+        for (id, min_x, min_y, max_x, max_y) in &items {
+            if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite()
+            {
+                return Err(format!(
+                    "SpatialIndex::try_rebuild_with_unbounded: non-finite bounds for {id} [{min_x},{min_y}]-[{max_x},{max_y}]"
+                ));
+            }
+        }
+        self.rebuild_with_unbounded(items, unbounded);
+        Ok(())
+    }
+
+    /// Variante fallible para `rebuild` simple.
+    pub fn try_rebuild(
+        &mut self,
+        items: Vec<(ObjectId, f64, f64, f64, f64)>,
+    ) -> Result<(), String> {
+        self.try_rebuild_with_unbounded(items, Vec::new())
     }
 
     pub fn candidates(&self, x: f64, y: f64, tolerance: f64) -> Vec<ObjectId> {
@@ -196,5 +227,46 @@ mod tests {
         // Old item is gone after rebuild.
         assert!(!idx.candidates(0.0, 0.0, 0.5).contains(&id(1)));
         assert!(idx.candidates(1.0, 1.0, 0.5).contains(&id(2)));
+    }
+
+    #[test]
+    fn bulk_load_is_deterministic_regardless_of_input_order() {
+        let items_a = vec![
+            (id(3), 3.0, 3.0, 3.0, 3.0),
+            (id(1), 1.0, 1.0, 1.0, 1.0),
+            (id(2), 2.0, 2.0, 2.0, 2.0),
+        ];
+        let items_b = vec![
+            (id(1), 1.0, 1.0, 1.0, 1.0),
+            (id(2), 2.0, 2.0, 2.0, 2.0),
+            (id(3), 3.0, 3.0, 3.0, 3.0),
+        ];
+        let mut idx_a = SpatialIndex::new();
+        idx_a.rebuild(items_a);
+        let mut idx_b = SpatialIndex::new();
+        idx_b.rebuild(items_b);
+        assert_eq!(idx_a.len(), idx_b.len());
+        // Candidates con tolerancia amplia deben coincidir ordenados.
+        let cand_a = idx_a.candidates(2.0, 2.0, 5.0);
+        let cand_b = idx_b.candidates(2.0, 2.0, 5.0);
+        assert_eq!(cand_a, cand_b);
+        assert_eq!(cand_a, vec![id(1), id(2), id(3)]);
+    }
+
+    #[test]
+    fn try_rebuild_rejects_non_finite_aabb() {
+        let mut idx = SpatialIndex::new();
+        let err = idx
+            .try_rebuild(vec![(id(1), f64::NAN, 0.0, 1.0, 1.0)])
+            .expect_err("NaN bounds must be rejected");
+        assert!(err.contains("non-finite"));
+        // Después de error, índice sigue vacío (no se corrompe).
+        assert!(idx.is_empty());
+        // rebuild silencioso sigue drop pero determinista.
+        idx.rebuild(vec![(id(1), f64::INFINITY, 0.0, 1.0, 1.0)]);
+        assert!(idx.is_empty(), "infinite bounds should be dropped");
+        // try_insert también rechaza
+        assert!(idx.try_insert(id(2), f64::NAN, 0.0, 1.0, 1.0).is_err());
+        assert!(idx.try_insert(id(2), 0.0, 0.0, 1.0, 1.0).is_ok());
     }
 }

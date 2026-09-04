@@ -99,6 +99,13 @@ pub struct ManimOrchestrator {
     pub template: String,
     orchestrator_started: Option<Instant>,
     steps_taken: usize,
+    /// Fracción REAL 0..1 del último `progress` del worker (`percent/100`).
+    ///
+    /// Nunca inventada: `0.0` hasta que el worker emite `progress`. La UI debe
+    /// mostrar indeterminado mientras sea `0.0` sin eventos previos.
+    render_fraction: f32,
+    /// Último error tipado del worker `(code, mensaje_localizado)`.
+    last_worker_error: Option<(String, String)>,
 }
 
 impl Default for ManimOrchestrator {
@@ -112,6 +119,8 @@ impl Default for ManimOrchestrator {
             template: "universal".into(),
             orchestrator_started: None,
             steps_taken: 0,
+            render_fraction: 0.0,
+            last_worker_error: None,
         }
     }
 }
@@ -134,6 +143,8 @@ impl ManimOrchestrator {
         self.state = OrchestratorState::Planning { started: now };
         self.orchestrator_started = Some(now);
         self.steps_taken = 0;
+        self.render_fraction = 0.0;
+        self.last_worker_error = None;
         self.activities.clear();
         self.push_activity(
             AgentRole::Planner,
@@ -149,6 +160,79 @@ impl ManimOrchestrator {
         if !self.state.is_terminal() {
             self.state = OrchestratorState::Cancelled;
             self.push_activity(AgentRole::Planner, "Cancelado por el usuario".into());
+        }
+    }
+    /// Fracción REAL 0..1 del último `progress` del worker.
+    pub fn render_fraction(&self) -> f32 {
+        self.render_fraction
+    }
+    /// Último error tipado del worker `(código, mensaje en español)`.
+    pub fn last_worker_error(&self) -> Option<&(String, String)> {
+        self.last_worker_error.as_ref()
+    }
+    /// Aplica un `percent` REAL del worker (`progress.percent` 0..=100).
+    ///
+    /// Fija `render_fraction = percent/100.0`. No inventa valores: solo llamar
+    /// con datos parseados del worker (`grafito_anim::RenderProgress`).
+    pub fn apply_progress(&mut self, percent: u8) {
+        self.render_fraction = (f32::from(percent.min(100))) / 100.0;
+        self.update_ledger();
+    }
+    /// Aplica un evento del worker (`Progress`/`Result`/`Error`) al estado.
+    ///
+    /// - `Progress` → actualiza `render_fraction` sin cambiar de estado.
+    /// - `Result` → `Completed { media_path }`.
+    /// - `Error` → `Failed` con mensaje localizado al español (ver
+    ///   `grafito_anim::localize_worker_error`), acotado a 500 chars.
+    pub fn apply_job_event(&mut self, event: &grafito_anim::JobEvent) {
+        match event {
+            grafito_anim::JobEvent::Progress(p) => {
+                self.apply_progress(p.percent);
+                self.push_activity(
+                    AgentRole::Renderer,
+                    format!("Renderizando: {}% ({})", p.percent.min(100), p.step),
+                );
+            }
+            grafito_anim::JobEvent::Result(r) => {
+                self.render_fraction = 1.0;
+                self.state = OrchestratorState::Completed {
+                    media_path: r.media_path.clone(),
+                };
+                self.push_activity(
+                    AgentRole::Reviewer,
+                    format!("Render completo: {} frames", r.frames),
+                );
+                self.update_ledger();
+            }
+            grafito_anim::JobEvent::Error { code, message } => {
+                self.fail_with_worker_error(code, message);
+            }
+        }
+    }
+    /// Falla con un error tipado del worker, localizado al español.
+    pub fn fail_with_worker_error(&mut self, code: &str, message: &str) {
+        let localized = grafito_anim::localize_worker_error(code, message);
+        let code_sane = grafito_anim::sanitize_error_code(code);
+        self.last_worker_error = Some((code_sane, localized.clone()));
+        self.state = OrchestratorState::Failed {
+            reason: localized.clone(),
+        };
+        self.push_activity(AgentRole::Reviewer, localized);
+        self.update_ledger();
+    }
+    /// Config del engine con overrides por Env (`GRAFITO_ANIM_*`); si el Env es
+    /// inválido, devuelve el defecto para no romper la UI (el error se loguea
+    /// en el ledger de actividades).
+    pub fn engine_config(&mut self) -> grafito_anim::EngineConfig {
+        match grafito_anim::EngineConfig::from_env() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.push_activity(
+                    AgentRole::Planner,
+                    format!("Config Env inválida ({e}); usando defecto 90s/8s/64KiB"),
+                );
+                grafito_anim::EngineConfig::default()
+            }
         }
     }
     /// Avanza un paso de la orquestación (llamar cada frame o con timer).
@@ -328,7 +412,8 @@ impl ManimOrchestrator {
             .map(|a| format!("{}: {}", a.role.label(), a.message))
             .collect::<Vec<_>>()
             .join("\n");
-        self.ledger = Some(format!("Manim Orchestrator\nEstado: {state_label}\nConcepto: {}\nTemplate: {}\nActividades:\n{activities}", self.concept, self.template));
+        let pct = (self.render_fraction * 100.0).round() as u32;
+        self.ledger = Some(format!("Manim Orchestrator\nEstado: {state_label}\nConcepto: {}\nTemplate: {}\nProgreso real: {pct}%\nActividades:\n{activities}", self.concept, self.template));
     }
     pub fn is_busy(&self) -> bool {
         matches!(
@@ -380,5 +465,63 @@ mod tests {
     fn orchestrator_plan_for_concept() {
         let o = ManimOrchestrator::new("integral", "integral-area");
         assert!(o.plan_for_concept().contains("integral"));
+    }
+    #[test]
+    fn orchestrator_applies_real_progress_fraction() {
+        let mut o = ManimOrchestrator::new("derivada", "derivative-slope");
+        assert_eq!(o.render_fraction(), 0.0);
+        o.apply_progress(30);
+        assert!((o.render_fraction() - 0.3).abs() < f32::EPSILON);
+        o.apply_progress(100);
+        assert_eq!(o.render_fraction(), 1.0);
+        // clamp >100
+        o.apply_progress(250);
+        assert_eq!(o.render_fraction(), 1.0);
+    }
+    #[test]
+    fn orchestrator_applies_job_events_with_spanish_errors() {
+        use grafito_anim::{AnimResult, JobEvent, RenderProgress};
+        let mut o = ManimOrchestrator::new("derivada", "derivative-slope");
+        o.apply_job_event(&JobEvent::Progress(RenderProgress {
+            job_id: "job-1".into(),
+            step: "render".into(),
+            percent: 60,
+        }));
+        assert!((o.render_fraction() - 0.6).abs() < f32::EPSILON);
+        o.apply_job_event(&JobEvent::Result(AnimResult {
+            job_id: "job-1".into(),
+            media_path: "/tmp/x.png".into(),
+            frames: 12,
+            duration_ms: 120,
+        }));
+        assert!(matches!(o.state, OrchestratorState::Completed { .. }));
+        assert_eq!(o.render_fraction(), 1.0);
+        // Error tipado en español, sin inglés crudo
+        let mut o2 = ManimOrchestrator::new("x", "universal");
+        o2.apply_job_event(&JobEvent::Error {
+            code: "render_failed".into(),
+            message: "boom".into(),
+        });
+        match &o2.state {
+            OrchestratorState::Failed { reason } => {
+                assert!(reason.contains("falló el render"), "reason: {reason}");
+                assert!(!reason.to_lowercase().contains("animation engine"));
+            }
+            other => panic!("esperaba Failed, got {other:?}"),
+        }
+        assert!(o2.last_worker_error().is_some());
+    }
+    #[test]
+    fn orchestrator_truncates_long_worker_message() {
+        let mut o = ManimOrchestrator::new("x", "universal");
+        let long = "e".repeat(2000);
+        o.fail_with_worker_error("render_failed", &long);
+        match &o.state {
+            OrchestratorState::Failed { reason } => {
+                // 500 chars + prefijo "falló el render: " → acotado
+                assert!(reason.chars().count() <= 520, "len {}", reason.len());
+            }
+            other => panic!("esperaba Failed, got {other:?}"),
+        }
     }
 }

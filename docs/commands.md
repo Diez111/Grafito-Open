@@ -10,12 +10,12 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Circle[centro, radio]`: Crea una circunferencia. Mutacion: crea objetos. Riesgo: bajo.
 - `Polygon[(x1, y1), ...]`: Crea un poligono cerrado. Mutacion: crea objetos. Riesgo: bajo.
 - `Function[expr]`: Grafica una funcion explicita. Mutacion: crea objetos. Riesgo: bajo. Alias: `func`.
-## Dinamica
+## Dinámica
 
 - `Animate[]`: Anima un parametro local; sin argumentos crea una fase ciclica. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Animate[variable]`, `Animate[variable, minimo, maximo, velocidad]`. Alias: `animar`.
 ## Animaciones
 
-- `GenerateAnimation[template, concepto]`: Genera una animación didáctica (placeholder o Manim) para el concepto dado. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `GenerateAnimation[template]`, `GenerateAnimation[]`. Alias: `GenerateAnimation`.
+- `GenerateAnimation[template, concepto]`: Genera una animación didáctica (placeholder o Manim) para el concepto dado. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `GenerateAnimation[template]`, `GenerateAnimation[]`.
 ## Complejos
 
 - `DomainColoring[expr, xmin, xmax, ymin, ymax, resolution]`: Visualiza fase y módulo de una función compleja en el plano 2D; límites opcionales y una resolución que debe ser un entero literal entre 16 y 300 (200 por defecto). Mutacion: crea objetos. Riesgo: medio. Alias: `domain_coloring`, `dcolor`.
@@ -40,7 +40,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Hyperbola[(cx, cy), a, b]`: Crea una hiperbola por centro y semiejes. Mutacion: crea objetos. Riesgo: bajo.
 - `RegularPolygon[(cx, cy), n, r]`: Crea un poligono regular. Mutacion: crea objetos. Riesgo: bajo. Alias: `regular_polygon`.
 - `SampledGraph[expr, range]`: Muestrea y=f(x) en 201 abscisas uniformes de [-range, range] y crea un poligono estatico cerrado con las muestras finitas; no es un lugar geometrico dinamico. Mutacion: crea objetos. Riesgo: medio.
-## Dinamica
+## Dinámica
 
 - `Locus[driver, target]`: Crea un lugar geometrico persistente: registra el objetivo despues de cada actualizacion local valida del driver, sin eventos de puntero ni tiempo. Mutacion: agrega restricciones. Riesgo: medio. Alias: `lugar`.
 - `LocusEquation[locus]`: Aproxima eliminación Groebner (mock) a partir de muestreo de locus + regresión simbólica; genera curva implícita presupuestada. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `LocusEquation[locus, grado]`. Alias: `locus_equation`, `ecuacionlocus`, `ecuacion_locus`.
@@ -74,12 +74,12 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `FractionText[valor]`: Crea texto con valor fraccionario: FractionText[0.5] -> "1/2". Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `FractionText[valor, punto]`. Alias: `fraccion`, `fraction`.
 - `SurdText[valor]`: Crea texto con surd: SurdText[1.414] -> "√2". Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `SurdText[valor, punto]`. Alias: `surd`, `raiztexto`.
-## Estadistica
+## Estadística
 
 - `FillColumn[col, valor]`: Rellena una columna de la hoja iterando filas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillColumn[col, inicio, fin, valor]`. Alias: `fill_column`, `fillcol`.
-- `FillCells[rango, valor]`: Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillCells[a1, b2, valor]`. Alias: `fill_cells`, `fillcells`, `rellenar`.
+- `FillCells[rango, valor]`: Rellena un rango rectangular de celdas con un valor; respeta presupuestos de spreadsheet. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillCells[a1, b2, valor]`. Alias: `fill_cells`, `rellenar`.
 - `CellRange[a1, b2]`: Resuelve un rango A1:B2 a array de valores evaluados; soporta A1:B2 o A1,B2. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CellRange[rango]`. Alias: `cell_range`, `rango`.
-- `FillRow[fila, valor]`: Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillRow[fila, inicio, fin, valor]`. Alias: `fill_row`, `fillrow`.
+- `FillRow[fila, valor]`: Rellena una fila de la hoja iterando columnas y escribiendo valor; respeta MAX_SPREADSHEET_ROWS/COLS/RECOMPUTE. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `FillRow[fila, inicio, fin, valor]`. Alias: `fill_row`.
 ## Restricciones
 
 - `Distance[A, B, valor]`: Impone una distancia entre objetos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `dist`.
@@ -89,7 +89,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Vertical[obj]`: Fuerza una orientacion vertical. Mutacion: agrega restricciones. Riesgo: medio.
 - `EqualLength[s1, s2]`: Iguala longitudes. Mutacion: agrega restricciones. Riesgo: medio. Alias: `equal_length`, `eqlength`.
 - `Symmetry[P, Q, eje]`: Impone simetria respecto a un eje. Mutacion: agrega restricciones. Riesgo: medio.
-## Conicas
+## Cónicas
 
 - `EllipseByFoci[F1, F2, P]`: Construye una elipse por focos. Mutacion: agrega restricciones. Riesgo: medio. Alias: `ellipse_by_foci`.
 - `ParabolaByFocusDirectrix[F, d]`: Construye una parabola por foco y directriz. Mutacion: agrega restricciones. Riesgo: medio. Alias: `parabola_by_focus_directrix`.
@@ -111,20 +111,20 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Integral[expr]`: Calcula una integral simbolica o definida. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Integral[expr, variable]`, `Integral[expr, a, b]`, `Integral[expr, variable, a, b]`. Alias: `integrar`, `int`.
 - `Solve[expr, variable, minimo, maximo]`: Resuelve una ecuacion en la variable indicada. Mutacion: crea objetos. Riesgo: medio. Alias: `nsolve`, `resolver`.
 - `Limit[expr, variable, punto]`: Estima un limite bilateral finito. Mutacion: solo consulta. Riesgo: medio. Alias: `limite`, `lim`.
-- `LimitAbove[expr, variable, punto]`: Estima un límite lateral por la derecha (x→a⁺). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_superior`, `limite_derecho`, `limitabove`.
-- `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`, `limitbelow`.
-- `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`, `parametricderivative`.
-- `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`, `asymptote`.
-- `GroebnerDegRevLex[polinomios]`: Base de Groebner (stub: no implementado, use Eliminate). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`, `groebnerDegRevLex`.
+- `LimitAbove[expr, variable, punto]`: Estima un límite lateral por la derecha (x→a⁺). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_superior`, `limite_derecho`.
+- `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`.
+- `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`.
+- `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`.
+- `GroebnerDegRevLex[polinomios]`: Base de Groebner (stub: no implementado, use Eliminate). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerbasis`, `groebnerlex`, `groebner_basis`.
 - `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
 - `Taylor[expr, variable, centro, orden]`: Construye una serie de Taylor finita. Mutacion: crea objetos. Riesgo: medio.
-- `CompleteSquare[expr, variable]`: Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CompleteSquare[expr]`. Alias: `complete_square`, `completesquare`, `completarCuadrado`, `completar_cuadrado`.
-- `PrimeFactors[n]`: Factoriza un entero n (2 <= n <= 1e12) en primos por trial division. Mutacion: solo consulta. Riesgo: bajo. Alias: `prime_factors`, `primefactors`, `factoresPrimos`, `factores_primos`.
-- `IFactor[expr]`: Factorización entera: si es entero usa PrimeFactors, si es polinomio extrae contenido entero y lo factoriza. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `IFactor[expr, variable]`. Alias: `ifactor`, `ifactorizar`, `factorEntero`, `factor_entero`.
-- `Assume[predicado]`: Almacena hipótesis como x>0 (positive), x!=0 (nonzero), x real/integer; guarda en Document.variables_assumptions. Mutacion: solo consulta. Riesgo: bajo. Alias: `assume`, `asumir`, `suponer`, `supone`.
-## Analisis
+- `CompleteSquare[expr, variable]`: Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CompleteSquare[expr]`. Alias: `complete_square`, `completarCuadrado`, `completar_cuadrado`.
+- `PrimeFactors[n]`: Factoriza un entero n (2 <= n <= 1e12) en primos por trial division. Mutacion: solo consulta. Riesgo: bajo. Alias: `prime_factors`, `factoresPrimos`, `factores_primos`.
+- `IFactor[expr]`: Factorización entera: si es entero usa PrimeFactors, si es polinomio extrae contenido entero y lo factoriza. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `IFactor[expr, variable]`. Alias: `ifactorizar`, `factorEntero`, `factor_entero`.
+- `Assume[predicado]`: Almacena hipótesis como x>0 (positive), x!=0 (nonzero), x real/integer; guarda en Document.variables_assumptions. Mutacion: solo consulta. Riesgo: bajo. Alias: `asumir`, `suponer`, `supone`.
+## Análisis
 
 - `Root[f]`: Busca raices de una funcion. Mutacion: crea objetos. Riesgo: medio. Alias: `raiz`, `raices`.
 - `Extremum[f]`: Busca extremos locales. Mutacion: crea objetos. Riesgo: medio. Alias: `extremos`, `max`, `min`.
@@ -166,7 +166,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Normal[mu, sigma]`: Evalua o crea una distribucion normal. Mutacion: solo consulta. Riesgo: bajo.
 - `Binomial[n, p, k]`: Evalua una distribucion binomial. Mutacion: solo consulta. Riesgo: bajo.
 - `Poisson[lambda, k]`: Evalua una distribucion de Poisson. Mutacion: solo consulta. Riesgo: bajo.
-## Estadistica
+## Estadística
 
 - `Histogram[{data}, bins]`: Crea un histograma. Mutacion: crea objetos. Riesgo: medio. Alias: `histograma`.
 - `ScatterPlot[{xs}, {ys}]`: Crea un grafico de dispersion. Mutacion: crea objetos. Riesgo: medio. Alias: `scatter`.
@@ -188,32 +188,32 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Correlation[{xs}, {ys}]`: Calcula una correlacion. Mutacion: solo consulta. Riesgo: bajo. Alias: `correlacion`.
 ## Probabilidad
 
-- `InverseNormal[p]`: Cuantil normal: InverseNormal[p, mu, sigma] (p en (0,1), sigma>0); con un arg usa N(0,1). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InverseNormal[p, mu, sigma]`. Alias: `inverse_normal`, `inversenormal`, `cuantilnormal`, `cuantil_normal`.
-- `InverseT[p, df]`: Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_t`, `inverset`, `cuantilt`, `cuantil_t`.
-- `InverseChiSquared[p, df]`: Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_chi_squared`, `inversechisquared`, `inversachicuadrado`, `cuantilchicuadrado`.
-- `InverseF[p, df1, df2]`: Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_f`, `inversef`, `cuantilf`, `cuantil_f`.
-## Estadistica
+- `InverseNormal[p]`: Cuantil normal: InverseNormal[p, mu, sigma] (p en (0,1), sigma>0); con un arg usa N(0,1). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InverseNormal[p, mu, sigma]`. Alias: `inverse_normal`, `cuantilnormal`, `cuantil_normal`.
+- `InverseT[p, df]`: Cuantil t-Student: InverseT[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_t`, `cuantilt`, `cuantil_t`.
+- `InverseChiSquared[p, df]`: Cuantil chi-cuadrado: InverseChiSquared[p, df] (p en (0,1), df>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_chi_squared`, `inversachicuadrado`, `cuantilchicuadrado`.
+- `InverseF[p, df1, df2]`: Cuantil F de Fisher: InverseF[p, df1, df2] (p en (0,1), df1>0, df2>0). Mutacion: solo consulta. Riesgo: bajo. Alias: `inverse_f`, `cuantilf`, `cuantil_f`.
+## Estadística
 
 - `FrequencyTable[{datos}]`: Tabla de frecuencias: FrequencyTable[{datos}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `frequency_table`, `frecuencia`, `tabl frecuencias`.
 - `StemPlot[{datos}]`: Diagrama tallo-hoja: StemPlot[{datos}] texto. Mutacion: solo consulta. Riesgo: bajo. Alias: `stem_plot`, `stemleaf`, `tallo_hoja`, `diagrama_tallo`.
-- `ResidualPlot[{xs}, {ys}]`: Residuos de regresión lineal: ResidualPlot[{xs}, {ys}] o ResidualPlot[tabla]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ResidualPlot[tabla]`. Alias: `residual_plot`, `residuos`, `grafico_residuos`.
-- `TTest[{datos}, mu0]`: Prueba t de una muestra: TTest[{datos}, mu0]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest`, `t_test`, `prueba_t`.
-- `TTest2[{a}, {b}]`: Prueba t de dos muestras independientes: TTest2[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest2`, `t_test2`, `prueba_t2`.
+- `ResidualPlot[{xs}, {ys}]`: Residuos de regresión lineal: ResidualPlot[{xs}, {ys}] o ResidualPlot[tabla]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ResidualPlot[tabla]`. Alias: `residual_plot`, `grafico_residuos`.
+- `TTest[{datos}, mu0]`: Prueba t de una muestra: TTest[{datos}, mu0]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test`, `prueba_t`.
+- `TTest2[{a}, {b}]`: Prueba t de dos muestras independientes: TTest2[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test2`, `prueba_t2`.
 - `TTestPaired[{a}, {b}]`: Prueba t pareada: TTestPaired[{antes}, {despues}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest_paired`, `t_paired`, `prueba_t_pareada`, `ttestpareado`.
-- `ZTest[{datos}, mu0, sigma]`: Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ztest`, `z_test`, `prueba_z`.
-- `ChiSqTest[{obs}, {esp}]`: Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `chisqtest`, `chi2test`, `prueba_chi2`, `chi_cuadrado`.
-- `ANOVA[{g1}, {g2}]`: ANOVA de un factor: ANOVA[{g1}, {g2}, ...]. Mutacion: solo consulta. Riesgo: bajo. Alias: `anova`, `anova_oneway`.
+- `ZTest[{datos}, mu0, sigma]`: Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma]. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_test`, `prueba_z`.
+- `ChiSqTest[{obs}, {esp}]`: Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `chi2test`, `prueba_chi2`, `chi_cuadrado`.
+- `ANOVA[{g1}, {g2}]`: ANOVA de un factor: ANOVA[{g1}, {g2}, ...]. Mutacion: solo consulta. Riesgo: bajo. Alias: `anova_oneway`.
 ## Financiera
 
-- `Rate[nper, pmt, pv, fv]`: Calcula la tasa periodica (tipo 0=anual) resolviendo TVM con exp/log; 4-5 args. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Rate[nper, pmt, pv, fv, tipo]`. Alias: `rate`, `tasa`, `tipo`.
-- `Nper[rate, pmt, pv, fv]`: Calcula numero de periodos via TVM con exp/log; usa log((pmt*(1+r*tipo)-fv*r)/(pmt*(1+r*tipo)+pv*r))/log(1+r). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Nper[rate, pmt, pv, fv, tipo]`. Alias: `nper`, `n_per`, `periodos`, `plazo`.
-- `Pmt[rate, nper, pv, fv]`: Calcula el pago periodico TVM; 4-5 args con tipo 0/1. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pmt[rate, nper, pv, fv, tipo]`. Alias: `pmt`, `pago`, `cuota`.
-- `PV[rate, nper, pmt, fv]`: Calcula valor presente TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `PV[rate, nper, pmt, fv, tipo]`. Alias: `pv`, `va`, `valoractual`, `presentvalue`.
-- `FV[rate, nper, pmt, pv]`: Calcula valor futuro TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FV[rate, nper, pmt, pv, tipo]`. Alias: `fv`, `vf`, `valorfuturo`, `futurevalue`.
+- `Rate[nper, pmt, pv, fv]`: Calcula la tasa periodica (tipo 0=anual) resolviendo TVM con exp/log; 4-5 args. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Rate[nper, pmt, pv, fv, tipo]`. Alias: `tasa`, `tipo`.
+- `Nper[rate, pmt, pv, fv]`: Calcula numero de periodos via TVM con exp/log; usa log((pmt*(1+r*tipo)-fv*r)/(pmt*(1+r*tipo)+pv*r))/log(1+r). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Nper[rate, pmt, pv, fv, tipo]`. Alias: `n_per`, `periodos`, `plazo`.
+- `Pmt[rate, nper, pv, fv]`: Calcula el pago periodico TVM; 4-5 args con tipo 0/1. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Pmt[rate, nper, pv, fv, tipo]`. Alias: `pago`, `cuota`.
+- `PV[rate, nper, pmt, fv]`: Calcula valor presente TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `PV[rate, nper, pmt, fv, tipo]`. Alias: `va`, `valoractual`, `presentvalue`.
+- `FV[rate, nper, pmt, pv]`: Calcula valor futuro TVM; usa exp/log para (1+rate)^nper. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FV[rate, nper, pmt, pv, tipo]`. Alias: `vf`, `valorfuturo`, `futurevalue`.
 ## Atractores
 
 - `Lorenz[sigma, rho, beta]`: Crea el atractor de Lorenz. Mutacion: crea objetos. Riesgo: alto.
-- `Rossler[a, b, c]`: Crea el atractor de Rossler. Mutacion: crea objetos. Riesgo: alto. Alias: `rossler`, `rossler`.
+- `Rossler[a, b, c]`: Crea el atractor de Rossler. Mutacion: crea objetos. Riesgo: alto.
 - `Thomas[pasos]`: Crea el atractor de Thomas. Mutacion: crea objetos. Riesgo: alto. Alias: `butterfly`.
 - `Aizawa[a, b, c, d, e, f]`: Crea el atractor de Aizawa. Mutacion: crea objetos. Riesgo: alto.
 - `Chen[a, b, c]`: Crea el atractor de Chen. Mutacion: crea objetos. Riesgo: alto.
@@ -253,62 +253,74 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Moebius[radius, width]`: Crea una banda de Moebius 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `mobius`.
 - `Curve3D[(x(t), y(t), z(t)), t, tmin, tmax]`: Crea una curva parametrica 3D. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `Curve3D[(x(t), y(t), z(t)), tmin, tmax]`.
 - `Surface3D[f(x, y), xmin, xmax, ymin, ymax]`: Crea una superficie 3D parametrica o explicita. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `Surface3D[(x(u,v), y(u,v), z(u,v)), umin, umax, vmin, vmax]`, `Surface3D[x(u,v), y(u,v), z(u,v), umin, umax, vmin, vmax]`.
-- `ComplexSurface[expr, xmin, xmax, ymin, ymax, resolution]`: Grafica el modulo de una funcion compleja como superficie 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `complexsurface`, `complex_surface`, `csurface`.
+- `ComplexSurface[expr, xmin, xmax, ymin, ymax, resolution]`: Grafica el modulo de una funcion compleja como superficie 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `complex_surface`, `csurface`.
 - `Extrude[polygon_label, height]`: Extruye un poligono a un solido. Mutacion: crea objetos. Riesgo: alto.
 - `VectorField3D[u, v, w]`: Crea un campo vectorial 3D. Mutacion: crea objetos. Riesgo: alto. Alias: `vectorfield`.
-- `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prism`, `prisma`.
-- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `net`, `desarrollo`, `desplegado`, `unwrap`.
-- `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `quadric`, `cuadrica`, `cuádrica`.
-- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersection3d`, `intersect3d`, `interseccion3d`, `intersección3d`.
+- `Prism[poligono, altura]`: Crea un prisma extruyendo un polígono base por un vector (altura en Z o dx,dy,dz). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Prism[poligono, dx, dy, dz]`. Alias: `prisma`.
+- `Net[poliedro]`: Genera el desarrollo 2D de un poliedro (stub: informa disponibilidad). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Net[poliedro, escala]`. Alias: `desarrollo`, `desplegado`, `unwrap`.
+- `Quadric[a, b, c, d, e, f, g, h, i, j]`: Crea una cuádrica general a*x²+b*y²+c*z²+d*xy+e*yz+f*zx+g*x+h*y+i*z+j=0. Mutacion: crea objetos. Riesgo: medio. Alias: `cuadrica`, `cuádrica`.
+- `Intersection3D[a, b]`: Calcula intersecciones 3D: Plano-Plano, Recta-Plano, Recta-Recta, Plano-Esfera (círculo) o Plano-Poliedro (stub). Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `Intersection3D[a, b, c]`. Alias: `intersect3d`, `interseccion3d`, `intersección3d`.
 ## Crear
 
-- `Arc[centro, radio, inicio, fin]`: Crea un arco por centro/radio/ángulos o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Arc[P1, P2, P3]`. Alias: `arc`, `arco`.
-- `Sector[centro, radio, angulo]`: Crea un sector circular con relleno. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Sector[centro, radio, inicio, fin]`. Alias: `sector`.
-- `Semicircle[centro, radio]`: Crea un semicírculo por centro/radio o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Semicircle[P1, P2, P3]`. Alias: `semicircle`, `semicirculo`.
+- `Arc[centro, radio, inicio, fin]`: Crea un arco por centro/radio/ángulos o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Arc[P1, P2, P3]`. Alias: `arco`.
+- `Sector[centro, radio, angulo]`: Crea un sector circular con relleno. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Sector[centro, radio, inicio, fin]`.
+- `Semicircle[centro, radio]`: Crea un semicírculo por centro/radio o por tres puntos. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Semicircle[P1, P2, P3]`. Alias: `semicirculo`.
 - `BezierCurve[P1, P2, ...]`: Crea una curva de Bézier por 2..64 puntos de control. Mutacion: crea objetos. Riesgo: medio. Alias: `bezier`, `bezier_curve`.
-- `Spline[P1, P2, ...]`: Crea una spline Catmull-Rom por 2..64 puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `spline`.
+- `Spline[P1, P2, ...]`: Crea una spline Catmull-Rom por 2..64 puntos. Mutacion: crea objetos. Riesgo: medio.
 ## Construir
 
 - `Compasses[centro, punto]`: Traza un círculo con compás: centro y punto o radio. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Compasses[centro, radio]`. Alias: `compass`, `compas`.
-- `Incircle[A, B, C]`: Crea el incírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `incircle`, `incirculo`.
-- `Circumcircle[A, B, C]`: Crea el circuncírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `circumcircle`, `circuncirculo`.
+- `Incircle[A, B, C]`: Crea el incírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `incirculo`.
+- `Circumcircle[A, B, C]`: Crea el circuncírculo de un triángulo ABC. Mutacion: crea objetos. Riesgo: medio. Alias: `circuncirculo`.
 ## Discreta
 
-- `ConvexHull[puntos]`: Calcula la envolvente convexa de un conjunto de puntos con monotone chain; respeta MAX_POLYGON_VERTICES 8192 y MAX_DISCRETE_COUNT 10000. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `ConvexHull[{p1, p2, ...}]`. Alias: `convex_hull`, `convexhull`, `envolventeconvexa`, `envolvente`.
-- `DelaunayTriangulation[puntos]`: Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos. Mutacion: crea objetos. Riesgo: medio. Alias: `delaunay`, `delaunaytriangulation`, `triangulaciondelaunay`.
-- `Voronoi[puntos]`: Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible. Mutacion: crea objetos. Riesgo: medio. Alias: `voronoi`, `cellsvoronoi`, `diagramaVoronoi`.
-- `MinimumSpanningTree[puntos]`: Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `mst`, `minimumspanningtree`, `arbolminimo`, `kruskal`.
-- `TravelingSalesman[puntos]`: Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto. Mutacion: crea objetos. Riesgo: medio. Alias: `tsp`, `travelingsalesman`, `viajante`, `travellingsalesman`.
-- `ShortestDistance[punto, objeto]`: Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites. Mutacion: solo consulta. Riesgo: bajo. Alias: `shortestdistance`, `distanciaminima`, `closestdistance`, `distanciamínima`.
+- `ConvexHull[puntos]`: Calcula la envolvente convexa de un conjunto de puntos con monotone chain; respeta MAX_POLYGON_VERTICES 8192 y MAX_DISCRETE_COUNT 10000. Mutacion: crea objetos. Riesgo: medio. Formas alternativas: `ConvexHull[{p1, p2, ...}]`. Alias: `convex_hull`, `envolventeconvexa`, `envolvente`.
+- `DelaunayTriangulation[puntos]`: Triangulación Delaunay aproximada por abanico (fan) desde el primer punto; stub que no falla y respeta límites discretos. Mutacion: crea objetos. Riesgo: medio. Alias: `delaunay`, `triangulaciondelaunay`.
+- `Voronoi[puntos]`: Diagrama de Voronoi aproximado: genera círculos stub en cada sitio cuando no hay motor exacto disponible. Mutacion: crea objetos. Riesgo: medio. Alias: `cellsvoronoi`, `diagramaVoronoi`.
+- `MinimumSpanningTree[puntos]`: Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `mst`, `arbolminimo`, `kruskal`.
+- `TravelingSalesman[puntos]`: Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto. Mutacion: crea objetos. Riesgo: medio. Alias: `tsp`, `viajante`, `travellingsalesman`.
+- `ShortestDistance[punto, objeto]`: Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites. Mutacion: solo consulta. Riesgo: bajo. Alias: `distanciaminima`, `closestdistance`, `distanciamínima`.
 ## Lista
 
-- `Sequence[expr, var, start, end]`: Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k. Mutacion: solo consulta. Riesgo: bajo. Alias: `seq`, `secuencia`, `rango`, `table`.
-- `SequenceLive[expr, var, start, end]`: Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada). Mutacion: crea objetos. Riesgo: bajo. Alias: `sequencelive`, `secuenciaviva`, `seqviva`, `viva`.
-- `Zip[list1, list2]`: Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `zip`, `emparejar`, `cremallera`.
-- `Flatten[list]`: Aplana un nivel de anidamiento {{1,2},{3,4}}→{1,2,3,4}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `flatten`, `aplanar`, `aplanado`.
-- `Sort[list]`: Ordena ascendentemente una lista plana numérica; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `sort`, `ordenar`, `orden`.
-- `Reverse[list]`: Invierte el orden de una lista; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `reverse`, `invertir`, `reversa`.
-- `Join[list1, list2]`: Concatena dos listas; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `join`, `unir`, `concat`, `concatenar`.
-- `Append[list, elem]`: Añade un elemento al final de la lista; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `append`, `anexar`, `agregar`.
-- `First[list]`: Primer elemento de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `first`, `primero`, `head`.
-- `Last[list]`: Último elemento de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `last`, `ultimo`, `último`, `tail`.
-- `Take[list, n]`: Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `take`, `tomar`, `coger`.
-- `KeepIf[list, predicado]`: Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `keepif`, `keep_if`, `filtrar`, `selectif`, `filter`.
-- `CountIf[list, predicado]`: Cuenta elementos que cumplen predicado simple sobre x; valida longitud. Mutacion: solo consulta. Riesgo: bajo. Alias: `countif`, `count_if`, `contarsi`, `contar_si`.
+- `Sequence[expr, var, start, end]`: Genera lista {expr(var=start)...expr(var=end)} evaluando expr con var entera; valida MAX_ARRAY_LENGTH 200k y MAX_DISCRETE_COUNT 10k. Mutacion: solo consulta. Riesgo: bajo. Alias: `seq`, `secuencia`.
+- `SequenceLive[expr, var, start, end]`: Secuencia viva: crea DataTable con binding variable_meta y re-evalúa automáticamente al cambiar variables (dependencia registrada). Mutacion: crea objetos. Riesgo: bajo. Alias: `secuenciaviva`, `seqviva`, `viva`.
+- `Zip[list1, list2]`: Empareja dos listas en lista de pares {{a1,b1},…}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `emparejar`, `cremallera`.
+- `Flatten[list]`: Aplana un nivel de anidamiento {{1,2},{3,4}}→{1,2,3,4}; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `aplanar`, `aplanado`.
+- `Sort[list]`: Ordena ascendentemente una lista plana numérica; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `ordenar`, `orden`.
+- `Reverse[list]`: Invierte el orden de una lista; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `invertir`, `reversa`.
+- `Join[list1, list2]`: Concatena dos listas; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `unir`, `concat`, `concatenar`.
+- `Append[list, elem]`: Añade un elemento al final de la lista; valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `anexar`, `agregar`.
+- `First[list]`: Primer elemento de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `primero`, `head`.
+- `Last[list]`: Último elemento de la lista. Mutacion: solo consulta. Riesgo: bajo. Alias: `ultimo`, `último`, `tail`.
+- `Take[list, n]`: Primeros n elementos de la lista; valida 0≤n≤len y MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `tomar`, `coger`.
+- `KeepIf[list, predicado]`: Filtra con predicado simple sobre x (ej x>2); valida MAX_ARRAY_LENGTH. Mutacion: solo consulta. Riesgo: bajo. Alias: `keep_if`, `filtrar`, `selectif`, `filter`.
+- `CountIf[list, predicado]`: Cuenta elementos que cumplen predicado simple sobre x; valida longitud. Mutacion: solo consulta. Riesgo: bajo. Alias: `count_if`, `contarsi`, `contar_si`.
 ## Cónicas
 
-- `Focus[conica]`: Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact. Mutacion: solo consulta. Riesgo: bajo. Alias: `Foco`, `foco`, `focos`.
-- `Directrix[conica]`: Devuelve la directriz de una parábola como recta (dos puntos) usando exact::parabola. Mutacion: solo consulta. Riesgo: bajo. Alias: `Directriz`, `directriz`.
-- `Center[conica]`: Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center. Mutacion: solo consulta. Riesgo: bajo. Alias: `Centro`, `centro`.
-- `Eccentricity[conica]`: Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola). Mutacion: solo consulta. Riesgo: bajo. Alias: `Excentricidad`, `excentricidad`, `ecc`.
-- `Axes[conica]`: Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejes`, `ejes`, `semiejes`.
-- `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`, `esTangente`, `estangente`, `isTangent`.
+- `Focus[conica]`: Devuelve el/los focos de una cónica (elipse, hipérbola, parábola) usando grafito-geometry::exact. Mutacion: solo consulta. Riesgo: bajo. Alias: `Foco`, `focos`.
+- `Directrix[conica]`: Devuelve la directriz de una parábola como recta (dos puntos) usando exact::parabola. Mutacion: solo consulta. Riesgo: bajo. Alias: `Directriz`.
+- `Center[conica]`: Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center. Mutacion: solo consulta. Riesgo: bajo. Alias: `Centro`.
+- `Eccentricity[conica]`: Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola). Mutacion: solo consulta. Riesgo: bajo. Alias: `Excentricidad`, `ecc`.
+- `Axes[conica]`: Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejes`, `semiejes`.
+- `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`.
 ## Texto
 
-- `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`, `tablatexto`, `tablaTexto`, `Table`.
+- `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`.
 ## Dinámica
 
-- `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`, `deslizador`.
+- `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
+## Análisis
+
+- `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.
+- `NormalAt[expr, x0]`: Recta normal a y=f(x) en x0: NormalAt[expr, x0] crea una recta perpendicular a la tangente en (x0,f(x0)). Mutacion: crea objetos. Riesgo: bajo. Alias: `NormalEn`.
+- `ArcLength[expr, a, b]`: Longitud de arco de y=f(x) entre a y b: ArcLength[expr, a, b] integra sqrt(1+f'(x)^2). Mutacion: solo consulta. Riesgo: medio. Alias: `LongitudArco`.
+- `CurvatureAt[expr, x0]`: Curvatura de y=f(x) en x0: CurvatureAt[expr, x0] calcula κ = |f''|/(1+f'^2)^{3/2}. Mutacion: solo consulta. Riesgo: medio. Alias: `CurvaturaEn`.
+- `VolumeOfRevolution[expr, a, b]`: Volumen de revolución de y=f(x) alrededor del eje X entre a y b: VolumeOfRevolution[expr, a, b] = π∫f(x)^2 dx. Mutacion: solo consulta. Riesgo: medio. Alias: `VolumenRevolucion`, `volumen_revolucion`.
+- `SurfaceOfRevolution[expr, a, b]`: Superficie de revolución de y=f(x) entre a y b: SurfaceOfRevolution[expr, a, b] = 2π∫f(x)sqrt(1+f'(x)^2) dx. Mutacion: solo consulta. Riesgo: medio. Alias: `SuperficieRevolucion`, `superficie_revolucion`.
+## CAS
+
+- `ODE[expr, t0, y0, t_end]`: Resuelve EDO y'=f(t,y): ODE[expr, t0, y0, t_end, steps, metodo, tolerancia] con metodos euler/rk4/rk45/backward; genera PencilObj. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ODE[expr, t0, y0, t_end, steps]`, `ODE[expr, t0, y0, t_end, steps, metodo]`, `ODE[expr, t0, y0, t_end, steps, metodo, tolerancia]`. Alias: `EDO`.
+- `ODESystem[expr1, expr2, t0, x0, y0]`: Resuelve sistema 2D x'=f(t,x,y), y'=g(t,x,y): ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ODESystem[expr1, expr2, t0, x0, y0, t_end]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo]`, `ODESystem[expr1, expr2, t0, x0, y0, t_end, steps, metodo, tolerancia]`. Alias: `SistemaEDO`, `sistema_edo`.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

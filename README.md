@@ -111,6 +111,7 @@ Es el campo de texto en el panel izquierdo. Escribí cualquier comando o expresi
 **Atajos útiles:**
 - `Ctrl+K` abre la paleta de comandos con todos los comandos disponibles, navegables con flechas
 - `Ctrl+Z` deshace la última acción, `Ctrl+Y` rehace
+- `Ctrl+T` alterna tema claro/oscuro
 - `Escape` cancela el objeto en construcción
 
 ### Variables y sliders
@@ -466,13 +467,17 @@ grafito/
 | Seleccionar | Clic con herramienta Seleccionar |
 | Deseleccionar | Clic en vacío |
 | Orbitar 3D | Botón derecho + arrastrar |
-| Deshacer / Rehacer | Ctrl+Z / Ctrl+Y |
+| Deshacer / Rehacer | Ctrl+Z / Ctrl+Y (Ctrl+Shift+Y: Intercepto Y) |
 | Eliminar objeto | Suprimir (con objeto seleccionado) |
 | Paleta de comandos | Ctrl+K |
-| Herramientas 2D | F1 Seleccionar / F2 Punto / F3 Recta / F4 Círculo / F5 Polígono / F6 Función |
-| Análisis | R Raíz / E Extremo / N Inflexión / Ctrl+Shift+Y Intersección Y / Ctrl+A Analizar |
-| Grilla y ejes | Shift+L (log), Shift+K (lineal), Shift+J (cuadrícula), G (snap a grilla) |
-| Abrir / Guardar | Ctrl+O / Ctrl+S |
+| Herramientas 2D | F1 Seleccionar / F2 Punto / F3 Recta / F4 Círculo / F5 Polígono / F6 Función / F8 Esfera / F9 Cubo |
+| Herramientas por tecla | R Raíz / E Extremo / I Intercepto X / X Intersección / N Inflexión / S Segmento / Y Semirrecta / V Vector / M Punto medio |
+| Análisis | Ctrl+A Analizar |
+| Lápiz / Borrador | Ctrl+P / Ctrl+E |
+| Tema claro/oscuro | Ctrl+T (también en Vista > Modo oscuro) |
+| Grilla y ejes | Shift+L (eje X log), Shift+K (eje Y log), Shift+J (ambos), G (snap a grilla) |
+| Abrir / Guardar | Ctrl+N Nuevo / Ctrl+O Abrir / Ctrl+S Guardar / Ctrl+Shift+S Guardar como |
+| Perspectivas | Ctrl+Shift+1..9,0 (10 perspectivas) |
 
 ---
 

@@ -30,6 +30,8 @@ pub struct FillComputePipeline {
     constants_buffer: wgpu::Buffer,
     output_buffer: wgpu::Buffer,
     output_readback: wgpu::Buffer,
+    /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
+    timing: crate::gpu_timing::GpuTimingHandle,
 }
 
 #[repr(C)]
@@ -183,6 +185,7 @@ impl FillComputePipeline {
             constants_buffer,
             output_buffer,
             output_readback,
+            timing: crate::gpu_timing::create(device, queue, "Fill Compute", 1),
         }
     }
 
@@ -288,7 +291,7 @@ impl FillComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Fill Compute Pass"),
-                timestamp_writes: None,
+                timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -299,6 +302,7 @@ impl FillComputePipeline {
         }
         let copy_size = (pixel_count * std::mem::size_of::<u32>()) as u64;
         encoder.copy_buffer_to_buffer(&self.output_buffer, 0, &self.output_readback, 0, copy_size);
+        crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         // Synchronously map the readback buffer. This blocks the CPU until the
@@ -313,11 +317,15 @@ impl FillComputePipeline {
                 log::error!("Fill compute readback failed: {:?}", result.err());
             }
         });
-        // TODO P1: mover a spawn_blocking — Wait bloquea el hilo de prepare (acotado a 1 intento por frame)
-        log::trace!("Fill compute sync readback (Wait) — bloqueante, 1 intento por frame");
-        device.poll(wgpu::Maintain::Wait);
+        // TODO P1: mover a spawn_blocking — el readback síncrono sigue bloqueando
+        // el hilo de prepare (acotado a 1 intento por frame via
+        // MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE en canvas.rs). Mitigación:
+        // poll acotado con timeout en vez de Wait infinito.
+        log::trace!("Fill compute sync readback (bounded poll) — 1 intento por frame");
+        let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Fill Compute");
 
-        if !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
+        if !mapped {
             // `unmap` is idempotent: when `map_async` reported an error the
             // buffer was never mapped, so this is a no-op.
             self.output_readback.unmap();

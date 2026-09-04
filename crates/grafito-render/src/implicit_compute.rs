@@ -502,6 +502,8 @@ pub struct ImplicitComputePipeline {
     values_buffer: wgpu::Buffer,
     values_readback: wgpu::Buffer,
     max_grid: usize,
+    /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
+    timing: crate::gpu_timing::GpuTimingHandle,
 }
 
 #[repr(C)]
@@ -644,6 +646,7 @@ impl ImplicitComputePipeline {
             values_buffer,
             values_readback,
             max_grid,
+            timing: crate::gpu_timing::create(device, queue, "Implicit Compute", 1),
         }
     }
 
@@ -724,11 +727,9 @@ impl ImplicitComputePipeline {
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Implicit Compute Pass"),
-                // Sin GPU timing: TIMESTAMP_QUERY es opcional y el readback es
-                // síncrono, así que el wait del lado CPU domina. Cablear
-                // wgpu-profiler aquí cuando TIMESTAMP_QUERY esté disponible
-                // (verificado en Renderer::new).
-                timestamp_writes: None,
+                // GPU timing opt-in tras la feature `profiling` (ver gpu_timing);
+                // sin la feature esto es `None` — cero costo en release.
+                timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
@@ -742,6 +743,7 @@ impl ImplicitComputePipeline {
             0,
             (sample_count * std::mem::size_of::<f32>()) as u64,
         );
+        crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
 
         // Synchronously map the readback buffer. This blocks the CPU until the
@@ -763,6 +765,7 @@ impl ImplicitComputePipeline {
         // poll acotado con timeout en vez de Wait infinito.
         log::trace!("Implicit compute sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
+        crate::gpu_timing::read_and_log(&self.timing, device, "Implicit Compute");
 
         if !mapped {
             // `unmap` is idempotent: when `map_async` reported an

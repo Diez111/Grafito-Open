@@ -412,4 +412,99 @@ mod tests {
         let ex = gen.generate_with_seed(&lo, PedagogicalLevel::University, 0);
         assert_eq!(ex.difficulty, ExerciseDifficulty::Hard);
     }
+
+    #[test]
+    fn generate_valid_per_level_parametric() {
+        use crate::feedback::FeedbackEngine;
+        use crate::level::UTNProgram;
+        let gen = ExerciseGenerator;
+        // (nivel, LO representativo, dificultad esperada)
+        let casos: Vec<(PedagogicalLevel, LearningObjective, ExerciseDifficulty)> = vec![
+            (
+                PedagogicalLevel::Primary,
+                LearningObjective::new("pri-conteo", "Conteo", "Conteo", None),
+                ExerciseDifficulty::Easy,
+            ),
+            (
+                PedagogicalLevel::Secondary,
+                LearningObjective::new("sec-trig", "Trigonometría", "Seno", None),
+                ExerciseDifficulty::Medium,
+            ),
+            (
+                PedagogicalLevel::UTN(UTNProgram::AM1),
+                LearningObjective::new("am1-der", "Derivadas", "Derivada", None),
+                ExerciseDifficulty::Hard,
+            ),
+        ];
+        let semillas = [0u64, 7, 42];
+        for (nivel, lo, dificultad_esperada) in &casos {
+            for seed in semillas {
+                let ex = gen.generate_with_seed(lo, *nivel, seed);
+                // Enunciado no vacío y respuesta no vacía.
+                assert!(
+                    !ex.prompt.trim().is_empty(),
+                    "enunciado vacío nivel {:?} seed {seed}",
+                    nivel
+                );
+                assert!(
+                    !ex.solution.trim().is_empty(),
+                    "respuesta vacía nivel {:?} seed {seed}",
+                    nivel
+                );
+                // Válido según validador interno.
+                assert!(
+                    ex.validate().is_ok(),
+                    "ejercicio inválido nivel {:?} seed {seed}: {:?}",
+                    nivel,
+                    ex.validate().err()
+                );
+                // Dificultad acorde al nivel.
+                assert_eq!(
+                    ex.difficulty, *dificultad_esperada,
+                    "dificultad incorrecta nivel {:?} seed {seed}",
+                    nivel
+                );
+                // Respuesta verificable: auto-evaluación con la solución debe dar correcto.
+                let fb = FeedbackEngine.assess(&ex, &ex.solution);
+                assert!(
+                    fb.correct,
+                    "respuesta no verificable nivel {:?} seed {seed} prompt '{}' sol '{}'",
+                    nivel, ex.prompt, ex.solution
+                );
+                assert_eq!(ex.seed, Some(seed));
+            }
+        }
+    }
+
+    #[test]
+    fn generate_valid_todos_los_los_con_semilla() {
+        use crate::curriculum::Curriculum;
+        use crate::feedback::FeedbackEngine;
+        let gen = ExerciseGenerator;
+        // Cobertura: todo LO del currículum genera ejercicio válido con seed 7.
+        for lo in Curriculum::all() {
+            let ex = gen.generate_with_seed(&lo, PedagogicalLevel::Secondary, 7);
+            assert!(
+                !ex.prompt.trim().is_empty(),
+                "enunciado vacío para LO {}",
+                lo.id
+            );
+            assert!(
+                !ex.solution.trim().is_empty(),
+                "respuesta vacía para LO {}",
+                lo.id
+            );
+            assert!(
+                ex.validate().is_ok(),
+                "ejercicio inválido para LO {}",
+                lo.id
+            );
+            let fb = FeedbackEngine.assess(&ex, &ex.solution);
+            assert!(
+                fb.correct,
+                "respuesta no verificable para LO {} sol '{}'",
+                lo.id, ex.solution
+            );
+        }
+    }
 }

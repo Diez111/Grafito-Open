@@ -1,4 +1,29 @@
 //! Protocolo JSON v1 entre Grafito y el motor de animaciones externo.
+//!
+//! Wire protocol (líneas JSON sobre stdio, `\n` terminado, UTF-8):
+//!
+//! - Rust → Python: `render_request`, `ping`, `shutdown`.
+//! - Python → Rust: `hello`, `pong`, `progress`, `render_result`, `error`.
+//!
+//! Ejemplos (cada línea termina en `\n`):
+//! ```text
+//! R→P {"type":"render_request","job_id":"job-1","template":"derivative-slope","concept":"derivada","params":{},"spec":null,"export":"png","canvas":[640,480],"duration_ms":2000}
+//! P→R {"type":"hello","protocol_version":1,"capabilities":["derivative-slope","integral-area"]}
+//! P→R {"type":"pong"}
+//! P→R {"type":"progress","job_id":"job-1","step":"render","percent":30}
+//! P→R {"type":"progress","job_id":"job-1","step":"manim","percent":60}
+//! P→R {"type":"progress","job_id":"job-1","step":"render","percent":100}
+//! P→R {"type":"render_result","job_id":"job-1","media_path":"/tmp/w/job-1.png","frames":1,"duration_ms":120}
+//! P→R {"type":"error","job_id":"job-1","code":"render_failed","message":"detalle acotado a 500 chars"}
+//! R→P {"type":"ping"}
+//! R→P {"type":"shutdown"}
+//! ```
+//!
+//! Progreso REAL: el worker emite `progress` con `percent` 0..=100.
+//! `RenderProgress::fraction()` lo expone como fracción 0..1 (`percent/100.0`)
+//! sin inventar valores en el lado Rust. Errores del worker viajan tipados
+//! como `WorkerError { code, message }` con mensaje acotado a 500 chars y
+//! localización al español vía [`localize_worker_error`].
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,6 +110,103 @@ pub enum ProtocolError {
 }
 
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
+
+/// Longitud máxima del mensaje de error del worker (acotado para la UI).
+pub const MAX_WORKER_MESSAGE_LEN: usize = 500;
+/// Longitud máxima del código de error del worker.
+pub const MAX_ERROR_CODE_LEN: usize = 64;
+
+/// Sanea un código de error a `[A-Za-z0-9_-]{1,64}`; si no cumple, `"error"`.
+pub fn sanitize_error_code(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty()
+        || t.len() > MAX_ERROR_CODE_LEN
+        || !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return "error".to_string();
+    }
+    t.to_string()
+}
+
+/// Trunca un mensaje a 500 chars (por caracteres, no bytes) y recorta bordes.
+pub fn truncate_worker_message(msg: &str) -> String {
+    let s = msg.trim();
+    if s.chars().count() <= MAX_WORKER_MESSAGE_LEN {
+        s.to_string()
+    } else {
+        s.chars().take(MAX_WORKER_MESSAGE_LEN).collect()
+    }
+}
+
+/// Error tipado del worker: código + mensaje acotado a 500 chars.
+///
+/// Se construye con [`WorkerError::try_new`] que sanea y trunca; nunca deja
+/// pasar inglés crudo a la UI sin pasar por [`localize_worker_error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerError {
+    pub code: String,
+    pub message: String,
+}
+
+impl WorkerError {
+    pub fn try_new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: sanitize_error_code(&code.into()),
+            message: truncate_worker_message(&message.into()),
+        }
+    }
+    /// Mensaje listo para la UI, siempre en español.
+    pub fn localized(&self) -> String {
+        localize_worker_error(&self.code, &self.message)
+    }
+}
+
+impl std::fmt::Display for WorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.localized())
+    }
+}
+
+impl std::error::Error for WorkerError {}
+
+/// Localiza un error del worker al español para la UI.
+///
+/// Nunca devuelve inglés crudo: cada código conocido tiene plantilla en
+/// español; los desconocidos usan `"error del motor (<code>): <msg>"`.
+/// `message` se trunca a 500 chars por seguridad.
+pub fn localize_worker_error(code: &str, message: &str) -> String {
+    let code = sanitize_error_code(code);
+    let msg = truncate_worker_message(message);
+    let detail = if msg.is_empty() {
+        String::new()
+    } else {
+        format!(": {msg}")
+    };
+    match code.as_str() {
+        "invalid_request" => format!("petición inválida{detail}"),
+        "render_failed" => format!("falló el render{detail}"),
+        "path_escape" => "ruta de salida fuera del área de trabajo".to_string(),
+        "handshake_timeout" => "el motor no respondió al saludo (tiempo agotado)".to_string(),
+        "handshake_error" => format!("error de conexión con el motor{detail}"),
+        "version_mismatch" => format!("versión de protocolo incompatible{detail}"),
+        "engine_exit" => format!("el motor se cerró inesperadamente{detail}"),
+        "protocol" => "el motor emitió una línea demasiado larga (límite 64 KiB)".to_string(),
+        "job_timeout" | "timeout" | "timed_out" => {
+            "tiempo agotado esperando al motor (límite 90 s por defecto)".to_string()
+        }
+        "cancelled" => "cancelado por el usuario".to_string(),
+        "error" => {
+            if msg.is_empty() {
+                "error del motor".to_string()
+            } else {
+                format!("error del motor{detail}")
+            }
+        }
+        _ => format!("error del motor ({code}){detail}"),
+    }
+}
 
 /// Resolución validada del lienzo (type-safe).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +451,13 @@ impl RenderProgress {
         }
         Ok(())
     }
+    /// Fracción REAL 0..1 del progreso reportado por el worker (`percent/100`).
+    ///
+    /// No inventa valores: si el worker no ha emitido `progress`, el llamante
+    /// debe mostrar indeterminado en lugar de llamar a esto con datos falsos.
+    pub fn fraction(&self) -> f32 {
+        (f32::from(self.percent.min(100))) / 100.0
+    }
 }
 
 /// Resultado de un render.
@@ -418,16 +547,17 @@ pub fn try_downcast(value: &serde_json::Value) -> ProtocolResult<WireMessage> {
             Ok(WireMessage::Result(result))
         }
         kinds::ERROR => {
-            let message = value
+            let message_raw = value
                 .get("message")
                 .and_then(|v| v.as_str())
-                .ok_or(ProtocolError::MissingField { field: "message" })?
-                .to_owned();
-            let code = value
+                .ok_or(ProtocolError::MissingField { field: "message" })?;
+            let code_raw = value
                 .get("code")
                 .and_then(|v| v.as_str())
-                .unwrap_or("error")
-                .to_owned();
+                .unwrap_or("error");
+            // Tipado + acotado: código saneado y mensaje truncado a 500 chars.
+            let code = sanitize_error_code(code_raw);
+            let message = truncate_worker_message(message_raw);
             Ok(WireMessage::Error { code, message })
         }
         kinds::PONG => Ok(WireMessage::Pong),

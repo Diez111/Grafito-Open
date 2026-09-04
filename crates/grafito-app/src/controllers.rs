@@ -11,6 +11,20 @@
 //! - `DocumentController` — document, undo/redo, lifecycle, snapshots (O(1) pop_front + presupuesto 50 MiB).
 //! - `ViewController` — camera, view, render quality, canvas state (fuente canónica `Perspective`).
 //! - `AssistantController` — assistant state, visibilidad.
+//
+// TODO(app.rs-owner): `GrafitoApp` aún duplica esta lógica inline y NO usa
+// `DocumentController` — migrar requiere tocar `app.rs` (fuera de ownership
+// de este agente, NO tocar aquí):
+// - `app.rs:551` `enforce_undo_budgets` espeja `DocumentController::enforce_budgets` (aquí:173).
+// - `app.rs:578` `push_history_snapshot_with_counter` espeja `DocumentController::push_snapshot` (aquí:117).
+// - `app.rs:2529` `GrafitoApp::undo` espeja `DocumentController::undo` (aquí:126).
+// - `app.rs:2553` `GrafitoApp::redo` espeja `DocumentController::redo` (aquí:153).
+// - `app.rs:869` `save_command_snapshot_if_mutated` es el commit que debería
+//   delegar en `push_snapshot` (también usado desde `assistant.rs:91`
+//   `apply_local_assistant_plan` con `undo_stack`/`redo_stack` directos).
+// Plan sugerido (otro agente): cambiar los campos `document`/`undo_stack`/
+// `redo_stack`/`undo_total_bytes` de `GrafitoApp` por un `DocumentController`
+// y delegar `undo`/`redo`/`push`, manteniendo `MAX_UNDO`/`MAX_UNDO_BYTES`.
 
 use grafito_core::{ChangeSet, Document};
 use std::collections::VecDeque;

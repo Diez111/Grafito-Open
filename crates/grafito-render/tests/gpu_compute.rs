@@ -16,7 +16,9 @@ use grafito_render::{
     function_compute::FunctionComputePipeline,
     implicit_compute::{marching_squares_from_grid, ImplicitComputePipeline},
     parametric_compute::{
-        maybe_compute_curve_2d_on_gpu, maybe_compute_curve_3d_on_gpu, maybe_compute_polar_on_gpu,
+        maybe_compute_curve_2d_on_gpu, maybe_compute_curve_3d_on_gpu,
+        maybe_compute_curves_2d_on_gpu_batched, maybe_compute_curves_3d_on_gpu_batched,
+        maybe_compute_polar_on_gpu, maybe_compute_polars_on_gpu_batched,
         maybe_compute_surface_on_gpu, ParametricComputePipeline,
     },
     vector_compute::VectorComputePipeline,
@@ -1078,6 +1080,232 @@ fn gpu_and_cpu_contours_share_the_no_crossing_work_budget() {
         MAX_MARCHING_SQUARES_WORK_UNITS / cells_per_level
     );
     assert!(gpu_segments.iter().all(|(_, segments)| segments.is_empty()));
+}
+
+#[test]
+fn renderer_fill_compute_stays_none_without_fillable_implicits_and_activates_on_demand() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &gpu.device,
+        &gpu.queue,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        1,
+    );
+    assert!(
+        renderer.fill_compute.is_none(),
+        "Renderer::new no debe reservar los ~128 MiB de buffers de fill"
+    );
+
+    let mut plain = Document::new();
+    plain.add_object(GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+        "cos(t)",
+        "sin(t)",
+        0.0,
+        std::f64::consts::TAU,
+    )));
+    assert!(
+        renderer
+            .ensure_fill_compute_for_document(&gpu.device, &gpu.queue, &plain)
+            .is_none(),
+        "sin implícitas rellenables el pipeline de fill no se crea"
+    );
+    assert!(
+        renderer.fill_compute.is_none(),
+        "el campo fill_compute sigue None tras un documento sin fill (128 MiB ahorrados)"
+    );
+
+    let mut fillable = Document::new();
+    fillable.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+        "x",
+        "y",
+        RelationOperator::Less,
+    )));
+    assert!(
+        renderer
+            .ensure_fill_compute_for_document(&gpu.device, &gpu.queue, &fillable)
+            .is_some(),
+        "una implícita con op != Eq activa el pipeline de fill"
+    );
+    assert!(renderer.fill_compute.is_some());
+}
+
+#[test]
+fn parametric_batch_matches_individual_dispatches() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4000, 128);
+
+    let circle = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+    let line = ParametricCurve2DObj::new("2*t - 1", "t*t", 0.0, 1.0);
+    let polar = PolarCurveObj::new("1 + cos(t)", 0.0, std::f64::consts::TAU);
+
+    let individual_2d = compute
+        .evaluate_curve_2d(&gpu.device, &gpu.queue, &circle, 64, &HashMap::new())
+        .expect("single 2D dispatch must execute");
+    let individual_polar = compute
+        .evaluate_polar(&gpu.device, &gpu.queue, &polar, 64, &HashMap::new())
+        .expect("single polar dispatch must execute");
+
+    let batched_2d = compute.evaluate_curves_2d_batched(
+        &gpu.device,
+        &gpu.queue,
+        &[(&circle, 64), (&line, 64)],
+        &HashMap::new(),
+    );
+    let batched_polar =
+        compute.evaluate_polars_batched(&gpu.device, &gpu.queue, &[(&polar, 64)], &HashMap::new());
+
+    assert_eq!(batched_2d.len(), 2);
+    let batched_circle = batched_2d[0].as_ref().expect("circle must batch");
+    assert_eq!(batched_circle.len(), individual_2d.len());
+    for ((bx, by), (ix, iy)) in batched_circle.iter().zip(&individual_2d) {
+        assert_close(*bx, *ix, "batched 2D x");
+        assert_close(*by, *iy, "batched 2D y");
+    }
+    let batched_line = batched_2d[1].as_ref().expect("line must batch");
+    assert_eq!(batched_line.len(), 65);
+
+    let batched_polar_samples = batched_polar[0].as_ref().expect("polar must batch");
+    assert_eq!(batched_polar_samples.len(), individual_polar.len());
+    for ((bx, by), (ix, iy)) in batched_polar_samples.iter().zip(&individual_polar) {
+        assert_close(*bx, *ix, "batched polar x");
+        assert_close(*by, *iy, "batched polar y");
+    }
+}
+
+#[test]
+fn parametric_3d_batch_matches_individual_dispatch() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4000, 128);
+    let helix = ParametricCurve3DObj::new("cos(t)", "sin(t)", "t", 0.0, std::f64::consts::TAU);
+
+    let individual = compute
+        .evaluate_curve_3d(&gpu.device, &gpu.queue, &helix, 64, &HashMap::new())
+        .expect("single 3D dispatch must execute");
+    let batched = compute.evaluate_curves_3d_batched(
+        &gpu.device,
+        &gpu.queue,
+        &[(&helix, 64)],
+        &HashMap::new(),
+    );
+    let batched = batched[0].as_ref().expect("helix must batch");
+
+    assert_eq!(batched.len(), individual.len());
+    for ((bx, by, bz), (ix, iy, iz)) in batched.iter().zip(&individual) {
+        assert_close(*bx, *ix, "batched 3D x");
+        assert_close(*by, *iy, "batched 3D y");
+        assert_close(*bz, *iz, "batched 3D z");
+    }
+}
+
+#[test]
+fn maybe_compute_batched_populates_caches_in_one_submit() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4000, 128);
+    let circle = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+    let line = ParametricCurve2DObj::new("t", "t", 0.0, 1.0);
+
+    let results = maybe_compute_curves_2d_on_gpu_batched(
+        &compute,
+        &gpu.device,
+        &gpu.queue,
+        &[(&circle, 64), (&line, 64)],
+        &HashMap::new(),
+    );
+    assert_eq!(results, vec![true, true]);
+    assert_eq!(circle.cached_samples.read().unwrap().len(), 65);
+    assert_eq!(line.cached_samples.read().unwrap().len(), 65);
+
+    // Segunda llamada: cachés ya pobladas → true sin re-despachar.
+    let results2 = maybe_compute_curves_2d_on_gpu_batched(
+        &compute,
+        &gpu.device,
+        &gpu.queue,
+        &[(&circle, 64), (&line, 64)],
+        &HashMap::new(),
+    );
+    assert_eq!(results2, vec![true, true]);
+}
+
+#[test]
+fn maybe_compute_batched_3d_and_polar_populate_caches_in_one_submit() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4000, 128);
+    let helix = ParametricCurve3DObj::new("cos(t)", "sin(t)", "t", 0.0, std::f64::consts::TAU);
+    let polar = PolarCurveObj::new("1 + cos(t)", 0.0, std::f64::consts::TAU);
+
+    let results_3d = maybe_compute_curves_3d_on_gpu_batched(
+        &compute,
+        &gpu.device,
+        &gpu.queue,
+        &[(&helix, 64)],
+        &HashMap::new(),
+    );
+    assert_eq!(results_3d, vec![true]);
+    assert_eq!(helix.cached_samples.read().unwrap().len(), 65);
+
+    let results_polar = maybe_compute_polars_on_gpu_batched(
+        &compute,
+        &gpu.device,
+        &gpu.queue,
+        &[(&polar, 64)],
+        &HashMap::new(),
+    );
+    assert_eq!(results_polar, vec![true]);
+    assert_eq!(polar.cached_samples.read().unwrap().len(), 65);
+}
+
+#[test]
+fn domain_coloring_rejects_over_250k_cells_before_dispatch() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
+    let expr = grafito_complex::math::complex_expr::parse("z").expect("test expression must parse");
+    let points: Vec<(f64, f64)> = (0..250_001).map(|i| (i as f64 * 1e-6, 0.0)).collect();
+
+    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &points, &HashMap::new(), 0);
+    assert!(
+        result.is_none(),
+        "MAX_CELLS 250k es un presupuesto duro: 250_001 celdas se rechazan"
+    );
+}
+
+#[test]
+fn surface_gpu_rejects_over_128_resolution_without_clamping() {
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4000, 128);
+    let surface = Surface3DObj::new("x + y", (0.0, 1.0), (0.0, 1.0));
+
+    assert!(
+        compute
+            .evaluate_surface(&gpu.device, &gpu.queue, &surface, 129, &HashMap::new())
+            .is_none(),
+        "MAX_SURFACE_RES 128 es un presupuesto duro: res 129 se rechaza"
+    );
+
+    let cpu_grid = vec![vec![Point3D::new(3.0, 4.0, 5.0)]];
+    *surface.cached_grid.write().unwrap() = cpu_grid.clone();
+    assert!(!maybe_compute_surface_on_gpu(
+        &compute,
+        &gpu.device,
+        &gpu.queue,
+        &surface,
+        129,
+        &HashMap::new(),
+    ));
+    assert_eq!(*surface.cached_grid.read().unwrap(), cpu_grid);
 }
 
 fn assert_close(actual: f64, expected: f64, context: &str) {

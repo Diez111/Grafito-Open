@@ -13,18 +13,23 @@ use grafito_ui::theme::current_theme;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 // ── F3-Render caches: fractal / phase / ordered_visible keyed por document.version ──
 thread_local! {
-    static FRACTAL_RENDER_CACHE: RefCell<HashMap<u64, Vec<grafito_geometry::fractals::FractalPixel>>> =
+    // Los valores se guardan como `Arc` para que el cache hit clone solo el
+    // puntero (refcount) y no el payload completo (hasta 160k píxeles de
+    // fractal, density² segmentos de retrato de fase, o el AST complejo).
+    static FRACTAL_RENDER_CACHE: RefCell<
+        HashMap<u64, Arc<Vec<grafito_geometry::fractals::FractalPixel>>>,
+    > = RefCell::new(HashMap::new());
+    static PHASE_PORTRAIT_CACHE: RefCell<HashMap<u64, PhasePortraitSegments>> =
         RefCell::new(HashMap::new());
-    static PHASE_PORTRAIT_CACHE: RefCell<HashMap<u64, Vec<(Point2, Point2)>>> =
-        RefCell::new(HashMap::new());
-    static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Vec<ObjectId>)>> =
+    static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Arc<Vec<ObjectId>>)>> =
         const { RefCell::new(None) };
     /// Cache de ASTs complejos parseados (ComplexGrid/ComplexMapping) keyed por
     /// la expresión. Evita re-parsear `complex_expr` en cada frame (H10).
-    static COMPLEX_EXPR_CACHE: RefCell<HashMap<String, grafito_complex::ComplexExpr>> =
+    static COMPLEX_EXPR_CACHE: RefCell<HashMap<String, Arc<grafito_complex::ComplexExpr>>> =
         RefCell::new(HashMap::new());
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
@@ -33,6 +38,9 @@ thread_local! {
 const FRACTAL_RENDER_CACHE_CAP: usize = 8;
 const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
+
+/// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
+type PhasePortraitSegments = Arc<Vec<(Point2, Point2)>>;
 
 fn fractal_render_cache_key(document_version: u64, fr: &grafito_core::Fractal2DObj) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -85,7 +93,7 @@ fn phase_render_cache_key(
 fn cached_try_compute_fractal(
     fr: &grafito_core::Fractal2DObj,
     document_version: u64,
-) -> Option<Vec<grafito_geometry::fractals::FractalPixel>> {
+) -> Option<Arc<Vec<grafito_geometry::fractals::FractalPixel>>> {
     let key = fractal_render_cache_key(document_version, fr);
     if let Some(cached) = FRACTAL_RENDER_CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Some(cached);
@@ -106,16 +114,18 @@ fn cached_try_compute_fractal(
             max_iter: fr.max_iter,
         },
     };
-    let pixels = grafito_geometry::fractals::try_compute_fractal(
-        &fractal_type,
-        fr.x_min,
-        fr.x_max,
-        fr.y_min,
-        fr.y_max,
-        fr.resolution,
-        fr.resolution,
-    )
-    .ok()?;
+    let pixels = Arc::new(
+        grafito_geometry::fractals::try_compute_fractal(
+            &fractal_type,
+            fr.x_min,
+            fr.x_max,
+            fr.y_min,
+            fr.y_max,
+            fr.resolution,
+            fr.resolution,
+        )
+        .ok()?,
+    );
     FRACTAL_RENDER_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         if cache.len() >= FRACTAL_RENDER_CACHE_CAP {
@@ -134,12 +144,12 @@ fn cached_sample_phase_portrait(
     portrait: &grafito_core::PhasePortraitObj,
     variables: &HashMap<String, f64>,
     document_version: u64,
-) -> Vec<(Point2, Point2)> {
+) -> PhasePortraitSegments {
     let key = phase_render_cache_key(document_version, portrait, variables);
     if let Some(cached) = PHASE_PORTRAIT_CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return cached;
     }
-    let segments = grafito_render::sample_phase_portrait(portrait, variables);
+    let segments = Arc::new(grafito_render::sample_phase_portrait(portrait, variables));
     PHASE_PORTRAIT_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         if cache.len() >= PHASE_RENDER_CACHE_CAP {
@@ -199,11 +209,11 @@ fn refine_function_samples(
 /// Devuelve el AST complejo parseado de `expr`, cacheado por string de
 /// expresión (LRU acotado). Evita re-parsear `complex_expr` en cada frame
 /// (H10): el parseo solo ocurre en cache miss.
-fn cached_complex_expr(expr: &str) -> Option<grafito_complex::ComplexExpr> {
+fn cached_complex_expr(expr: &str) -> Option<Arc<grafito_complex::ComplexExpr>> {
     if let Some(cached) = COMPLEX_EXPR_CACHE.with(|c| c.borrow().get(expr).cloned()) {
         return Some(cached);
     }
-    let parsed = grafito_complex::complex_expr::parse(expr).ok()?;
+    let parsed = Arc::new(grafito_complex::complex_expr::parse(expr).ok()?);
     COMPLEX_EXPR_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         if cache.len() >= COMPLEX_EXPR_CACHE_CAP {
@@ -219,17 +229,22 @@ fn cached_complex_expr(expr: &str) -> Option<grafito_complex::ComplexExpr> {
 /// Cachea `ordered_visible_2d_objects` keyed por `document.version`.
 /// Evita re-ordenar (layer+ObjectId) y re-filtrar cada vez que se pintan
 /// múltiples pasadas (grid, fills, mappings) en el mismo frame.
-fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Vec<ObjectId> {
+fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Arc<Vec<ObjectId>> {
     let version = document.version;
+    // El cache hit clona el `Arc` (refcount), no el `Vec<ObjectId>` completo.
+    // Este helper se invoca varias veces por frame (paint plan, cache plan,
+    // fills, mappings), así que clonar el payload era un hotspot medible.
     if let Some((cached_version, ids)) = ORDERED_VISIBLE_CACHE.with(|c| c.borrow().clone()) {
         if cached_version == version {
             return ids;
         }
     }
-    let ids: Vec<ObjectId> = grafito_render::ordered_visible_2d_objects(document)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
+    let ids: Arc<Vec<ObjectId>> = Arc::new(
+        grafito_render::ordered_visible_2d_objects(document)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
+    );
     ORDERED_VISIBLE_CACHE.with(|c| *c.borrow_mut() = Some((version, ids.clone())));
     ids
 }
@@ -240,9 +255,9 @@ fn cached_ordered_visible_2d_objects(
     // Usa ids cacheados (keyed por version) y reconstruye refs sin re-ordenar.
     let ids = cached_ordered_visible_ids(document);
     let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(obj) = document.get_object(id) {
-            out.push((id, obj));
+    for id in ids.iter() {
+        if let Some(obj) = document.get_object(*id) {
+            out.push((*id, obj));
         }
     }
     out
@@ -270,6 +285,18 @@ fn to_color32(c: Color) -> Color32 {
         (c.b * 255.0).clamp(0.0, 255.0) as u8,
         (c.a * 255.0).clamp(0.0, 255.0) as u8,
     )
+}
+
+/// Aplica el clip del canvas visible a un painter.
+///
+/// Todos los painters de `render_2d` pasan por aquí en su punto de entrada
+/// (grid, ejes, objetos, overlays, hover) para que ninguna primitiva pueda
+/// dibujar fuera del área del canvas: `with_clip_rect` es barato (solo fija
+/// el rect de clip del layer) y hace el recorte autocontenido aunque el
+/// llamador (app.rs) ya haya fijado el mismo rect.
+#[inline]
+fn clipped_to_canvas(painter: &egui::Painter, canvas_rect: Rect) -> egui::Painter {
+    painter.with_clip_rect(canvas_rect)
 }
 
 fn should_connect_screen_points(a: Pos2, b: Pos2, canvas_rect: Rect) -> bool {
@@ -1061,9 +1088,19 @@ fn trig_asymptotes(function: u8, x_min: f64, x_max: f64) -> Vec<f64> {
         64
     };
     let mut xs = Vec::new();
-    let k_min = ((x_min - offset) / step).floor() as i64 - 1;
-    let k_max = ((x_max - offset) / step).ceil() as i64 + 1;
+    // Aritmética saturada: en zoom-out extremo `(x/step)` puede exceder i64 y
+    // `i64::MIN - 1` desbordaría (panic en debug). El tope de iteraciones
+    // garantiza terminación incluso si el rango k es gigantesco.
+    let k_min = ((x_min - offset) / step).floor() as i64;
+    let k_max = ((x_max - offset) / step).ceil() as i64;
+    let k_min = k_min.saturating_sub(1);
+    let k_max = k_max.saturating_add(1);
+    let mut iterations = 0usize;
     for k in k_min..=k_max {
+        iterations += 1;
+        if iterations > 4096 {
+            break;
+        }
         let x = offset + k as f64 * step;
         if x >= x_min && x <= x_max {
             xs.push(x);
@@ -1664,6 +1701,7 @@ impl GrafitoApp {
         if !self.show_grid {
             return;
         }
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br =
@@ -1728,8 +1766,10 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let mut min_x = (world_tl.x / major_step).floor() as i64 - 1;
-            let mut max_x = (world_br.x / major_step).ceil() as i64 + 1;
+            let min_x = (world_tl.x / major_step).floor() as i64;
+            let max_x = (world_br.x / major_step).ceil() as i64;
+            let mut min_x = min_x.saturating_sub(1);
+            let mut max_x = max_x.saturating_add(1);
             if max_x.saturating_sub(min_x) > 500 {
                 let center = (min_x + max_x) / 2;
                 min_x = center - 250;
@@ -1804,8 +1844,10 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let mut min_y = (world_br.y / major_step).floor() as i64 - 1;
-            let mut max_y = (world_tl.y / major_step).ceil() as i64 + 1;
+            let min_y = (world_br.y / major_step).floor() as i64;
+            let max_y = (world_tl.y / major_step).ceil() as i64;
+            let mut min_y = min_y.saturating_sub(1);
+            let mut max_y = max_y.saturating_add(1);
             if max_y.saturating_sub(min_y) > 500 {
                 let center = (min_y + max_y) / 2;
                 min_y = center - 250;
@@ -1834,6 +1876,7 @@ impl GrafitoApp {
     ) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("draw_axes");
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
         let world_br =
@@ -1927,8 +1970,10 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let mut min_x = (world_tl.x / major_step).floor() as i64 - 1;
-            let mut max_x = (world_br.x / major_step).ceil() as i64 + 1;
+            let min_x = (world_tl.x / major_step).floor() as i64;
+            let max_x = (world_br.x / major_step).ceil() as i64;
+            let mut min_x = min_x.saturating_sub(1);
+            let mut max_x = max_x.saturating_add(1);
             if max_x.saturating_sub(min_x) > 500 {
                 let center = (min_x + max_x) / 2;
                 min_x = center - 250;
@@ -2017,8 +2062,10 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
-            let mut min_y = (world_br.y / major_step).floor() as i64 - 1;
-            let mut max_y = (world_tl.y / major_step).ceil() as i64 + 1;
+            let min_y = (world_br.y / major_step).floor() as i64;
+            let max_y = (world_tl.y / major_step).ceil() as i64;
+            let mut min_y = min_y.saturating_sub(1);
+            let mut max_y = max_y.saturating_add(1);
             if max_y.saturating_sub(min_y) > 500 {
                 let center = (min_y + max_y) / 2;
                 min_y = center - 250;
@@ -2076,6 +2123,7 @@ impl GrafitoApp {
             return;
         }
 
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let view = self.document.view();
         let theme = current_theme(painter.ctx());
         let spec = Self::trig_spec(self.trig_function);
@@ -2102,7 +2150,7 @@ impl GrafitoApp {
             let a = to_pos(Point2::new(x, y_min));
             let b = to_pos(Point2::new(x, y_max));
             draw_dashed_line(
-                painter,
+                &painter,
                 a,
                 b,
                 Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 84, 84, 115)),
@@ -2119,7 +2167,7 @@ impl GrafitoApp {
         if value.is_finite() && value >= y_min && value <= y_max && t >= x_min && t <= x_max {
             let p = to_pos(Point2::new(t, value));
             draw_dashed_line(
-                painter,
+                &painter,
                 to_pos(Point2::new(t, y_min)),
                 to_pos(Point2::new(t, y_max)),
                 Stroke::new(1.2, marker),
@@ -2143,7 +2191,7 @@ impl GrafitoApp {
         match self.trig_view_mode {
             crate::app::TrigViewMode::Didactic => {
                 self.draw_trig_unit_card(
-                    painter,
+                    &painter,
                     canvas_rect,
                     accent,
                     marker,
@@ -2197,6 +2245,7 @@ impl GrafitoApp {
         projection_x: Color32,
         projection_y: Color32,
     ) {
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let theme = current_theme(painter.ctx());
         let card_size = Vec2::new(210.0, 190.0);
         let card = Rect::from_min_size(canvas_rect.min + Vec2::new(14.0, 14.0), card_size);
@@ -2329,6 +2378,7 @@ impl GrafitoApp {
         use num_complex::Complex64;
         use std::collections::HashMap;
 
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let view = self.document.view();
         let theme = current_theme(painter.ctx());
         let source_color = Color32::from_rgb(255, 84, 84);
@@ -2341,12 +2391,19 @@ impl GrafitoApp {
 
         let (expr, label) = self.active_complex_animation_expr();
         let parsed = grafito_complex::complex_expr::parse(&expr).ok();
-        let eval_at = |z: Complex64| -> Option<Complex64> {
+        // PERF: el entorno de variables se construye UNA vez por frame y el
+        // símbolo base se actualiza con `get_mut` en cada evaluación. Antes se
+        // reconstruía un `HashMap` completo por punto del círculo (131/frame).
+        let mut vars: HashMap<String, Complex64> = HashMap::new();
+        for (name, value) in &self.document.variables {
+            vars.insert(name.clone(), Complex64::new(*value, 0.0));
+        }
+        let base_symbol = self.document.complex_base_symbol.clone();
+        vars.insert(base_symbol.clone(), Complex64::new(0.0, 0.0));
+        let mut eval_at = |z: Complex64| -> Option<Complex64> {
             let expr = parsed.as_ref()?;
-            let mut vars: HashMap<String, Complex64> = HashMap::new();
-            vars.insert(self.document.complex_base_symbol.clone(), z);
-            for (name, value) in &self.document.variables {
-                vars.insert(name.clone(), Complex64::new(*value, 0.0));
+            if let Some(slot) = vars.get_mut(&base_symbol) {
+                *slot = z;
             }
             expr.eval(&vars)
                 .ok()
@@ -2464,6 +2521,7 @@ impl GrafitoApp {
     ) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("draw_objects");
+        let painter = clipped_to_canvas(painter, canvas_rect);
         self.prune_fill_texture_cache();
 
         // Cache misses and fill rasterization are admitted in ObjectId order
@@ -2520,12 +2578,12 @@ impl GrafitoApp {
             };
             match paint {
                 BasePaint2D::Cpu(_) => {
-                    self.draw_object_styled(painter, canvas_rect, obj, style, false);
+                    self.draw_object_styled(&painter, canvas_rect, obj, style, false);
                 }
                 BasePaint2D::Gpu(_) => {
-                    self.draw_gpu_object_backfill(painter, canvas_rect, obj);
+                    self.draw_gpu_object_backfill(&painter, canvas_rect, obj);
                     paint_gpu_object(id);
-                    self.draw_object_styled(painter, canvas_rect, obj, style, true);
+                    self.draw_object_styled(&painter, canvas_rect, obj, style, true);
                 }
             }
         }
@@ -2546,14 +2604,28 @@ impl GrafitoApp {
                 },
                 ..Default::default()
             };
-            self.draw_object_styled(painter, canvas_rect, preview, Some(style), false);
+            self.draw_object_styled(&painter, canvas_rect, preview, Some(style), false);
         }
 
         // Draw hover analytics
+        //
+        // Presupuesto (decisión documentada): el análisis de hover se calcula en
+        // `input.rs::update_hover_analysis` con un debounce espacial de 5px y solo
+        // cuando el cursor está casi quieto (no durante pan/arrastre), por lo que
+        // su coste O(objetos) no se paga a 60fps. El lado de dibujo aquí es O(1):
+        // un marcador + un label. Si el análisis llegara a exceder el presupuesto
+        // de frame, la degradación correcta es mover `update_hover_analysis` a un
+        // hilo async (canal + `request_repaint`), NO simplificar el render; el
+        // render ya está acotado y recortado al canvas.
         if let Some(hover) = &self.hovered_analysis {
             let view = *self.document.view();
             let screen_pos = view.world_to_screen(hover.point);
             let pos = canvas_rect.min + egui::Vec2::new(screen_pos.x, screen_pos.y);
+            // Cull barato: si el punto de análisis quedó fuera del canvas (p.ej.
+            // tras un pan/zoom), no dibujar el marcador ni el label.
+            if !canvas_rect.expand(24.0).contains(pos) {
+                return;
+            }
 
             let color = Self::hovered_analysis_color(hover.is_snap, hover.feature, hover.snap_kind);
             let radius = if hover.is_snap { 6.0 } else { 4.0 };
@@ -2703,6 +2775,7 @@ impl GrafitoApp {
     }
 
     pub(crate) fn draw_tool_ghost(&self, painter: &egui::Painter, canvas_rect: Rect) {
+        let painter = clipped_to_canvas(painter, canvas_rect);
         if let Some(ghost) = &self.tool_ghost {
             let mut style = StyleOverride {
                 color_alpha_multiplier: Some(0.3),
@@ -2725,12 +2798,13 @@ impl GrafitoApp {
                 }
                 _ => {}
             }
-            self.draw_object_styled(painter, canvas_rect, ghost, Some(style), false);
+            self.draw_object_styled(&painter, canvas_rect, ghost, Some(style), false);
         }
     }
 
     pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
-        self.draw_object_styled(painter, canvas_rect, obj, None, false);
+        let painter = clipped_to_canvas(painter, canvas_rect);
+        self.draw_object_styled(&painter, canvas_rect, obj, None, false);
     }
 
     /// Rellena el área interior de la imagen transformada de un
@@ -3115,6 +3189,11 @@ impl GrafitoApp {
     ) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("draw_object_styled");
+        // Clip global: TODA primitiva de objeto (puntos, círculos, polígonos,
+        // curvas, fills, fractales, mappings) queda recortada al canvas. Los
+        // casos que antes recortaban internamente (ComplexGrid/ComplexMapping)
+        // ahora quedan cubiertos por este clip único.
+        let painter = clipped_to_canvas(painter, canvas_rect);
         let overlay_only = match cpu_object_pass(&self.document, obj, overlay_only) {
             CpuObjectPass::Full => false,
             CpuObjectPass::Supplement => true,
@@ -3211,7 +3290,7 @@ impl GrafitoApp {
                     // Arrowhead for vectors at the forward (t=1) end.
                     let is_vector = label == "v";
                     if is_vector && !overlay_only {
-                        Self::draw_arrowhead(painter, pa, pb, width, to_color32(color));
+                        Self::draw_arrowhead(&painter, pa, pb, width, to_color32(color));
                     }
                 }
                 if !label.is_empty() {
@@ -3280,14 +3359,21 @@ impl GrafitoApp {
                 let label = get_label(&poly.label, style);
                 let stroke = Stroke::new(width, to_color32(color));
                 let fill = fill_color.map(to_color32).unwrap_or(Color32::TRANSPARENT);
-                if !overlay_only {
-                    painter.add(Shape::convex_polygon(points.clone(), fill, stroke));
-                }
-                if !label.is_empty() {
+                // PERF: el centroide se calcula antes de mover `points` al shape
+                // (evita `points.clone()` por frame para el label).
+                let centroid = if !label.is_empty() {
                     let cx: f32 = points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32;
                     let cy: f32 = points.iter().map(|p| p.y).sum::<f32>() / points.len() as f32;
+                    Some(Pos2::new(cx, cy))
+                } else {
+                    None
+                };
+                if !overlay_only {
+                    painter.add(Shape::convex_polygon(points, fill, stroke));
+                }
+                if let Some(centroid) = centroid {
                     painter.text(
-                        Pos2::new(cx, cy),
+                        centroid,
                         egui::Align2::CENTER_CENTER,
                         label,
                         egui::FontId::proportional(12.0),
@@ -3562,17 +3648,14 @@ impl GrafitoApp {
                     let s = view.world_to_screen(Point2::new(x, y));
                     pts.push(canvas_rect.min + Vec2::new(s.x, s.y));
                 }
-                if let Some(fill) = el.fill_color {
-                    painter.add(Shape::convex_polygon(
-                        pts.clone(),
-                        to_color32(fill),
-                        Stroke::NONE,
-                    ));
-                }
-                for i in 0..n {
-                    let j = (i + 1) % n;
-                    painter.line_segment([pts[i], pts[j]], stroke);
-                }
+                // PERF: un solo `convex_polygon` con fill+stroke reemplaza el
+                // `pts.clone()` + 64 `line_segment` por frame. La elipse muestreada
+                // en 64 puntos es convexa, así que el contorno es idéntico.
+                let fill = el
+                    .fill_color
+                    .map(to_color32)
+                    .unwrap_or(Color32::TRANSPARENT);
+                painter.add(Shape::convex_polygon(pts, fill, stroke));
                 if !el.label.is_empty() {
                     let s = view.world_to_screen(el.center);
                     painter.text(
@@ -3834,7 +3917,7 @@ impl GrafitoApp {
                 }
                 let dx = (fr.x_max - fr.x_min) / res as f64;
                 let dy = (fr.y_max - fr.y_min) / res as f64;
-                for px in &pixels {
+                for px in pixels.iter() {
                     let (r, g, b, a) = fractal_color_hsv(px.iter, px.max_iter, px.smooth_value);
                     let bl = view.world_to_screen(Point2::new(px.x, px.y));
                     let tr = view.world_to_screen(Point2::new(px.x + dx, px.y + dy));
@@ -3928,17 +4011,30 @@ impl GrafitoApp {
                         }
                     }
                 }
-                let all_pts: Vec<_> = runs.iter().flatten().copied().collect();
                 let label = get_label(&pol.label, style);
                 if !label.is_empty() {
-                    if let Some(position) = all_pts.get(all_pts.len() / 2) {
-                        painter.text(
-                            *position + Vec2::new(0.0, 14.0),
-                            egui::Align2::CENTER_TOP,
-                            label,
-                            egui::FontId::proportional(12.0),
-                            label_color,
-                        );
+                    // PERF: localiza el punto medio de la polilínea sin clonar
+                    // todos los puntos en un `Vec` auxiliar por frame.
+                    let total: usize = runs.iter().map(|run| run.len()).sum();
+                    if total > 0 {
+                        let mut remaining = total / 2;
+                        let mut position = None;
+                        for run in &runs {
+                            if remaining < run.len() {
+                                position = Some(run[remaining]);
+                                break;
+                            }
+                            remaining -= run.len();
+                        }
+                        if let Some(position) = position {
+                            painter.text(
+                                position + Vec2::new(0.0, 14.0),
+                                egui::Align2::CENTER_TOP,
+                                label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
+                        }
                     }
                 }
             }
@@ -4117,7 +4213,7 @@ impl GrafitoApp {
                 );
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     let stroke = Stroke::new(1.5, to_color32(portrait.color));
-                    for (start, end) in &segments {
+                    for (start, end) in segments.iter() {
                         let start = view.world_to_screen(*start);
                         let end = view.world_to_screen(*end);
                         if start.is_finite() && end.is_finite() {
@@ -4170,7 +4266,7 @@ impl GrafitoApp {
                                 | RelationOperator::GreaterEq
                         ) {
                             self.draw_implicit_curve_fill(
-                                painter,
+                                &painter,
                                 canvas_rect,
                                 view,
                                 ic,
@@ -4181,11 +4277,12 @@ impl GrafitoApp {
                 }
 
                 // 1) Contorno: dibujar los segmentos del marching squares.
-                // Read-lock optimizado + clon breve para no retener el lock durante el pintado.
-                let levels = {
-                    let guard = read_lock_optimized(&ic.cached_segments);
-                    guard.clone()
-                };
+                // PERF: se itera bajo el read-guard sin clonar `ImplicitCurveSegments`
+                // (hasta ~262k celdas en grid 512). El guard es de solo lectura y el
+                // escritor (`segments_or_compute`) corre en el mismo hilo antes de
+                // pintar, así que no hay riesgo de deadlock ni de retener el lock
+                // durante trabajo ajeno al pintado.
+                let levels = read_lock_optimized(&ic.cached_segments);
                 if !levels.is_empty() {
                     let use_contour_colors = ic.contour_levels.is_some();
                     let contour_count = levels.len();
@@ -4218,9 +4315,9 @@ impl GrafitoApp {
             GeoObject::ComplexGrid(cg) => {
                 use num_complex::Complex64;
                 use std::collections::HashMap;
-                // Recorta al canvas: el domain coloring y la rejilla deformada
-                // pueden emitir primitivas fuera del área de dibujo.
-                let painter = painter.with_clip_rect(canvas_rect);
+                // El clip al canvas ya lo aplica `draw_object_styled` en su
+                // entrada; el domain coloring y la rejilla deformada pueden
+                // emitir primitivas fuera del área de dibujo y quedan recortadas.
 
                 if cg.render_mode == 1 || cg.render_mode == 2 {
                     // Domain coloring (complex f(z)) or Heat map (real f(x,y))
@@ -4499,9 +4596,9 @@ impl GrafitoApp {
             GeoObject::ComplexMapping(cm) => {
                 use num_complex::Complex64;
                 use std::collections::HashMap;
-                // Recorta al canvas: trazos transformados (asíntotas, segmentos
-                // largos) pueden salir del área de dibujo.
-                let painter = painter.with_clip_rect(canvas_rect);
+                // El clip al canvas ya lo aplica `draw_object_styled` en su
+                // entrada; los trazos transformados (asíntotas, segmentos
+                // largos) pueden salir del área de dibujo y quedan recortados.
 
                 // 1) Validar que la expresión compleja parsea. Si falla,
                 //    skip (es comportamiento lazy: el objeto queda creado pero
@@ -5071,7 +5168,7 @@ impl GrafitoApp {
             GeoObject::ComplexIntegral(ci) => {
                 if let Some(target) = self.document.get_object(ci.target) {
                     self.draw_object_styled(
-                        painter,
+                        &painter,
                         canvas_rect,
                         target,
                         Some(StyleOverride {
@@ -5094,9 +5191,168 @@ impl GrafitoApp {
                         view,
                         self.dark_mode,
                     );
-                paint_render_geometry(painter, canvas_rect, &vertices, &indices, style);
+                paint_render_geometry(&painter, canvas_rect, &vertices, &indices, style);
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod clipping_and_resize_tests {
+    use super::*;
+    use grafito_core::RenderQuality;
+
+    // ── Clipping ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clipped_to_canvas_sets_the_visible_rect_on_the_painter() {
+        let ctx = egui::Context::default();
+        let canvas = Rect::from_min_size(Pos2::new(120.0, 40.0), Vec2::new(800.0, 600.0));
+        let painter = ctx.layer_painter(egui::LayerId::background());
+
+        let clipped = super::clipped_to_canvas(&painter, canvas);
+
+        assert_eq!(clipped.clip_rect(), canvas);
+        // El painter original no se muta (with_clip_rect devuelve uno nuevo).
+        assert_ne!(painter.clip_rect(), canvas);
+    }
+
+    /// Regresión de fuente: cada punto de entrada de dibujo 2D debe recortar al
+    /// canvas visible. Si alguien añade un nuevo painter sin `clipped_to_canvas`,
+    /// este test falla y obliga a decidir el clip explícitamente.
+    #[test]
+    fn every_2d_draw_entry_point_clips_to_the_canvas() {
+        let source = include_str!("render_2d.rs");
+        let entry_points = [
+            "pub(crate) fn draw_grid(",
+            "pub(crate) fn draw_axes(",
+            "pub(crate) fn draw_trig_canvas_overlay(",
+            "fn draw_trig_unit_card(",
+            "fn draw_complex_animation_overlay(",
+            "pub(crate) fn draw_objects(",
+            "pub(crate) fn draw_tool_ghost(",
+            "pub(crate) fn draw_object(",
+            "pub(crate) fn draw_object_styled(",
+        ];
+        for entry in entry_points {
+            let start = source
+                .find(entry)
+                .unwrap_or_else(|| panic!("entry point not found: {entry}"));
+            let body = &source[start..];
+            let end = body
+                .find(
+                    "
+    pub(crate) fn ",
+                )
+                .or_else(|| {
+                    body.find(
+                        "
+    fn ",
+                    )
+                })
+                .or_else(|| {
+                    body.find(
+                        "
+    #[cfg(test)]",
+                    )
+                })
+                .unwrap_or(body.len());
+            let body = &body[..end];
+            assert!(
+                body.contains("clipped_to_canvas(painter, canvas_rect)"),
+                "{entry} must clip its painter to the visible canvas"
+            );
+        }
+    }
+
+    // ── Resize: w/h = 0, 1px, 8K ────────────────────────────────────────────
+
+    #[test]
+    fn fill_cache_texture_size_is_bounded_for_zero_one_pixel_and_8k_canvases() {
+        let view_bounds = (-10.0, 10.0, -10.0, 10.0);
+        let region = (-20.0, 20.0, -20.0, 20.0);
+        // Canvas 0×0 → nunca 0 (egui rechaza texturas vacías).
+        let (w, h) = super::fill_cache_texture_size(view_bounds, region, (0, 0));
+        assert!(w >= 1 && h >= 1);
+        // 1px se mantiene.
+        let (w, h) = super::fill_cache_texture_size(view_bounds, region, (1, 1));
+        assert!(w >= 1 && h >= 1);
+        // 8K (7680×4320) se acota al tope de 4096 por eje.
+        let (w, h) = super::fill_cache_texture_size(view_bounds, region, (7680, 4320));
+        assert!(w <= 4096 && h <= 4096);
+        assert!(w >= 1 && h >= 1);
+        // Región degenerada (ancho 0) no produce 0.
+        let degenerate = (0.0, 0.0, -1.0, 1.0);
+        let (w, h) = super::fill_cache_texture_size(view_bounds, degenerate, (800, 600));
+        assert!(w >= 1 && h >= 1);
+    }
+
+    #[test]
+    fn fill_texture_byte_size_never_overflows_for_8k_textures() {
+        // 4096×4096 RGBA8 = 64 MiB exactos.
+        assert_eq!(
+            super::fill_texture_byte_size((4096, 4096)),
+            64 * 1024 * 1024
+        );
+        // u32::MAX×u32::MAX no desborda: devuelve usize::MAX (centinela).
+        assert_eq!(
+            super::fill_texture_byte_size((u32::MAX, u32::MAX)),
+            usize::MAX
+        );
+        // 0×0 → 0 bytes.
+        assert_eq!(super::fill_texture_byte_size((0, 0)), 0);
+    }
+
+    #[test]
+    fn implicit_fill_work_is_bounded_for_zero_and_8k_canvases() {
+        let mut curve = ImplicitCurveObj::new("x", "0", RelationOperator::Less);
+        curve.fill_color = Some(Color::new(0.5, 0.5, 0.5, 0.5));
+        let view_bounds = (-10.0, 10.0, -10.0, 10.0);
+
+        // Canvas 0×0: el fill se acota a 1×1 (sin OOM).
+        let zero = Rect::from_min_size(Pos2::ZERO, Vec2::ZERO);
+        let work = super::implicit_curve_fill_work(&curve, view_bounds, zero, RenderQuality::High);
+        assert!(work.is_some());
+        assert!(work.unwrap() <= 4096 * 4096);
+
+        // 8K: el fill se acota al tope de textura (4096²).
+        let eight_k = Rect::from_min_size(Pos2::ZERO, Vec2::new(7680.0, 4320.0));
+        let work =
+            super::implicit_curve_fill_work(&curve, view_bounds, eight_k, RenderQuality::High);
+        assert!(work.is_some());
+        assert!(work.unwrap() <= 4096 * 4096);
+
+        // Eq no rellena.
+        let eq = ImplicitCurveObj::new("x", "0", RelationOperator::Eq);
+        assert_eq!(
+            super::implicit_curve_fill_work(&eq, view_bounds, eight_k, RenderQuality::High),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn trig_sample_count_is_bounded_for_zero_and_8k_widths() {
+        // 0 px de ancho → mínimo de calidad (sin rango vacío).
+        assert!(super::trig_sample_count(0, 10.0, RenderQuality::Normal) >= 200);
+        // 8K de ancho → tope por zoom (sin explotar el muestreo).
+        assert!(super::trig_sample_count(7680, 10.0, RenderQuality::High) <= 760);
+        // Zoom extremo → tope reducido.
+        assert!(super::trig_sample_count(7680, 1e6, RenderQuality::High) <= 200);
+    }
+
+    #[test]
+    fn trig_asymptotes_are_bounded_for_extreme_world_spans() {
+        // Span normal → hasta 64 asíntotas.
+        let xs = super::trig_asymptotes(2, -10.0, 10.0);
+        assert!(!xs.is_empty());
+        assert!(xs.len() <= 64);
+        // Span extremo (zoom-out) → tope reducido, sin loop gigante.
+        let xs = super::trig_asymptotes(2, -1e300, 1e300);
+        assert!(xs.len() <= 8);
+        // Span degenerado (0) → sin asíntotas.
+        assert!(super::trig_asymptotes(2, 0.0, 0.0).is_empty());
+        // Función no trigonométrica → vacío.
+        assert!(super::trig_asymptotes(0, -10.0, 10.0).is_empty());
     }
 }

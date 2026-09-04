@@ -2,8 +2,9 @@
 //! Mejoras de auditoria 2026-08-20: Statem AnimJobState, correccion de races/leaks/timeouts.
 
 use crate::protocol::{
-    downcast, kinds, AnimJobId, AnimRequest, AnimResult, RenderProgress, WireMessage,
-    ANIM_PROTOCOL_VERSION,
+    downcast, kinds, localize_worker_error, sanitize_error_code, truncate_worker_message,
+    AnimJobId, AnimRequest, AnimResult, RenderProgress, WireMessage, ANIM_PROTOCOL_VERSION,
+    MAX_WORKER_MESSAGE_LEN,
 };
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,6 +12,30 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
+
+/// Timeout por defecto para completar un job (90 s).
+pub const DEFAULT_JOB_TIMEOUT_SECS: u64 = 90;
+/// Timeout por defecto para handshake/apagado cooperativo (8 s).
+pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 8;
+/// Tope por defecto de bytes por línea del worker (64 KiB).
+pub const DEFAULT_LINE_CAP_BYTES: usize = 64 * 1024;
+/// Rango válido para `job_timeout`: 1 s..=600 s.
+pub const MIN_JOB_TIMEOUT_SECS: u64 = 1;
+pub const MAX_JOB_TIMEOUT_SECS: u64 = 600;
+/// Rango válido para `idle_timeout`: 1 s..=60 s.
+pub const MIN_IDLE_TIMEOUT_SECS: u64 = 1;
+pub const MAX_IDLE_TIMEOUT_SECS: u64 = 60;
+/// Rango válido para `line_cap_bytes`: 1 KiB..=1 MiB.
+pub const MIN_LINE_CAP_BYTES: usize = 1024;
+pub const MAX_LINE_CAP_BYTES: usize = 1024 * 1024;
+/// Gracia cooperativa de cancelación: el kill llega antes de 200 ms.
+///
+/// Se fija en 100 ms para dejar ~100 ms de margen de planificación del SO y
+/// cumplir `<200 ms desde el pedido hasta el kill` de forma determinista en
+/// test incluso bajo carga de CI.
+pub const CANCEL_GRACE: Duration = Duration::from_millis(100);
+/// Deadline dura de cancelación exigida (<200 ms).
+pub const CANCEL_DEADLINE: Duration = Duration::from_millis(200);
 
 /// Configuracion del proceso del motor de animaciones.
 #[derive(Debug, Clone)]
@@ -36,10 +61,68 @@ impl Default for EngineConfig {
                 "grafito_manim_engine".to_string(),
             ],
             working_dir: None,
-            idle_timeout: Duration::from_secs(8),
-            job_timeout: Duration::from_secs(90),
-            line_cap_bytes: 64 * 1024,
+            idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
+            job_timeout: Duration::from_secs(DEFAULT_JOB_TIMEOUT_SECS),
+            line_cap_bytes: DEFAULT_LINE_CAP_BYTES,
         }
+    }
+}
+
+impl EngineConfig {
+    /// Valida rangos: `job_timeout` 1..=600 s, `idle_timeout` 1..=60 s,
+    /// `line_cap` 1 KiB..=1 MiB. Mensajes en español para la UI.
+    pub fn validate(&self) -> Result<(), String> {
+        let job = self.job_timeout.as_secs();
+        if !(MIN_JOB_TIMEOUT_SECS..=MAX_JOB_TIMEOUT_SECS).contains(&job) {
+            return Err(format!(
+                "job_timeout fuera de rango: {job}s (válido {MIN_JOB_TIMEOUT_SECS}..={MAX_JOB_TIMEOUT_SECS}s)"
+            ));
+        }
+        let idle = self.idle_timeout.as_secs();
+        if !(MIN_IDLE_TIMEOUT_SECS..=MAX_IDLE_TIMEOUT_SECS).contains(&idle) {
+            return Err(format!(
+                "idle_timeout fuera de rango: {idle}s (válido {MIN_IDLE_TIMEOUT_SECS}..={MAX_IDLE_TIMEOUT_SECS}s)"
+            ));
+        }
+        if self.line_cap_bytes < MIN_LINE_CAP_BYTES || self.line_cap_bytes > MAX_LINE_CAP_BYTES {
+            return Err(format!(
+                "line_cap fuera de rango: {} bytes (válido {MIN_LINE_CAP_BYTES}..={MAX_LINE_CAP_BYTES})",
+                self.line_cap_bytes
+            ));
+        }
+        if self.command.is_empty() {
+            return Err("comando del motor vacío".to_string());
+        }
+        Ok(())
+    }
+
+    /// Construye la config desde Env con validación de rango.
+    ///
+    /// Vars: `GRAFITO_ANIM_JOB_TIMEOUT_SECS`, `GRAFITO_ANIM_IDLE_TIMEOUT_SECS`,
+    /// `GRAFITO_ANIM_LINE_CAP_BYTES`. Ausentes → defecto (90 s / 8 s / 64 KiB).
+    /// Valores no numéricos o fuera de rango → `Err` en español.
+    pub fn from_env() -> Result<Self, String> {
+        let mut cfg = Self::default();
+        if let Ok(raw) = std::env::var("GRAFITO_ANIM_JOB_TIMEOUT_SECS") {
+            let secs: u64 = raw.trim().parse().map_err(|_| {
+                format!("GRAFITO_ANIM_JOB_TIMEOUT_SECS inválido: {raw:?} (entero en segundos)")
+            })?;
+            cfg.job_timeout = Duration::from_secs(secs);
+        }
+        if let Ok(raw) = std::env::var("GRAFITO_ANIM_IDLE_TIMEOUT_SECS") {
+            let secs: u64 = raw.trim().parse().map_err(|_| {
+                format!("GRAFITO_ANIM_IDLE_TIMEOUT_SECS inválido: {raw:?} (entero en segundos)")
+            })?;
+            cfg.idle_timeout = Duration::from_secs(secs);
+        }
+        if let Ok(raw) = std::env::var("GRAFITO_ANIM_LINE_CAP_BYTES") {
+            let bytes: usize = raw.trim().parse().map_err(|_| {
+                format!("GRAFITO_ANIM_LINE_CAP_BYTES inválido: {raw:?} (entero en bytes)")
+            })?;
+            cfg.line_cap_bytes = bytes;
+        }
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
 
@@ -166,7 +249,15 @@ impl AnimEngineTrait for AnimEngine {
     fn engine_state(&self) -> Option<AnimEngineState> {
         match self.state() {
             AnimJobState::Idle | AnimJobState::Spawning => Some(AnimEngineState::Queued),
-            AnimJobState::Running { .. } => Some(AnimEngineState::Rendering { done: 0, total: 48 }),
+            // Progreso REAL: done/total derivan del último `progress` del worker
+            // (percent 0..=100), no de un 0/48 inventado.
+            AnimJobState::Running { .. } => {
+                let done = self
+                    .last_progress
+                    .as_ref()
+                    .map_or(0, |p| u32::from(p.percent.min(100)));
+                Some(AnimEngineState::Rendering { done, total: 100 })
+            }
             AnimJobState::ShuttingDown { .. } => Some(AnimEngineState::Exporting {
                 format: "gif".into(),
             }),
@@ -197,6 +288,27 @@ pub enum JobEvent {
     Error { code: String, message: String },
 }
 
+impl JobEvent {
+    /// Fracción REAL 0..1 solo para `Progress` (parseada del worker).
+    ///
+    /// Devuelve `Some(f)` con `f = percent/100.0` si es progreso, `None` en
+    /// otro caso. Nunca inventa valores: si no hay `Progress`, la UI debe
+    /// mostrar indeterminado.
+    pub fn fraction(&self) -> Option<f32> {
+        match self {
+            Self::Progress(p) => Some(p.fraction()),
+            Self::Result(_) | Self::Error { .. } => None,
+        }
+    }
+    /// Mensaje localizado al español para `Error`; `None` si no es error.
+    pub fn localized_error(&self) -> Option<String> {
+        match self {
+            Self::Error { code, message } => Some(localize_worker_error(code, message)),
+            Self::Progress(_) | Self::Result(_) => None,
+        }
+    }
+}
+
 /// Puente hacia un proceso de motor de animaciones ya lanzado.
 pub struct AnimEngine {
     child: Option<Child>,
@@ -206,26 +318,26 @@ pub struct AnimEngine {
     config: EngineConfig,
     diagnostics: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     state: AnimJobState,
+    /// Último progreso REAL reportado por el worker (fracción vía `fraction()`).
+    last_progress: Option<RenderProgress>,
 }
 
 impl AnimEngine {
     /// Lanza el proceso del motor y empieza a leer sus mensajes.
     pub fn spawn(config: EngineConfig) -> Result<Self, String> {
-        if config.command.is_empty() {
-            return Err("animation engine command is empty".into());
-        }
+        config.validate()?;
         for arg in &config.command {
             if arg.contains('\0') {
-                return Err("animation engine command contains NUL byte".into());
+                return Err("el comando del motor contiene byte NUL".into());
             }
         }
         if let Some(dir) = &config.working_dir {
             if dir.as_os_str().is_empty() {
-                return Err("animation engine working_dir is empty".into());
+                return Err("working_dir del motor vacío".into());
             }
             if !dir.exists() {
                 return Err(format!(
-                    "animation engine working_dir no existe: {}",
+                    "working_dir del motor no existe: {}",
                     dir.display()
                 ));
             }
@@ -235,7 +347,7 @@ impl AnimEngine {
             let bin = Path::new(&config.command[0]);
             if !bin.exists() {
                 return Err(format!(
-                    "animation engine bin no encontrado: {}",
+                    "binario del motor no encontrado: {}",
                     bin.display()
                 ));
             }
@@ -251,14 +363,14 @@ impl AnimEngine {
         }
         let mut child = command
             .spawn()
-            .map_err(|error| format!("cannot start animation engine: {error}"))?;
+            .map_err(|error| format!("no se pudo iniciar el motor de animación: {error}"))?;
         // Si take() falla, matamos al hijo para no fugarlo (S1).
         let stdin = match child.stdin.take() {
             Some(s) => s,
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("animation engine stdin is unavailable".into());
+                return Err("stdin del motor no disponible".into());
             }
         };
         let stdout = match child.stdout.take() {
@@ -266,7 +378,7 @@ impl AnimEngine {
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("animation engine stdout is unavailable".into());
+                return Err("stdout del motor no disponible".into());
             }
         };
         let stderr = child.stderr.take();
@@ -284,11 +396,31 @@ impl AnimEngine {
             config,
             diagnostics,
             state: AnimJobState::Spawning,
+            last_progress: None,
         })
     }
 
     pub fn state(&self) -> &AnimJobState {
         &self.state
+    }
+
+    /// Último progreso REAL del worker, si ya emitió `progress`.
+    pub fn last_progress(&self) -> Option<&RenderProgress> {
+        self.last_progress.as_ref()
+    }
+
+    /// Fracción REAL 0..1 del último `progress` (`percent/100`).
+    ///
+    /// `0.0` si aún no hay progreso: la UI debe mostrar indeterminado en ese
+    /// caso y nunca inventar un % falso.
+    pub fn progress_fraction(&self) -> f32 {
+        self.last_progress.as_ref().map_or(0.0, |p| p.fraction())
+    }
+
+    /// PID del hijo para tests de cancelación (verifican kill <200 ms).
+    #[cfg(test)]
+    fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
     }
 
     /// Diagnosticos (stderr) recogidos del motor — poison-aware.
@@ -310,10 +442,13 @@ impl AnimEngine {
             if Instant::now() >= hello_deadline {
                 self.state = AnimJobState::Failed {
                     code: "handshake_timeout".into(),
-                    message: "hello not received".into(),
+                    message: truncate_worker_message("hello no recibido"),
                 };
                 let _ = self.shutdown();
-                return Err("animation engine did not send a hello handshake".into());
+                return Err(localize_worker_error(
+                    "handshake_timeout",
+                    "el motor no envió el saludo inicial",
+                ));
             }
             let remaining = hello_deadline.saturating_duration_since(Instant::now());
             // polling fino para respetar deadline sin 1s de granularidad
@@ -325,28 +460,33 @@ impl AnimEngine {
                     if protocol_version != ANIM_PROTOCOL_VERSION {
                         self.state = AnimJobState::Failed {
                             code: "version_mismatch".into(),
-                            message: format!("v{protocol_version}"),
+                            message: truncate_worker_message(&format!("v{protocol_version}")),
                         };
                         let _ = self.shutdown();
-                        return Err(format!(
-                            "animation engine speaks protocol v{protocol_version}; this Grafito supports v{ANIM_PROTOCOL_VERSION}"
+                        return Err(localize_worker_error(
+                            "version_mismatch",
+                            &format!(
+                                "el motor habla v{protocol_version}; Grafito soporta v{ANIM_PROTOCOL_VERSION}"
+                            ),
                         ));
                     }
                     break;
                 }
                 Ok(Some(WireMessage::Error { code, message })) => {
+                    let code = sanitize_error_code(&code);
+                    let message = truncate_worker_message(&message);
                     self.state = AnimJobState::Failed {
                         code: code.clone(),
                         message: message.clone(),
                     };
                     let _ = self.shutdown();
-                    return Err(format!("animation engine {code}: {message}"));
+                    return Err(localize_worker_error(&code, &message));
                 }
                 Ok(_) => {}
                 Err(error) => {
                     self.state = AnimJobState::Failed {
                         code: "handshake_error".into(),
-                        message: error.clone(),
+                        message: truncate_worker_message(&error),
                     };
                     return Err(error);
                 }
@@ -362,10 +502,13 @@ impl AnimEngine {
             if Instant::now() >= pong_deadline {
                 self.state = AnimJobState::Failed {
                     code: "handshake_timeout".into(),
-                    message: "pong not received".into(),
+                    message: truncate_worker_message("pong no recibido"),
                 };
                 let _ = self.shutdown();
-                return Err("animation engine did not answer the health ping".into());
+                return Err(localize_worker_error(
+                    "handshake_timeout",
+                    "el motor no respondió al ping de salud",
+                ));
             }
             let remaining = pong_deadline.saturating_duration_since(Instant::now());
             let poll = remaining.min(Duration::from_millis(250));
@@ -375,18 +518,20 @@ impl AnimEngine {
                     return Ok(());
                 }
                 Ok(Some(WireMessage::Error { code, message })) => {
+                    let code = sanitize_error_code(&code);
+                    let message = truncate_worker_message(&message);
                     self.state = AnimJobState::Failed {
                         code: code.clone(),
                         message: message.clone(),
                     };
                     let _ = self.shutdown();
-                    return Err(format!("animation engine {code}: {message}"));
+                    return Err(localize_worker_error(&code, &message));
                 }
                 Ok(_) => {}
                 Err(e) => {
                     self.state = AnimJobState::Failed {
                         code: "handshake_error".into(),
-                        message: e.clone(),
+                        message: truncate_worker_message(&e),
                     };
                     return Err(e);
                 }
@@ -399,14 +544,14 @@ impl AnimEngine {
     pub fn submit(&mut self, request: AnimRequest) -> Result<AnimJobId, String> {
         if !self.state.can_submit() {
             return Err(format!(
-                "cannot submit in state {:?}: wait_ready() first",
+                "no se puede enviar en estado {:?}: llamá wait_ready() primero",
                 self.state
             ));
         }
         // Validación temprana: evita enviar canvas >4096 o duration fuera de rango al motor.
         // Antes 8192 pasaba y el motor clampaba silencioso.
         if let Err(e) = request.validate() {
-            return Err(format!("invalid request: {e}"));
+            return Err(format!("petición inválida: {e}"));
         }
         self.next_job = self.next_job.wrapping_add(1);
         let job_id = AnimJobId(format!("job-{}", self.next_job));
@@ -436,18 +581,24 @@ impl AnimEngine {
     ) -> Result<AnimJobId, String> {
         params
             .validate()
-            .map_err(|e| format!("invalid params: {e}"))?;
+            .map_err(|e| format!("parámetros inválidos: {e}"))?;
         let req = params.into_request();
         self.submit(req)
     }
 
-    /// Cancela el job en curso si está en Running. Transiciona a Cancelling.
+    /// Cancela el job en curso con deadline cooperativa <200 ms.
+    ///
+    /// Envía `SHUTDOWN`, espera hasta [`CANCEL_GRACE`] (100 ms) a salida
+    /// graciosa y luego hace kill. Sincrónico y acotado: retorna en <200 ms
+    /// incluso si el worker ignora el apagado. Transiciona a `Cancelling` y
+    /// luego a `Cancelled`.
     pub fn cancel(&mut self) -> Result<(), String> {
         match &self.state {
             AnimJobState::Running { job_id, .. } => {
                 let job_id = job_id.clone();
                 self.state = AnimJobState::Cancelling { job_id };
-                let _ = self.shutdown();
+                let _ = self.send(&json!({ "type": kinds::SHUTDOWN }));
+                kill_child_with_grace(self.child.take(), CANCEL_GRACE);
                 self.state = AnimJobState::Cancelled;
                 Ok(())
             }
@@ -457,12 +608,34 @@ impl AnimEngine {
         }
     }
 
+    /// Kill cooperativo rápido cuando el estado ya es `Cancelling`/`TimedOut`.
+    ///
+    /// Usado por `run_job` que fija el estado antes de matar (evita el chequeo
+    /// `Running` de [`Self::cancel`]). Envía `SHUTDOWN`, mata en <200 ms y
+    /// deja `Cancelled` si venía de `Cancelling`; `TimedOut` se conserva.
+    fn cancel_fast_after_state(&mut self) -> Result<(), String> {
+        let _ = self.send(&json!({ "type": kinds::SHUTDOWN }));
+        kill_child_with_grace(self.child.take(), CANCEL_GRACE);
+        if matches!(self.state, AnimJobState::Cancelling { .. }) {
+            self.state = AnimJobState::Cancelled;
+        }
+        Ok(())
+    }
+
     /// Lee el siguiente evento de un job (None cuando no hay mensaje en el timeout).
-    pub fn recv_event(&self, timeout: Option<Duration>) -> Result<Option<JobEvent>, String> {
+    ///
+    /// Actualiza [`Self::progress_fraction`] con el último `Progress` REAL del
+    /// worker (`percent/100.0`). Requiere `&mut` para recordar ese progreso.
+    pub fn recv_event(&mut self, timeout: Option<Duration>) -> Result<Option<JobEvent>, String> {
         match self.recv_raw(timeout)? {
-            Some(WireMessage::Progress(progress)) => Ok(Some(JobEvent::Progress(progress))),
+            Some(WireMessage::Progress(progress)) => {
+                self.last_progress = Some(progress.clone());
+                Ok(Some(JobEvent::Progress(progress)))
+            }
             Some(WireMessage::Result(result)) => Ok(Some(JobEvent::Result(result))),
             Some(WireMessage::Error { code, message }) => {
+                let code = sanitize_error_code(&code);
+                let message = truncate_worker_message(&message);
                 Ok(Some(JobEvent::Error { code, message }))
             }
             Some(_) => Ok(None),
@@ -477,28 +650,19 @@ impl AnimEngine {
     /// no bloquea 8 s en el UI thread. El `Drop` garantiza la limpieza final con
     /// `try_wait` no bloqueante.
     pub fn shutdown(&mut self) -> Result<(), String> {
+        self.shutdown_with_grace(self.config.idle_timeout)
+    }
+
+    /// Apagado con gracia explícita (para tests y cancelación rápida).
+    fn shutdown_with_grace(&mut self, grace: Duration) -> Result<(), String> {
         self.state = AnimJobState::ShuttingDown {
-            deadline: Instant::now() + self.config.idle_timeout,
+            deadline: Instant::now() + grace,
         };
         let _ = self.send(&json!({ "type": kinds::SHUTDOWN }));
         // Delega la espera bloqueante a un hilo para no congelar la UI.
         if let Some(mut child) = self.child.take() {
-            let idle = self.config.idle_timeout;
             std::thread::spawn(move || {
-                let deadline = Instant::now() + idle;
-                loop {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) => {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let _ = child.kill();
+                wait_or_kill(&mut child, grace);
                 let _ = child.wait();
             });
         }
@@ -516,10 +680,10 @@ impl AnimEngine {
         line.push('\n');
         self.stdin
             .write_all(line.as_bytes())
-            .map_err(|error| format!("animation engine stdin write failed: {error}"))?;
+            .map_err(|error| format!("falló escribir al stdin del motor: {error}"))?;
         self.stdin
             .flush()
-            .map_err(|error| format!("animation engine stdin flush failed: {error}"))
+            .map_err(|error| format!("falló vaciar el stdin del motor: {error}"))
     }
 
     fn recv_raw(&self, timeout: Option<Duration>) -> Result<Option<WireMessage>, String> {
@@ -535,13 +699,42 @@ impl AnimEngine {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
                 let diagnostics = self.diagnostics().join("; ");
-                Err(format!(
-                    "animation engine exited unexpectedly{}{}",
-                    if diagnostics.is_empty() { "" } else { ": " },
-                    diagnostics
-                ))
+                let detail = truncate_worker_message(&diagnostics);
+                Err(if detail.is_empty() {
+                    "el motor se cerró inesperadamente".to_string()
+                } else {
+                    format!("el motor se cerró inesperadamente: {detail}")
+                })
             }
         }
+    }
+}
+
+/// Espera salida graciosa hasta `grace` y luego hace kill (cooperativo).
+fn wait_or_kill(child: &mut Child, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    loop {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Kill sincrónico acotado a `grace` para cancelación <200 ms.
+///
+/// Toma el hijo, espera salida graciosa hasta `grace` y luego mata y cosecha.
+/// Retorna siempre antes de `grace + ~20 ms` incluso si el worker ignora todo.
+fn kill_child_with_grace(child: Option<Child>, grace: Duration) {
+    if let Some(mut c) = child {
+        wait_or_kill(&mut c, grace);
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
 
@@ -558,6 +751,11 @@ impl Drop for AnimEngine {
 
 /// Ejecuta un job de punta a punta contra un motor efimero.
 /// Polling de 200ms para honrar cancel (RJ1) y timeout incluye wait_ready via deadline absoluta.
+///
+/// - Progreso REAL: cada `Progress` del worker se reenvía a `on_event` tal cual
+///   (fracción `percent/100.0` vía [`JobEvent::fraction`], sin inventar %).
+/// - Errores tipados: `code + mensaje(≤500)` localizados al español.
+/// - Cancelación cooperativa con kill <200 ms; timeout con kill rápido.
 pub fn run_job(
     config: &EngineConfig,
     request: &AnimRequest,
@@ -567,7 +765,7 @@ pub fn run_job(
     // Validación temprana: duration y canvas viajaban perdidos o clampados.
     request
         .validate()
-        .map_err(|e| format!("invalid request: {e}"))?;
+        .map_err(|e| format!("petición inválida: {e}"))?;
     let mut engine = AnimEngine::spawn(config.clone())?;
     engine.wait_ready()?;
     let job_id = engine.submit(request.clone())?;
@@ -579,15 +777,18 @@ pub fn run_job(
             engine.state = AnimJobState::Cancelling {
                 job_id: job_id.clone(),
             };
-            let _ = engine.shutdown();
-            engine.state = AnimJobState::Cancelled;
-            return Err("animation job was cancelled".into());
+            // Kill cooperativo rápido (<200 ms) en lugar de shutdown de 8 s.
+            let _ = engine.cancel_fast_after_state();
+            return Err(localize_worker_error("cancelled", ""));
         }
         let now = Instant::now();
         if now >= job_deadline {
             engine.state = AnimJobState::TimedOut;
-            let _ = engine.shutdown();
-            return Err("animation job timed out".into());
+            let _ = engine.cancel_fast_after_state();
+            return Err(localize_worker_error(
+                "job_timeout",
+                &format!("límite {}s excedido", config.job_timeout.as_secs()),
+            ));
         }
         let remaining = job_deadline.saturating_duration_since(now);
         // cap a 200ms para chequear cancel con baja latencia
@@ -624,12 +825,13 @@ pub fn run_job(
                 ) {
                     engine.state = AnimJobState::Failed {
                         code: "path_escape".into(),
-                        message: result.media_path.clone(),
+                        message: truncate_worker_message(&result.media_path),
                     };
                     let _ = engine.shutdown();
-                    return Err(
-                        "animation engine returned a media path outside its working dir".into(),
-                    );
+                    return Err(localize_worker_error(
+                        "path_escape",
+                        "el artefacto quedó fuera del área de trabajo",
+                    ));
                 }
                 engine.state = AnimJobState::Completed {
                     media_path: PathBuf::from(result.media_path.clone()),
@@ -638,18 +840,24 @@ pub fn run_job(
                 return Ok(result);
             }
             Ok(Some(JobEvent::Error { code, message })) => {
+                let code = sanitize_error_code(&code);
+                let message = truncate_worker_message(&message);
+                debug_assert!(
+                    message.chars().count() <= MAX_WORKER_MESSAGE_LEN,
+                    "mensaje worker acotado a 500"
+                );
                 engine.state = AnimJobState::Failed {
                     code: code.clone(),
                     message: message.clone(),
                 };
                 let _ = engine.shutdown();
-                return Err(format!("animation engine {code}: {message}"));
+                return Err(localize_worker_error(&code, &message));
             }
             Ok(None) => {}
             Err(error) => {
                 engine.state = AnimJobState::Failed {
                     code: "engine_exit".into(),
-                    message: error.clone(),
+                    message: truncate_worker_message(&error),
                 };
                 let _ = engine.shutdown();
                 return Err(error);
@@ -765,7 +973,7 @@ fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: 
             if oversized {
                 let _ = sender.send(WireMessage::Error {
                     code: "protocol".into(),
-                    message: "the animation engine emitted an oversized line".into(),
+                    message: "línea del motor excede el límite de 64 KiB".into(),
                 });
                 continue;
             }
@@ -940,7 +1148,15 @@ for line in sys.stdin:
         }
         let (_guard, config) = stub_engine();
         let error = run_job(&config, &derivada_request("fail"), None, |_| {}).unwrap_err();
-        assert!(error.contains("render_failed"), "error: {error}");
+        // Error tipado localizado al español, sin inglés crudo.
+        assert!(
+            error.contains("falló el render"),
+            "error localizado esperado, got: {error}"
+        );
+        assert!(
+            !error.to_lowercase().contains("animation engine"),
+            "sin inglés crudo, got: {error}"
+        );
     }
 
     #[test]
@@ -950,9 +1166,13 @@ for line in sys.stdin:
             return;
         }
         let (_guard, mut config) = stub_engine();
-        config.job_timeout = Duration::from_millis(300);
+        // Mínimo validado 1 s (rango 1..=600 s); el stub "never" duerme 120 s.
+        config.job_timeout = Duration::from_secs(1);
         let error = run_job(&config, &derivada_request("never"), None, |_| {}).unwrap_err();
-        assert!(error.contains("timed out"), "error: {error}");
+        assert!(
+            error.contains("tiempo agotado"),
+            "timeout localizado esperado, got: {error}"
+        );
     }
 
     #[test]
@@ -978,5 +1198,443 @@ for line in sys.stdin:
         let err = engine.submit(derivada_request("x")).unwrap_err();
         assert!(err.contains("wait_ready"), "err: {err}");
         let _ = engine.shutdown();
+    }
+
+    // ── T1 Progreso REAL: fracción 0..1 parseada del worker ──────────────
+    #[test]
+    fn progress_fraction_is_real_not_invented() {
+        use crate::protocol::RenderProgress;
+        // Unidad pura: percent → fracción, sin inventar.
+        for (pct, want) in [(0u8, 0.0f32), (30, 0.3), (50, 0.5), (100, 1.0)] {
+            let p = RenderProgress {
+                job_id: "job-1".into(),
+                step: "render".into(),
+                percent: pct,
+            };
+            assert!(
+                (p.fraction() - want).abs() < 1e-6,
+                "percent {pct} → {} (esperaba {want})",
+                p.fraction()
+            );
+        }
+        // JobEvent::fraction solo Some para Progress.
+        let prog = JobEvent::Progress(RenderProgress {
+            job_id: "j".into(),
+            step: "s".into(),
+            percent: 60,
+        });
+        assert_eq!(prog.fraction(), Some(0.6));
+        assert!(prog.localized_error().is_none());
+        let res = JobEvent::Result(AnimResult {
+            job_id: "j".into(),
+            media_path: "/tmp/x.png".into(),
+            frames: 1,
+            duration_ms: 10,
+        });
+        assert_eq!(res.fraction(), None);
+        let err = JobEvent::Error {
+            code: "render_failed".into(),
+            message: "boom".into(),
+        };
+        assert_eq!(err.fraction(), None);
+        let loc = err.localized_error().unwrap();
+        assert!(loc.contains("falló el render"), "loc: {loc}");
+    }
+
+    #[test]
+    fn engine_tracks_real_progress_from_stub() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, config) = stub_engine();
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine.wait_ready().unwrap();
+        // Sin progress aún: 0.0 (UI debe mostrar indeterminado, no inventar).
+        assert_eq!(engine.progress_fraction(), 0.0);
+        let _job = engine.submit(derivada_request("derivada")).unwrap();
+        // El stub emite progress 50 → fracción 0.5 real.
+        let mut saw = false;
+        for _ in 0..100 {
+            match engine.recv_event(Some(Duration::from_millis(200))).unwrap() {
+                Some(JobEvent::Progress(p)) => {
+                    assert_eq!(p.percent, 50);
+                    assert!((p.fraction() - 0.5).abs() < 1e-6);
+                    assert!((engine.progress_fraction() - 0.5).abs() < 1e-6);
+                    // engine_state v3 usa done/total reales (50/100), no 0/48.
+                    match engine.engine_state() {
+                        Some(AnimEngineState::Rendering { done, total }) => {
+                            assert_eq!((done, total), (50, 100));
+                        }
+                        other => panic!("esperaba Rendering real, got {other:?}"),
+                    }
+                    saw = true;
+                    break;
+                }
+                Some(JobEvent::Result(_)) => break,
+                Some(JobEvent::Error { code, message }) => {
+                    panic!("stub error inesperado {code}: {message}")
+                }
+                None => {}
+            }
+        }
+        assert!(saw, "el stub debe emitir progress 50");
+        let _ = engine.shutdown();
+    }
+
+    // ── T2 Cancelación cooperativa <200 ms ────────────────────────────────
+    const IGNORING_STUB: &str = r#"
+import json, sys, time
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+send({"type":"hello","protocol_version":1,"capabilities":[]})
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: msg=json.loads(line)
+    except Exception: continue
+    t=msg.get("type")
+    if t=="ping":
+        send({"type":"pong"})
+    elif t=="shutdown":
+        continue
+    elif t=="render_request":
+        time.sleep(30)
+"#;
+
+    fn stub_engine_with(source: &str) -> (TempDirGuard, EngineConfig) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER2: AtomicU64 = AtomicU64::new(10_000);
+        let id = COUNTER2.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "grafito_anim_stub2_{}_{}_{:?}",
+            std::process::id(),
+            id,
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let stub_path = dir.join("stub_engine.py");
+        fs::write(&stub_path, source).unwrap();
+        let config = EngineConfig {
+            command: vec![
+                "python3".to_string(),
+                "-u".to_string(),
+                stub_path.to_string_lossy().to_string(),
+            ],
+            working_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        (TempDirGuard(dir), config)
+    }
+
+    #[test]
+    fn cancel_kills_ignoring_worker_within_200ms() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, config) = stub_engine_with(IGNORING_STUB);
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine.wait_ready().unwrap();
+        let _job = engine.submit(derivada_request("nunca termina")).unwrap();
+        let pid = engine.child_pid().expect("hijo vivo antes de cancelar");
+        let start = Instant::now();
+        engine.cancel().unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < CANCEL_DEADLINE,
+            "cancel() debe retornar <200 ms, tardó {elapsed:?}"
+        );
+        assert!(
+            matches!(engine.state(), AnimJobState::Cancelled),
+            "estado {:?}",
+            engine.state()
+        );
+        // El proceso debe estar muerto (kill <200 ms aunque ignore SHUTDOWN).
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while proc.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!proc.exists(), "el worker {pid} debió morir en <200 ms");
+    }
+
+    // ── T3 Timeouts configurables + line_cap ─────────────────────────────
+    #[test]
+    fn engine_config_validates_ranges() {
+        let mut cfg = EngineConfig::default();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.job_timeout, Duration::from_secs(90));
+        assert_eq!(cfg.idle_timeout, Duration::from_secs(8));
+        assert_eq!(cfg.line_cap_bytes, 64 * 1024);
+        cfg.job_timeout = Duration::from_secs(0);
+        assert!(cfg.validate().is_err());
+        cfg.job_timeout = Duration::from_secs(601);
+        assert!(cfg.validate().is_err());
+        cfg.job_timeout = Duration::from_secs(90);
+        cfg.idle_timeout = Duration::from_secs(0);
+        assert!(cfg.validate().is_err());
+        cfg.idle_timeout = Duration::from_secs(61);
+        assert!(cfg.validate().is_err());
+        cfg.idle_timeout = Duration::from_secs(8);
+        cfg.line_cap_bytes = 100;
+        assert!(cfg.validate().is_err());
+        cfg.line_cap_bytes = 2 * 1024 * 1024;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn engine_config_from_env_with_validation() {
+        // Limpia por si otro test dejó vars (best-effort; este es el único
+        // test que usa GRAFITO_ANIM_*).
+        for k in [
+            "GRAFITO_ANIM_JOB_TIMEOUT_SECS",
+            "GRAFITO_ANIM_IDLE_TIMEOUT_SECS",
+            "GRAFITO_ANIM_LINE_CAP_BYTES",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+        let def = EngineConfig::from_env().unwrap();
+        assert_eq!(def.job_timeout, Duration::from_secs(90));
+        unsafe { std::env::set_var("GRAFITO_ANIM_JOB_TIMEOUT_SECS", "30") };
+        unsafe { std::env::set_var("GRAFITO_ANIM_IDLE_TIMEOUT_SECS", "5") };
+        unsafe { std::env::set_var("GRAFITO_ANIM_LINE_CAP_BYTES", "32768") };
+        let custom = EngineConfig::from_env().unwrap();
+        assert_eq!(custom.job_timeout, Duration::from_secs(30));
+        assert_eq!(custom.idle_timeout, Duration::from_secs(5));
+        assert_eq!(custom.line_cap_bytes, 32768);
+        // Fuera de rango → Err en español.
+        unsafe { std::env::set_var("GRAFITO_ANIM_JOB_TIMEOUT_SECS", "0") };
+        let err = EngineConfig::from_env().unwrap_err();
+        assert!(err.contains("fuera de rango"), "err: {err}");
+        unsafe { std::env::set_var("GRAFITO_ANIM_JOB_TIMEOUT_SECS", "no-num") };
+        let err2 = EngineConfig::from_env().unwrap_err();
+        assert!(err2.contains("inválido"), "err: {err2}");
+        for k in [
+            "GRAFITO_ANIM_JOB_TIMEOUT_SECS",
+            "GRAFITO_ANIM_IDLE_TIMEOUT_SECS",
+            "GRAFITO_ANIM_LINE_CAP_BYTES",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+    }
+
+    const GIANT_STUB: &str = r#"
+import json, sys, os
+def send(o):
+    sys.stdout.write(json.dumps(o) + "\n")
+    sys.stdout.flush()
+send({"type":"hello","protocol_version":1,"capabilities":[]})
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    try: msg=json.loads(line)
+    except Exception: continue
+    t=msg.get("type")
+    if t=="ping":
+        send({"type":"pong"})
+    elif t=="shutdown":
+        break
+    elif t=="render_request":
+        jid=msg["job_id"]
+        sys.stdout.write("A"*(100*1024) + "\n")
+        sys.stdout.flush()
+        send({"type":"progress","job_id":jid,"step":"render","percent":10})
+        out=os.path.join(os.getcwd(), jid+".png")
+        open(out,"wb").write(b"\x89PNG\r\n\x1a\n")
+        send({"type":"render_result","job_id":jid,"media_path":out,"frames":1,"duration_ms":10})
+"#;
+
+    #[test]
+    fn line_cap_rejects_giant_line_as_protocol_error() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, mut config) = stub_engine_with(GIANT_STUB);
+        config.line_cap_bytes = 64 * 1024;
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine.wait_ready().unwrap();
+        let _job = engine.submit(derivada_request("gigante")).unwrap();
+        let mut saw_protocol_error = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match engine.recv_event(Some(Duration::from_millis(300))).unwrap() {
+                Some(JobEvent::Error { code, message }) if code == "protocol" => {
+                    assert!(
+                        message.contains("64 KiB") || message.contains("límite"),
+                        "msg: {message}"
+                    );
+                    saw_protocol_error = true;
+                    break;
+                }
+                Some(JobEvent::Progress(_)) => {
+                    // El progress puede llegar antes si el reader reordena;
+                    // seguir esperando el error de la línea gigante.
+                    continue;
+                }
+                Some(JobEvent::Result(_)) => break,
+                Some(JobEvent::Error { .. }) => continue,
+                None => {}
+            }
+        }
+        assert!(
+            saw_protocol_error,
+            "línea de 100 KiB debe producir Error{{code: protocol}} con line_cap 64 KiB"
+        );
+        let _ = engine.shutdown();
+    }
+
+    // ── T4 Errores tipados acotados ──────────────────────────────────────
+    #[test]
+    fn worker_error_truncates_to_500_and_localizes() {
+        use crate::protocol::{WorkerError, MAX_WORKER_MESSAGE_LEN};
+        let long = "x".repeat(2000);
+        let e = WorkerError::try_new("render_failed", long);
+        assert!(e.message.chars().count() <= MAX_WORKER_MESSAGE_LEN);
+        assert_eq!(e.message.chars().count(), 500);
+        let loc = e.localized();
+        assert!(loc.contains("falló el render"), "loc: {loc}");
+        assert!(!loc.to_lowercase().contains("animation engine"));
+        // Código inválido → "error" + español.
+        let e2 = WorkerError::try_new("bad code!!", "boom");
+        assert_eq!(e2.code, "error");
+        assert!(e2.localized().contains("error del motor"));
+        // Wire: try_downcast trunca mensaje gigante del worker.
+        let big = "y".repeat(900);
+        let v = serde_json::json!({"type":"error","code":"render_failed","message":big});
+        match crate::protocol::try_downcast(&v).unwrap() {
+            WireMessage::Error { message, .. } => {
+                assert!(message.chars().count() <= 500);
+            }
+            other => panic!("esperaba Error, got {other:?}"),
+        }
+    }
+
+    // ── T5 Sandbox Python: 2 tests de escape ─────────────────────────────
+    fn python_engine_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("engines/python")
+    }
+
+    fn run_sandbox_check(script: &str) -> Result<String, String> {
+        let out = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .env(
+                "PYTHONPATH",
+                python_engine_dir().to_string_lossy().to_string(),
+            )
+            .output()
+            .map_err(|e| format!("no se pudo lanzar python3: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            Err(format!(
+                "sandbox check falló: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ))
+        }
+    }
+
+    #[test]
+    fn sandbox_rejects_code_injection_import_dunder() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        // Cubre: import, dunder (__import__/__class__), Attribute, Call no
+        // permitida y Subscript. El sandbox debe rechazar TODO lo listado y
+        // aceptar solo "x**2 + sin(x)".
+        let script = r#"
+import sys
+from manim_engine.__main__ import validate_expr
+bad = [
+    "__import__('os').system('echo pwned')",
+    "import os",
+    "x.__class__.__bases__[0]",
+    "open('/etc/passwd').read()",
+    "eval('1+1')",
+    "getattr(x, 'real')",
+    "x[0]",
+    "(lambda x: x)(1)",
+    "sin(__import__('os').name)",
+]
+for expr in bad:
+    try:
+        validate_expr(expr)
+    except ValueError:
+        continue
+    print(f"ESCAPE NO BLOQUEADO: {expr!r}")
+    sys.exit(1)
+# Expresión legítima debe pasar
+assert validate_expr("x**2 + sin(x)") == "x**2 + sin(x)"
+# MAX_EXPR_LEN=500: 501 chars debe fallar
+try:
+    validate_expr("x+" + "1"*600)
+    print("ESCAPE LONGITUD NO BLOQUEADA")
+    sys.exit(1)
+except ValueError:
+    pass
+print("sandbox code-injection OK")
+"#;
+        run_sandbox_check(script).unwrap();
+    }
+
+    #[test]
+    fn sandbox_rejects_path_traversal_and_symlink_escape() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        // Cubre: path traversal vía job_id ("../escape", "/abs", "a/b") y
+        // symlink escape (job-1.png → /etc/passwd debe rechazarse por
+        // resolve()+relative_to). También MAX_NODES y export inválido.
+        let script = r#"
+import pathlib, sys, tempfile, os
+from manim_engine.__main__ import safe_path, validate_expr
+with tempfile.TemporaryDirectory() as td:
+    wd = pathlib.Path(td)
+    # 1) job_id con traversal debe fallar (JOB_RE ^[A-Za-z0-9_-]{1,64}$)
+    for evil in ["../escape", "/abs", "a/b", "", "x"*65, "a;b", "a b"]:
+        try:
+            safe_path(wd, evil, "png")
+        except ValueError:
+            continue
+        print(f"TRAVERSAL NO BLOQUEADO: {evil!r}")
+        sys.exit(1)
+    # 2) export inválido debe fallar
+    try:
+        safe_path(wd, "job-1", "exe")
+        print("EXPORT NO BLOQUEADO")
+        sys.exit(1)
+    except ValueError:
+        pass
+    # 3) caso legítimo pasa y queda dentro del workdir
+    p = safe_path(wd, "job-1", "png")
+    assert str(p).startswith(str(wd.resolve())), p
+    # 4) symlink escape: pre-crear job-1.png -> /etc/passwd debe rechazarse
+    link = wd / "job-1.png"
+    try:
+        link.symlink_to("/etc/passwd")
+    except (OSError, NotImplementedError) as e:
+        print(f"sin symlink en este FS, salto parcial OK ({e})")
+    else:
+        try:
+            safe_path(wd, "job-1", "png")
+            print("SYMLINK ESCAPE NO BLOQUEADO")
+            sys.exit(1)
+        except ValueError:
+            pass
+    # 5) MAX_NODES=200: expresión gigante debe fallar
+    try:
+        validate_expr("+".join(["x"]*500))
+        print("MAX_NODES NO BLOQUEADO")
+        sys.exit(1)
+    except ValueError:
+        pass
+print("sandbox path-traversal OK")
+"#;
+        run_sandbox_check(script).unwrap();
     }
 }

@@ -393,9 +393,13 @@ impl CommandPaletteState {
 
                 ui.separator();
                 ui.label(
-                    egui::RichText::new("↑↓ navegar · Enter abrir · Esc cerrar")
-                        .small()
-                        .weak(),
+                    egui::RichText::new(format!(
+                        "{} de {} · ↑↓ navegar · Enter abrir · Esc cerrar",
+                        filtered.len(),
+                        all_commands().len()
+                    ))
+                    .small()
+                    .weak(),
                 );
             });
 
@@ -414,7 +418,18 @@ impl CommandPaletteState {
 
 #[cfg(test)]
 mod tests {
-    use super::{all_commands, fuzzy_match, CommandPaletteState};
+    use super::{all_commands, command_registry, fuzzy_match, CommandPaletteState, UI_ACTIONS};
+
+    #[test]
+    fn paleta_expone_registro_mas_acciones_ui() {
+        let total = all_commands().len();
+        assert_eq!(
+            total,
+            command_registry::palette_commands().count() + UI_ACTIONS.len()
+        );
+        let state = CommandPaletteState::default();
+        assert_eq!(state.filtered_commands().len(), total);
+    }
 
     #[test]
     fn fuzzy_match_contiene_en_orden() {

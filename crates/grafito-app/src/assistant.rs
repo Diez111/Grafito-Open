@@ -311,6 +311,41 @@ impl AssistantRuntime {
     fn take_queued_model_refresh_if_idle(&mut self) -> bool {
         self.model_job.is_none() && std::mem::take(&mut self.model_refresh_queued)
     }
+
+    /// Cancela todos los jobs del asistente para el botón Cancel.
+    ///
+    /// - `remote`/`proposal`/`agent`/`model` tienen token: se marcan cancelados
+    ///   pero el slot se conserva hasta que `take_finished_*`/`poll_assistant_agent`
+    ///   drene el worker (sin huérfanos; ver test `cancelled_remote_job_...`).
+    /// - `anim` no tiene token: se dropea el receiver. El worker es acotado
+    ///   (render nativo o `job_timeout` 15s del motor) y su `send` falla tras el
+    ///   drop, así que el hilo termina solo sin dejar trabajo huérfano.
+    ///
+    /// Retorna `true` si había algún job en vuelo.
+    fn cancel_all_assistant_jobs(&mut self) -> bool {
+        let mut cancelled = false;
+        if let Some(job) = self.remote_job.as_ref() {
+            job.cancellation.cancel();
+            cancelled = true;
+        }
+        if let Some(job) = self.proposal_job.as_ref() {
+            job.cancellation.cancel();
+            cancelled = true;
+        }
+        if let Some(job) = self.agent_job.as_ref() {
+            job.cancellation.cancel();
+            cancelled = true;
+        }
+        if let Some(job) = self.model_job.as_ref() {
+            job.cancellation.cancel();
+            cancelled = true;
+        }
+        if self.anim_job.is_some() {
+            self.anim_job = None;
+            cancelled = true;
+        }
+        cancelled
+    }
 }
 
 struct AssistantRemoteJob {
@@ -2208,7 +2243,9 @@ impl GrafitoApp {
         ) {
             Ok(request) => request,
             Err(error) => {
-                self.show_assistant_error(error);
+                // `build_remote_assistant_request` valida límites (inglés de
+                // crates externos) — se envuelve en español antes de mostrar.
+                self.show_assistant_error(remote_error_message(&error, &effective_model));
                 return;
             }
         };
@@ -2327,7 +2364,9 @@ impl GrafitoApp {
             Ok(launch) => launch,
             Err(error) => {
                 self.assistant.restore_proposal_correction();
-                self.report_assistant_error(error);
+                // build_* mezcla español local e inglés de validadores externos.
+                let current_model = self.assistant.model.clone();
+                self.report_assistant_error(remote_error_message(&error, &current_model));
                 return;
             }
         };
@@ -2389,18 +2428,15 @@ impl GrafitoApp {
     }
 
     fn cancel_assistant_request(&mut self) {
-        let mut cancelled = false;
-        if let Some(job) = &self.assistant_runtime.remote_job {
-            job.cancellation.cancel();
-            cancelled = true;
-        } else if let Some(job) = &self.assistant_runtime.proposal_job {
-            job.cancellation.cancel();
-            cancelled = true;
-        } else if let Some(job) = &self.assistant_runtime.agent_job {
-            job.cancellation.cancel();
-            cancelled = true;
-        }
-        if cancelled {
+        // Cancela remote+proposal+agent+model+anim (todos, sin else-if: aunque el
+        // slot remoto sólo permite un job de consulta a la vez, model/anim son
+        // independientes y deben cancelarse también). Los workers con token se
+        // drenan en poll (take_finished_*); anim se dropea (worker acotado).
+        let had_anim = self.assistant_runtime.anim_job.is_some();
+        if self.assistant_runtime.cancel_all_assistant_jobs() {
+            if had_anim {
+                self.assistant.anim_progress = false;
+            }
             self.begin_cancelling_remote_request();
         }
     }
@@ -2464,15 +2500,23 @@ impl GrafitoApp {
                         } else {
                             match result {
                                 Ok(outcome) => {
+                                    // Wiring B1 (loop Spark por Responses en paralelo):
+                                    // un `Done(Ok)` con Spark se acepta directo y NUNCA
+                                    // dispara el fallback a deepseek. El fallback sólo
+                                    // vive en la rama `Err` vía
+                                    // `should_fallback_agent_spark_to_deepseek`.
                                     self.assistant.complete_request(outcome.final_text);
                                 }
                                 Err(error) => {
                                     // Modo agente + Spark: las tools aún no viajan por Responses API.
                                     // Fallback sólo-sesión a deepseek (chat-compatible), preferencia intacta.
-                                    if error.contains("Responses API")
-                                        && job.model.contains("muse-spark")
-                                        && job.provider == ProviderProfile::OpenCodeGo
-                                    {
+                                    // Si B1 ya cerró el loop por Responses, este error deja
+                                    // de ocurrir y el `Ok` de arriba gana sin fallback.
+                                    if should_fallback_agent_spark_to_deepseek(
+                                        &error,
+                                        job.provider,
+                                        &job.model,
+                                    ) {
                                         eprintln!("grafito: session-fallback agent spark -> deepseek-v4-flash (preferencia intacta)");
                                         self.notify(
                                             "Modo agente con Spark aún no soporta herramientas; reintentando con DeepSeek Flash…",
@@ -2595,12 +2639,13 @@ impl GrafitoApp {
                             // Compatibilidad total SÓLO-SESIÓN: si muse-spark falla con 500 o timeout
                             // en OpenCodeGo, se reintenta con deepseek SIN tocar la preferencia
                             // guardada. El próximo pedido reintenta spark (auto-recupera si vuelve).
-                            let slow_or_down = error.contains("500") || error.contains("timed out");
-                            if slow_or_down
-                                && self.assistant.model.contains("muse-spark")
-                                && self.assistant.provider == ProviderProfile::OpenCodeGo
-                                && correction_attempt == 0
-                            {
+                            // Si B1 aún no terminó, este fallback sigue funcionando igual.
+                            if should_fallback_remote_spark_to_deepseek(
+                                &error,
+                                self.assistant.provider,
+                                &self.assistant.model,
+                                correction_attempt,
+                            ) {
                                 eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                 self.notify(
                                     "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.",
@@ -2778,7 +2823,10 @@ impl GrafitoApp {
                         self.assistant.set_available_models(models);
                     }
                     Err(error) => {
-                        self.show_assistant_error(error);
+                        // La lista de modelos viene del transporte (inglés
+                        // crudo posible) — se envuelve en español.
+                        let current_model = self.assistant.model.clone();
+                        self.show_assistant_error(remote_error_message(&error, &current_model));
                     }
                 }
             }
@@ -2805,11 +2853,11 @@ impl GrafitoApp {
                         self.assistant.attachment_message =
                             Some("Imagen lista para consultar.".into())
                     }
-                    Err(error) => self.show_assistant_error(error),
+                    Err(error) => self.show_assistant_error(attachment_error_message(&error)),
                 },
                 Err(error) => {
                     self.assistant.attachment_message = None;
-                    self.show_assistant_error(error);
+                    self.show_assistant_error(attachment_error_message(&error));
                 }
             }
         }
@@ -2841,10 +2889,12 @@ impl GrafitoApp {
                     "GRAFITO_ASSISTANT_CUSTOM_API_KEY",
                 )
             })
-            .map_err(|error| {
-                format!(
-                    "Custom provider requires its own API key (GRAFITO_ASSISTANT_CUSTOM_*_API_KEY): {error}"
-                )
+            .map_err(|_| {
+                // Español directo (sin inglés crudo del validador): la clave
+                // Custom vive en GRAFITO_ASSISTANT_CUSTOM_*_API_KEY y nunca
+                // reutiliza la de OpenCodeGo.
+                "El proveedor Custom requiere su propia API key (GRAFITO_ASSISTANT_CUSTOM_*_API_KEY). Revisá la configuración avanzada."
+                    .to_string()
             })?
         } else {
             ProviderSettings::for_profile(self.assistant.provider, model)
@@ -2901,6 +2951,54 @@ impl GrafitoApp {
                 Err("El llavero del sistema no está disponible para leer la API key.".into())
             }
         }
+    }
+}
+
+/// Wiring B1 — loop Spark por Responses en paralelo (agente externo).
+///
+/// El modo agente con Spark hoy falla porque las tools aún no viajan por la
+/// Responses API. B1 implementará ese loop en paralelo; cuando su `Done(Ok)`
+/// llegue con Spark, el `poll_assistant_agent` lo acepta directo (nunca
+/// fallback). Este helper distingue ese éxito del `Err` "Responses API", que
+/// sí dispara el fallback sólo-sesión a deepseek sin tocar la preferencia.
+fn is_agent_spark_responses_unsupported_error(error: &str) -> bool {
+    error.contains("Responses API")
+}
+
+/// Fallback agente sólo-sesión: Spark + Responses API no soportado → deepseek.
+/// Nunca dispara en `Ok` (sólo se llama en la rama `Err`).
+fn should_fallback_agent_spark_to_deepseek(
+    error: &str,
+    provider: ProviderProfile,
+    model: &str,
+) -> bool {
+    is_agent_spark_responses_unsupported_error(error)
+        && provider == ProviderProfile::OpenCodeGo
+        && model.contains("muse-spark")
+}
+
+/// Fallback chat (no agente) sólo-sesión: Spark 500/timeout → deepseek.
+/// La preferencia guardada queda intacta; el próximo pedido reintenta spark.
+fn should_fallback_remote_spark_to_deepseek(
+    error: &str,
+    provider: ProviderProfile,
+    current_model: &str,
+    correction_attempt: u8,
+) -> bool {
+    let slow_or_down = error.contains("500") || error.contains("timed out");
+    slow_or_down
+        && current_model.contains("muse-spark")
+        && provider == ProviderProfile::OpenCodeGo
+        && correction_attempt == 0
+}
+
+/// Sanea errores de adjuntos de crates externos (inglés crudo) a español.
+/// Los mensajes ya españoles de `grafito-ui` pasan intactos.
+fn attachment_error_message(error: &str) -> String {
+    if error.contains("assistant attachment") {
+        "La imagen no es válida o supera los límites permitidos.".into()
+    } else {
+        error.to_owned()
     }
 }
 
@@ -4182,17 +4280,20 @@ fn read_bounded_attachment(reader: impl Read, max_bytes: usize) -> Result<Vec<u8
 mod tests {
     use super::{
         accepts_model_result, accepts_remote_context, accepts_remote_result,
-        apply_local_assistant_plan, assistant_graph_perspective,
+        apply_local_assistant_plan, assistant_graph_perspective, attachment_error_message,
         can_offer_assistant_proposal_correction, classify_local_assistant_response,
         commit_assistant_graph_preflight, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        preflight_assistant_flower_scene, preflight_assistant_graph_command,
-        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, read_bounded_attachment, remote_error_message,
-        stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
-        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
-        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        LocalAssistantDisposition, RemoteProposalVerification,
+        is_agent_spark_responses_unsupported_error, preflight_assistant_flower_scene,
+        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
+        preflight_assistant_parameter, preflight_assistant_scene, read_bounded_attachment,
+        remote_error_message, should_fallback_agent_spark_to_deepseek,
+        should_fallback_remote_spark_to_deepseek, stage_assistant_parameter,
+        validate_assistant_command, verified_remote_proposals, AgentChannelMsg, AssistantAgentJob,
+        AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
+        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        AssistantRemoteRoute, AssistantRuntime, LocalAssistantDisposition,
+        RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -4623,6 +4724,238 @@ mod tests {
             !quota.contains("Revisá Configuración → Modelo"),
             "no culpa al modelo: {quota}"
         );
+    }
+
+    #[test]
+    fn agent_spark_success_never_falls_back_only_responses_error_does() {
+        // Wiring B1: `Done(Ok)` con Spark se acepta directo — el fallback sólo
+        // vive en la rama `Err` ("Responses API") y lo decide este helper.
+        assert!(!is_agent_spark_responses_unsupported_error("ok"));
+        assert!(!is_agent_spark_responses_unsupported_error("HTTP 500"));
+        assert!(is_agent_spark_responses_unsupported_error(
+            "agent tools are not supported via Responses API, use chat"
+        ));
+        assert!(should_fallback_agent_spark_to_deepseek(
+            "agent tools are not supported via Responses API",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
+        // No dispara con otro modelo, otro proveedor u otro error.
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "agent tools are not supported via Responses API",
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+        ));
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "agent tools are not supported via Responses API",
+            ProviderProfile::DeepSeek,
+            "muse-spark-1.3-contributor",
+        ));
+        assert!(!should_fallback_agent_spark_to_deepseek(
+            "HTTP 500 internal error",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+        ));
+    }
+
+    #[test]
+    fn remote_spark_fallback_only_on_500_or_timeout_without_correction() {
+        assert!(should_fallback_remote_spark_to_deepseek(
+            "HTTP 500 internal error",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        assert!(should_fallback_remote_spark_to_deepseek(
+            "request timed out after 60s",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        // Con corrección en curso, otro modelo/proveedor u otro error: no.
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "HTTP 500 internal error",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            1,
+        ));
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "HTTP 500 internal error",
+            ProviderProfile::OpenCodeGo,
+            "deepseek-v4-flash",
+            0,
+        ));
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "HTTP 500 internal error",
+            ProviderProfile::DeepSeek,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+        assert!(!should_fallback_remote_spark_to_deepseek(
+            "HTTP 401 unauthorized",
+            ProviderProfile::OpenCodeGo,
+            "muse-spark-1.3-contributor",
+            0,
+        ));
+    }
+
+    #[test]
+    fn session_key_remember_trims_pasted_whitespace() {
+        let mut runtime = AssistantRuntime::default();
+        runtime.remember_key(ProviderProfile::OpenCodeGo, "  sk-grafito-123\n".into());
+        assert_eq!(
+            runtime.key_for(ProviderProfile::OpenCodeGo).as_deref(),
+            Some("sk-grafito-123")
+        );
+        runtime.forget_key();
+        assert!(runtime.key_for(ProviderProfile::OpenCodeGo).is_none());
+    }
+
+    #[test]
+    fn remote_errors_for_custom_and_validators_are_spanish() {
+        // Error de validador Custom (inglés crudo) → español sin exponerlo.
+        let custom = remote_error_message(
+            "custom API key reference is invalid or reserved for a named provider",
+            "modelo-custom",
+        );
+        assert!(
+            custom.contains("No se pudo preparar") || custom.contains("Revisá"),
+            "custom en español: {custom}"
+        );
+        // Identificador de modelo inválido → rama de modelo en español.
+        let model_id = remote_error_message("remote model identifier is invalid", "x");
+        assert!(
+            model_id.contains("no está disponible"),
+            "modelo en español: {model_id}"
+        );
+        // Endpoint Custom sin HTTPS → envoltorio español.
+        let https = remote_error_message("custom OpenAI-compatible endpoints must use HTTPS", "x");
+        assert!(
+            https.contains("Revisá Configuración"),
+            "endpoint en español: {https}"
+        );
+        // Responses API → mensaje específico en español.
+        let responses = remote_error_message(
+            "agent tools are not supported via Responses API",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(
+            responses.contains("Responses API") && responses.contains("deepseek-v4-flash"),
+            "responses en español: {responses}"
+        );
+    }
+
+    #[test]
+    fn attachment_errors_are_spanish_not_raw_english() {
+        assert_eq!(
+            attachment_error_message("assistant attachment byte limit exceeded"),
+            "La imagen no es válida o supera los límites permitidos."
+        );
+        // Los mensajes ya españoles de grafito-ui pasan intactos.
+        assert_eq!(
+            attachment_error_message("se alcanzó el límite de adjuntos configurado"),
+            "se alcanzó el límite de adjuntos configurado"
+        );
+    }
+
+    #[test]
+    fn cancel_all_jobs_marks_tokens_and_drops_anim_without_orphans() {
+        let mut runtime = AssistantRuntime::default();
+        let remote_cancel = CancellationToken::default();
+        let (remote_tx, remote_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
+        runtime.remote_job = Some(AssistantRemoteJob {
+            id: 1,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "muse-spark-1.3-contributor".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "q".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            cancellation: remote_cancel.clone(),
+            receiver: remote_rx,
+        });
+        let proposal_cancel = CancellationToken::default();
+        let (proposal_tx, proposal_rx) =
+            sync_channel::<Result<RemoteProposalVerification, String>>(1);
+        runtime.proposal_job = Some(AssistantProposalJob {
+            id: 2,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "muse-spark-1.3-contributor".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "q".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            text: "t".into(),
+            cancellation: proposal_cancel.clone(),
+            receiver: proposal_rx,
+        });
+        let agent_cancel = grafito_agent::loop_engine::Cancellation::default();
+        let (agent_tx, agent_rx) = sync_channel::<AgentChannelMsg>(128);
+        runtime.agent_job = Some(AssistantAgentJob {
+            provider: ProviderProfile::OpenCodeGo,
+            model: "muse-spark-1.3-contributor".into(),
+            cancellation: agent_cancel.clone(),
+            receiver: agent_rx,
+        });
+        let model_cancel = CancellationToken::default();
+        let (model_tx, model_rx) = sync_channel::<Result<Vec<String>, String>>(1);
+        runtime.model_job = Some(AssistantModelJob {
+            id: 3,
+            provider: ProviderProfile::OpenCodeGo,
+            cancellation: model_cancel.clone(),
+            receiver: model_rx,
+        });
+        let (_anim_tx, anim_rx) =
+            sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob { receiver: anim_rx });
+
+        assert!(runtime.cancel_all_assistant_jobs());
+        assert!(remote_cancel.is_cancelled());
+        assert!(proposal_cancel.is_cancelled());
+        assert!(agent_cancel.is_cancelled());
+        assert!(model_cancel.is_cancelled());
+        // Anim no tiene token: se dropea el slot de inmediato.
+        assert!(runtime.anim_job.is_none());
+        // Los jobs con token conservan el slot hasta el drain (sin huérfanos).
+        assert!(!runtime.remote_request_slot_is_free());
+
+        // Drenar remote + proposal vía take_finished_* (marca cancelled).
+        remote_tx
+            .send(Err("remote assistant request was cancelled".into()))
+            .unwrap();
+        let finished_remote = runtime.take_finished_remote_job().unwrap();
+        assert!(finished_remote.cancelled);
+        proposal_tx.send(Err("cancelled".into())).unwrap();
+        let finished_proposal = runtime.take_finished_proposal_job().unwrap();
+        assert!(finished_proposal.cancelled);
+        // El canal del agente sigue vivo hasta que el poll lo drene.
+        agent_tx
+            .send(AgentChannelMsg::Done(Err("cancelled".into())))
+            .unwrap();
+        let agent_msg = runtime
+            .agent_job
+            .as_ref()
+            .expect("agent slot held until poll drain")
+            .receiver
+            .try_recv()
+            .expect("agent channel must not be orphaned");
+        assert!(matches!(agent_msg, AgentChannelMsg::Done(_)));
+        // Model se drena vía take_finished_model_job.
+        model_tx.send(Err("cancelled".into())).unwrap();
+        assert!(runtime.take_finished_model_job().is_some());
+        // Simula el drain del poll del agente: libera el slot remoto.
+        runtime.agent_job = None;
+        assert!(runtime.remote_request_slot_is_free());
+        // Sin jobs, cancelar es no-op.
+        assert!(!runtime.cancel_all_assistant_jobs());
     }
 
     #[test]

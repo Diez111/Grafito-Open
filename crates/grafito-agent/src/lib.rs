@@ -11,6 +11,7 @@ pub mod ledger;
 pub mod loop_engine;
 pub mod router;
 pub mod schema;
+pub mod tools;
 
 pub use ledger::{JSpaceLedger, MAX_LEDGER_RENDER_BYTES};
 pub use loop_engine::{

@@ -7,10 +7,19 @@
 use crate::manim_orchestrator::{ManimOrchestrator, OrchestratorState};
 use crate::whiteboard_ui::WhiteboardSession;
 use egui::{Color32, Stroke};
-use grafito_pedagogy::TeachingSession;
+use grafito_pedagogy::{Exercise, TeachingSession, TeachingTopic};
 use grafito_ui::icons::{action_icon_button, Icon};
 use grafito_whiteboard::WhiteboardDoc;
 use std::time::{Duration, Instant};
+
+/// Ancho ideal de la ventana de enseñanza (SPACE_XXL * 16 = 640, tokenizado).
+const VENTANA_ANCHO_IDEAL: f32 = grafito_ui::tokens::SPACE_XXL * 16.0;
+/// Ancho mínimo de la ventana (SPACE_XXL * 12 = 480).
+const VENTANA_ANCHO_MIN: f32 = grafito_ui::tokens::SPACE_XXL * 12.0;
+/// Ancho máximo de la ventana (SPACE_XXL * 20 = 800).
+const VENTANA_ANCHO_MAX: f32 = grafito_ui::tokens::SPACE_XXL * 20.0;
+/// Alto ideal de la ventana (SPACE_XXL * 13 = 520).
+const VENTANA_ALTO_IDEAL: f32 = grafito_ui::tokens::SPACE_XXL * 13.0;
 
 /// Estado de la UI de enseñanza.
 pub struct TeachingUiState {
@@ -757,6 +766,342 @@ pub(crate) fn whiteboard_elements_for_hint(
     elems
 }
 
+/// Mapeo puro tópico→pista sin strings (reemplazo del string-matching frágil).
+///
+/// No toca otros crates: vive en la Piel y sólo consume `TeachingTopic`.
+/// El dispatch por enum hace imposibles los errores de tipeo del `hint`
+/// (`hint_for_topic` queda como compat legacy para hints libres).
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn pista_para_topico(topico: &TeachingTopic) -> WhiteboardHint {
+    match topico {
+        TeachingTopic::Derivada => WhiteboardHint::Secante,
+        TeachingTopic::Integral => WhiteboardHint::Area,
+        TeachingTopic::Limite => WhiteboardHint::Limite,
+        TeachingTopic::Funcion => WhiteboardHint::Funcion,
+        TeachingTopic::Pitagoras => WhiteboardHint::Pitagoras,
+        TeachingTopic::Fraccion => WhiteboardHint::Fraccion,
+        TeachingTopic::Vector => WhiteboardHint::Vector,
+        TeachingTopic::Matriz => WhiteboardHint::Matriz,
+        TeachingTopic::Probabilidad => WhiteboardHint::Probabilidad,
+        TeachingTopic::Serie => WhiteboardHint::Serie,
+        TeachingTopic::Ecuacion => WhiteboardHint::Ecuacion,
+        TeachingTopic::Trigonometria => WhiteboardHint::Trigonometria,
+        TeachingTopic::Conica => WhiteboardHint::Conica,
+        TeachingTopic::General(_) => WhiteboardHint::General,
+    }
+}
+
+/// Elementos de pizarra para un tópico (puro, sin I/O, sin strings).
+///
+/// Despacha por [`pista_para_topico`]; para `Ecuacion` usa la parábola base
+/// (la variante «dos rectas» sólo existe en el path legacy con hint textual).
+/// `General` devuelve un único texto acotado con el `label` del tópico.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn elementos_para_topico(topico: &TeachingTopic) -> Vec<grafito_whiteboard::WhiteboardElement> {
+    let mut elems = Vec::new();
+    match pista_para_topico(topico) {
+        WhiteboardHint::Vacio | WhiteboardHint::Libre => {}
+        WhiteboardHint::Secante => push_secante_hint(&mut elems),
+        WhiteboardHint::Fraccion => push_fraccion_hint(&mut elems),
+        WhiteboardHint::Vector => push_vector_hint(&mut elems),
+        WhiteboardHint::Matriz => push_matriz_hint(&mut elems),
+        WhiteboardHint::Probabilidad => push_probabilidad_hint(&mut elems),
+        WhiteboardHint::Serie => push_serie_hint(&mut elems),
+        WhiteboardHint::Trigonometria => push_trigonometria_hint(&mut elems),
+        WhiteboardHint::Conica => push_conica_hint(&mut elems),
+        WhiteboardHint::Ecuacion => {
+            push_ecuacion_hint(&mut elems, "");
+        }
+        WhiteboardHint::Limite => push_limite_hint(&mut elems),
+        WhiteboardHint::Funcion => push_funcion_hint(&mut elems),
+        WhiteboardHint::Area => push_area_hint(&mut elems),
+        WhiteboardHint::Pitagoras => push_pitagoras_hint(&mut elems),
+        WhiteboardHint::General => {
+            use grafito_whiteboard::WhiteboardElement;
+            let etiqueta: String = topico.label().chars().take(40).collect();
+            elems.push(WhiteboardElement::Text {
+                at: (-1.5, 0.0),
+                text: etiqueta,
+                size: 14.0,
+            });
+        }
+    }
+    elems
+}
+
+// ── Tarjeta de ejercicio inline (pura + dibujo acotado) ──
+
+/// Tope de caracteres del enunciado para que la tarjeta no desborde.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub const MAX_ENUNCIADO_CHARS: usize = 280;
+/// Tope por opción múltiple.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub const MAX_OPCION_CHARS: usize = 120;
+
+/// Recorta por borde de carácter (nunca parte UTF-8). Puro, sin I/O.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn acotar_texto(texto: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if texto.chars().count() <= max {
+        return texto.to_string();
+    }
+    let recortado: String = texto.chars().take(max.saturating_sub(1)).collect();
+    format!("{recortado}…")
+}
+
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+fn numero_simple(texto: &str) -> Option<f64> {
+    let t = texto.trim().replace(',', ".");
+    if t.is_empty() {
+        return None;
+    }
+    if let Some((a, b)) = t.split_once('/') {
+        let a: f64 = a.trim().parse().ok()?;
+        let b: f64 = b.trim().parse().ok()?;
+        if b.abs() > 1e-12 {
+            return Some(a / b);
+        }
+        return None;
+    }
+    t.parse::<f64>().ok()
+}
+
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+fn formatear_numero(valor: f64) -> String {
+    if (valor - valor.round()).abs() < 1e-9 && valor.abs() < 1e9 {
+        format!("{}", valor.round() as i64)
+    } else {
+        format!("{valor:.2}")
+    }
+}
+
+/// Opciones múltiples deterministas (4, con la solución incluida). Puro, sin I/O.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn opciones_para_ejercicio(ejercicio: &Exercise) -> Vec<String> {
+    let solucion = ejercicio.solution.trim().to_string();
+    let mut candidatas: Vec<String> = Vec::with_capacity(4);
+    candidatas.push(solucion.clone());
+    if let Some(n) = numero_simple(&solucion) {
+        for d in [1.0, -1.0, 2.0] {
+            let v = if d == 2.0 { n * 2.0 } else { n + d };
+            let s = formatear_numero(v);
+            if !candidatas.iter().any(|c| c == &s) {
+                candidatas.push(s);
+            }
+            if candidatas.len() >= 4 {
+                break;
+            }
+        }
+        for extra in ["1", "2", "-1", "10"] {
+            if candidatas.len() >= 4 {
+                break;
+            }
+            if !candidatas.iter().any(|c| c == extra) {
+                candidatas.push(extra.to_string());
+            }
+        }
+    } else {
+        for suf in [" + 1", " − 1", " (otra forma)"] {
+            if candidatas.len() >= 4 {
+                break;
+            }
+            let s = format!("{solucion}{suf}");
+            if !candidatas.iter().any(|c| c == &s) {
+                candidatas.push(s);
+            }
+        }
+        if !candidatas.iter().any(|c| c == "Ninguna de estas") {
+            candidatas.push("Ninguna de estas".to_string());
+        }
+    }
+    candidatas.truncate(4);
+    while candidatas.len() < 4 {
+        let relleno = format!("Variante {}", candidatas.len() + 1);
+        candidatas.push(relleno);
+    }
+    let rot = (ejercicio.seed.unwrap_or(0) % 4) as usize;
+    candidatas.rotate_left(rot);
+    candidatas
+}
+
+/// Índice de la solución dentro de `opciones`. Puro, sin I/O.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn indice_respuesta_correcta(ejercicio: &Exercise, opciones: &[String]) -> Option<usize> {
+    let sol = ejercicio.solution.trim();
+    opciones.iter().position(|o| o.trim() == sol)
+}
+
+/// Estado local de la tarjeta inline (vive en la Piel, no persiste).
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub struct EstadoTarjetaEjercicio {
+    pub respuesta: String,
+    pub opcion_elegida: Option<usize>,
+    pub devolucion: Option<grafito_pedagogy::Feedback>,
+}
+
+/// Tarjeta inline: enunciado + opciones + devolución tras responder.
+///
+/// Layout acotado (ancho del panel, `wrap` + recorte). Sin I/O ni spawn:
+/// sólo evalúa con `FeedbackEngine` (CPU en memoria). Textos en rioplatense.
+#[allow(dead_code)] // TODO otro agente: cablear la tarjeta de ejercicio
+pub fn draw_tarjeta_ejercicio(
+    ui: &mut egui::Ui,
+    ejercicio: &Exercise,
+    opciones: &[String],
+    estado: &mut EstadoTarjetaEjercicio,
+) {
+    let tema = grafito_ui::theme::current_theme(ui.ctx());
+    egui::Frame::none()
+        .fill(tema.panel_bg)
+        .stroke(Stroke::new(1.0, tema.separator.gamma_multiply(0.10)))
+        .rounding(grafito_ui::tokens::RADIUS_MD)
+        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_MD))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(acotar_texto(&ejercicio.prompt, MAX_ENUNCIADO_CHARS))
+                        .strong()
+                        .size(grafito_ui::tokens::TYPE_BASE)
+                        .color(tema.text_primary),
+                )
+                .wrap(),
+            );
+            ui.add_space(grafito_ui::tokens::SPACE_XS);
+            for (idx, op) in opciones.iter().enumerate() {
+                let texto = acotar_texto(op, MAX_OPCION_CHARS);
+                if ui
+                    .radio_value(&mut estado.opcion_elegida, Some(idx), texto)
+                    .clicked()
+                {
+                    estado.respuesta = op.clone();
+                    estado.devolucion = None;
+                }
+            }
+            ui.add_space(grafito_ui::tokens::SPACE_SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Tu respuesta:")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .color(tema.text_secondary),
+                );
+                ui.text_edit_singleline(&mut estado.respuesta);
+                let boton = egui::Button::new(
+                    egui::RichText::new("Responder")
+                        .size(grafito_ui::tokens::TYPE_SM)
+                        .strong(),
+                )
+                .fill(tema.accent)
+                .stroke(Stroke::NONE)
+                .rounding(grafito_ui::tokens::RADIUS_MD);
+                if ui.add(boton).clicked() {
+                    let fb = grafito_pedagogy::FeedbackEngine.assess(ejercicio, &estado.respuesta);
+                    estado.devolucion = Some(fb);
+                }
+            });
+            if let Some(fb) = estado.devolucion.as_ref() {
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                let (borde, fondo) = if fb.correct {
+                    (
+                        egui::Color32::from_rgb(40, 180, 70),
+                        egui::Color32::from_rgb(232, 245, 233),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_rgb(200, 60, 60),
+                        egui::Color32::from_rgb(253, 237, 237),
+                    )
+                };
+                egui::Frame::none()
+                    .fill(fondo)
+                    .stroke(Stroke::new(1.0, borde))
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let titulo = if fb.correct {
+                            "¡Bien ahí, che! Respuesta correcta."
+                        } else {
+                            "Casi… fijate de nuevo."
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(titulo)
+                                    .strong()
+                                    .size(grafito_ui::tokens::TYPE_SM)
+                                    .color(borde),
+                            )
+                            .wrap(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(acotar_texto(&fb.message, MAX_ENUNCIADO_CHARS))
+                                    .size(grafito_ui::tokens::TYPE_SM)
+                                    .color(egui::Color32::from_rgb(40, 40, 40)),
+                            )
+                            .wrap(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(acotar_texto(
+                                    &fb.next_step,
+                                    MAX_ENUNCIADO_CHARS,
+                                ))
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .color(egui::Color32::from_rgb(90, 90, 90)),
+                            )
+                            .wrap(),
+                        );
+                    });
+            }
+        });
+}
+
+// ── Burbuja morph avatar→burbuja (pura + clamp a viewport) ──
+
+/// Ease-out cúbico del morph (ANIM_MICRO 180ms). Puro, sin I/O.
+pub fn progreso_morph_suave(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - x) * (1.0 - x) * (1.0 - x)
+}
+
+/// Interpola origen→destino y clampeea al `limite` (normalmente `available_rect`).
+///
+/// Garantiza que la burbuja nunca se pase del viewport: el resultado siempre
+/// está contenido en `limite`. Puro, sin I/O.
+pub fn rect_burbuja_morph(
+    origen: egui::Rect,
+    destino: egui::Rect,
+    progreso: f32,
+    limite: egui::Rect,
+) -> egui::Rect {
+    let t = progreso.clamp(0.0, 1.0);
+    let min = egui::pos2(
+        origen.min.x + (destino.min.x - origen.min.x) * t,
+        origen.min.y + (destino.min.y - origen.min.y) * t,
+    );
+    let max = egui::pos2(
+        origen.max.x + (destino.max.x - origen.max.x) * t,
+        origen.max.y + (destino.max.y - origen.max.y) * t,
+    );
+    let mut r = egui::Rect::from_min_max(min, max);
+    // Clamp duro al límite: intersección + resguardo si no hay solape.
+    if r.width() > limite.width() {
+        r.set_width(limite.width());
+    }
+    if r.height() > limite.height() {
+        r.set_height(limite.height());
+    }
+    r = r.intersect(limite);
+    if r.is_negative() {
+        r = egui::Rect::from_min_size(limite.min, egui::Vec2::ZERO);
+    }
+    r
+}
+
 impl TeachingUiState {
     fn anim_frames_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -972,10 +1317,10 @@ pub fn draw_teaching_overlay(
         .id(egui::Id::new("teaching_overlay"))
         .collapsible(false)
         .resizable(true)
-        .default_width(640.0)
-        .min_width(480.0)
-        .max_width(800.0)
-        .default_height(520.0)
+        .default_width(VENTANA_ANCHO_IDEAL)
+        .min_width(VENTANA_ANCHO_MIN)
+        .max_width(VENTANA_ANCHO_MAX)
+        .default_height(VENTANA_ALTO_IDEAL)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .frame(
             egui::Frame::window(&ctx.style())
@@ -1025,6 +1370,62 @@ pub fn draw_teaching_overlay(
                     }
                 });
             });
+            // Burbuja morph avatar→burbuja, siempre dentro del viewport.
+            // Clamp duro a `available_rect`: nunca se pasa del borde visible.
+            {
+                let progreso = state.morph_progress();
+                let suave = progreso_morph_suave(progreso);
+                let limite = ui.available_rect_before_wrap();
+                let ancho = limite.width().max(grafito_ui::tokens::SPACE_XXL * 2.0);
+                let (espacio, _) = ui.allocate_exact_size(
+                    egui::vec2(ancho, grafito_ui::tokens::SPACE_XXL),
+                    egui::Sense::hover(),
+                );
+                let origen = egui::Rect::from_min_size(
+                    espacio.min,
+                    egui::vec2(
+                        (espacio.width() * 0.35).max(grafito_ui::tokens::SPACE_XXL * 2.0),
+                        grafito_ui::tokens::SPACE_LG,
+                    ),
+                );
+                let destino = egui::Rect::from_min_size(
+                    espacio.min,
+                    egui::vec2(
+                        espacio.width(),
+                        grafito_ui::tokens::SPACE_LG + grafito_ui::tokens::SPACE_SM,
+                    ),
+                );
+                let burbuja = rect_burbuja_morph(origen, destino, suave, limite);
+                if ui.is_rect_visible(burbuja) {
+                    let alpha = (80.0 + 175.0 * suave) as u8;
+                    ui.painter().rect_filled(
+                        burbuja,
+                        grafito_ui::tokens::RADIUS_MD,
+                        theme.accent.gamma_multiply(suave * 0.16),
+                    );
+                    ui.painter().rect_stroke(
+                        burbuja,
+                        grafito_ui::tokens::RADIUS_MD,
+                        Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
+                    );
+                    let texto = format!(
+                        "Mirá el paso {} de {} — vamos de a poco, che.",
+                        current_idx + 1,
+                        step_count
+                    );
+                    ui.painter().text(
+                        burbuja.center(),
+                        egui::Align2::CENTER_CENTER,
+                        texto.chars().take(72).collect::<String>(),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                        theme.text_primary.gamma_multiply(alpha as f32 / 255.0),
+                    );
+                }
+                // Mientras el morph (<180ms) pide cuadros cortos; al asentar, nada.
+                if progreso < 1.0 {
+                    budget.request(std::time::Duration::from_millis(16));
+                }
+            }
             ui.add_space(grafito_ui::tokens::SPACE_SM);
             // Barra progreso — hairline 4px, sin animación extra
             let (r, _) = ui.allocate_exact_size(
@@ -1164,9 +1565,15 @@ pub fn draw_teaching_overlay(
                             let time = ui.input(|i| i.time);
                             let idx = ((time * 12.0) as usize) % anim_textures.len();
                             let tex = &anim_textures[idx];
-                            let max_w = ui.available_width().max(80.0);
+                            let max_w = ui
+                                .available_width()
+                                .max(grafito_ui::tokens::SPACE_XXL * 2.0);
                             // Clampear altura para no generar "altura enorme al pedo" con texturas retrato
-                            let max_h = 200.0_f32.min(ui.available_height().max(80.0) * 0.6);
+                            let max_h = (grafito_ui::tokens::SPACE_XXL * 5.0).min(
+                                ui.available_height()
+                                    .max(grafito_ui::tokens::SPACE_XXL * 2.0)
+                                    * 0.6,
+                            );
                             let size = tex.size_vec2();
                             let scale_w = (max_w / size.x.max(1.0)).clamp(0.25, 1.0);
                             let scale_h = (max_h / size.y.max(1.0)).clamp(0.25, 1.0);
@@ -1192,7 +1599,7 @@ pub fn draw_teaching_overlay(
                             ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "Animación: {} — {} frames (fallback nativo)",
+                                    "Animación: {} — {} cuadros (reserva nativa)",
                                     template,
                                     anim_textures.len()
                                 ))
@@ -1208,8 +1615,10 @@ pub fn draw_teaching_overlay(
                                 let col = theme.accent.gamma_multiply(0.45 + 0.55 * pulse as f32);
                                 let (rect, _) = ui.allocate_exact_size(
                                     egui::vec2(
-                                        grafito_ui::tokens::SPACE_SM + 2.0,
-                                        grafito_ui::tokens::SPACE_SM + 2.0,
+                                        grafito_ui::tokens::SPACE_SM
+                                            + grafito_ui::tokens::SHADOW_WINDOW_OFFSET_Y,
+                                        grafito_ui::tokens::SPACE_SM
+                                            + grafito_ui::tokens::SHADOW_WINDOW_OFFSET_Y,
                                     ),
                                     egui::Sense::hover(),
                                 );
@@ -1246,7 +1655,7 @@ pub fn draw_teaching_overlay(
                                         ui.label(
                                             egui::RichText::new(ledger)
                                                 .monospace()
-                                                .size(grafito_ui::tokens::TYPE_XS - 1.0)
+                                                .size(grafito_ui::tokens::TYPE_2XS)
                                                 .color(theme.text_secondary),
                                         );
                                     });
@@ -1342,5 +1751,239 @@ pub fn draw_teaching_overlay(
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pista_de_sesion(texto: &str) -> String {
+        let sesion = TeachingSession::for_topic(texto);
+        sesion
+            .steps
+            .first()
+            .map(|s| s.whiteboard_hint.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn pista_para_topico_cubre_13_variantes_cerradas() {
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Derivada),
+            WhiteboardHint::Secante
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Integral),
+            WhiteboardHint::Area
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Limite),
+            WhiteboardHint::Limite
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Funcion),
+            WhiteboardHint::Funcion
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Pitagoras),
+            WhiteboardHint::Pitagoras
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Fraccion),
+            WhiteboardHint::Fraccion
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Vector),
+            WhiteboardHint::Vector
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Matriz),
+            WhiteboardHint::Matriz
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Probabilidad),
+            WhiteboardHint::Probabilidad
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Serie),
+            WhiteboardHint::Serie
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Ecuacion),
+            WhiteboardHint::Ecuacion
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Trigonometria),
+            WhiteboardHint::Trigonometria
+        );
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::Conica),
+            WhiteboardHint::Conica
+        );
+    }
+
+    #[test]
+    fn pista_para_topico_general_cae_en_general() {
+        assert_eq!(
+            pista_para_topico(&TeachingTopic::General("estrellas".into())),
+            WhiteboardHint::General
+        );
+    }
+
+    #[test]
+    fn elementos_para_topico_no_vacios_para_las_14_variantes() {
+        let topicos = [
+            TeachingTopic::Derivada,
+            TeachingTopic::Integral,
+            TeachingTopic::Limite,
+            TeachingTopic::Funcion,
+            TeachingTopic::Pitagoras,
+            TeachingTopic::Fraccion,
+            TeachingTopic::Vector,
+            TeachingTopic::Matriz,
+            TeachingTopic::Probabilidad,
+            TeachingTopic::Serie,
+            TeachingTopic::Ecuacion,
+            TeachingTopic::Trigonometria,
+            TeachingTopic::Conica,
+            TeachingTopic::General("origami".into()),
+        ];
+        for t in topicos {
+            let elems = elementos_para_topico(&t);
+            assert!(!elems.is_empty(), "tópico sin elementos: {t:?}");
+        }
+    }
+
+    #[test]
+    fn hint_legacy_derivada_da_secante_e_integral_da_area() {
+        assert_eq!(
+            hint_for_topic(&pista_de_sesion("derivada de x^2")),
+            WhiteboardHint::Secante
+        );
+        assert_eq!(
+            hint_for_topic(&pista_de_sesion("integral de x^2")),
+            WhiteboardHint::Area
+        );
+    }
+
+    #[test]
+    fn hint_legacy_limite_funcion_pitagoras() {
+        assert_eq!(
+            hint_for_topic("Recta con hueco en a"),
+            WhiteboardHint::Limite
+        );
+        assert_eq!(
+            hint_for_topic("Ejes con puntos (x, f(x))"),
+            WhiteboardHint::Funcion
+        );
+        assert_eq!(
+            hint_for_topic("Triángulo rectángulo con cuadrados en cada lado"),
+            WhiteboardHint::Pitagoras
+        );
+    }
+
+    #[test]
+    fn hint_legacy_fraccion_vector_matriz() {
+        assert_eq!(
+            hint_for_topic("Rectángulo dividido en partes"),
+            WhiteboardHint::Fraccion
+        );
+        assert_eq!(hint_for_topic("Flecha en ejes R²"), WhiteboardHint::Vector);
+        assert_eq!(hint_for_topic("Grilla 2x2"), WhiteboardHint::Matriz);
+    }
+
+    #[test]
+    fn hint_legacy_probabilidad_serie_trigonometria() {
+        assert_eq!(
+            hint_for_topic("Diagrama de árbol"),
+            WhiteboardHint::Probabilidad
+        );
+        assert_eq!(
+            hint_for_topic("Suma parcial que se aproxima"),
+            WhiteboardHint::Serie
+        );
+        assert_eq!(
+            hint_for_topic("Círculo unitario con ángulo"),
+            WhiteboardHint::Trigonometria
+        );
+    }
+
+    #[test]
+    fn hint_legacy_conica_ecuacion_libre_general() {
+        assert_eq!(hint_for_topic("Elipse con focos"), WhiteboardHint::Conica);
+        assert_eq!(
+            hint_for_topic("Parábola y raíces"),
+            WhiteboardHint::Ecuacion
+        );
+        assert_eq!(
+            hint_for_topic("Pizarra libre para trazar"),
+            WhiteboardHint::Libre
+        );
+        assert!(hint_for_topic("").is_vacio_o_libre());
+        assert_eq!(hint_for_topic("origami de papel"), WhiteboardHint::General);
+    }
+
+    #[test]
+    fn hint_pitagoras_tiene_prioridad_sobre_area() {
+        // "triángulo rectángulo" contiene "rectángulo": debe ganar Pitágoras.
+        assert_eq!(
+            hint_for_topic("triángulo rectángulo con cuadrados"),
+            WhiteboardHint::Pitagoras
+        );
+    }
+
+    #[test]
+    fn elementos_para_hint_vacio_y_libre_no_dibujan() {
+        assert!(whiteboard_elements_for_hint("").is_empty());
+        assert!(whiteboard_elements_for_hint("   ").is_empty());
+        assert!(whiteboard_elements_for_hint("Pizarra libre").is_empty());
+    }
+
+    #[test]
+    fn morph_suave_arranca_lento_y_termina_en_uno() {
+        assert_eq!(progreso_morph_suave(0.0), 0.0);
+        assert_eq!(progreso_morph_suave(1.0), 1.0);
+        let medio = progreso_morph_suave(0.5);
+        assert!(medio > 0.5 && medio < 1.0);
+    }
+
+    #[test]
+    fn burbuja_nunca_se_pasa_del_limite() {
+        let limite = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 200.0));
+        let origen = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(60.0, 30.0));
+        let destino = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(900.0, 800.0));
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let r = rect_burbuja_morph(origen, destino, t, limite);
+            assert!(limite.contains_rect(r), "se pasó en t={t}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn acotar_no_rompe_utf8_y_opciones_son_cuatro() {
+        assert!(acotar_texto("áéíóú", 3).chars().count() <= 3);
+        let ejercicio = Exercise {
+            prompt: "Si f(x)=2*x+1, evalúa en x=3".into(),
+            solution: "7".into(),
+            kind: grafito_pedagogy::ExerciseKind::Numeric,
+            difficulty: grafito_pedagogy::ExerciseDifficulty::Medium,
+            lo_id: "x".into(),
+            params: std::collections::HashMap::new(),
+            seed: Some(1),
+            validator: grafito_pedagogy::ValidatorKind::NumericTol(0.02),
+        };
+        let ops = opciones_para_ejercicio(&ejercicio);
+        assert_eq!(ops.len(), 4);
+        assert!(ops.iter().any(|o| o.trim() == "7"));
+        assert!(indice_respuesta_correcta(&ejercicio, &ops).is_some());
+    }
+
+    trait VacioOlibre {
+        fn is_vacio_o_libre(&self) -> bool;
+    }
+    impl VacioOlibre for WhiteboardHint {
+        fn is_vacio_o_libre(&self) -> bool {
+            matches!(self, WhiteboardHint::Vacio | WhiteboardHint::Libre)
+        }
     }
 }
