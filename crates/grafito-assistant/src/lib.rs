@@ -1717,6 +1717,8 @@ fn remote_error_category(error: &str) -> &'static str {
         "budget"
     } else if error.contains("API key") {
         "credential"
+    } else if error.contains("429") || error.contains("rate limit") || error.contains("RateLimit") {
+        "ratelimit"
     } else if error.contains("privacy consent") {
         "privacy"
     } else if error.contains("failed or timed out") {

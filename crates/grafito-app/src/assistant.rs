@@ -2917,6 +2917,11 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         "La consulta remota se canceló antes de completarse.".into()
     } else if error.contains("401") || error.contains("403") || error.contains("unauthorized") {
         format!("La clave de API no es válida o expiró: {error}. Revisá la configuración avanzada.")
+    } else if error.contains("429") || error.contains("rate limit") || error.contains("RateLimit") {
+        // 429 = cuota por minuto del proveedor, no es tu modelo ni tu clave.
+        // Va antes de la rama 404/"model" porque el cuerpo del 429 puede
+        // nombrar al modelo ("Model X rate limited").
+        "Límite de uso del proveedor (429, cuota por minuto). Esperá ~1 minuto y reintentá; no cambies tu modelo ni tu clave.".into()
     } else if error.contains("404") || error.contains("model") {
         format!(
             "El modelo '{}' no está disponible: {error}. Revisá Configuración → Modelo.",
@@ -4181,11 +4186,11 @@ mod tests {
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
         preflight_assistant_flower_scene, preflight_assistant_graph_command,
         preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
-        preflight_assistant_scene, read_bounded_attachment, stage_assistant_parameter,
-        validate_assistant_command, verified_remote_proposals, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
-        AssistantRemoteRoute, AssistantRuntime, LocalAssistantDisposition,
-        RemoteProposalVerification,
+        preflight_assistant_scene, read_bounded_attachment, remote_error_message,
+        stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
+        AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
+        AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
+        LocalAssistantDisposition, RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -4597,6 +4602,25 @@ mod tests {
             ProviderProfile::OpenCodeGo,
             "muse-spark-1.3-contributor",
         ));
+    }
+
+    #[test]
+    fn error_429_reports_quota_not_model_or_key() {
+        // 429 = cuota por minuto, no modelo ni clave: el mensaje no debe
+        // mandar a reconfigurar nada.
+        let quota = remote_error_message(
+            "assistant agent returned HTTP 429: Model muse-spark-1.3-contributor rate limited",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(quota.contains("429"), "menciona el código: {quota}");
+        assert!(
+            quota.contains("Esperá"),
+            "pide esperar, no reconfigurar: {quota}"
+        );
+        assert!(
+            !quota.contains("Revisá Configuración → Modelo"),
+            "no culpa al modelo: {quota}"
+        );
     }
 
     #[test]
