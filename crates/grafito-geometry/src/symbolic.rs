@@ -1095,6 +1095,76 @@ pub fn parametric_derivative(x_expr: &str, y_expr: &str, var: &str) -> Result<St
 /// devuelve `"y = m*x + b"` (o `"y = b"` si `m≈0`). Si no converge,
 /// devuelve `LimitDoesNotExist` o `Unsupported`. No usa `unwrap` y respeta
 /// presupuestos de entrada.
+/// Estimador genérico para límites en infinito: convergencia dentro de `1e-7+1e-6·scale`.
+/// Extraído de `asymptote_typed:estimate_limit` para reuso en `limit_infinite_typed`.
+fn estimate_limit_values(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let last = *values.last()?;
+    if !last.is_finite() {
+        return None;
+    }
+    let scale = values.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+    let tol = 1e-7 + 1e-6 * scale;
+    if values
+        .iter()
+        .all(|v| v.is_finite() && (v - last).abs() <= tol)
+    {
+        Some(last)
+    } else {
+        None
+    }
+}
+
+/// Cálculo de pendiente y ordenada al origen para asíntota vía muestreo secante.
+/// Extraído de `asymptote_typed:try_direction` para reuso.
+fn try_asymptote_direction(ast: &Expr, var: &str, direction: f64) -> Option<(f64, f64)> {
+    const SCALES: [f64; 4] = [1e6, 1e8, 1e10, 1e12];
+    let mut xs = Vec::with_capacity(SCALES.len());
+    let mut ys = Vec::with_capacity(SCALES.len());
+    for &scale in &SCALES {
+        let x = direction * scale;
+        let fx = ast.eval_at(var, x);
+        if !fx.is_finite() || !x.is_finite() || x == 0.0 {
+            return None;
+        }
+        xs.push(x);
+        ys.push(fx);
+    }
+    let mut m_vals = Vec::with_capacity(SCALES.len() - 1);
+    for i in 0..xs.len() - 1 {
+        let dx = xs[i + 1] - xs[i];
+        let dy = ys[i + 1] - ys[i];
+        if dx == 0.0 || !dx.is_finite() || !dy.is_finite() {
+            return None;
+        }
+        let m = dy / dx;
+        if !m.is_finite() {
+            return None;
+        }
+        m_vals.push(m);
+    }
+    let m = estimate_limit_values(&m_vals)?;
+    let mut b_vals = Vec::with_capacity(xs.len());
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let b = y - m * x;
+        if !b.is_finite() {
+            return None;
+        }
+        b_vals.push(b);
+    }
+    // Usa cola de 3 para b: el primer punto 1e6 puede estar 3e-6 lejos y exceder tol 2.1e-6,
+    // pero la cola 1e8..1e12 ya converge (2.97e-08 < tol). Sin esto (2*x+1)/(x-1) fallaría.
+    let b = if b_vals.len() >= 3 {
+        estimate_limit_values(&b_vals[b_vals.len() - 3..])
+            .or_else(|| estimate_limit_values(&b_vals))?
+    } else {
+        estimate_limit_values(&b_vals)?
+    };
+    Some((m, b))
+}
+
 pub fn asymptote_typed(expr: &str, var: &str) -> MathResult<String> {
     if !is_math_identifier(var) {
         return MathResult::DomainError(MathError::InvalidExpression {
@@ -1108,73 +1178,8 @@ pub fn asymptote_typed(expr: &str, var: &str) -> MathResult<String> {
         Err(error) => return math_failure(error),
     };
 
-    let estimate_limit = |values: &[f64]| -> Option<f64> {
-        if values.is_empty() {
-            return None;
-        }
-        let last = *values.last()?;
-        if !last.is_finite() {
-            return None;
-        }
-        let scale = values.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
-        let tol = 1e-7 + 1e-6 * scale;
-        if values
-            .iter()
-            .all(|v| v.is_finite() && (v - last).abs() <= tol)
-        {
-            Some(last)
-        } else {
-            None
-        }
-    };
-
-    let try_direction = |direction: f64| -> Option<(f64, f64)> {
-        // Escalas crecientes para aproximar el infinito. Se usa muestreo
-        // diferenciado para que `m` sea la pendiente secante entre puntos
-        // lejanos: más estable que `f/x` cuando el error de `m` se amplifica
-        // por `x` al calcular `b`.
-        const SCALES: [f64; 4] = [1e6, 1e8, 1e10, 1e12];
-        let mut xs = Vec::with_capacity(SCALES.len());
-        let mut ys = Vec::with_capacity(SCALES.len());
-        for &scale in &SCALES {
-            let x = direction * scale;
-            let fx = ast.eval_at(var, x);
-            if !fx.is_finite() || !x.is_finite() || x == 0.0 {
-                return None;
-            }
-            xs.push(x);
-            ys.push(fx);
-        }
-        // Pendientes secantes entre pares consecutivos → estiman `m`.
-        let mut m_vals = Vec::with_capacity(SCALES.len() - 1);
-        for i in 0..xs.len() - 1 {
-            let dx = xs[i + 1] - xs[i];
-            let dy = ys[i + 1] - ys[i];
-            if dx == 0.0 || !dx.is_finite() || !dy.is_finite() {
-                return None;
-            }
-            let m = dy / dx;
-            if !m.is_finite() {
-                return None;
-            }
-            m_vals.push(m);
-        }
-        let m = estimate_limit(&m_vals)?;
-        // Ordenadas al origen `b = y - m·x` evaluadas en los mismos puntos.
-        let mut b_vals = Vec::with_capacity(xs.len());
-        for (&x, &y) in xs.iter().zip(ys.iter()) {
-            let b = y - m * x;
-            if !b.is_finite() {
-                return None;
-            }
-            b_vals.push(b);
-        }
-        let b = estimate_limit(&b_vals)?;
-        Some((m, b))
-    };
-
-    let pos = try_direction(1.0);
-    let neg = try_direction(-1.0);
+    let pos = try_asymptote_direction(&ast, var, 1.0);
+    let neg = try_asymptote_direction(&ast, var, -1.0);
 
     let format_asymptote = |m: f64, b: f64| -> String {
         const EPS: f64 = 1e-9;
@@ -1215,6 +1220,276 @@ pub fn asymptote_typed(expr: &str, var: &str) -> MathResult<String> {
 /// Adaptador compatible de [`asymptote_typed`].
 pub fn asymptote(expr: &str, var: &str) -> Result<String, String> {
     adapt_symbolic_result(asymptote_typed(expr, var))
+}
+
+// ---------------------------------------------------------------------------
+// Límites en ±∞ genéricos: extrae estimate_limit/try_direction de asymptote
+// y añade sustitución t=1/x + detección de oscilatorios.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::match_like_matches_macro)]
+fn is_bounded_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Const(_)
+            | Expr::Sin(_)
+            | Expr::Cos(_)
+            | Expr::Atan(_)
+            | Expr::Atanh(_)
+            | Expr::Tanh(_)
+            | Expr::Asin(_)
+            | Expr::Acos(_)
+    )
+}
+
+fn contains_unbounded_oscillatory(expr: &Expr, var: &str) -> bool {
+    use Expr::*;
+    match expr {
+        Sin(arg) | Cos(arg) | Tan(arg) | Sec(arg) | Csc(arg) | Cot(arg) => {
+            if contains_var(arg, var) {
+                return true;
+            }
+            contains_unbounded_oscillatory(arg, var)
+        }
+        Neg(inner) | Asin(inner) | Acos(inner) | Atan(inner) | Exp(inner) | Ln(inner)
+        | Log(inner) | Sqrt(inner) | Abs(inner) | Sinh(inner) | Cosh(inner) | Tanh(inner)
+        | Asinh(inner) | Acosh(inner) | Atanh(inner) | Cbrt(inner) | Re(inner) | Im(inner)
+        | Arg(inner) | Conj(inner) | Erf(inner) | Erfc(inner) | Gamma(inner) | LnGamma(inner)
+        | Digamma(inner) | Trigamma(inner) | Floor(inner) | Ceil(inner) | Round(inner)
+        | Sign(inner) | Heaviside(inner) => contains_unbounded_oscillatory(inner, var),
+        Add(left, right)
+        | Sub(left, right)
+        | Mul(left, right)
+        | Div(left, right)
+        | Pow(left, right)
+        | Atan2(left, right)
+        | Modulo(left, right)
+        | Min(left, right)
+        | Max(left, right)
+        | Beta(left, right)
+        | BesselJ(left, right)
+        | BesselY(left, right)
+        | BesselI(left, right)
+        | Lt(left, right)
+        | Gt(left, right)
+        | Le(left, right)
+        | Ge(left, right)
+        | Eq(left, right)
+        | Ne(left, right) => {
+            contains_unbounded_oscillatory(left, var) || contains_unbounded_oscillatory(right, var)
+        }
+        Clamp(v, lo, hi) => {
+            contains_unbounded_oscillatory(v, var)
+                || contains_unbounded_oscillatory(lo, var)
+                || contains_unbounded_oscillatory(hi, var)
+        }
+        Sum(body, _, s, e) | Product(body, _, s, e) => {
+            contains_unbounded_oscillatory(body, var)
+                || contains_unbounded_oscillatory(s, var)
+                || contains_unbounded_oscillatory(e, var)
+        }
+        Piecewise(branches, default) => {
+            branches.iter().any(|(c, v)| {
+                contains_unbounded_oscillatory(c, var) || contains_unbounded_oscillatory(v, var)
+            }) || contains_unbounded_oscillatory(default, var)
+        }
+        Const(_) | Var(_) => false,
+    }
+}
+
+fn has_proven_squeezed_zero_at_infinity(expr: &Expr, var: &str) -> bool {
+    if let Expr::Mul(left, right) = expr {
+        let left_bounded = is_bounded_expr(left) || contains_unbounded_oscillatory(left, var);
+        let right_bounded = is_bounded_expr(right) || contains_unbounded_oscillatory(right, var);
+        let left_zero = sample_tends_to_zero(left, var);
+        let right_zero = sample_tends_to_zero(right, var);
+        if (left_bounded && right_zero) || (right_bounded && left_zero) {
+            return true;
+        }
+    }
+    if let Expr::Div(num, den) = expr {
+        let num_bounded = is_bounded_expr(num) || contains_unbounded_oscillatory(num, var);
+        if num_bounded && matches!(den.as_ref(), Expr::Var(name) if name == var) {
+            return true;
+        }
+        if num_bounded && expr_is_linear_in(den, var) {
+            if let Some((a, _)) = expr_linear_coeff(den, var) {
+                if a.abs() > 1e-12 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn sample_tends_to_zero(expr: &Expr, var: &str) -> bool {
+    const SCALES: [f64; 4] = [1e6, 1e8, 1e10, 1e12];
+    let mut vals = Vec::with_capacity(SCALES.len());
+    for &s in &SCALES {
+        let v = expr.eval_at(var, s);
+        if !v.is_finite() {
+            return false;
+        }
+        vals.push(v.abs());
+    }
+    let last = *vals.last().unwrap_or(&f64::INFINITY);
+    last < 1e-6 && vals.windows(2).all(|w| w[1] <= w[0] * 0.6)
+}
+
+fn sample_limit_at_infinity(ast: &Expr, var: &str, direction: f64) -> Option<LimitEstimate> {
+    const SCALES: [f64; 4] = [1e6, 1e8, 1e10, 1e12];
+    let mut values = Vec::with_capacity(SCALES.len());
+    for &scale in &SCALES {
+        let x = direction * scale;
+        let fx = ast.eval_at(var, x);
+        if !fx.is_finite() {
+            return None;
+        }
+        values.push(fx);
+    }
+    let limit = estimate_limit_values(&values)?;
+    let scale = values.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+    let spread = values
+        .iter()
+        .map(|v| (v - limit).abs())
+        .fold(0.0_f64, f64::max);
+    let error = spread.max(1e-9 + 1e-6 * scale);
+    if !limit.is_finite() || !error.is_finite() {
+        return None;
+    }
+    Some(LimitEstimate {
+        value: limit,
+        error_estimate: error,
+    })
+}
+
+fn estimate_via_substitution(ast: &Expr, var: &str, direction: f64) -> Option<LimitEstimate> {
+    const T_SCALES: [f64; 6] = [1e-2, 1e-3, 1e-4, 1e-6, 1e-8, 1e-10];
+    let mut values = Vec::with_capacity(T_SCALES.len());
+    for &t in &T_SCALES {
+        if t == 0.0 || !t.is_finite() {
+            return None;
+        }
+        let x = direction / t;
+        if !x.is_finite() {
+            return None;
+        }
+        let fx = ast.eval_at(var, x);
+        if !fx.is_finite() {
+            return None;
+        }
+        values.push(fx);
+    }
+    let tail = &values[values.len() - 3..];
+    let limit = estimate_limit_values(tail)?;
+    let scale = tail.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
+    let spread = tail
+        .iter()
+        .map(|v| (v - limit).abs())
+        .fold(0.0_f64, f64::max);
+    let error = spread.max(1e-9 + 1e-6 * scale);
+    (limit.is_finite() && error.is_finite() && error <= limit_tolerance(limit)).then_some(
+        LimitEstimate {
+            value: limit,
+            error_estimate: error,
+        },
+    )
+}
+
+fn has_unresolved_oscillatory_at_infinity(expr: &Expr, var: &str) -> bool {
+    if has_proven_squeezed_zero_at_infinity(expr, var) {
+        return false;
+    }
+    contains_unbounded_oscillatory(expr, var)
+}
+
+/// Límite genérico en ±∞ vía muestreo y sustitución t=1/x.
+///
+/// Calcula `lim_{var→±∞} f(var)` con `m = lim f/x` y `b = lim f−m·x` implícitos
+/// en la estimación por muestreo secante heredada de `asymptote`. Si la función
+/// es oscilatoria no amortiguada, devuelve `DomainError(LimitDoesNotExist)`.
+/// La sustitución `t=1/x` se usa como segundo intento (Richardson en t→0).
+pub fn limit_infinite_typed(expr: &str, var: &str, positive: bool) -> MathResult<f64> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Limit,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::Limit,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::Limit) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    let direction = if positive { 1.0 } else { -1.0 };
+    let at = if positive {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
+
+    if has_proven_squeezed_zero_at_infinity(&ast, var) {
+        return MathResult::Approximate {
+            value: 0.0,
+            error_estimate: 0.0,
+        };
+    }
+    if has_unresolved_oscillatory_at_infinity(&ast, var) {
+        return MathResult::DomainError(MathError::LimitDoesNotExist {
+            expression: expr.into(),
+            variable: var.into(),
+            at,
+        });
+    }
+
+    if let Some(est) = sample_limit_at_infinity(&ast, var, direction) {
+        return MathResult::Approximate {
+            value: est.value,
+            error_estimate: est.error_estimate,
+        };
+    }
+    if let Some(est) = estimate_via_substitution(&ast, var, direction) {
+        return MathResult::Approximate {
+            value: est.value,
+            error_estimate: est.error_estimate,
+        };
+    }
+    if let Some((m, b)) = try_asymptote_direction(&ast, var, direction) {
+        if m.abs() > 1e-12 {
+            return MathResult::DomainError(MathError::LimitDoesNotExist {
+                expression: expr.into(),
+                variable: var.into(),
+                at,
+            });
+        }
+        return MathResult::Approximate {
+            value: b,
+            error_estimate: limit_tolerance(b),
+        };
+    }
+    MathResult::DomainError(MathError::LimitDoesNotExist {
+        expression: expr.into(),
+        variable: var.into(),
+        at,
+    })
+}
+
+/// Atajo para límite en +∞.
+pub fn limit_pos_infinity_typed(expr: &str, var: &str) -> MathResult<f64> {
+    limit_infinite_typed(expr, var, true)
+}
+
+/// Atajo para límite en −∞.
+pub fn limit_neg_infinity_typed(expr: &str, var: &str) -> MathResult<f64> {
+    limit_infinite_typed(expr, var, false)
 }
 
 /// Límite para factorización prima (1e12) — respeta MAX y evita explosión.
@@ -2059,12 +2334,35 @@ pub fn expand(expr: &str) -> Result<String, String> {
 /// Para expresiones fuera de este subconjunto devuelve la expresión original:
 /// es preferible no factorizar a publicar factores numéricos incompletos.
 pub fn factor(expr: &str, var: &str) -> Result<String, String> {
+    if !is_math_identifier(var) {
+        return Err(format!("variable '{var}' no es un identificador válido"));
+    }
     let pp = expr.replace(' ', "");
     let ast = parse_ast(&pp).map_err(|e| format!("No se pudo factorizar '{expr}': {e}"))?;
     let simplified = simplify_expr(&ast);
-    let Some(coeffs) = collect_polynomial_coeffs(&simplified, var, 2) else {
+    // Detección honesta de grado con cota amplia para distinguir grado>2 de no-polinomio.
+    let Some(coeffs_wide) = collect_polynomial_coeffs(&simplified, var, 64) else {
         return Ok(pp);
     };
+    if coeffs_wide
+        .iter()
+        .any(|coefficient| !coefficient.is_finite())
+    {
+        return Ok(pp);
+    }
+    let degree_opt = coeffs_wide
+        .iter()
+        .rposition(|coefficient| *coefficient != 0.0);
+    let Some(degree) = degree_opt else {
+        return Ok("0".to_string());
+    };
+    if degree > 2 {
+        return Err("grado>2 no soportado: factor solo soporta grado 1-2".to_string());
+    }
+    if degree == 0 {
+        return Ok(pp);
+    }
+    let coeffs = coeffs_wide;
     if coeffs.iter().any(|coefficient| !coefficient.is_finite()) {
         return Ok(pp);
     }
@@ -2130,6 +2428,71 @@ pub fn factor(expr: &str, var: &str) -> Result<String, String> {
     };
 
     Ok(factors.join(" * "))
+}
+
+/// Variante tipada de [`factor`] con errores estructurados.
+///
+/// Para grado>2 devuelve `Unsupported` con razón `"grado>2 no soportado"`,
+/// preservando el camino feliz grado 1-2 idéntico a [`factor`].
+pub fn factor_typed(expr: &str, var: &str) -> MathResult<String> {
+    if expr.len() > MAX_MATH_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::SymbolicDerivative,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_MATH_INPUT_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::SymbolicDerivative,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::SymbolicDerivative) {
+        Ok(ast) => ast,
+        Err(error) => return math_failure(error),
+    };
+    let simplified = simplify_expr(&ast);
+    if let Some(coeffs) = collect_polynomial_coeffs(&simplified, var, 64) {
+        if let Some(degree) = coeffs.iter().rposition(|c| *c != 0.0) {
+            if degree > 2 {
+                return MathResult::Unsupported(MathError::DerivativeUnavailable {
+                    expression: expr.into(),
+                    variable: var.into(),
+                    reason: "grado>2 no soportado".into(),
+                });
+            }
+        }
+    }
+    match factor(expr, var) {
+        Ok(value) => {
+            if value.len() > MAX_MATH_INPUT_BYTES {
+                MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::SymbolicDerivative,
+                    provided_bytes: value.len(),
+                    maximum_bytes: MAX_MATH_INPUT_BYTES,
+                })
+            } else {
+                MathResult::Exact(value)
+            }
+        }
+        Err(reason) => {
+            if reason.contains("grado>2") {
+                MathResult::Unsupported(MathError::DerivativeUnavailable {
+                    expression: expr.into(),
+                    variable: var.into(),
+                    reason,
+                })
+            } else {
+                MathResult::DomainError(MathError::InvalidExpression {
+                    operation: MathOperation::SymbolicDerivative,
+                    expression: expr.into(),
+                    reason,
+                })
+            }
+        }
+    }
 }
 
 fn preserves_linear_coefficients(leading: f64, root: f64, constant: f64) -> bool {
@@ -2660,6 +3023,198 @@ fn integrate_expr(e: &Expr, var: &str) -> Option<Expr> {
     integrate_expr_depth(e, var, 0)
 }
 
+/// Helpers para detección lineal `a·x + b` (funde tabla symbolic:2663 + fallback ast:2841).
+fn expr_is_linear_in(expr: &Expr, var: &str) -> bool {
+    use Expr::*;
+    match expr {
+        Var(name) => name == var,
+        Const(_) => true,
+        Neg(inner) => expr_is_linear_in(inner, var),
+        Add(left, right) | Sub(left, right) => {
+            expr_is_linear_in(left, var) && expr_is_linear_in(right, var)
+        }
+        Mul(left, right) => {
+            if let Const(_) = left.as_ref() {
+                expr_is_linear_in(right, var)
+            } else if let Const(_) = right.as_ref() {
+                expr_is_linear_in(left, var)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn expr_linear_coeff(expr: &Expr, var: &str) -> Option<(f64, f64)> {
+    use Expr::*;
+    match expr {
+        Var(name) if name == var => Some((1.0, 0.0)),
+        Const(value) if value.is_finite() => Some((0.0, *value)),
+        Neg(inner) => {
+            let (a, b) = expr_linear_coeff(inner, var)?;
+            Some((-a, -b))
+        }
+        Add(left, right) => {
+            let (a1, b1) = expr_linear_coeff(left, var)?;
+            let (a2, b2) = expr_linear_coeff(right, var)?;
+            let a = a1 + a2;
+            let b = b1 + b2;
+            (a.is_finite() && b.is_finite()).then_some((a, b))
+        }
+        Sub(left, right) => {
+            let (a1, b1) = expr_linear_coeff(left, var)?;
+            let (a2, b2) = expr_linear_coeff(right, var)?;
+            let a = a1 - a2;
+            let b = b1 - b2;
+            (a.is_finite() && b.is_finite()).then_some((a, b))
+        }
+        Mul(left, right) => {
+            if let Const(coeff) = left.as_ref() {
+                let (a, b) = expr_linear_coeff(right, var)?;
+                let a2 = coeff * a;
+                let b2 = coeff * b;
+                (a2.is_finite() && b2.is_finite()).then_some((a2, b2))
+            } else if let Const(coeff) = right.as_ref() {
+                let (a, b) = expr_linear_coeff(left, var)?;
+                let a2 = coeff * a;
+                let b2 = coeff * b;
+                (a2.is_finite() && b2.is_finite()).then_some((a2, b2))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Detecta `sec(a·x+b)^2` y devuelve `tan(a·x+b)/a`.
+fn try_sec_squared_form(expr: &Expr, var: &str) -> Option<Expr> {
+    use Expr::*;
+    if let Pow(base, exp) = expr {
+        if let Const(n) = exp.as_ref() {
+            if (*n - 2.0).abs() < 1e-12 {
+                if let Sec(arg) = base.as_ref() {
+                    if expr_is_linear_in(arg, var) {
+                        let (a, _) = expr_linear_coeff(arg, var)?;
+                        if a.abs() > 1e-12 {
+                            return Some(Mul(Box::new(Const(1.0 / a)), Box::new(Tan(arg.clone()))));
+                        }
+                    }
+                }
+            }
+            if (*n - 2.0).abs() < 1e-12 {
+                if let Csc(arg) = base.as_ref() {
+                    if expr_is_linear_in(arg, var) {
+                        let (a, _) = expr_linear_coeff(arg, var)?;
+                        if a.abs() > 1e-12 {
+                            return Some(Mul(
+                                Box::new(Const(-1.0 / a)),
+                                Box::new(Cot(arg.clone())),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Mul(left, right) = expr {
+        if let (Sec(arg1), Sec(arg2)) = (left.as_ref(), right.as_ref()) {
+            if arg1 == arg2 && expr_is_linear_in(arg1, var) {
+                let (a, _) = expr_linear_coeff(arg1, var)?;
+                if a.abs() > 1e-12 {
+                    return Some(Mul(Box::new(Const(1.0 / a)), Box::new(Tan(arg1.clone()))));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detecta `c / (x² + a²)` → `(c/a)·atan(x/a)` con `a = sqrt(a²)`.
+fn try_atan_form(expr: &Expr, var: &str) -> Option<Expr> {
+    use Expr::*;
+    let (num, den) = match expr {
+        Div(n, d) => (n.as_ref(), d.as_ref()),
+        _ => return None,
+    };
+    if contains_var(num, var) {
+        return None;
+    }
+    let coeff = constant_scalar_value(num)?;
+    if !coeff.is_finite() {
+        return None;
+    }
+    let (pow_base, pow_exp, const_val) = match den {
+        Add(left, right) => match (left.as_ref(), right.as_ref()) {
+            (Pow(b, e), Const(k)) => (b.as_ref(), e.as_ref(), *k),
+            (Const(k), Pow(b, e)) => (b.as_ref(), e.as_ref(), *k),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let Const(exp_val) = pow_exp else {
+        return None;
+    };
+    if (*exp_val - 2.0).abs() >= 1e-12 {
+        return None;
+    }
+    let Var(name) = pow_base else {
+        return None;
+    };
+    if name != var {
+        return None;
+    }
+    if !const_val.is_finite() || const_val <= 0.0 {
+        return None;
+    }
+    let a = const_val.sqrt();
+    if !a.is_finite() || a == 0.0 {
+        return None;
+    }
+    let factor = coeff / a;
+    if !factor.is_finite() {
+        return None;
+    }
+    Some(Mul(
+        Box::new(Const(factor)),
+        Box::new(Atan(Box::new(Div(
+            Box::new(Var(var.to_string())),
+            Box::new(Const(a)),
+        )))),
+    ))
+}
+
+/// Intento genérico por partes `∫u·dv = u·v − ∫v·du`.
+fn try_generic_parts(expr: &Expr, var: &str, depth: u32) -> Option<Expr> {
+    use Expr::*;
+    const MAX_PARTS_DEPTH: u32 = 256;
+    if depth > MAX_PARTS_DEPTH {
+        return None;
+    }
+    let (left, right) = match expr {
+        Mul(a, b) => (a.as_ref(), b.as_ref()),
+        _ => return None,
+    };
+    for (u_cand, dv_cand) in [(left, right), (right, left)] {
+        let v = integrate_expr_depth(dv_cand, var, depth + 1).or_else(|| dv_cand.integrate(var))?;
+        let du = diff_expr(u_cand, var);
+        let du_s = simplify_expr(&du);
+        if is_identically_zero(&du_s) {
+            continue;
+        }
+        let v_du = Mul(Box::new(v.clone()), Box::new(du_s));
+        let int_vdu =
+            integrate_expr_depth(&v_du, var, depth + 1).or_else(|| v_du.integrate(var))?;
+        let uv = Mul(Box::new(u_cand.clone()), Box::new(v));
+        let result = Sub(Box::new(uv), Box::new(int_vdu));
+        let simplified = simplify_expr(&result);
+        return Some(simplified);
+    }
+    None
+}
+
+#[allow(clippy::collapsible_match)]
 fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
     const MAX_INTEGRATE_DEPTH: u32 = 256;
     if depth > MAX_INTEGRATE_DEPTH {
@@ -2669,6 +3224,12 @@ fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
     let v = var.to_string();
     if !contains_var(e, var) {
         return Some(Mul(Box::new(e.clone()), Box::new(Var(v))));
+    }
+    if let Some(sec_form) = try_sec_squared_form(e, var) {
+        return Some(sec_form);
+    }
+    if let Some(atan_form) = try_atan_form(e, var) {
+        return Some(atan_form);
     }
     let rec = |x: &Expr| integrate_expr_depth(x, var, depth + 1);
     Some(match e {
@@ -2691,6 +3252,8 @@ fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
                 Mul(a.clone(), Box::new(rec(b)?))
             } else if !contains_var(b, var) {
                 Mul(Box::new(rec(a)?), b.clone())
+            } else if let Some(parts) = try_generic_parts(e, var, depth) {
+                return Some(parts);
             } else {
                 return None;
             }
@@ -2730,20 +3293,66 @@ fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
             }
             return None;
         }
-        Sin(u) if matches!(u.as_ref(), Var(name) if name == var) => {
-            Neg(Box::new(Cos(Box::new(Var(v.clone())))))
+        Sin(arg) => {
+            if expr_is_linear_in(arg, var) {
+                let (a, _) = expr_linear_coeff(arg, var)?;
+                if a.abs() < 1e-12 {
+                    return None;
+                }
+                Mul(Box::new(Const(-1.0 / a)), Box::new(Cos(arg.clone())))
+            } else {
+                return None;
+            }
         }
-        Cos(u) if matches!(u.as_ref(), Var(name) if name == var) => Sin(Box::new(Var(v.clone()))),
-        Exp(u) if matches!(u.as_ref(), Var(name) if name == var) => Exp(Box::new(Var(v.clone()))),
-        Ln(u) if matches!(u.as_ref(), Var(name) if name == var) => {
-            // ∫ ln(x) dx = x·ln(x) − x
-            Sub(
-                Box::new(Mul(
-                    Box::new(Var(v.clone())),
-                    Box::new(Ln(Box::new(Var(v.clone())))),
-                )),
+        Cos(arg) => {
+            if expr_is_linear_in(arg, var) {
+                let (a, _) = expr_linear_coeff(arg, var)?;
+                if a.abs() < 1e-12 {
+                    return None;
+                }
+                Mul(Box::new(Const(1.0 / a)), Box::new(Sin(arg.clone())))
+            } else {
+                return None;
+            }
+        }
+        Tan(arg) => {
+            if expr_is_linear_in(arg, var) {
+                let (a, _) = expr_linear_coeff(arg, var)?;
+                if a.abs() < 1e-12 {
+                    return None;
+                }
+                Mul(
+                    Box::new(Const(-1.0 / a)),
+                    Box::new(Ln(Box::new(Abs(Box::new(Cos(arg.clone())))))),
+                )
+            } else {
+                return None;
+            }
+        }
+        Exp(arg) => {
+            if expr_is_linear_in(arg, var) {
+                let (a, _) = expr_linear_coeff(arg, var)?;
+                if a.abs() < 1e-12 {
+                    return None;
+                }
+                if (a - 1.0).abs() < 1e-12 {
+                    Exp(arg.clone())
+                } else {
+                    Mul(Box::new(Const(1.0 / a)), Box::new(Exp(arg.clone())))
+                }
+            } else {
+                return None;
+            }
+        }
+        Ln(u) if matches!(u.as_ref(), Var(name) if name == var) => Sub(
+            Box::new(Mul(
                 Box::new(Var(v.clone())),
-            )
+                Box::new(Ln(Box::new(Var(v.clone())))),
+            )),
+            Box::new(Var(v.clone())),
+        ),
+        Sec(_arg) => {
+            return None;
         }
         _ => return None,
     })
@@ -5386,5 +5995,113 @@ mod tests {
         assert!(integrate_definite("abs(x)", "x", -1.0, 1.0)
             .unwrap()
             .contains('\u{2248}'));
+    }
+
+    // ——— Misión 3-en-1: tests que fallarían antes del fix honesto ———
+
+    #[test]
+    fn factor_rejects_degree_greater_than_two_honestly() {
+        let err = factor("x^3 + 2*x + 1", "x").expect_err("grado>2 debe ser Err");
+        assert!(
+            err.contains("grado>2"),
+            "mensaje debe contener grado>2, got {err}"
+        );
+        assert!(matches!(
+            factor_typed("x^3 + 2*x + 1", "x"),
+            MathResult::Unsupported(MathError::DerivativeUnavailable { reason, .. }) if reason.contains("grado>2")
+        ));
+        assert!(factor("x^2 - 4", "x").is_ok());
+        assert!(factor("x + 2", "x").is_ok());
+        assert!(matches!(factor_typed("x^2 - 4", "x"), MathResult::Exact(_)));
+    }
+
+    #[test]
+    fn integrate_sin_linear_and_exp_linear() {
+        let prim_sin = integrate("sin(2*x+1)", "x").expect("sin(2*x+1) debe integrar");
+        let d_sin = derivative(&prim_sin, "x").expect("derivada de prim sin");
+        for &xv in &[0.0, 0.5, 1.2] {
+            let orig = eval_result("sin(2*x+1)", "x", xv);
+            let got = eval_result(&d_sin, "x", xv);
+            assert!(
+                (orig - got).abs() < 1e-8,
+                "sin(2*x+1) prim deriv mismatch at {xv}: {orig} vs {got} prim={prim_sin} d={d_sin}"
+            );
+        }
+        let prim_exp = integrate("exp(3*x)", "x").expect("exp(3*x) debe integrar");
+        let d_exp = derivative(&prim_exp, "x").expect("derivada de prim exp");
+        for &xv in &[0.0, 0.5, 1.2] {
+            let orig = eval_result("exp(3*x)", "x", xv);
+            let got = eval_result(&d_exp, "x", xv);
+            assert!(
+                (orig - got).abs() < 1e-6,
+                "exp(3*x) prim deriv mismatch at {xv}: {orig} vs {got}"
+            );
+        }
+        assert!(matches!(
+            integrate_typed("sin(2*x+1)", "x"),
+            MathResult::Exact(_)
+        ));
+        assert!(matches!(
+            integrate_typed("exp(3*x)", "x"),
+            MathResult::Exact(_)
+        ));
+    }
+
+    #[test]
+    fn integrate_sec_squared_and_atan_forms() {
+        let prim_sec = integrate("sec(x)^2", "x").expect("sec^2 -> tan");
+        assert!(prim_sec.contains("tan"), "got {prim_sec}");
+        let d_sec = derivative(&prim_sec, "x").unwrap();
+        for &xv in &[0.2, 0.5] {
+            let orig = eval_result("sec(x)^2", "x", xv);
+            let got = eval_result(&d_sec, "x", xv);
+            assert!((orig - got).abs() < 1e-7, "sec^2 mismatch at {xv}");
+        }
+        let prim_atan = integrate("1/(x^2+1)", "x").expect("1/(x^2+1) -> atan");
+        assert!(prim_atan.contains("atan"), "got {prim_atan}");
+        let d_atan = derivative(&prim_atan, "x").unwrap();
+        for &xv in &[0.0, 0.5, 1.2] {
+            let orig = eval_result("1/(x^2+1)", "x", xv);
+            let got = eval_result(&d_atan, "x", xv);
+            assert!((orig - got).abs() < 1e-9, "atan form mismatch at {xv}");
+        }
+        assert!(matches!(
+            integrate_typed("sin(x)/x", "x"),
+            MathResult::Unsupported(MathError::AntiderivativeUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn limit_infinite_via_asymptote_and_substitution() {
+        match limit_infinite_typed("(2*x+1)/(x-1)", "x", true) {
+            MathResult::Approximate { value, .. } => {
+                assert!((value - 2.0).abs() < 1e-4, "expected 2, got {value}")
+            }
+            r => panic!("expected approximate 2, got {r:?}"),
+        }
+        assert!(matches!(
+            limit_infinite_typed("sin(x)", "x", true),
+            MathResult::DomainError(MathError::LimitDoesNotExist { at, .. }) if at.is_infinite()
+        ));
+        assert!(matches!(
+            limit_infinite_typed("cos(x)", "x", true),
+            MathResult::DomainError(MathError::LimitDoesNotExist { .. })
+        ));
+        match limit_infinite_typed("sin(x)/x", "x", true) {
+            MathResult::Approximate { value, .. } => {
+                assert!(value.abs() < 1e-6, "squeezed sin/x -> 0, got {value}")
+            }
+            r => panic!("expected squeezed 0, got {r:?}"),
+        }
+        match limit_infinite_typed("1/x", "x", true) {
+            MathResult::Approximate { value, .. } => {
+                assert!(value.abs() < 1e-6, "1/x at +∞ -> 0, got {value}")
+            }
+            r => panic!("expected 0, got {r:?}"),
+        }
+        assert!(matches!(
+            limit_infinite_typed("x", "x", true),
+            MathResult::DomainError(MathError::LimitDoesNotExist { .. })
+        ));
     }
 }

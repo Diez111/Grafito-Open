@@ -1,0 +1,53 @@
+# A16-13 Scope de mutación por crate (cargo-mutants 24.11.1) — G17 deuda
+#
+# Uso en CI (job `mutation`, semanal + workflow_dispatch):
+#   cargo install cargo-mutants --version 24.11.1 --locked
+#   cargo mutants --workspace --timeout 60 --in-place -- --locked
+#   # Variante shardeada (no activa en CI actual, documentada para PRs diff):
+#   # cargo mutants --workspace --timeout 60 --shard k/4 --in-place -- --locked
+#   # En PRs de diff, añadir `--in-diff <(git diff -U0 main...HEAD)` para mutar
+#   # sólo lo tocado (el scope de abajo sigue aplicando como allowlist).
+#
+# Scope real (informativo, sin gate % en CI): core, geometry, command, render,
+# app. Fuera: pedagogy, assistant, anim, classroom, plugins, whiteboard,
+# complex, profile, ggb (no en `examine_globs`; ver `exclude_globs`).
+# Estado G17: CI `mutation` es informativo (no falla por caught%); la promesa
+# previa `caught >80%` se retira hasta implementar parseo de `caught%` con
+# `fail-under` en CI. Próximo paso: medir `caught%` por crate y gatear 80%
+# cuando el harness sea estable.
+#
+# NOTA: este archivo fija scope + timeout (60s). El shard activo (k/4) lo fija
+# la matriz de CI si se shardea; el gate % lo fijará CI cuando se implemente.
+
+# Timeout por mutante: fallos colgados (deadlocks, sleeps) no queman CI.
+# Alineado con `.github/workflows/ci.yml:mutation` (60s).
+timeout = 60
+
+# Scope A16: cerebro en orden de dependencia + app.
+# core → geometry → command → render → app (el DAG real es
+# geometry/complex/render → core → command → app; el orden de la lista
+# es el de ejecución sugerido del plan W1-W6).
+examine_globs = [
+    "crates/grafito-core/src/**/*.rs",
+    "crates/grafito-geometry/src/**/*.rs",
+    "crates/grafito-command/src/**/*.rs",
+    "crates/grafito-render/src/**/*.rs",
+    "crates/grafito-app/src/**/*.rs",
+]
+
+# Fuera de scope: tests, benches, ejemplos, fixtures y crates de soporte.
+exclude_globs = [
+    "**/tests/**",
+    "**/benches/**",
+    "**/benches/*",
+    "**/examples/**",
+    "**/examples/*",
+    "**/testdata/**",
+    "**/tests.rs",
+    "**/*_test.rs",
+    "**/*_tests.rs",
+    "crates/grafito-release-tests/**",
+    "fuzz/**",
+    "packaging/**",
+    "crates/grafito-anim/engines/**",
+]

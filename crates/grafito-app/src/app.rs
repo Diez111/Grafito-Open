@@ -10,7 +10,7 @@
 //! - GPU compute: `domain_coloring_compute` 500×500 = 250k cells en un único
 //!   dispatch wgpu (grafito-render). CPU submit << GPU time ⇒ GPU-bound.
 
-use crate::utils::{load_config, save_config, AppConfig};
+use crate::utils::{load_config, save_config, AppConfig, AutosaveDebouncer};
 use crate::{Perspective, ViewMode};
 use egui::{Key, Pos2};
 use grafito_core::{
@@ -39,6 +39,11 @@ pub(crate) const MAX_UNDO: usize = 50;
 /// total estimado supera 50 MB. Ver `Document::estimated_bytes()` para la
 /// estimación `max(object_count*200KiB, json_len, 8KiB)`.
 pub(crate) const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
+
+/// Cota del protocolo de construcción: 500 entradas cronológicas máximo.
+/// Tras cada `push` se trunca manteniendo las más recientes (`drain 0..excess`)
+/// para presupuesto O(n) acotado (500) y orden cronológico.
+pub(crate) const MAX_CONSTRUCTION_LOG: usize = 500;
 
 /// Job de guardado en background — evita bloquear UI thread (60fps) en `save_document`.
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
@@ -1306,6 +1311,16 @@ pub struct GrafitoApp {
     /// aplica el mínimo al final del frame (`apply`). Se resetea al inicio de
     /// cada `update`.
     pub(crate) repaint_budget: RepaintBudget,
+    /// Autosave debouncer — tick en `update` (nunca en `Ui::`), escribe sidecar
+    /// en background thread si `should_autosave(now)`.
+    pub(crate) autosave: AutosaveDebouncer,
+    /// Versión del documento vista en el último tick de autosave (para detectar
+    /// mutaciones que no pasaron por `save_snapshot` y marcar dirty fallback).
+    pub(crate) autosave_last_version: u64,
+    /// Opt-in explícito para Aula/red avanzada (loopback sin red).
+    pub advanced_red_opt_in: bool,
+    /// Panel de Aula (F0 sin red) — loopback con ShareCode + QR dibujado con líneas egui.
+    pub classroom: crate::classroom::ClassroomPanel,
 }
 
 pub(crate) const DEFAULT_KEYBOARD_VISIBLE: bool = false;
@@ -1547,6 +1562,8 @@ impl GrafitoApp {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.undo_total_bytes = 0;
+        self.autosave.mark_saved();
+        self.autosave_last_version = self.document.version;
         self.clear_document_bound_transient_state();
         self.document_snapshot = std::sync::Arc::new(self.document.clone());
         self.snapshot_version = self.document.version;
@@ -1698,6 +1715,10 @@ impl GrafitoApp {
         let document_snapshot = std::sync::Arc::new(document.clone());
         let profile = crate::utils::load_profile();
         let avatar_draft = profile.avatar.clone();
+        let advanced_red_opt_in = config.advanced_red_opt_in;
+        let mut classroom = crate::classroom::ClassroomPanel::new();
+        classroom.set_opt_in(advanced_red_opt_in);
+        let autosave_last_version = document.version;
 
         // `current_view` es cache derivado de `perspective` — fuente canónica
         // `Perspective::view_mode()` / `Perspective::canvas_mode()`.
@@ -1825,6 +1846,10 @@ impl GrafitoApp {
             config_name_error: None,
             teaching_ui: crate::teaching_ui::TeachingUiState::default(),
             repaint_budget: RepaintBudget::default(),
+            autosave: AutosaveDebouncer::new(),
+            autosave_last_version,
+            advanced_red_opt_in,
+            classroom,
         }
     }
 
@@ -1845,6 +1870,62 @@ impl GrafitoApp {
         self.repaint_budget.apply(ctx);
     }
 
+    /// Epoch segundos para autosave (SystemTime -> secs, 0 si falla).
+    pub(crate) fn autosave_now_epoch() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Marca el documento como sucio para autosave (debounce).
+    pub(crate) fn mark_autosave_dirty(&mut self) {
+        let now = Self::autosave_now_epoch();
+        self.autosave.mark_dirty(now);
+    }
+
+    /// Tick de autosave en `update` (nunca en `Ui::`): si `should_autosave(now)`
+    /// escribe sidecar en background thread + `mark_saved()`. Reutiliza patrón
+    /// `spawn_profile_save` (thread Builder + request_repaint), nunca bloquea UI.
+    /// También detecta cambios de `document.version` no capturados por
+    /// `mark_autosave_dirty()` (fallback para mutaciones via free functions).
+    pub(crate) fn tick_autosave(&mut self, ctx: &egui::Context) {
+        // Fallback: si el documento cambió desde el último tick y aún no está dirty,
+        // marcarlo. Esto cubre mutaciones que no pasaron por `save_snapshot`.
+        if self.document.version != self.autosave_last_version && !self.autosave.is_dirty() {
+            self.mark_autosave_dirty();
+        }
+        self.autosave_last_version = self.document.version;
+        let now = Self::autosave_now_epoch();
+        if !self.autosave.should_autosave(now) {
+            return;
+        }
+        let Some(main_path) = self
+            .document_lifecycle
+            .current_path()
+            .map(|p| p.to_path_buf())
+        else {
+            return;
+        };
+        let doc = self.document.clone();
+        let egui_ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("autosave".into())
+            .spawn(move || {
+                if let Err(err) =
+                    grafito_core::persistence::write_autosave_sidecar(&doc, &main_path)
+                {
+                    log::warn!("autosave sidecar failed for {}: {err}", main_path.display());
+                }
+                egui_ctx.request_repaint();
+            });
+        if spawned.is_ok() {
+            self.autosave.mark_saved();
+        } else {
+            log::warn!("autosave: spawn failed");
+        }
+    }
+
     /// Persiste preferencias de interfaz; las claves del asistente viven sólo en el llavero.
     pub(crate) fn save_app_config(&self) {
         // Se conservan los toggles de plugins ya persistidos; los cambios de
@@ -1863,6 +1944,7 @@ impl GrafitoApp {
             onboarding_completed: existing.onboarding_completed,
             enabled_plugins: existing.enabled_plugins,
             disabled_plugins: existing.disabled_plugins,
+            advanced_red_opt_in: self.advanced_red_opt_in,
         });
     }
 
@@ -1980,6 +2062,7 @@ impl GrafitoApp {
             snapshot,
             Some(&mut self.undo_total_bytes),
         );
+        self.mark_autosave_dirty();
     }
 
     /// Guarda un único estado previo sólo cuando una interacción de panel
@@ -2196,14 +2279,15 @@ impl GrafitoApp {
             .collect()
     }
 
-    /// Registra un paso en el protocolo de construcción.
+    /// Registra un paso en el protocolo de construcción. Cota `MAX_CONSTRUCTION_LOG=500`
+    /// — mantiene orden cronológico y trunca las más antiguas (`drain`).
     pub(crate) fn record_construction_step(
         &mut self,
         action: &str,
         inputs: Vec<String>,
         output: &str,
     ) {
-        let n = self.construction_log.len() + 1;
+        let n = self.construction_log.len().saturating_add(1);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
@@ -2216,6 +2300,13 @@ impl GrafitoApp {
             disabled: false,
             timestamp,
         });
+        if self.construction_log.len() > MAX_CONSTRUCTION_LOG {
+            let excess = self
+                .construction_log
+                .len()
+                .saturating_sub(MAX_CONSTRUCTION_LOG);
+            self.construction_log.drain(0..excess);
+        }
     }
 
     /// Registra un paso comparando las etiquetas del documento antes y
@@ -2265,6 +2356,7 @@ impl GrafitoApp {
         .into_iter()
         .next()
         .ok_or_else(|| "Object insertion produced no identifier".to_string())?;
+        self.mark_autosave_dirty();
         let output = self
             .document
             .get_object(id)
@@ -2312,6 +2404,9 @@ impl GrafitoApp {
             &mut self.undo_stack,
             &mut self.redo_stack,
         );
+        if mutated_document {
+            self.mark_autosave_dirty();
+        }
         self.handle_command_outcome(outcome.clone(), time, cmd);
         self.record_step_from_diff(cmd, &before, mutated_document);
         outcome
@@ -2366,6 +2461,9 @@ impl GrafitoApp {
             &mut self.undo_stack,
             &mut self.redo_stack,
         );
+        if mutated_document {
+            self.mark_autosave_dirty();
+        }
         self.handle_command_outcome(outcome.clone(), time, &input_was);
         if clear_submitted_input_on_success(&mut self.input_text, &outcome) {
             self.preview_object = None;
@@ -2615,6 +2713,12 @@ impl GrafitoApp {
                     .document_lifecycle
                     .record_save_success(path.clone(), &self.document);
                 self.remember_recent_file(&path);
+                // Autosave: tras guardado exitoso limpiar debounce y borrar sidecar
+                self.autosave.mark_saved();
+                self.autosave_last_version = self.document.version;
+                if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(&path) {
+                    let _ = std::fs::remove_file(sidecar);
+                }
                 self.notify(
                     format!("Documento guardado en {}", path.display()),
                     grafito_ui::toast::ToastKind::Success,
@@ -2646,6 +2750,11 @@ impl GrafitoApp {
                         .document_lifecycle
                         .record_save_success(path.clone(), &self.document);
                     self.remember_recent_file(&path);
+                    self.autosave.mark_saved();
+                    self.autosave_last_version = self.document.version;
+                    if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(&path) {
+                        let _ = std::fs::remove_file(sidecar);
+                    }
                     self.notify(
                         format!("Documento guardado en {}", path.display()),
                         grafito_ui::toast::ToastKind::Success,
@@ -3019,6 +3128,13 @@ impl GrafitoApp {
             self.right_drawer_open = true;
             self.compact_geometry_utility_open = true;
         }
+    }
+
+    pub(crate) const AULA_TAB_INDEX: usize = 3;
+    #[allow(dead_code)]
+    pub(crate) const AULA_TAB_LABEL: &'static str = "Aula";
+    pub(crate) fn is_aula_tab_visible(&self) -> bool {
+        self.classroom.should_show_aula_tab()
     }
 
     /// Carga objetos de ejemplo apropiados para la perspectiva dada.
@@ -3587,6 +3703,7 @@ impl GrafitoApp {
                         inputs[2],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3628,6 +3745,7 @@ impl GrafitoApp {
                         inputs[1],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3667,6 +3785,7 @@ impl GrafitoApp {
                         inputs[2],
                     ) {
                         Ok(()) => {
+                            self.mark_autosave_dirty();
                             let labels: Vec<String> =
                                 inputs.iter().map(|&i| self.label_of(i)).collect();
                             let output = self.new_labels_since(&before).join(", ");
@@ -3698,6 +3817,7 @@ impl GrafitoApp {
                     &points,
                 ) {
                     Ok(()) => {
+                        self.mark_autosave_dirty();
                         let output = self.new_labels_since(&before).join(", ");
                         self.record_construction_step("ConicByFivePoints", labels, &output);
                     }
@@ -3999,6 +4119,10 @@ impl eframe::App for GrafitoApp {
 
         self.handle_native_close_request(ctx);
         self.poll_background_jobs(ctx);
+        // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
+        self.classroom.set_opt_in(self.advanced_red_opt_in);
+        // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
+        self.tick_autosave(ctx);
 
         // Unified repaint scheduler: gather warmup/animating/busy flags.
         let mut needs_repaint = false;
@@ -4342,6 +4466,10 @@ impl eframe::App for GrafitoApp {
                 self.compact_geometry_utility_open,
             );
             if shell.show_left_drawer {
+                // Clamp Aula tab cuando no está habilitada
+                if !self.is_aula_tab_visible() && self.sidebar_tab == Self::AULA_TAB_INDEX {
+                    self.sidebar_tab = 0;
+                }
                 match self.sidebar_tab {
                     0 => match self.perspective {
                         Perspective::Complex => crate::panels::draw_complex_panel(self, ctx),
@@ -4352,8 +4480,51 @@ impl eframe::App for GrafitoApp {
                         _ => crate::tools_panel::draw_tools_panel(self, ctx),
                     },
                     2 => crate::panels::draw_view_panel(self, ctx),
+                    3 if self.is_aula_tab_visible() => {
+                        crate::classroom::draw_classroom_panel(self, ctx)
+                    }
                     _ => crate::panels::draw_empty_panel(self, ctx),
                 }
+            }
+            // Fallback rail para Aula cuando está habilitada pero el rail de ui.rs no expone el tab
+            // (ownership restringido a app.rs). Dibujamos un botón flotante mínimo sobre el rail
+            // si opt-in, para permitir acceso manual sin tocar ui.rs/panels.rs.
+            if self.is_aula_tab_visible() {
+                let aula_active = self.sidebar_tab == Self::AULA_TAB_INDEX;
+                // No I/O en Ui:: salvo background: este botón solo muta estado en memoria.
+                egui::Area::new(egui::Id::new("aula_rail_fallback"))
+                    .anchor(
+                        egui::Align2::LEFT_TOP,
+                        egui::vec2(
+                            grafito_ui::tokens::SPACE_XS,
+                            grafito_ui::tokens::TOP_BAR_HEIGHT * 4.0
+                                + grafito_ui::tokens::SPACE_XL
+                                + grafito_ui::tokens::SPACE_XS,
+                        ),
+                    )
+                    .show(ctx, |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Aula")
+                                .size(grafito_ui::tokens::TYPE_XS)
+                                .strong(),
+                        )
+                        .selected(aula_active)
+                        .rounding(grafito_ui::tokens::RADIUS_SM);
+                        if ui
+                            .add_sized(
+                                egui::vec2(
+                                    grafito_ui::tokens::RAIL_WIDTH - grafito_ui::tokens::SPACE_SM,
+                                    grafito_ui::tokens::SPACE_XL + grafito_ui::tokens::SPACE_XS,
+                                ),
+                                btn,
+                            )
+                            .clicked()
+                        {
+                            self.sidebar_tab = Self::AULA_TAB_INDEX;
+                            self.left_drawer_open = true;
+                            self.compact_drawer_open = true;
+                        }
+                    });
             }
 
             // La barra «Entrada…» inferior se quitó del layout: los comandos
@@ -5427,6 +5598,34 @@ mod canvas_resize_preview_tests {
         assert!(numeric_guard < numeric_ticks);
         assert!(axes[numeric_guard..numeric_ticks].contains("return;"));
     }
+
+    #[test]
+    fn construction_log_caps_at_500_keeping_chronological_order() {
+        let mut app = dummy_grafito_app();
+        for i in 0..MAX_CONSTRUCTION_LOG + 1 {
+            app.record_construction_step(&format!("act{i}"), vec![], &format!("out{i}"));
+        }
+        assert_eq!(app.construction_log.len(), MAX_CONSTRUCTION_LOG);
+        // El más antiguo (act0) fue drenado; el primero ahora es act1
+        assert_eq!(app.construction_log[0].action, "act1");
+        assert_eq!(
+            app.construction_log[MAX_CONSTRUCTION_LOG - 1].action,
+            format!("act{}", MAX_CONSTRUCTION_LOG)
+        );
+        // Agregar otro mantiene cota y orden
+        app.record_construction_step("final", vec![], "F");
+        assert_eq!(app.construction_log.len(), MAX_CONSTRUCTION_LOG);
+        assert_eq!(app.construction_log[0].action, "act2");
+        assert_eq!(
+            app.construction_log[MAX_CONSTRUCTION_LOG - 1].action,
+            "final"
+        );
+    }
+
+    #[test]
+    fn construction_log_constant_is_500() {
+        assert_eq!(MAX_CONSTRUCTION_LOG, 500);
+    }
 }
 
 #[cfg(test)]
@@ -5560,5 +5759,9 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         config_name_error: None,
         teaching_ui: crate::teaching_ui::TeachingUiState::default(),
         repaint_budget: RepaintBudget::default(),
+        autosave: AutosaveDebouncer::new(),
+        autosave_last_version: 0,
+        advanced_red_opt_in: false,
+        classroom: crate::classroom::ClassroomPanel::new(),
     }
 }

@@ -5,6 +5,46 @@
 
 pub(crate) const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 
+use grafito_anim::protocol::{
+    scene_param_clamped, SCENE_PARAM_A, SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS,
+    SCENE_PARAM_X0,
+};
+
+// ── Registro canónico nativo v3 (11 plantillas) ──────────────────────────
+// DIVERGENCIA HONESTA (sync 7↔12↔11↔6, BUILD v3):
+// - `grafito-agent/src/tools.rs::KNOWN_TEMPLATES`: 7 (sin logistic/gradient/
+//   mobius/universal; NO editable desde este scope).
+// - `grafito-anim/src/protocol.rs::sanitize_template`: 11 canónicas + alias
+//   pythagoras (v3: ya no degrada logistic/gradient/mobius/universal).
+// - Este dispatcher: 11 canónicas + aliases pedagógicos F5.
+// - `anim_ui.rs` ComboBox: 11 (v3: antes solo 6, faltaba pitagoras).
+// - Worker python `ALLOW_TEMPLATE`: 6 (sin euler/fourier/logistic/gradient/
+//   mobius; NO editable desde este scope → el worker mapea por concepto).
+// - `limit-epsilon` / `ode-*` NO existen en ningún registro: caen al fallback
+//   universal (genérico). El test `limit_y_ode_caen_a_fallback_universal`
+//   pinnea ese estado hasta que alguien les dé renderer propio (TODO).
+//
+/// Plantillas canónicas con renderer nativo propio (+ `universal` youtube-style).
+pub const NATIVE_TEMPLATES: &[&str] = &[
+    "derivative-slope",
+    "integral-area",
+    "taylor-series",
+    "conformal-map",
+    "pitagoras",
+    "euler",
+    "fourier",
+    "logistic-bifurcation",
+    "gradient-field",
+    "mobius-transform",
+    "universal",
+];
+
+/// ¿La plantilla tiene renderer nativo propio?
+pub fn is_known_native_template(template: &str) -> bool {
+    let t = template.trim().to_lowercase();
+    NATIVE_TEMPLATES.contains(&t.as_str()) || t == "pythagoras"
+}
+
 // ── Paleta nativa centralizada (única fuente de verdad en anim_native.rs) ───
 // Deriva del tema Scandinavian (grafito-ui Theme DARK, tokens TYPE_*/SPACE_*):
 // - BG #0E0E14 ≈ DARK canvas_bg #0A0A0A con lift vídeo para gradiente legible.
@@ -674,6 +714,21 @@ fn ease_in_out(t: f64) -> f64 {
 // ── Plantillas existentes ────────────────────────────────────────────────
 
 pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    // Legacy sin params: mapa vacío = comportamiento histórico exacto.
+    render_derivative_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Derivada con params vivos: `x0` centro del barrido en [-3, 3] (def 0.0),
+/// `span` semiancho en [0.25, 3.0] (def 1.5). El scrub de la UI re-renderiza
+/// llamando aquí con el mapa vivo (`anim_ui::live_params` →
+/// `build_anim_params().params`). Mapa vacío = histórico exacto.
+pub fn render_derivative_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    let center = scene_param_clamped(params, SCENE_PARAM_X0, 0.0, -3.0, 3.0);
+    let span = scene_param_clamped(params, SCENE_PARAM_SPAN, 1.5, 0.25, 3.0);
     let ((w, h), _) = resolve_native_size(width, height);
     let parabola: Vec<(f64, f64)> = (-60..=60)
         .map(|i| {
@@ -715,7 +770,7 @@ pub(crate) fn render_native_animation_frames(width: u32, height: u32) -> Vec<egu
             let (bx, by) = to_pixel(w, h, pair[1].0, pair[1].1);
             draw_line(&mut buf, w, h, (ax, ay), (bx, by), CURVE_MAIN);
         }
-        let x0 = -1.5 + 3.0 * t;
+        let x0 = (center - span + 2.0 * span * t).clamp(-3.0, 3.0);
         let y0 = x0 * x0;
         let slope = 2.0 * x0;
         let x_a = x0 - 1.0;
@@ -790,6 +845,20 @@ pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::Colo
 }
 
 pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_integral_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Integral con params vivos: `a` cota inferior en [-3, 3] (def 0.0), `b`
+/// cota superior en [-3, 3] (def 2.0); si `a > b` se ordenan. El área barrida
+/// es `a..(a + (b-a)*t)`. Mapa vacío = histórico exacto (`0..2t`).
+pub fn render_integral_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    let lo = scene_param_clamped(params, SCENE_PARAM_A, 0.0, -3.0, 3.0);
+    let hi = scene_param_clamped(params, SCENE_PARAM_B, 2.0, -3.0, 3.0);
+    let (a, b) = if lo <= hi { (lo, hi) } else { (hi, lo) };
     let ((w, h), _) = resolve_native_size(width, height);
     let curve: Vec<(f64, f64)> = (-60..=60)
         .map(|i| {
@@ -827,10 +896,10 @@ pub(crate) fn render_integral_frames(width: u32, height: u32) -> Vec<egui::Color
             let (bx, by) = to_pixel(w, h, pair[1].0, pair[1].1);
             draw_line(&mut buf, w, h, (ax, ay), (bx, by), CURVE_MAIN);
         }
-        let x_max = 2.0 * t;
-        let steps = (x_max * 20.0) as i32;
+        let x_max = (a + (b - a) * t).clamp(-3.0, 3.0);
+        let steps = (((x_max - a) * 20.0) as i32).max(0);
         for i in 0..steps {
-            let x = i as f64 / 20.0;
+            let x = a + i as f64 / 20.0;
             let y = x * x * 0.15;
             let top = to_pixel(w, h, x, y);
             let bottom = to_pixel(w, h, x, 0.0);
@@ -1118,36 +1187,76 @@ pub fn render_anim_for_concept(
     width: u32,
     height: u32,
 ) -> Vec<egui::ColorImage> {
+    render_anim_for_concept_with_params(
+        template,
+        concept,
+        width,
+        height,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Resuelve el nombre de plantilla a su canónica (misma lógica que usaba
+/// `render_anim_for_concept` inline; extraída para reuso sin duplicar).
+fn resolve_native_template(template: &str, concept: &str) -> &'static str {
     let t_lower = template.trim().to_lowercase();
-    let tmpl: &str = if t_lower.is_empty() || t_lower == "universal" || t_lower == "auto" {
-        detect_template_for_concept(concept)
-    } else {
-        match t_lower.as_str() {
-            "derivative-slope" => "derivative-slope",
-            "integral-area" => "integral-area",
-            "taylor-series" => "taylor-series",
-            "conformal-map" => "conformal-map",
-            "pitagoras" | "pythagoras" => "pitagoras",
-            "universal" => "universal",
-            "euler" => "euler",
-            "fourier" => "fourier",
-            "logistic-bifurcation" | "bifurcacion-logistica" | "logistica" => {
-                "logistic-bifurcation"
-            }
-            "gradient-field" | "campo-gradiente" | "gradiente" => "gradient-field",
-            "mobius-transform" | "mobius" | "moebius" => "mobius-transform",
-            // F5: templates pedagógicos inline — mapeo a nativos existentes
-            "fraccion-visual" => "integral-area",
-            "vector-anim" => "conformal-map",
-            "matriz-anim" => "universal",
-            "prob-anim" => "integral-area",
-            "serie-anim" => "taylor-series",
-            "ecuacion-anim" => "derivative-slope",
-            "trig-anim" => "taylor-series",
-            "conica-anim" => "conformal-map",
-            _ => detect_template_for_concept(concept),
-        }
-    };
+    if t_lower.is_empty() || t_lower == "universal" || t_lower == "auto" {
+        return detect_template_for_concept(concept);
+    }
+    match t_lower.as_str() {
+        "derivative-slope" => "derivative-slope",
+        "integral-area" => "integral-area",
+        "taylor-series" => "taylor-series",
+        "conformal-map" => "conformal-map",
+        "pitagoras" | "pythagoras" => "pitagoras",
+        "universal" => "universal",
+        "euler" => "euler",
+        "fourier" => "fourier",
+        "logistic-bifurcation" | "bifurcacion-logistica" | "logistica" => "logistic-bifurcation",
+        "gradient-field" | "campo-gradiente" | "gradiente" => "gradient-field",
+        "mobius-transform" | "mobius" | "moebius" => "mobius-transform",
+        // F5: templates pedagógicos inline — mapeo a nativos existentes
+        "fraccion-visual" => "integral-area",
+        "vector-anim" => "conformal-map",
+        "matriz-anim" => "universal",
+        "prob-anim" => "integral-area",
+        "serie-anim" => "taylor-series",
+        "ecuacion-anim" => "derivative-slope",
+        "trig-anim" => "taylor-series",
+        "conica-anim" => "conformal-map",
+        _ => detect_template_for_concept(concept),
+    }
+}
+
+/// Dispatcher con params vivos (v3): el scrub de la UI re-renderiza llamando
+/// aquí con el mapa vivo. Atienden params: `derivative-slope` (x0/span),
+/// `integral-area` (a/b), `euler`/`fourier` (terms). El resto IGNORA params
+/// por ahora (TODO honesto: taylor es fade de orden fijo; conformal/pitagoras/
+/// logistic/gradient/mobius/universal aún no parametrizan) y delega al legacy.
+/// Firmas legacy intactas: ningún caller existente se rompe.
+pub fn render_anim_for_concept_with_params(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    match resolve_native_template(template, concept) {
+        "integral-area" => render_integral_frames_with_params(width, height, params),
+        "derivative-slope" => render_derivative_frames_with_params(width, height, params),
+        "euler" => render_euler_frames_with_params(width, height, params),
+        "fourier" => render_fourier_frames_with_params(width, height, params),
+        tmpl => render_anim_for_concept_legacy(tmpl, concept, width, height),
+    }
+}
+
+/// Rama legacy del dispatcher (sin params): idéntica a la versión previa a v3.
+fn render_anim_for_concept_legacy(
+    tmpl: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+) -> Vec<egui::ColorImage> {
     match tmpl {
         "integral-area" => render_integral_frames(width, height),
         "taylor-series" => render_taylor_frames(width, height),
@@ -1167,6 +1276,18 @@ pub fn render_anim_for_concept(
 /// Stub Euler: serie e^x parciales con fondo nativo, <2s garantizado.
 /// Usa la misma paleta y grid para no romper estilo; animación determinista.
 pub fn render_euler_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_euler_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Euler con params vivos: `terms` nº máximo de parciales de e^x en [1, 7]
+/// (def 7); el frame `t` muestra `1 + t*(terms-1)` parciales.
+/// Mapa vacío = histórico exacto.
+pub fn render_euler_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    let max_terms = scene_param_clamped(params, SCENE_PARAM_TERMS, 7.0, 1.0, 7.0) as usize;
     let ((w, h), _) = resolve_native_size(width, height);
     // Partial sums of exp: S_n(x) = sum_{k=0..n} x^k/k!
     let start = std::time::Instant::now();
@@ -1197,7 +1318,7 @@ pub fn render_euler_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
             break;
         }
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
-        let terms = (1 + (t * 6.0) as usize).clamp(1, 7);
+        let terms = (1 + (t * (max_terms as f64 - 1.0)) as usize).clamp(1, max_terms);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
@@ -1268,6 +1389,18 @@ pub fn render_euler_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
 
 /// Stub Fourier: suma de armónicos de onda cuadrada, <2s garantizado.
 pub fn render_fourier_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_fourier_frames_with_params(width, height, &std::collections::BTreeMap::new())
+}
+
+/// Fourier con params vivos: `terms` nº máximo de armónicos en [1, 6]
+/// (def 6); el frame `t` muestra `1 + t*(terms-1)` armónicos.
+/// Mapa vacío = histórico exacto.
+pub fn render_fourier_frames_with_params(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    let max_harm = scene_param_clamped(params, SCENE_PARAM_TERMS, 6.0, 1.0, 6.0) as usize;
     let ((w, h), _) = resolve_native_size(width, height);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
@@ -1296,7 +1429,7 @@ pub fn render_fourier_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
             break;
         }
         let t = frame as f64 / (NATIVE_ANIM_FRAME_COUNT as f64 - 1.0).max(1.0);
-        let harmonics = (1 + (t * 5.0) as usize).clamp(1, 6);
+        let harmonics = (1 + (t * (max_harm as f64 - 1.0)) as usize).clamp(1, max_harm);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
@@ -2064,5 +2197,136 @@ mod tests {
         // hash varia
         assert_ne!(hash_concept("a"), hash_concept("b"));
         let _ = c2;
+    }
+
+    // ── v3: params vivos ────────────────────────────────────────────────
+    fn params_map(pairs: &[(&str, f64)]) -> std::collections::BTreeMap<String, f64> {
+        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn params_vacios_reproducen_legacy_exactos() {
+        // Mapa vacío = histórico exacto (todos los frames, no solo el 1º).
+        let empty = params_map(&[]);
+        for (label, legacy, vivo) in [
+            (
+                "derivative-slope",
+                render_native_animation_frames(64, 64),
+                render_derivative_frames_with_params(64, 64, &empty),
+            ),
+            (
+                "integral-area",
+                render_integral_frames(64, 64),
+                render_integral_frames_with_params(64, 64, &empty),
+            ),
+            (
+                "euler",
+                render_euler_frames(64, 64),
+                render_euler_frames_with_params(64, 64, &empty),
+            ),
+            (
+                "fourier",
+                render_fourier_frames(64, 64),
+                render_fourier_frames_with_params(64, 64, &empty),
+            ),
+        ] {
+            assert_eq!(legacy.len(), vivo.len(), "{label}: len");
+            for (i, (a, b)) in legacy.iter().zip(vivo.iter()).enumerate() {
+                assert_eq!(a.pixels, b.pixels, "{label} frame {i}: idéntico a legacy");
+            }
+        }
+    }
+
+    #[test]
+    fn params_vivos_cambian_los_frames() {
+        let base = params_map(&[]);
+        // x0 desplaza el barrido de la tangente.
+        let a = render_derivative_frames_with_params(64, 64, &base);
+        let b = render_derivative_frames_with_params(64, 64, &params_map(&[("x0", 2.0)]));
+        assert_ne!(
+            a[NATIVE_ANIM_FRAME_COUNT / 2].pixels,
+            b[NATIVE_ANIM_FRAME_COUNT / 2].pixels,
+            "x0 debe mover el frame medio"
+        );
+        // a/b cambian el área barrida.
+        let ia_base = render_integral_frames_with_params(64, 64, &base);
+        let ia_movida = render_integral_frames_with_params(64, 64, &params_map(&[("a", 1.0)]));
+        assert_ne!(
+            ia_base[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            ia_movida[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "a debe cambiar el área final"
+        );
+        // NaN/inf → default (igual que vacío), sin panic.
+        let nan = render_derivative_frames_with_params(
+            64,
+            64,
+            &params_map(&[("x0", f64::NAN), ("span", f64::INFINITY)]),
+        );
+        assert_eq!(a[0].pixels, nan[0].pixels, "NaN/inf → defaults");
+        // terms limita parciales/armónicos (último frame difiere).
+        let e1 = render_euler_frames_with_params(64, 64, &params_map(&[("terms", 1.0)]));
+        let e7 = render_euler_frames_with_params(64, 64, &params_map(&[("terms", 7.0)]));
+        assert_ne!(
+            e1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            e7[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "terms debe cambiar euler"
+        );
+        let f1 = render_fourier_frames_with_params(64, 64, &params_map(&[("terms", 1.0)]));
+        let f6 = render_fourier_frames_with_params(64, 64, &params_map(&[("terms", 6.0)]));
+        assert_ne!(
+            f1[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            f6[NATIVE_ANIM_FRAME_COUNT - 1].pixels,
+            "terms debe cambiar fourier"
+        );
+    }
+
+    #[test]
+    fn dispatcher_with_params_vacio_igual_a_legacy() {
+        // Sin params, el dispatcher v3 delega idéntico al legacy en las 11.
+        let empty = params_map(&[]);
+        for tmpl in NATIVE_TEMPLATES {
+            let legacy = render_anim_for_concept(tmpl, "concepto libre", 64, 64);
+            let vivo = render_anim_for_concept_with_params(tmpl, "concepto libre", 64, 64, &empty);
+            assert_eq!(legacy.len(), vivo.len(), "{tmpl}: len");
+            for (i, (a, b)) in legacy.iter().zip(vivo.iter()).enumerate() {
+                assert_eq!(a.pixels, b.pixels, "{tmpl} frame {i}");
+            }
+        }
+    }
+
+    // ── v3: registro + divergencia honesta ──────────────────────────────
+    #[test]
+    fn native_templates_son_once_y_despachan() {
+        assert_eq!(NATIVE_TEMPLATES.len(), 11, "registro canónico = 11");
+        for tmpl in NATIVE_TEMPLATES {
+            assert!(is_known_native_template(tmpl), "{tmpl} conocido");
+            let f = render_timed(tmpl, 64, 64, || render_anim_by_template(tmpl, 64, 64));
+            assert_frames_valid(&f, 64, 64, tmpl);
+        }
+        assert!(is_known_native_template("pythagoras"), "alias pythagoras");
+        assert!(is_known_native_template("  EULER  "), "case/trim");
+        assert!(
+            !is_known_native_template("limit-epsilon"),
+            "sin renderer propio"
+        );
+        assert!(
+            !is_known_native_template("ode-system"),
+            "sin renderer propio"
+        );
+        assert!(!is_known_native_template(""), "vacío no es plantilla");
+    }
+
+    #[test]
+    fn limit_y_ode_caen_a_fallback_universal() {
+        // DIVERGENCIA HONESTA: limit-epsilon / ode-* no existen en ningún
+        // registro (ni agent, ni protocolo, ni nativo, ni python). Producen
+        // frames válidos solo vía fallback genérico — este test lo pinnea
+        // hasta que alguien les dé renderer propio (TODO).
+        for tmpl in ["limit-epsilon", "ode-system", "ode"] {
+            let f = render_anim_by_template(tmpl, 64, 64);
+            assert_frames_valid(&f, 64, 64, tmpl);
+            let g = render_anim_for_concept(tmpl, "límite epsilon delta", 64, 64);
+            assert_frames_valid(&g, 64, 64, tmpl);
+        }
     }
 }

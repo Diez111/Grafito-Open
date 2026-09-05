@@ -39,11 +39,14 @@ const GROUP_LINE: &[ToolEntry] = &[
     (Tool::Ray, "Semirrecta", ""),
     (Tool::Vector, "Vector", ""),
     (Tool::Perpendicular, "Perpendicular", ""),
+    (Tool::Parallel, "Paralela", ""),
 ];
 
 const GROUP_CIRCLE: &[ToolEntry] = &[
     (Tool::Circle, "Circulo centro-punto", "F4"),
     (Tool::Tangent, "Tangente", ""),
+    (Tool::Arc, "Arco 3 puntos", ""),
+    (Tool::Sector, "Sector circular", ""),
 ];
 
 const GROUP_POLYGON: &[ToolEntry] = &[
@@ -750,8 +753,9 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         Tool::VectorField2D | Tool::VectorField3D => icon_vector,
         Tool::Locus => icon_curve,
         Tool::Midpoint => icon_midpoint,
-        Tool::Perpendicular => icon_perpendicular,
+        Tool::Perpendicular | Tool::Parallel => icon_perpendicular,
         Tool::Tangent => icon_tangent,
+        Tool::Arc | Tool::Sector => icon_circle,
         Tool::Distance | Tool::Angle | Tool::Area | Tool::Slope => icon_measure,
         Tool::Root
         | Tool::Extremum

@@ -65,6 +65,7 @@ jobs:
             command_atomicity
             validation_limits
             spreadsheet_recompute
+            anim_wire
           )
           failed=0
           for target in "${targets[@]}"; do

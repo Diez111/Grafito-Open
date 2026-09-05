@@ -3217,6 +3217,21 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("Slider[variable, min, max, paso]"; "variable": Variable required, "min": Number required, "max": Number required, "paso": Number required)
         ]
     ),
+    command!(
+        "dynamic.trace",
+        "Rastro",
+        ["Estela"],
+        "Dinámica",
+        "Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.)",
+        TransformsObject,
+        Low,
+        true,
+        "Rastro",
+        [
+            signature!("Rastro[objeto]"; "objeto": ObjectLabel required),
+            signature!("Rastro[objeto, estado]"; "objeto": ObjectLabel required, "estado": Expression required)
+        ]
+    ),
     // ---- P0 CAS analisis geometrico: TangentAt / NormalAt / ArcLength / CurvatureAt / Volume/SurfaceOfRevolution ----
     command!(
         "cas.tangent-at",
@@ -4043,6 +4058,7 @@ mod registry_tests {
             // Slider y aula despachan via lower-case handle_aula_commands, también cuentan
             let aula_extra = [
                 "slider",
+                "rastro",
                 "focus",
                 "directrix",
                 "center",

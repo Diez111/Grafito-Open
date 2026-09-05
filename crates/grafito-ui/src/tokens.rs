@@ -248,6 +248,68 @@ pub const ANIM_NORMAL: f32 = 200.0;
 /// Duración de highlights (e.g. objeto recién creado).
 pub const ANIM_HIGHLIGHT: f32 = 1000.0;
 
+// ═══════════════════════════════════════════════════════════
+// Accesibilidad aula (A11Y) — WCAG 2.2
+// Única fuente para foco visible, hit-targets, tipo aula y toasts.
+// ═══════════════════════════════════════════════════════════
+
+/// Anillo de foco visible — ancho 2 px (WCAG 2.4.13: perímetro ≥ 2 px).
+/// Ver `crate::theme::Theme::focus_ring_stroke`.
+pub const FOCUS_RING_WIDTH: f32 = 2.0;
+/// Anillo de foco — desplazamiento respecto al borde del widget, 2 px.
+pub const FOCUS_RING_OFFSET: f32 = 2.0;
+/// Anillo de foco — contraste mínimo contra el fondo adyacente, 3:1 (WCAG 1.4.11).
+pub const FOCUS_RING_MIN_CONTRAST: f32 = 3.0;
+
+/// Piso de atenuación gamma para texto — 0.85.
+/// Ningún texto se atenúa por debajo del 85 %: `Theme::dimmed_text` hace
+/// clamp de todo `gamma_multiply` a `[TEXT_GAMMA_FLOOR, 1.0]` (WCAG 1.4.3 AA).
+pub const TEXT_GAMMA_FLOOR: f32 = 0.85;
+
+/// Hit-target mínimo general — 24 px (WCAG 2.5.8 Target Size Minimum).
+pub const HIT_TARGET_MIN: f32 = 24.0;
+/// Hit-target modo aula/proyector y táctil — 44 px (WCAG 2.5.5 Enhanced).
+pub const HIT_TARGET_AULA: f32 = 44.0;
+
+/// Tamaño tipográfico mínimo en modo aula — 12 px (legible a distancia).
+/// Ver `aula_font_size`.
+pub const TYPE_MIN_AULA: f32 = 12.0;
+/// Escala tipográfica modo aula — 1.25 (ratio Major Third del sistema).
+pub const AULA_FONT_SCALE: f32 = 1.25;
+
+/// Duración por defecto de toasts — 7 s (WCAG 2.2.1: tiempo de lectura).
+pub const TOAST_DURATION_DEFAULT: f64 = 7.0;
+/// Duración de toasts de error — persistente hasta dismiss con clic (sin auto-dismiss).
+pub const TOAST_DURATION_ERROR: f64 = f64::INFINITY;
+/// Fade-in de toasts — 0.2 s.
+pub const TOAST_FADE_IN: f32 = 0.2;
+/// Fade-out de toasts — 0.5 s.
+pub const TOAST_FADE_OUT: f32 = 0.5;
+/// Altura mínima de toast — 30 px (≥ HIT_TARGET_MIN: clicable para dismiss).
+pub const TOAST_MIN_HEIGHT: f32 = 30.0;
+/// Offset superior de la pila de toasts — 56 px = TOP_BAR_HEIGHT (48) + SPACE_SM (8).
+pub const TOAST_TOP_OFFSET: f32 = TOP_BAR_HEIGHT + SPACE_SM;
+/// Fracción máxima de pantalla para la pila — 0.25 (deja 3/4 libres al composer).
+pub const TOAST_MAX_SCREEN_FRACTION: f32 = 0.25;
+
+/// Clamp de tamaño interactivo al mínimo WCAG 2.5.8 (24 px).
+#[inline]
+pub fn hit_target_size(requested: f32) -> f32 {
+    requested.max(HIT_TARGET_MIN)
+}
+
+/// Clamp de tamaño interactivo al mínimo aula/táctil (44 px).
+#[inline]
+pub fn aula_hit_target_size(requested: f32) -> f32 {
+    requested.max(HIT_TARGET_AULA)
+}
+
+/// Tamaño tipográfico modo aula: escala 1.25 con piso 12 px.
+#[inline]
+pub fn aula_font_size(base: f32) -> f32 {
+    (base * AULA_FONT_SCALE).max(TYPE_MIN_AULA)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +488,51 @@ mod tests {
         assert!((ratio_base_lg - 1.25).abs() < 0.05);
         // Monotonic ya verificado, aquí sólo ratio
         assert!(TYPE_SM < TYPE_BASE && TYPE_BASE < TYPE_LG);
+    }
+
+    #[test]
+    fn focus_ring_tokens_meet_wcag_minimums() {
+        assert_eq!(FOCUS_RING_WIDTH, 2.0);
+        assert_eq!(FOCUS_RING_OFFSET, 2.0);
+        assert_eq!(FOCUS_RING_MIN_CONTRAST, 3.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn text_gamma_floor_preserves_contrast() {
+        assert_eq!(TEXT_GAMMA_FLOOR, 0.85);
+        assert!(TEXT_GAMMA_FLOOR > 0.0 && TEXT_GAMMA_FLOOR <= 1.0);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn hit_targets_meet_wcag_sizes() {
+        assert_eq!(HIT_TARGET_MIN, 24.0);
+        assert_eq!(HIT_TARGET_AULA, 44.0);
+        assert!(HIT_TARGET_MIN < HIT_TARGET_AULA);
+        assert_eq!(hit_target_size(16.0), HIT_TARGET_MIN);
+        assert_eq!(hit_target_size(32.0), 32.0);
+        assert_eq!(aula_hit_target_size(24.0), HIT_TARGET_AULA);
+        assert_eq!(aula_hit_target_size(48.0), 48.0);
+    }
+
+    #[test]
+    fn aula_type_has_floor_and_scale() {
+        assert_eq!(TYPE_MIN_AULA, 12.0);
+        assert_eq!(AULA_FONT_SCALE, 1.25);
+        assert_eq!(aula_font_size(TYPE_BASE), TYPE_BASE * AULA_FONT_SCALE);
+        // Piso: bases pequeñas no bajan de 12 px.
+        assert_eq!(aula_font_size(9.0), TYPE_MIN_AULA);
+        assert_eq!(aula_font_size(TYPE_XS), TYPE_XS * AULA_FONT_SCALE);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn toast_durations_give_reading_time_and_persistent_errors() {
+        assert_eq!(TOAST_DURATION_DEFAULT, 7.0);
+        assert!(TOAST_DURATION_ERROR.is_infinite());
+        assert!(TOAST_DURATION_DEFAULT < TOAST_DURATION_ERROR);
+        assert!(TOAST_MIN_HEIGHT >= HIT_TARGET_MIN);
+        assert_eq!(TOAST_TOP_OFFSET, TOP_BAR_HEIGHT + SPACE_SM);
     }
 }

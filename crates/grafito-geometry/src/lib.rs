@@ -26,6 +26,7 @@ pub mod ast;
 pub mod attractors;
 pub mod boolean;
 pub mod cas;
+pub mod cas_steps;
 pub mod dd;
 pub mod derivation;
 pub mod discrete;

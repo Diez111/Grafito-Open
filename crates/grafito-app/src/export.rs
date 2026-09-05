@@ -31,9 +31,13 @@ const MAX_PROJECTED_COORDINATE: f64 = 1.0e12;
 static NEXT_EXPORT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Formatos de exportacion profesional admitidos por la aplicacion.
-// TODO(2026-09-04): no existe export PDF; al añadir `ExportFormat::Pdf`,
-// incluir la pizarra (`Document.whiteboard`) como en SVG/PNG vía
-// `SceneBuilder::append_whiteboard` (vectorial con texto como <text>).
+// NOTE(2026-09-05, EXPORT): PDF vectorial pendiente de la dependencia
+// `printpdf` (puro Rust, sin binarios externos; tectonic/wkhtmltopdf vetados).
+// `Cargo.toml` lo cablea el lead; mientras tanto `export_pdf` es un stub
+// honesto (`ExportError::Unavailable`, destino intacto). No se añade
+// `ExportFormat::Pdf` para no romper los `match` exhaustivos de `app.rs`.
+// La pizarra (`Document.whiteboard`) ya entra en SVG/PNG/TikZ vía
+// `SceneBuilder::append_whiteboard` / `TikzMathWriter::emit_whiteboard`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ExportFormat {
     Svg,
@@ -121,6 +125,41 @@ impl ExportFormat {
 impl fmt::Display for ExportFormat {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.display_name())
+    }
+}
+
+/// Modo de exportación TikZ (parámetro `tikz=visual|math`).
+///
+/// - `Visual`: réplica exacta en pt del lienzo (coordenadas de pantalla).
+/// - `Math`: pgfplots editable en coordenadas del mundo (`\addplot` para
+///   Function, `\filldraw circle` para Circle); el resto va como comentario
+///   honesto que remite al modo visual. Ambos son standalone compilables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TikzMode {
+    Visual,
+    /// Solo construido vía [`TikzMode::from_param`] (tests) hasta que la UI
+    /// exponga el selector (lead).
+    #[allow(dead_code)]
+    Math,
+}
+
+impl TikzMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Visual => "visual",
+            Self::Math => "math",
+        }
+    }
+
+    /// Parsea el parámetro `tikz=visual|math`; `None` si no es reconocido.
+    /// Pendiente de cableado UI por el lead.
+    #[allow(dead_code)]
+    pub(crate) fn from_param(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "visual" => Some(Self::Visual),
+            "math" => Some(Self::Math),
+            _ => None,
+        }
     }
 }
 
@@ -447,6 +486,12 @@ pub(crate) enum ExportError {
         format: ExportFormat,
         reason: String,
     },
+    /// Funcionalidad pendiente (p. ej. PDF sin `printpdf`): nunca toca el
+    /// destino; el mensaje pinnea "no disponible en esta build".
+    Unavailable {
+        feature: &'static str,
+        reason: String,
+    },
     Io {
         format: ExportFormat,
         path: PathBuf,
@@ -521,6 +566,10 @@ impl fmt::Display for ExportError {
                     "{format} no reemplazo el destino; codificacion: {reason}"
                 )
             }
+            Self::Unavailable { feature, reason } => write!(
+                formatter,
+                "{feature} no disponible en esta build; {reason} (destino intacto)"
+            ),
             Self::Io {
                 format,
                 path,
@@ -822,6 +871,17 @@ fn validate_export_options(
 
 fn point_is_finite(point: Point2) -> bool {
     point.x.is_finite() && point.y.is_finite()
+}
+
+/// Variables del documento en orden determinista (hash/evaluación estable).
+fn sorted_document_variables(document: &Document) -> Vec<(String, f64)> {
+    let mut variables = document
+        .variables
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<Vec<_>>();
+    variables.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    variables
 }
 
 fn color_is_valid(color: Color) -> bool {
@@ -1530,15 +1590,7 @@ fn build_export_scene(
         document,
         format,
         view,
-        variables: {
-            let mut variables = document
-                .variables
-                .iter()
-                .map(|(name, value)| (name.clone(), *value))
-                .collect::<Vec<_>>();
-            variables.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            variables
-        },
+        variables: sorted_document_variables(document),
         scene_units: 0,
     };
     let mut object_types = BTreeMap::new();
@@ -2604,6 +2656,7 @@ fn serialize_svg(scene: &ExportScene) -> Vec<u8> {
         scene.width, scene.height, scene.width, scene.height
     )
     .ok();
+    svg.push_str("<title>Grafito - exportacion SVG</title>\n");
     writeln!(
         svg,
         "<defs><clipPath id=\"grafito-export-clip\"><rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
@@ -2833,6 +2886,658 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
     tex.into_bytes()
 }
 
+/// Número de mundo formateado para TikZ math; `None` si no es representable.
+fn math_num(value: f64) -> Option<String> {
+    value.is_finite().then(|| format!("{value:.4}"))
+}
+
+/// Sanea una expresión Grafito para `\addplot{...}` (sintaxis pgfplots).
+/// Devuelve `None` si requiere revisión manual: el llamador emite un
+/// comentario honesto en vez de romper la compilación del `.tex`.
+fn tikz_math_expr(expression: &str) -> Option<String> {
+    let trimmed = expression.trim().replace(['\n', '\r'], " ");
+    if trimmed.is_empty() || trimmed.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return None;
+    }
+    let portable = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "+-*/^().,!_ =<>|".contains(c));
+    portable.then_some(trimmed)
+}
+
+fn resolve_math_binding(
+    item: &ExportItem,
+    variables: &[(String, f64)],
+    expression: &Option<String>,
+    fallback: f64,
+    field: &str,
+) -> std::result::Result<f64, ExportError> {
+    const FORMAT: ExportFormat = ExportFormat::Tikz;
+    let value = match expression {
+        Some(expression) => {
+            grafito_geometry::expr::evaluate(expression, variables).map_err(|error| {
+                invalid_object(FORMAT, item, format!("{field} no se pudo evaluar: {error}"))
+            })?
+        }
+        None => fallback,
+    };
+    if !value.is_finite() {
+        return Err(invalid_object(
+            FORMAT,
+            item,
+            format!("{field} produjo un valor no finito"),
+        ));
+    }
+    Ok(value)
+}
+
+/// Escritor del modo TikZ math: coordenadas del mundo dentro de un `axis` de
+/// pgfplots (editable), a diferencia de `serialize_tikz` (réplica en pt).
+struct TikzMathWriter {
+    tex: String,
+    variables: Vec<(String, f64)>,
+    bounds: AABB,
+}
+
+impl TikzMathWriter {
+    const FORMAT: ExportFormat = ExportFormat::Tikz;
+
+    fn fallback_comment(&mut self, item: &ExportItem, detail: &str) {
+        use std::fmt::Write as _;
+        writeln!(
+            self.tex,
+            "% {} '{}': {detail} (ver tikz=visual).",
+            item.object_type,
+            item.label.replace(['\n', '\r'], " ")
+        )
+        .ok();
+    }
+
+    fn invalid(&self, item: &ExportItem, reason: &str) -> ExportError {
+        invalid_object(Self::FORMAT, item, reason)
+    }
+
+    fn emit_function(
+        &mut self,
+        item: &ExportItem,
+        function: &grafito_core::FunctionObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        let min = resolve_math_binding(
+            item,
+            &self.variables,
+            &function.domain_min_expr,
+            function.domain_min.unwrap_or(self.bounds.min.x),
+            "Function.domain_min_expr",
+        )?;
+        let max = resolve_math_binding(
+            item,
+            &self.variables,
+            &function.domain_max_expr,
+            function.domain_max.unwrap_or(self.bounds.max.x),
+            "Function.domain_max_expr",
+        )?;
+        if min >= max {
+            return Err(self.invalid(item, "el dominio evaluado debe ser creciente"));
+        }
+        let visible_min = min.max(self.bounds.min.x);
+        let visible_max = max.min(self.bounds.max.x);
+        if visible_min >= visible_max {
+            return Ok(());
+        }
+        let Some(expr) = tikz_math_expr(&function.expr) else {
+            self.fallback_comment(item, "expresion no portable a pgfplots; revisar sintaxis");
+            return Ok(());
+        };
+        let (Some(lo), Some(hi)) = (math_num(visible_min), math_num(visible_max)) else {
+            return Err(self.invalid(item, "el dominio visible no es representable"));
+        };
+        let stroke = validate_stroke(Self::FORMAT, item, function.width, function.color)?;
+        if function.fill_color.is_some() {
+            self.fallback_comment(item, "nota: relleno hasta y=0 solo en tikz=visual");
+        }
+        writeln!(
+            self.tex,
+            "% Function '{}': y = {expr}",
+            item.label.replace(['\n', '\r'], " ")
+        )
+        .ok();
+        writeln!(
+            self.tex,
+            "\\addplot[domain={lo}:{hi}, samples=200, draw={}, draw opacity={:.5}, line width={:.3}pt] {{{expr}}};",
+            tikz_color(stroke.color),
+            stroke.color.a,
+            stroke.width
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_circle(
+        &mut self,
+        item: &ExportItem,
+        circle: &grafito_core::CircleObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        let radius = resolve_math_binding(
+            item,
+            &self.variables,
+            &circle.radius_expr,
+            circle.radius,
+            "Circle.radius_expr",
+        )?;
+        if radius <= 0.0 {
+            return Err(self.invalid(item, "el radio evaluado debe ser positivo"));
+        }
+        let stroke = validate_stroke(Self::FORMAT, item, circle.width, circle.color)?;
+        let fill = validate_fill(Self::FORMAT, item, circle.fill_color)?;
+        let (Some(cx), Some(cy), Some(radius)) = (
+            math_num(circle.center.x),
+            math_num(circle.center.y),
+            math_num(radius),
+        ) else {
+            return Err(self.invalid(item, "el centro o el radio no es representable"));
+        };
+        let fill_option = fill.map_or_else(
+            || "fill=none".to_string(),
+            |color| format!("fill={},fill opacity={:.5}", tikz_color(color), color.a),
+        );
+        writeln!(
+            self.tex,
+            "\\filldraw[draw={},draw opacity={:.5},line width={:.3}pt,{fill_option}] ({cx},{cy}) circle ({radius});",
+            tikz_color(stroke.color),
+            stroke.color.a,
+            stroke.width
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_point(
+        &mut self,
+        item: &ExportItem,
+        point: &grafito_core::PointObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        let x = resolve_math_binding(
+            item,
+            &self.variables,
+            &point.x_expr,
+            point.position.x,
+            "Point.x_expr",
+        )?;
+        let y = resolve_math_binding(
+            item,
+            &self.variables,
+            &point.y_expr,
+            point.position.y,
+            "Point.y_expr",
+        )?;
+        if !point.size.is_finite() || point.size <= 0.0 || point.size > MAX_EXPORT_STYLE_PIXELS {
+            return Err(self.invalid(item, "el tamano del marcador no es representable"));
+        }
+        if !color_is_valid(point.color) {
+            return Err(self.invalid(item, "el color RGBA no es valido"));
+        }
+        let (Some(px), Some(py)) = (math_num(x), math_num(y)) else {
+            return Err(self.invalid(item, "la posicion no es representable"));
+        };
+        let node = if point.label.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" node[above right]{{{}}}", escape_tikz(&point.label))
+        };
+        writeln!(
+            self.tex,
+            "\\filldraw[fill={},draw={}] ({px},{py}) circle ({:.3}pt){node};",
+            tikz_color(point.color),
+            tikz_color(point.color),
+            point.size
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_line(
+        &mut self,
+        item: &ExportItem,
+        line: &grafito_core::LineObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        if line.kind != LineKind::Segment {
+            self.fallback_comment(item, "semirrecta/recta infinita: usar tikz=visual");
+            return Ok(());
+        }
+        let start = (
+            resolve_math_binding(
+                item,
+                &self.variables,
+                &line.start_x_expr,
+                line.start.x,
+                "Line.start_x_expr",
+            )?,
+            resolve_math_binding(
+                item,
+                &self.variables,
+                &line.start_y_expr,
+                line.start.y,
+                "Line.start_y_expr",
+            )?,
+        );
+        let end = (
+            resolve_math_binding(
+                item,
+                &self.variables,
+                &line.end_x_expr,
+                line.end.x,
+                "Line.end_x_expr",
+            )?,
+            resolve_math_binding(
+                item,
+                &self.variables,
+                &line.end_y_expr,
+                line.end.y,
+                "Line.end_y_expr",
+            )?,
+        );
+        if start == end {
+            self.fallback_comment(item, "segmento degenerado sin longitud");
+            return Ok(());
+        }
+        let stroke = validate_stroke(Self::FORMAT, item, line.width, line.color)?;
+        let (Some(ax), Some(ay), Some(bx), Some(by)) = (
+            math_num(start.0),
+            math_num(start.1),
+            math_num(end.0),
+            math_num(end.1),
+        ) else {
+            return Err(self.invalid(item, "los extremos no son representables"));
+        };
+        writeln!(
+            self.tex,
+            "\\draw[draw={},draw opacity={:.5},line width={:.3}pt] ({ax},{ay}) -- ({bx},{by});",
+            tikz_color(stroke.color),
+            stroke.color.a,
+            stroke.width
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_polygon(
+        &mut self,
+        item: &ExportItem,
+        polygon: &grafito_core::PolygonObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        if polygon.vertices.len() < 3 {
+            return Err(self.invalid(item, "un poligono visible necesita al menos tres vertices"));
+        }
+        let mut corners = Vec::with_capacity(polygon.vertices.len());
+        for (index, vertex) in polygon.vertices.iter().enumerate() {
+            let x = resolve_math_binding(
+                item,
+                &self.variables,
+                polygon.x_exprs.get(index).unwrap_or(&None),
+                vertex.x,
+                &format!("Polygon.x_exprs[{index}]"),
+            )?;
+            let y = resolve_math_binding(
+                item,
+                &self.variables,
+                polygon.y_exprs.get(index).unwrap_or(&None),
+                vertex.y,
+                &format!("Polygon.y_exprs[{index}]"),
+            )?;
+            let (Some(px), Some(py)) = (math_num(x), math_num(y)) else {
+                return Err(self.invalid(item, "un vertice no es representable"));
+            };
+            corners.push(format!("({px},{py})"));
+        }
+        let stroke = validate_stroke(Self::FORMAT, item, polygon.width, polygon.color)?;
+        let fill = validate_fill(Self::FORMAT, item, polygon.fill_color)?;
+        let fill_option = fill.map_or_else(
+            || "fill=none".to_string(),
+            |color| format!("fill={},fill opacity={:.5}", tikz_color(color), color.a),
+        );
+        writeln!(
+            self.tex,
+            "\\draw[draw={},draw opacity={:.5},line width={:.3}pt,{fill_option}] {} -- cycle;",
+            tikz_color(stroke.color),
+            stroke.color.a,
+            stroke.width,
+            corners.join(" -- ")
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_text(
+        &mut self,
+        item: &ExportItem,
+        text: &grafito_core::TextObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        let (Some(px), Some(py)) = (math_num(text.position.x), math_num(text.position.y)) else {
+            return Err(self.invalid(item, "la posicion no es representable"));
+        };
+        if !text.font_size.is_finite()
+            || text.font_size <= 0.0
+            || text.font_size > MAX_EXPORT_STYLE_PIXELS
+        {
+            return Err(self.invalid(item, "el tamano de texto no es representable"));
+        }
+        if !color_is_valid(text.color) {
+            return Err(self.invalid(item, "el color RGBA no es valido"));
+        }
+        writeln!(
+            self.tex,
+            "\\node[anchor=west,text={},text opacity={:.5},font=\\fontsize{{{:.3}}}{{{:.3}}}\\selectfont] at ({px},{py}) {{{}}};",
+            tikz_color(text.color),
+            text.color.a,
+            text.font_size,
+            text.font_size * 1.2,
+            escape_tikz(&text.content)
+        )
+        .ok();
+        Ok(())
+    }
+
+    fn emit_ellipse(
+        &mut self,
+        item: &ExportItem,
+        ellipse: &grafito_core::EllipseObj,
+    ) -> std::result::Result<(), ExportError> {
+        use std::fmt::Write as _;
+        let (Some(cx), Some(cy), Some(rx), Some(ry)) = (
+            math_num(ellipse.center.x),
+            math_num(ellipse.center.y),
+            math_num(ellipse.rx),
+            math_num(ellipse.ry),
+        ) else {
+            return Err(self.invalid(item, "el centro o los semiejes no son representables"));
+        };
+        if !ellipse.rx.is_finite()
+            || !ellipse.ry.is_finite()
+            || ellipse.rx <= 0.0
+            || ellipse.ry <= 0.0
+            || !ellipse.angle.is_finite()
+        {
+            return Err(self.invalid(item, "los semiejes deben ser finitos y positivos"));
+        }
+        let stroke = validate_stroke(Self::FORMAT, item, ellipse.width, ellipse.color)?;
+        let fill = validate_fill(Self::FORMAT, item, ellipse.fill_color)?;
+        let fill_option = fill.map_or_else(
+            || "fill=none".to_string(),
+            |color| format!(",fill={},fill opacity={:.5}", tikz_color(color), color.a),
+        );
+        writeln!(
+            self.tex,
+            "\\draw[draw={},draw opacity={:.5},line width={:.3}pt{fill_option},rotate around={{{:.2}:({cx},{cy})}}] ({cx},{cy}) ellipse ({rx} and {ry});",
+            tikz_color(stroke.color),
+            stroke.color.a,
+            stroke.width,
+            ellipse.angle.to_degrees()
+        )
+        .ok();
+        Ok(())
+    }
+
+    /// Vuelca `Document.whiteboard` en coordenadas del mundo. Los elementos
+    /// inválidos se omiten en silencio, igual que en `append_whiteboard`.
+    fn emit_whiteboard(&mut self, document: &Document) {
+        use std::fmt::Write as _;
+        let elements = document.whiteboard.elements().to_vec();
+        if elements.is_empty() {
+            return;
+        }
+        let item = ExportItem {
+            object_type: "Whiteboard".to_string(),
+            label: "pizarra".to_string(),
+            object_id: "whiteboard".to_string(),
+        };
+        let mut included = 0usize;
+        for element in &elements {
+            if self.emit_whiteboard_element(&item, element) {
+                included += 1;
+            }
+        }
+        if included > 0 {
+            writeln!(self.tex, "% Whiteboard: {included} elementos").ok();
+        }
+    }
+
+    fn emit_whiteboard_element(&mut self, item: &ExportItem, element: &WhiteboardElement) -> bool {
+        use std::fmt::Write as _;
+        let shape_color = whiteboard_rgb_to_color((26, 26, 26));
+        match element {
+            WhiteboardElement::Stroke {
+                points,
+                color,
+                width,
+            } => {
+                let Ok(stroke) = validate_stroke(
+                    Self::FORMAT,
+                    item,
+                    *width as f32,
+                    whiteboard_rgb_to_color(*color),
+                ) else {
+                    return false;
+                };
+                let nodes = points
+                    .iter()
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .filter_map(|(x, y)| {
+                        math_num(*x).and_then(|px| math_num(*y).map(|py| (px, py)))
+                    })
+                    .map(|(px, py)| format!("({px},{py})"))
+                    .collect::<Vec<_>>();
+                if nodes.len() < 2 {
+                    return false;
+                }
+                writeln!(
+                    self.tex,
+                    "\\draw[draw={},draw opacity={:.5},line width={:.3}pt,line cap=round,line join=round] {};",
+                    tikz_color(stroke.color),
+                    stroke.color.a,
+                    stroke.width,
+                    nodes.join(" -- ")
+                )
+                .ok();
+                true
+            }
+            WhiteboardElement::Rectangle { min, max, fill } => {
+                if !finite_whiteboard_pair(*min) || !finite_whiteboard_pair(*max) {
+                    return false;
+                }
+                let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
+                    return false;
+                };
+                let Ok(fill) = validate_fill(Self::FORMAT, item, fill.map(whiteboard_rgb_to_color))
+                else {
+                    return false;
+                };
+                let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
+                    math_num(min.0.min(max.0)),
+                    math_num(min.1.min(max.1)),
+                    math_num(min.0.max(max.0)),
+                    math_num(min.1.max(max.1)),
+                ) else {
+                    return false;
+                };
+                if x0 == x1 || y0 == y1 {
+                    return false;
+                }
+                let fill_option = fill.map_or_else(
+                    || "fill=none".to_string(),
+                    |color| format!(",fill={},fill opacity={:.5}", tikz_color(color), color.a),
+                );
+                writeln!(
+                    self.tex,
+                    "\\draw[draw={},draw opacity={:.5},line width={:.3}pt{fill_option}] ({x0},{y0}) rectangle ({x1},{y1});",
+                    tikz_color(stroke.color),
+                    stroke.color.a,
+                    stroke.width
+                )
+                .ok();
+                true
+            }
+            WhiteboardElement::Ellipse { center, rx, ry } => {
+                if !finite_whiteboard_pair(*center)
+                    || !rx.is_finite()
+                    || !ry.is_finite()
+                    || *rx <= 0.0
+                    || *ry <= 0.0
+                {
+                    return false;
+                }
+                let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
+                    return false;
+                };
+                let (Some(cx), Some(cy), Some(rx), Some(ry)) = (
+                    math_num(center.0),
+                    math_num(center.1),
+                    math_num(*rx),
+                    math_num(*ry),
+                ) else {
+                    return false;
+                };
+                writeln!(
+                    self.tex,
+                    "\\draw[draw={},draw opacity={:.5},line width={:.3}pt] ({cx},{cy}) ellipse ({rx} and {ry});",
+                    tikz_color(stroke.color),
+                    stroke.color.a,
+                    stroke.width
+                )
+                .ok();
+                true
+            }
+            WhiteboardElement::Arrow { from, to } => {
+                if !finite_whiteboard_pair(*from) || !finite_whiteboard_pair(*to) || from == to {
+                    return false;
+                }
+                let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
+                    return false;
+                };
+                let (Some(ax), Some(ay), Some(bx), Some(by)) = (
+                    math_num(from.0),
+                    math_num(from.1),
+                    math_num(to.0),
+                    math_num(to.1),
+                ) else {
+                    return false;
+                };
+                writeln!(
+                    self.tex,
+                    "\\draw[->,draw={},draw opacity={:.5},line width={:.3}pt] ({ax},{ay}) -- ({bx},{by});",
+                    tikz_color(stroke.color),
+                    stroke.color.a,
+                    stroke.width
+                )
+                .ok();
+                true
+            }
+            WhiteboardElement::Text { at, text, size } => {
+                if text.is_empty() || !finite_whiteboard_pair(*at) {
+                    return false;
+                }
+                if !size.is_finite() || *size <= 0.0 || *size as f32 > MAX_EXPORT_STYLE_PIXELS {
+                    return false;
+                }
+                let (Some(px), Some(py)) = (math_num(at.0), math_num(at.1)) else {
+                    return false;
+                };
+                writeln!(
+                    self.tex,
+                    "\\node[anchor=west,text={},font=\\fontsize{{{:.3}}}{{{:.3}}}\\selectfont] at ({px},{py}) {{{}}};",
+                    tikz_color(shape_color),
+                    *size as f32,
+                    *size as f32 * 1.2,
+                    escape_tikz(text)
+                )
+                .ok();
+                true
+            }
+        }
+    }
+}
+
+/// Serializa la escena en modo TikZ math: standalone compilable con pgfplots,
+/// editable en coordenadas del mundo. Requiere la escena ya construida (los
+/// presupuestos —dimensiones, unidades, bytes— se aplican igual que en visual).
+fn serialize_tikz_math(
+    document: &Document,
+    scene: &ExportScene,
+    options: ExportOptions,
+) -> std::result::Result<Vec<u8>, ExportError> {
+    use std::fmt::Write as _;
+
+    const FORMAT: ExportFormat = ExportFormat::Tikz;
+    let view = ExportView::new(document, options, FORMAT)?;
+    let (Some(xmin), Some(xmax), Some(ymin), Some(ymax)) = (
+        math_num(view.bounds.min.x),
+        math_num(view.bounds.max.x),
+        math_num(view.bounds.min.y),
+        math_num(view.bounds.max.y),
+    ) else {
+        return Err(ExportError::Encoding {
+            format: FORMAT,
+            reason: "los limites visibles no son representables en TikZ".to_string(),
+        });
+    };
+
+    let mut writer = TikzMathWriter {
+        tex: String::with_capacity(scene.scene_units.saturating_mul(28).min(4_000_000)),
+        variables: sorted_document_variables(document),
+        bounds: view.bounds,
+    };
+    writer.tex.push_str("\\documentclass{standalone}\n");
+    writer.tex.push_str("\\usepackage[utf8]{inputenc}\n");
+    writer.tex.push_str("\\usepackage{xcolor}\n");
+    writer.tex.push_str("\\usepackage{tikz}\n");
+    writer.tex.push_str("\\usepackage{pgfplots}\n");
+    writer.tex.push_str("\\pgfplotsset{compat=1.18}\n");
+    writeln!(
+        writer.tex,
+        "% grafito tikz-mode={} (editable; visual=replica exacta en pt)",
+        TikzMode::Math.as_str()
+    )
+    .ok();
+    writer.tex.push_str("\\begin{document}\n");
+    writer.tex.push_str("\\begin{tikzpicture}\n");
+    writeln!(
+        writer.tex,
+        "\\begin{{axis}}[xmin={xmin}, xmax={xmax}, ymin={ymin}, ymax={ymax}, axis lines=middle, axis equal image, enlargelimits=false]"
+    )
+    .ok();
+
+    let mut visible: Vec<(ObjectId, &GeoObject)> = document
+        .objects_iter()
+        .filter(|(_, object)| object.is_visible())
+        .map(|(id, object)| (*id, object))
+        .collect();
+    visible.sort_unstable_by_key(|(id, object)| (grafito_render::scene_layer_2d(object), *id));
+    for (_, object) in &visible {
+        let item = ExportItem::from_object(object);
+        match object {
+            GeoObject::Function(function) => writer.emit_function(&item, function)?,
+            GeoObject::Circle(circle) => writer.emit_circle(&item, circle)?,
+            GeoObject::Point(point) => writer.emit_point(&item, point)?,
+            GeoObject::Line(line) => writer.emit_line(&item, line)?,
+            GeoObject::Polygon(polygon) => writer.emit_polygon(&item, polygon)?,
+            GeoObject::Text(text) => writer.emit_text(&item, text)?,
+            GeoObject::Ellipse(ellipse) => writer.emit_ellipse(&item, ellipse)?,
+            _ => writer.fallback_comment(&item, "sin equivalente matematico directo"),
+        }
+    }
+    writer.emit_whiteboard(document);
+
+    writer
+        .tex
+        .push_str("\\end{axis}\n\\end{tikzpicture}\n\\end{document}\n");
+    Ok(writer.tex.into_bytes())
+}
+
 fn tiny_skia_color(color: Color) -> tiny_skia::Color {
     if let Some(valid) = tiny_skia::Color::from_rgba(color.r, color.g, color.b, color.a) {
         valid
@@ -3045,20 +3750,14 @@ pub(crate) fn export_document(
     export_document_with_options(document, format, path, options)
 }
 
-/// Construye y valida toda la salida antes de reemplazar atomicamente el destino.
-pub(crate) fn export_document_with_options(
-    document: &Document,
+/// Valida el presupuesto de salida y reemplaza atómicamente el destino.
+/// Toda exportación verificable pasa por aquí: ningún error escribe a medias.
+fn finish_export(
     format: ExportFormat,
-    path: impl AsRef<Path>,
-    options: ExportOptions,
+    scene: &ExportScene,
+    bytes: Vec<u8>,
+    path: &Path,
 ) -> std::result::Result<ExportReport, ExportError> {
-    let path = path.as_ref();
-    let scene = build_export_scene(document, format, options)?;
-    let bytes = match format {
-        ExportFormat::Svg => serialize_svg(&scene),
-        ExportFormat::Png => render_png(&scene, format)?,
-        ExportFormat::Tikz => serialize_tikz(&scene),
-    };
     if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
         return Err(ExportError::ResourceLimit {
             format,
@@ -3079,8 +3778,42 @@ pub(crate) fn export_document_with_options(
         exported_objects: scene.objects.len(),
         hidden_objects: scene.hidden_objects,
         primitive_count: scene.primitive_count(),
-        object_types: scene.object_types,
+        object_types: scene.object_types.clone(),
     })
+}
+
+/// Construye y valida toda la salida antes de reemplazar atomicamente el destino.
+pub(crate) fn export_document_with_options(
+    document: &Document,
+    format: ExportFormat,
+    path: impl AsRef<Path>,
+    options: ExportOptions,
+) -> std::result::Result<ExportReport, ExportError> {
+    let path = path.as_ref();
+    let scene = build_export_scene(document, format, options)?;
+    let bytes = match format {
+        ExportFormat::Svg => serialize_svg(&scene),
+        ExportFormat::Png => render_png(&scene, format)?,
+        ExportFormat::Tikz => serialize_tikz(&scene),
+    };
+    finish_export(format, &scene, bytes, path)
+}
+
+/// Exporta TikZ en el modo indicado (`tikz=visual|math`); `Visual` conserva
+/// el comportamiento histórico (réplica exacta en pt).
+pub(crate) fn export_document_with_tikz_mode(
+    document: &Document,
+    path: impl AsRef<Path>,
+    options: ExportOptions,
+    mode: TikzMode,
+) -> std::result::Result<ExportReport, ExportError> {
+    let path = path.as_ref();
+    let scene = build_export_scene(document, ExportFormat::Tikz, options)?;
+    let bytes = match mode {
+        TikzMode::Visual => serialize_tikz(&scene),
+        TikzMode::Math => serialize_tikz_math(document, &scene, options)?,
+    };
+    finish_export(ExportFormat::Tikz, &scene, bytes, path)
 }
 
 pub(crate) fn export_svg(
@@ -3101,7 +3834,49 @@ pub(crate) fn export_tikz(
     document: &Document,
     path: impl AsRef<Path>,
 ) -> std::result::Result<ExportReport, ExportError> {
-    export_document(document, ExportFormat::Tikz, path)
+    export_tikz_with_mode(document, path, TikzMode::Visual)
+}
+
+/// Exporta TikZ en el modo indicado (`tikz=visual|math`).
+pub(crate) fn export_tikz_with_mode(
+    document: &Document,
+    path: impl AsRef<Path>,
+    mode: TikzMode,
+) -> std::result::Result<ExportReport, ExportError> {
+    let options = ExportOptions::from_document(document, ExportFormat::Tikz)?;
+    export_document_with_tikz_mode(document, path, options, mode)
+}
+
+fn pdf_unavailable() -> ExportError {
+    ExportError::Unavailable {
+        feature: "PDF",
+        reason: "vectorial pendiente de la dependencia printpdf (puro Rust, sin binarios externos)"
+            .to_string(),
+    }
+}
+
+/// Stub honesto de exportación PDF vectorial: re-emitir `Path`/`Text` exige
+/// `printpdf`, que solo el lead puede añadir en `Cargo.toml` (ver resumen
+/// EXPORT). Nunca toca el destino: siempre devuelve `Unavailable`, así los
+/// presupuestos (dimensión, píxeles, bytes) quedan intactos por construcción.
+#[allow(dead_code)] // Pendiente de cableado UI por el lead (ver resumen EXPORT).
+pub(crate) fn export_pdf(
+    document: &Document,
+    path: impl AsRef<Path>,
+) -> std::result::Result<ExportReport, ExportError> {
+    let _ = (document, path.as_ref());
+    Err(pdf_unavailable())
+}
+
+/// Variante con opciones explícitas del stub honesto de PDF.
+#[allow(dead_code)] // Pendiente de cableado UI por el lead (ver resumen EXPORT).
+pub(crate) fn export_pdf_with_options(
+    document: &Document,
+    path: impl AsRef<Path>,
+    options: ExportOptions,
+) -> std::result::Result<ExportReport, ExportError> {
+    let _ = (document, path.as_ref(), options);
+    Err(pdf_unavailable())
 }
 
 pub(crate) fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> io::Result<()> {
@@ -4579,6 +5354,152 @@ mod tests {
         .expect("export sin pizarra");
         assert_eq!(report.exported_objects, 19);
         assert!(!report.object_types.contains_key("Whiteboard"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn svg_standalone_carries_title() {
+        let document = common_2d_document();
+        let path = temp_export_path("svg");
+        export_document_with_options(
+            &document,
+            ExportFormat::Svg,
+            &path,
+            ExportOptions::new(320, 240),
+        )
+        .expect("export SVG");
+        let svg = std::fs::read_to_string(&path).expect("read SVG");
+        assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(
+            svg.contains("<title>"),
+            "el SVG standalone debe llevar <title>"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tikz_mode_param_parsing() {
+        assert_eq!(TikzMode::from_param("visual"), Some(TikzMode::Visual));
+        assert_eq!(TikzMode::from_param(" math "), Some(TikzMode::Math));
+        assert_eq!(TikzMode::from_param("MATH"), Some(TikzMode::Math));
+        assert_eq!(TikzMode::from_param("pdf"), None);
+        assert_eq!(TikzMode::from_param(""), None);
+        assert_eq!(TikzMode::Visual.as_str(), "visual");
+        assert_eq!(TikzMode::Math.as_str(), "math");
+    }
+
+    fn tikz_math_fixture_document() -> Document {
+        use grafito_core::{CircleObj, FunctionObj};
+
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        document.view_mut().scale = 20.0;
+        document
+            .try_add_object(GeoObject::Function(FunctionObj::new("x^2")))
+            .expect("funcion valida");
+        document
+            .try_add_object(GeoObject::Circle(CircleObj::new(
+                Point2::new(0.0, 0.0),
+                2.0,
+            )))
+            .expect("circulo valido");
+        document
+    }
+
+    #[test]
+    fn tikz_math_mode_is_editable_while_visual_is_a_pt_replica() {
+        let document = tikz_math_fixture_document();
+        let options = ExportOptions::new(320, 240);
+        let math_path = temp_export_path("tex");
+        let visual_path = temp_export_path("tex");
+
+        export_document_with_tikz_mode(&document, &math_path, options, TikzMode::Math)
+            .expect("modo math");
+        export_document_with_tikz_mode(&document, &visual_path, options, TikzMode::Visual)
+            .expect("modo visual");
+
+        let math = std::fs::read_to_string(&math_path).expect("read math TikZ");
+        let visual = std::fs::read_to_string(&visual_path).expect("read visual TikZ");
+        assert!(
+            math.contains("\\addplot"),
+            "math debe emitir \\addplot para Function"
+        );
+        assert!(
+            math.contains("\\filldraw"),
+            "math debe emitir \\filldraw circle para Circle"
+        );
+        assert!(math.contains("\\begin{axis}"), "math usa pgfplots");
+        assert!(
+            math.contains("\\end{document}"),
+            "math es standalone compilable"
+        );
+        assert!(
+            !visual.contains("\\addplot"),
+            "visual es replica en pt, sin pgfplots"
+        );
+        assert!(
+            !visual.contains("\\filldraw"),
+            "visual es replica en pt, sin primitivas matematicas"
+        );
+        assert!(
+            visual.contains("\\begin{tikzpicture}"),
+            "visual sigue siendo TikZ compilable"
+        );
+        let _ = std::fs::remove_file(math_path);
+        let _ = std::fs::remove_file(visual_path);
+    }
+
+    #[test]
+    fn tikz_math_mode_preserves_destination_on_invalid_geometry() {
+        let mut document = Document::new();
+        document.view_mut().screen_size = glam::Vec2::new(320.0, 240.0);
+        let id = document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+            .expect("punto valido");
+        let GeoObject::Point(point) = document.get_object_mut(id).expect("el punto existe") else {
+            panic!("se esperaba un punto")
+        };
+        point.position.x = f64::NAN;
+
+        let path = temp_export_path("tex");
+        std::fs::write(&path, b"keep me").expect("write sentinel");
+        let error = export_document_with_tikz_mode(
+            &document,
+            &path,
+            ExportOptions::new(320, 240),
+            TikzMode::Math,
+        )
+        .expect_err("la geometria no finita debe fallar en math");
+        assert!(matches!(error, ExportError::InvalidObject { .. }));
+        assert_eq!(std::fs::read(&path).expect("sentinel remains"), b"keep me");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pdf_export_reports_honest_unavailable_and_preserves_destination() {
+        let document = common_2d_document();
+        let path = temp_export_path("pdf");
+        std::fs::write(&path, b"existing destination").expect("write sentinel");
+
+        let error = export_pdf(&document, &path).expect_err("PDF aun no disponible");
+        assert!(
+            error
+                .to_string()
+                .contains("PDF no disponible en esta build"),
+            "error honesto esperado, fue: {error}"
+        );
+        let options_error = export_pdf_with_options(&document, &path, ExportOptions::new(320, 240))
+            .expect_err("PDF aun no disponible con opciones");
+        assert!(
+            options_error
+                .to_string()
+                .contains("PDF no disponible en esta build"),
+            "error honesto esperado, fue: {options_error}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("sentinel remains"),
+            b"existing destination"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

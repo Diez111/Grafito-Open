@@ -287,6 +287,77 @@ fn to_color32(c: Color) -> Color32 {
     )
 }
 
+/// Posición representativa 2D para muestrear el rastro de un objeto.
+///
+/// Punto→posición, línea→punto medio, círculo→centro, polígono→centroide.
+/// Resto (`None`): no se muestrea (funciones/paramétricas exigen evaluación
+/// con presupuesto propio; 3D no tiene rastro 2D).
+fn trail_representative_position(obj: &GeoObject) -> Option<Point2> {
+    match obj {
+        GeoObject::Point(o) => Some(o.position),
+        GeoObject::Line(o) => Some(Point2::new(
+            (o.start.x + o.end.x) * 0.5,
+            (o.start.y + o.end.y) * 0.5,
+        )),
+        GeoObject::Circle(o) => Some(o.center),
+        GeoObject::Polygon(o) => {
+            if o.vertices.is_empty() {
+                return None;
+            }
+            let n = o.vertices.len() as f64;
+            let (sx, sy) = o
+                .vertices
+                .iter()
+                .fold((0.0, 0.0), |(ax, ay), v| (ax + v.x, ay + v.y));
+            let c = Point2::new(sx / n, sy / n);
+            if c.x.is_finite() && c.y.is_finite() {
+                Some(c)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Dibuja una estela con fade: segmento `i` con alpha `(i+1)/len` del color base.
+///
+/// Polilínea abierta (sin cerrar), corta en puntos no-finitos, fuera de
+/// picking y bounds. No-op con <2 puntos.
+fn draw_trail(
+    painter: &egui::Painter,
+    view: &ViewTransform,
+    clip: Rect,
+    pts: &[Point2],
+    base: Color,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let n = pts.len();
+    let rgb = to_color32(Color::new(base.r, base.g, base.b, 1.0));
+    for i in 0..n.saturating_sub(1) {
+        let a = pts.get(i);
+        let b = pts.get(i + 1);
+        let (Some(a), Some(b)) = (a, b) else {
+            continue;
+        };
+        if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+            continue;
+        }
+        let sa = view.world_to_screen(*a);
+        let sb = view.world_to_screen(*b);
+        let pa = Pos2::new(sa.x, sa.y);
+        let pb = Pos2::new(sb.x, sb.y);
+        if !clip.contains(pa) && !clip.contains(pb) {
+            continue;
+        }
+        let alpha = (((i as f64 + 1.0) / n as f64) * 255.0).clamp(0.0, 255.0) as u8;
+        let col = Color32::from_rgba_unmultiplied(rgb.r(), rgb.g(), rgb.b(), alpha);
+        painter.line_segment([pa, pb], Stroke::new(1.5, col));
+    }
+}
+
 /// Aplica el clip del canvas visible a un painter.
 ///
 /// Todos los painters de `render_2d` pasan por aquí en su punto de entrada
@@ -2588,6 +2659,8 @@ impl GrafitoApp {
             }
         }
 
+        self.sample_and_draw_trails(&painter, canvas_rect);
+
         if let Some(preview) = &self.preview_object {
             let style = StyleOverride {
                 color: Some(Color {
@@ -2805,6 +2878,60 @@ impl GrafitoApp {
     pub(crate) fn draw_object(&self, painter: &egui::Painter, canvas_rect: Rect, obj: &GeoObject) {
         let painter = clipped_to_canvas(painter, canvas_rect);
         self.draw_object_styled(&painter, canvas_rect, obj, None, false);
+    }
+
+    /// Mínimo desplazamiento en pantalla (px) para registrar una muestra de rastro.
+    /// Evita llenar el buffer con el objeto quieto (throttle por movimiento).
+    pub(crate) const TRAIL_SAMPLE_MIN_PX: f64 = 1.0;
+
+    /// Muestrea y dibuja los rastros (`Rastro[etiqueta]`) de objetos con trace activo.
+    ///
+    /// Solo objetos visibles 2D; early-out por `is_trace` (nunca recorre 5000
+    /// objetos a fondo: el chequeo es O(1) por objeto visible). La estela se
+    /// dibuja como polilínea abierta con fade `(i+1)/len`, sin picking ni bounds.
+    pub(crate) fn sample_and_draw_trails(&mut self, painter: &egui::Painter, canvas_rect: Rect) {
+        let view = *self.document.view();
+        // Recolecta primero (ids + estilo) para no pelear borrows con el muestreo.
+        let mut jobs: Vec<(ObjectId, Color)> = Vec::new();
+        for (id, obj) in cached_ordered_visible_2d_objects(&self.document) {
+            if self.document.is_trace(id) {
+                jobs.push((id, obj.color()));
+            }
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let margin = 32.0;
+        let expanded = canvas_rect.expand(margin);
+        for (id, base) in jobs {
+            let Some(obj) = self.document.get_object(id) else {
+                continue;
+            };
+            let Some(rep) = trail_representative_position(obj) else {
+                continue;
+            };
+            if !rep.x.is_finite() || !rep.y.is_finite() {
+                continue;
+            }
+            // Throttle por movimiento en pantalla.
+            let screen = view.world_to_screen(rep);
+            let moved = self
+                .document
+                .trail_points(id)
+                .last()
+                .map(|last| {
+                    let ls = view.world_to_screen(*last);
+                    let dx = f64::from(screen.x - ls.x);
+                    let dy = f64::from(screen.y - ls.y);
+                    dx * dx + dy * dy >= Self::TRAIL_SAMPLE_MIN_PX * Self::TRAIL_SAMPLE_MIN_PX
+                })
+                .unwrap_or(true);
+            if moved {
+                self.document.push_trail_sample(id, rep);
+            }
+            let pts = self.document.trail_points(id);
+            draw_trail(painter, &view, expanded, &pts, base);
+        }
     }
 
     /// Rellena el área interior de la imagen transformada de un
@@ -3200,7 +3327,20 @@ impl GrafitoApp {
             CpuObjectPass::Skip => return,
         };
 
+        // Culling de viewport (mismo criterio que el builder GPU en
+        // `grafito_render::build_single_geometry`): si el objeto tiene AABB
+        // mundial acotado y no intersecta el canvas, se omite todo el
+        // muestreo/proyección CPU (fractales 160k px, domain coloring 250k
+        // celdas, paramétricas 4000 muestras, círculos/elipses, etc.). Los
+        // objetos no acotados o con mapeo devuelven `None` y nunca se cullan.
         let view = self.document.view();
+        let view_bounds = grafito_render::viewport_world_bounds(view);
+        if let Some(aabb) = grafito_render::object_world_aabb(view, &self.document, obj) {
+            let margin = grafito_render::object_cull_margin_world(obj, view.scale);
+            if !grafito_render::aabb_intersects(&aabb, &view_bounds, margin) {
+                return;
+            }
+        }
         let label_color = current_theme(painter.ctx()).object_label;
         match obj {
             GeoObject::Point(p) => {
@@ -3258,13 +3398,7 @@ impl GrafitoApp {
                     self.document.resolve_expr(&l.end_y_expr, l.end.y),
                 );
 
-                let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));
-                let world_br =
-                    view.screen_to_world(GlamVec2::new(canvas_rect.width(), canvas_rect.height()));
-                let view_bounds = grafito_geometry::AABB::new(
-                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
-                );
+                let view_bounds = grafito_render::viewport_world_bounds(view);
 
                 let stroke = Stroke::new(width, to_color32(color));
                 let clipped = match l.kind {
@@ -5354,5 +5488,148 @@ mod clipping_and_resize_tests {
         assert!(super::trig_asymptotes(2, 0.0, 0.0).is_empty());
         // Función no trigonométrica → vacío.
         assert!(super::trig_asymptotes(0, -10.0, 10.0).is_empty());
+    }
+    // ── Culling de viewport (path CPU) ─────────────────────────────────────
+
+    /// La decisión de culling del path CPU (`draw_object_styled`) debe
+    /// descartar un fractal fuera del viewport ANTES de muestrear/proyectar
+    /// sus 160k píxeles. Usa los mismos helpers que el builder GPU.
+    #[test]
+    fn cpu_path_culling_skips_offscreen_fractal() {
+        let mut document = grafito_core::Document::new();
+        document.set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        let mut fractal = grafito_core::Fractal2DObj::mandelbrot();
+        fractal.x_min += 1000.0;
+        fractal.x_max += 1000.0;
+        fractal.y_min += 1000.0;
+        fractal.y_max += 1000.0;
+        let obj = grafito_core::GeoObject::Fractal2D(fractal);
+        let view = document.view();
+        let view_bounds = grafito_render::viewport_world_bounds(view);
+        let aabb = grafito_render::object_world_aabb(view, &document, &obj).expect("fractal AABB");
+        let margin = grafito_render::object_cull_margin_world(&obj, view.scale);
+        assert!(
+            !grafito_render::aabb_intersects(&aabb, &view_bounds, margin),
+            "off-screen fractal must be culled by the CPU path decision"
+        );
+    }
+
+    /// El mismo fractal centrado en el viewport NO se culla (regresión de
+    /// sobre-culling: un objeto visible nunca debe desaparecer).
+    #[test]
+    fn cpu_path_culling_keeps_onscreen_fractal() {
+        let mut document = grafito_core::Document::new();
+        document.set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        let obj = grafito_core::GeoObject::Fractal2D(grafito_core::Fractal2DObj::mandelbrot());
+        let view = document.view();
+        let view_bounds = grafito_render::viewport_world_bounds(view);
+        let aabb = grafito_render::object_world_aabb(view, &document, &obj).expect("fractal AABB");
+        let margin = grafito_render::object_cull_margin_world(&obj, view.scale);
+        assert!(
+            grafito_render::aabb_intersects(&aabb, &view_bounds, margin),
+            "on-screen fractal must NOT be culled"
+        );
+    }
+
+    /// Regresión de fuente: `draw_object_styled` debe aplicar el culling de
+    /// viewport antes de muestrear/proyectar. Si alguien quita el culling del
+    /// path CPU, este test falla y obliga a decidir explícitamente.
+    #[test]
+    fn draw_object_styled_wires_viewport_culling() {
+        let source = include_str!("render_2d.rs");
+        let start = source
+            .find("pub(crate) fn draw_object_styled(")
+            .expect("draw_object_styled not found");
+        let body = &source[start..];
+        let end = body
+            .find("\n    pub(crate) fn ")
+            .or_else(|| body.find("\n    fn "))
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("grafito_render::object_world_aabb"),
+            "draw_object_styled must cull off-screen objects before sampling"
+        );
+        assert!(
+            body.contains("grafito_render::aabb_intersects"),
+            "draw_object_styled must use aabb_intersects for the viewport test"
+        );
+    }
+}
+
+#[cfg(test)]
+mod trail_tests {
+    use super::*;
+    use grafito_core::{CircleObj, FunctionObj, LineObj, PointObj, PolygonObj};
+
+    #[test]
+    fn representative_positions_cover_traceable_types() {
+        let p = GeoObject::Point(PointObj::new(Point2::new(3.0, 4.0)));
+        assert_eq!(
+            trail_representative_position(&p),
+            Some(Point2::new(3.0, 4.0))
+        );
+        let l = GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(4.0, 2.0)));
+        assert_eq!(
+            trail_representative_position(&l),
+            Some(Point2::new(2.0, 1.0))
+        );
+        let c = GeoObject::Circle(CircleObj::new(Point2::new(1.0, 1.0), 5.0));
+        assert_eq!(
+            trail_representative_position(&c),
+            Some(Point2::new(1.0, 1.0))
+        );
+        let g = GeoObject::Polygon(PolygonObj::new(vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(4.0, 0.0),
+            Point2::new(0.0, 4.0),
+        ]));
+        let centroid = trail_representative_position(&g).expect("centroide");
+        assert!((centroid.x - 4.0 / 3.0).abs() < 1e-12);
+        assert!((centroid.y - 4.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn representative_returns_none_for_unsupported_and_empty() {
+        let f = GeoObject::Function(FunctionObj::new("x^2"));
+        assert_eq!(trail_representative_position(&f), None);
+        let g = GeoObject::Polygon(PolygonObj::new(vec![]));
+        assert_eq!(trail_representative_position(&g), None);
+    }
+
+    #[test]
+    fn draw_trail_never_panics_and_skips_short_or_nonnfinite() {
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let view = ViewTransform::new(800.0, 600.0);
+        let clip = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(800.0, 600.0));
+        let base = Color::new(1.0, 0.0, 0.0, 1.0);
+        // <2 puntos: no-op.
+        draw_trail(&painter, &view, clip, &[], base);
+        draw_trail(&painter, &view, clip, &[Point2::new(0.0, 0.0)], base);
+        // NaN se corta sin panic.
+        draw_trail(
+            &painter,
+            &view,
+            clip,
+            &[
+                Point2::new(0.0, 0.0),
+                Point2::new(f64::NAN, 1.0),
+                Point2::new(2.0, 2.0),
+            ],
+            base,
+        );
+        // Normal: 3 puntos dibujan 2 segmentos con fade.
+        draw_trail(
+            &painter,
+            &view,
+            clip,
+            &[
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 1.0),
+                Point2::new(2.0, 0.0),
+            ],
+            base,
+        );
     }
 }

@@ -325,4 +325,187 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn offscreen_circle_is_culled_from_geometry() {
+        // Viewport por defecto (scale 50, 800×600) ≈ [-8, 8] × [-6, 6] mundo.
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(1000.0, 1000.0),
+            1.0,
+        )));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            vertices.is_empty(),
+            "off-screen circle must not tessellate (got {} vertices)",
+            vertices.len()
+        );
+    }
+
+    #[test]
+    fn onscreen_circle_still_tessellates() {
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(0.0, 0.0),
+            1.0,
+        )));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            !vertices.is_empty(),
+            "on-screen circle must tessellate (got {} vertices)",
+            vertices.len()
+        );
+    }
+
+    #[test]
+    fn huge_circle_overlapping_viewport_is_not_culled() {
+        // Centro fuera del viewport pero radio enorme: el AABB intersecta y
+        // el círculo SÍ debe teselarse (borde visible dentro del canvas).
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(1000.0, 0.0),
+            995.0,
+        )));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            !vertices.is_empty(),
+            "circle overlapping the viewport must not be culled"
+        );
+    }
+
+    #[test]
+    fn offscreen_fractal_is_culled_before_compute() {
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        let mut fractal = Fractal2DObj::mandelbrot();
+        fractal.x_min += 1000.0;
+        fractal.x_max += 1000.0;
+        fractal.y_min += 1000.0;
+        fractal.y_max += 1000.0;
+        doc.add_object(GeoObject::Fractal2D(fractal));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            vertices.is_empty(),
+            "off-screen fractal must not compute 160k pixels"
+        );
+    }
+
+    #[test]
+    fn offscreen_complex_grid_is_culled_before_compute() {
+        use grafito_core::ComplexGridObj;
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        let mut grid = ComplexGridObj::new("z", -1.0, 1.0, -1.0, 1.0);
+        grid.render_mode = 1; // domain coloring (250k celdas en resolución alta)
+        grid.x_min += 500.0;
+        grid.x_max += 500.0;
+        grid.y_min += 500.0;
+        grid.y_max += 500.0;
+        doc.add_object(GeoObject::ComplexGrid(grid));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            vertices.is_empty(),
+            "off-screen complex grid must not compute 250k cells"
+        );
+    }
+
+    #[test]
+    fn offscreen_parametric_curve_is_culled_from_projection() {
+        use grafito_core::ParametricCurve2DObj;
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        // Círculo centrado lejos del viewport: las 4000 muestras no se proyectan.
+        doc.add_object(GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+            "1000 + cos(t)",
+            "1000 + sin(t)",
+            0.0,
+            6.28,
+        )));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            vertices.is_empty(),
+            "off-screen parametric curve must not project 4000 samples"
+        );
+    }
+
+    #[test]
+    fn viewport_culling_margin_covers_stroke_width() {
+        // Un círculo pegado al borde del viewport (a menos de un trazo de
+        // distancia) NO se culla: el margen mundial cubre el ancho del trazo.
+        let mut doc = Document::new();
+        doc.set_view(ViewTransform::new(800.0, 600.0));
+        // Borde derecho del viewport ≈ x = 8. Círculo con borde en x = 8.05,
+        // dentro del margen de trazo (4px / 50 = 0.08 mundo).
+        doc.add_object(GeoObject::Circle(CircleObj::new(
+            Point2::new(9.05, 0.0),
+            1.0,
+        )));
+        let view = ViewTransform::new(800.0, 600.0);
+        let (vertices, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            !vertices.is_empty(),
+            "circle within stroke margin of the viewport must not be culled"
+        );
+    }
+
+    #[test]
+    fn object_world_aabb_is_conservative_for_rotated_ellipse() {
+        use grafito_core::EllipseObj;
+        let view = ViewTransform::new(800.0, 600.0);
+        let mut ellipse = EllipseObj::new(Point2::new(0.0, 0.0), 2.0, 1.0);
+        ellipse.angle = std::f64::consts::FRAC_PI_4;
+        let doc = Document::new();
+        let aabb = crate::object_world_aabb(&view, &doc, &GeoObject::Ellipse(ellipse))
+            .expect("ellipse has a bounded AABB");
+        // La elipse rotada cabe dentro de la caja ±(rx, ry) sin importar el ángulo.
+        assert!(aabb.min.x <= -2.0 && aabb.max.x >= 2.0);
+        assert!(aabb.min.y <= -1.0 && aabb.max.y >= 1.0);
+    }
+
+    #[test]
+    fn unbounded_and_mapped_objects_never_cull() {
+        use grafito_core::{ComplexMappingObj, LineObj, PointObj};
+        let view = ViewTransform::new(800.0, 600.0);
+        let mut doc = Document::new();
+        // Línea infinita: extensión no acotada → nunca se culla.
+        assert!(crate::object_world_aabb(
+            &view,
+            &doc,
+            &GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0),))
+        )
+        .is_none());
+        // ComplexMapping: el mapa puede traer puntos de fuera hacia dentro.
+        let target = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        assert!(crate::object_world_aabb(
+            &view,
+            &doc,
+            &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", target)),
+        )
+        .is_none());
+    }
+    #[test]
+    fn scatter_plot_aabb_covers_data_beyond_declared_bounds() {
+        use grafito_core::ScatterPlotObj;
+        let view = ViewTransform::new(800.0, 600.0);
+        let doc = Document::new();
+        // Los bounds declarados (x_min/x_max = ±5) NO cubren el dato en 1000:
+        // el AABB debe derivarse de los datos reales para no sobre-cullar.
+        let mut scatter = ScatterPlotObj::new(vec![0.0, 1000.0], vec![0.0, 1000.0]);
+        scatter.x_min = -5.0;
+        scatter.x_max = 5.0;
+        scatter.y_min = -5.0;
+        scatter.y_max = 5.0;
+        let aabb = crate::object_world_aabb(&view, &doc, &GeoObject::ScatterPlot(scatter))
+            .expect("scatter plot has a bounded AABB");
+        assert!(aabb.max.x >= 1000.0 && aabb.max.y >= 1000.0);
+        assert!(aabb.min.x <= 0.0 && aabb.min.y <= 0.0);
+    }
 }
