@@ -243,10 +243,25 @@ impl GrafitoApp {
                 if self.tool_state.pending.len() == 2 {
                     let p1 = self.tool_state.pending[0];
                     let p2 = self.tool_state.pending[1];
-                    let cmd = format!(
-                        "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
-                        p1.x, p1.y, p2.x, p2.y
-                    );
+                    // GeoGebra: perpendicular = punto + recta existentes por etiqueta.
+                    // Solo si no hay ese par, mediatriz honesta de dos puntos libres.
+                    let tol = 10.0 / self.document.view().scale;
+                    let classify = |obj: &GeoObject| {
+                        (
+                            obj.label().to_owned(),
+                            matches!(obj, GeoObject::Point(_)),
+                            matches!(obj, GeoObject::Line(_)),
+                        )
+                    };
+                    let r1 = self
+                        .document
+                        .pick_object(p1, tol)
+                        .and_then(|id| self.document.get_object(id).map(classify));
+                    let r2 = self
+                        .document
+                        .pick_object(p2, tol)
+                        .and_then(|id| self.document.get_object(id).map(classify));
+                    let cmd = perpendicular_command(r1, r2, p1, p2);
                     self.execute_command_and_record(&cmd, time);
                     self.tool_state.pending.clear();
                     self.tool_ghost = None;
@@ -272,6 +287,9 @@ impl GrafitoApp {
             | Tool::Midpoint
             | Tool::Slider
             | Tool::Button
+            | Tool::Parallel
+            | Tool::Arc
+            | Tool::Sector
             | Tool::Distance
             | Tool::Angle
             | Tool::Area
@@ -432,7 +450,11 @@ impl GrafitoApp {
                 if let Some(center) = pts.first() {
                     let radius = center.distance(&world);
                     let start_angle = (world.y - center.y).atan2(world.x - center.x);
-                    let n = 5;
+                    // n paramétrico (variable `n` > memoria sesión > 5), igual que el commit.
+                    let n = crate::tool_dispatcher::resolve_polygon_sides(
+                        &self.tool_state,
+                        &self.document,
+                    );
                     let verts: Vec<Point2> = (0..n)
                         .map(|i| {
                             let angle = start_angle + i as f64 / n as f64 * std::f64::consts::TAU;
@@ -1292,6 +1314,37 @@ impl GrafitoApp {
     }
 }
 
+/// Comando para la herramienta Perpendicular dados dos picks del lienzo.
+///
+/// `r` = `Some((etiqueta, es_punto, es_recta))` si el clic cayó sobre un
+/// objeto existente. Con par (punto, recta) en cualquier orden emite
+/// `Perpendicular[punto, recta]` (GeoGebra); en otro caso, mediatriz honesta
+/// de dos puntos libres (única perpendicular definible sin objetos).
+pub(crate) fn perpendicular_command(
+    r1: Option<(String, bool, bool)>,
+    r2: Option<(String, bool, bool)>,
+    p1: Point2,
+    p2: Point2,
+) -> String {
+    let mut point_label: Option<String> = None;
+    let mut line_label: Option<String> = None;
+    for r in [r1, r2].into_iter().flatten() {
+        if r.1 && point_label.is_none() {
+            point_label = Some(r.0.clone());
+        }
+        if r.2 && line_label.is_none() {
+            line_label = Some(r.0);
+        }
+    }
+    match (point_label, line_label) {
+        (Some(p), Some(l)) => format!("Perpendicular[{p}, {l}]"),
+        _ => format!(
+            "PerpendicularBisector[({:.2}, {:.2}), ({:.2}, {:.2})]",
+            p1.x, p1.y, p2.x, p2.y
+        ),
+    }
+}
+
 fn point_to_line_distance(p: Point2, a: Point2, b: Point2) -> f64 {
     let abx = b.x - a.x;
     let aby = b.y - a.y;
@@ -1499,5 +1552,41 @@ impl GrafitoApp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod perpendicular_command_tests {
+    use super::*;
+    use grafito_geometry::Point2;
+
+    fn pt(x: f64, y: f64) -> Point2 {
+        Point2::new(x, y)
+    }
+
+    #[test]
+    fn point_line_pair_in_any_order_emits_perpendicular() {
+        let p = |s: &str| Some((s.to_owned(), true, false));
+        let l = |s: &str| Some((s.to_owned(), false, true));
+        assert_eq!(
+            perpendicular_command(p("A"), l("r"), pt(0.0, 0.0), pt(1.0, 1.0)),
+            "Perpendicular[A, r]"
+        );
+        assert_eq!(
+            perpendicular_command(l("r"), p("A"), pt(0.0, 0.0), pt(1.0, 1.0)),
+            "Perpendicular[A, r]"
+        );
+    }
+
+    #[test]
+    fn missing_pair_falls_back_to_honest_bisector() {
+        let p = |s: &str| Some((s.to_owned(), true, false));
+        let (p1, p2) = (pt(0.0, 0.0), pt(2.0, 0.0));
+        assert_eq!(
+            perpendicular_command(None, None, p1, p2),
+            "PerpendicularBisector[(0.00, 0.00), (2.00, 0.00)]"
+        );
+        assert!(perpendicular_command(p("A"), p("B"), p1, p2).starts_with("PerpendicularBisector"));
+        assert!(perpendicular_command(None, p("A"), p1, p2).starts_with("PerpendicularBisector"));
     }
 }

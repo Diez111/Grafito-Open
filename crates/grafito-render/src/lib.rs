@@ -25,10 +25,10 @@
 
 use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::{
-    ComplexGridObj, Document, GeoObject, ObjectId, PhasePortraitObj, RelationOperator,
-    RenderQuality, TransformedObj, VectorField3DObj,
+    ComplexGridObj, Document, GeoObject, HyperbolaObj, ObjectId, ParabolaObj, PhasePortraitObj,
+    RelationOperator, RenderQuality, TransformedObj, VectorField3DObj,
 };
-use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform};
+use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform, AABB};
 use lyon::{
     math::point,
     path::Path,
@@ -106,6 +106,265 @@ fn lyon_tolerance_for_view_scale(scale: f64) -> f32 {
     let base_tol = 0.1_f32;
     let ratio = (base_scale / scale.max(1e-6)) as f32;
     (base_tol * ratio.clamp(0.25, 4.0)).clamp(0.01, 0.5)
+}
+
+/// AABB mundial del viewport (esquinas mundo de la pantalla), normalizado
+/// para que `min <= max` aunque la cámara esté invertida (pan/zoom negativo).
+pub fn viewport_world_bounds(view: &ViewTransform) -> AABB {
+    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+    let world_br = view.screen_to_world(view.screen_size);
+    AABB::new(
+        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
+        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
+    )
+}
+
+/// Intersección de dos AABB con margen mundial (cubre trazos y etiquetas).
+pub fn aabb_intersects(a: &AABB, b: &AABB, margin: f64) -> bool {
+    a.min.x <= b.max.x + margin
+        && a.max.x >= b.min.x - margin
+        && a.min.y <= b.max.y + margin
+        && a.max.y >= b.min.y - margin
+}
+
+/// Margen mundial conservador para el culling: el trazo más ancho del objeto
+/// (píxeles de pantalla) convertido a unidades mundo. `scale` nunca es 0 en
+/// un viewport válido, pero se protege igualmente.
+pub fn object_cull_margin_world(obj: &GeoObject, scale: f64) -> f64 {
+    let width_px = match obj {
+        GeoObject::Point(p) => p.size,
+        GeoObject::Circle(c) => c.width,
+        GeoObject::Ellipse(el) => el.width,
+        GeoObject::Arc(a) => a.width,
+        GeoObject::Sector(s) => s.width,
+        GeoObject::Parabola(p) => p.width,
+        GeoObject::Hyperbola(h) => h.width,
+        GeoObject::BezierCurve(b) => b.width,
+        GeoObject::Spline(s) => s.width,
+        GeoObject::Histogram(h) => h.width,
+        GeoObject::BoxPlot(b) => b.width,
+        GeoObject::RegressionLine(r) => r.width,
+        GeoObject::Text(t) => t.font_size,
+        GeoObject::ScatterPlot(sp) => sp.point_size,
+        _ => 2.0,
+    };
+    (width_px as f64).max(4.0) / scale.max(1e-6)
+}
+
+/// AABB mundial conservador del objeto para culling de viewport.
+///
+/// `None` ⇒ extensión no acotada o mapeo que puede traer puntos de fuera del
+/// viewport hacia dentro (`ComplexMapping`/`Transformed`) ⇒ nunca se culla.
+/// Los objetos con dominio explícito (`Fractal2D`, `ComplexGrid`,
+/// `PhasePortrait`, `Histogram`, `ScatterPlot`, `BoxPlot`, `RegressionLine`)
+/// usan sus propios bounds; las curvas paramétricas/polares derivan el AABB
+/// de las muestras cacheadas (idénticas a las que se dibujan).
+pub fn object_world_aabb(
+    view: &ViewTransform,
+    document: &Document,
+    obj: &GeoObject,
+) -> Option<AABB> {
+    match obj {
+        GeoObject::Point(p) => Some(AABB::new(p.position, p.position)),
+        GeoObject::Circle(c) => {
+            let r = c.radius.abs();
+            Some(AABB::new(
+                Point2::new(c.center.x - r, c.center.y - r),
+                Point2::new(c.center.x + r, c.center.y + r),
+            ))
+        }
+        GeoObject::Ellipse(el) => {
+            let rx = el.rx.abs();
+            let ry = el.ry.abs();
+            Some(AABB::new(
+                Point2::new(el.center.x - rx, el.center.y - ry),
+                Point2::new(el.center.x + rx, el.center.y + ry),
+            ))
+        }
+        GeoObject::Arc(arc) => {
+            let r = arc.radius.abs();
+            Some(AABB::new(
+                Point2::new(arc.center.x - r, arc.center.y - r),
+                Point2::new(arc.center.x + r, arc.center.y + r),
+            ))
+        }
+        GeoObject::Sector(sector) => {
+            let r = sector.radius.abs();
+            Some(AABB::new(
+                Point2::new(sector.center.x - r, sector.center.y - r),
+                Point2::new(sector.center.x + r, sector.center.y + r),
+            ))
+        }
+        GeoObject::Text(t) => Some(AABB::new(t.position, t.position)),
+        // Los bounds declarados (x_min/x_max/y_min/y_max) son `pub` y pueden
+        // no cubrir los datos; el AABB se deriva de los datos reales que se
+        // dibujan para no sobre-cullar puntos visibles.
+        GeoObject::Histogram(h) => {
+            let (lo, hi) = finite_min_max(h.data.iter().copied())?;
+            Some(AABB::new(
+                Point2::new(lo, h.y_min),
+                Point2::new(hi, h.y_max),
+            ))
+        }
+        GeoObject::ScatterPlot(sp) => {
+            let (x_lo, x_hi) = finite_min_max(sp.xs.iter().copied())?;
+            let (y_lo, y_hi) = finite_min_max(sp.ys.iter().copied())?;
+            Some(AABB::new(Point2::new(x_lo, y_lo), Point2::new(x_hi, y_hi)))
+        }
+        GeoObject::BoxPlot(bp) => {
+            let (y_lo, y_hi) = finite_min_max(bp.data.iter().copied())?;
+            let half_w = bp.width_box.abs() * 0.5;
+            Some(AABB::new(
+                Point2::new(bp.position - half_w, y_lo),
+                Point2::new(bp.position + half_w, y_hi),
+            ))
+        }
+        GeoObject::RegressionLine(rl) => {
+            let (x_lo, x_hi) = finite_min_max(rl.xs.iter().copied())?;
+            let (y_lo, y_hi) = finite_min_max(rl.ys.iter().copied())?;
+            let line_lo = rl.slope * x_lo + rl.intercept;
+            let line_hi = rl.slope * x_hi + rl.intercept;
+            let y_lo = y_lo.min(line_lo).min(line_hi);
+            let y_hi = y_hi.max(line_lo).max(line_hi);
+            Some(AABB::new(Point2::new(x_lo, y_lo), Point2::new(x_hi, y_hi)))
+        }
+        GeoObject::Fractal2D(fr) => Some(AABB::new(
+            Point2::new(fr.x_min, fr.y_min),
+            Point2::new(fr.x_max, fr.y_max),
+        )),
+        GeoObject::ComplexGrid(cg) => Some(AABB::new(
+            Point2::new(cg.x_min, cg.y_min),
+            Point2::new(cg.x_max, cg.y_max),
+        )),
+        GeoObject::PhasePortrait(pp) => Some(AABB::new(
+            Point2::new(pp.x_min, pp.y_min),
+            Point2::new(pp.x_max, pp.y_max),
+        )),
+        GeoObject::Parabola(pb) => parabola_world_aabb(view, pb),
+        GeoObject::Hyperbola(hb) => hyperbola_world_aabb(hb),
+        GeoObject::BezierCurve(bez) if !bez.control_points.is_empty() => {
+            let mut aabb = AABB::new(bez.control_points[0], bez.control_points[0]);
+            for p in &bez.control_points {
+                aabb.expand(p);
+            }
+            Some(aabb)
+        }
+        GeoObject::Spline(spline) if !spline.points.is_empty() => {
+            let mut aabb = AABB::new(spline.points[0], spline.points[0]);
+            for p in &spline.points {
+                aabb.expand(p);
+            }
+            Some(aabb)
+        }
+        // El texto del resultado se dibuja en el centro del path del target:
+        // si el target está fuera del viewport, el resultado también lo está.
+        GeoObject::ComplexIntegral(integral) => {
+            let target = document.get_object(integral.target)?;
+            match target {
+                GeoObject::Polygon(p) if !p.vertices.is_empty() => {
+                    let mut aabb = AABB::new(p.vertices[0], p.vertices[0]);
+                    for v in &p.vertices {
+                        aabb.expand(v);
+                    }
+                    Some(aabb)
+                }
+                GeoObject::Circle(c) => {
+                    let r = c.radius.abs();
+                    Some(AABB::new(
+                        Point2::new(c.center.x - r, c.center.y - r),
+                        Point2::new(c.center.x + r, c.center.y + r),
+                    ))
+                }
+                GeoObject::Line(l) => Some(AABB::new(l.start, l.end)),
+                _ => None,
+            }
+        }
+        GeoObject::ParametricCurve2D(pc) => {
+            let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
+                pc,
+                4000,
+                &document.variables,
+            );
+            samples_aabb(&samples)
+        }
+        GeoObject::PolarCurve(pol) => {
+            let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
+                pol,
+                4000,
+                &document.variables,
+            );
+            samples_aabb(&samples)
+        }
+        _ => None,
+    }
+}
+
+/// Mínimo y máximo de un iterador de valores finitos; `None` si no hay ninguno.
+fn finite_min_max(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for value in values {
+        if value.is_finite() {
+            lo = lo.min(value);
+            hi = hi.max(value);
+        }
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+/// AABB de un conjunto de muestras finitas (mismas que dibuja el render).
+fn samples_aabb(samples: &[(f64, f64)]) -> Option<AABB> {
+    let mut aabb: Option<AABB> = None;
+    for &(x, y) in samples {
+        if x.is_finite() && y.is_finite() {
+            match &mut aabb {
+                Some(aabb) => aabb.expand(&Point2::new(x, y)),
+                None => aabb = Some(AABB::new(Point2::new(x, y), Point2::new(x, y))),
+            }
+        }
+    }
+    aabb
+}
+
+/// AABB del muestreo determinista de parábola. Mismo rango que
+/// `build_single_geometry`/`build_geometry_static`: `range = 20/scale`
+/// clamp `[0.1, 500]`, 128 pasos. El extremo en `t` es `range` y en
+/// `t²/(4p)` es `range²/(4|p|)`; rotado por `angle` da la caja exacta.
+fn parabola_world_aabb(view: &ViewTransform, pb: &ParabolaObj) -> Option<AABB> {
+    if !pb.p.is_finite() || pb.p.abs() < 1e-12 {
+        return None;
+    }
+    let range = (20.0 / view.scale).clamp(0.1, 500.0);
+    let extent = range * range / (4.0 * pb.p.abs());
+    let cos_a = pb.angle.cos().abs();
+    let sin_a = pb.angle.sin().abs();
+    let extent_x = range * cos_a + extent * sin_a;
+    let extent_y = range * sin_a + extent * cos_a;
+    Some(AABB::new(
+        Point2::new(pb.vertex.x - extent_x, pb.vertex.y - extent_y),
+        Point2::new(pb.vertex.x + extent_x, pb.vertex.y + extent_y),
+    ))
+}
+
+/// AABB del muestreo determinista de hipérbola. Mismo rango que
+/// `build_single_geometry`: `t ∈ ±(π/2 - ε)` con `ε = 0.05`, donde
+/// `|sec| ≈ 1/sin(ε) ≈ 20` y `|tan| ≈ cos(ε)/sin(ε) ≈ 20`; factor 21
+/// conservador, rotado por `angle`.
+fn hyperbola_world_aabb(hb: &HyperbolaObj) -> Option<AABB> {
+    const EXTREME: f64 = 21.0;
+    let (extent_lx, extent_ly) = if hb.horizontal {
+        (hb.a.abs() * EXTREME, hb.b.abs() * EXTREME)
+    } else {
+        (hb.b.abs() * EXTREME, hb.a.abs() * EXTREME)
+    };
+    let cos_a = hb.angle.cos().abs();
+    let sin_a = hb.angle.sin().abs();
+    let extent_x = extent_lx * cos_a + extent_ly * sin_a;
+    let extent_y = extent_lx * sin_a + extent_ly * cos_a;
+    Some(AABB::new(
+        Point2::new(hb.center.x - extent_x, hb.center.y - extent_y),
+        Point2::new(hb.center.x + extent_x, hb.center.y + extent_y),
+    ))
 }
 
 fn transformed_cache_key(
@@ -1329,7 +1588,17 @@ impl Renderer {
             Self::build_axes_static(&mut vertices, &mut indices, view, dark_mode);
         }
 
+        let view_bounds = viewport_world_bounds(view);
         for (_, obj) in ordered_visible_2d_objects(document) {
+            // Culling de viewport (mismo criterio que `build_single_geometry`):
+            // objetos con AABB mundial acotado fuera del viewport no se
+            // teselan (fractales 160k px, domain coloring 250k celdas, etc.).
+            if let Some(aabb) = object_world_aabb(view, document, obj) {
+                let margin = object_cull_margin_world(obj, view.scale);
+                if !aabb_intersects(&aabb, &view_bounds, margin) {
+                    continue;
+                }
+            }
             match obj {
                 GeoObject::Point(p) if include_overlays => {
                     let screen = view.world_to_screen(p.position);
@@ -1344,12 +1613,6 @@ impl Renderer {
                     let end = Point2::new(
                         document.resolve_expr(&l.end_x_expr, l.end.x),
                         document.resolve_expr(&l.end_y_expr, l.end.y),
-                    );
-                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                    let world_br = view.screen_to_world(view.screen_size);
-                    let view_bounds = grafito_geometry::AABB::new(
-                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                     );
                     let clipped = match l.kind {
                         grafito_core::LineKind::Segment => {
@@ -1413,12 +1676,6 @@ impl Renderer {
                     // Polilínea: cada par consecutivo de puntos genera un
                     // segmento con `add_line_segment`. Aplicamos clipping
                     // 2D por segmento para no dibujar fuera del viewport.
-                    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                    let world_br = view.screen_to_world(view.screen_size);
-                    let view_bounds = grafito_geometry::AABB::new(
-                        Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                        Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
-                    );
                     for w in pencil.points.windows(2) {
                         let a = w[0];
                         let b = w[1];
@@ -1917,12 +2174,7 @@ impl Renderer {
                     document.resolve_expr(&l.end_x_expr, l.end.x),
                     document.resolve_expr(&l.end_y_expr, l.end.y),
                 );
-                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view.screen_to_world(view.screen_size);
-                let view_bounds = grafito_geometry::AABB::new(
-                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
-                );
+                let view_bounds = viewport_world_bounds(view);
                 let clipped = match l.kind {
                     grafito_core::LineKind::Segment => {
                         grafito_geometry::clip_segment_to_rect(start, end, view_bounds)
@@ -2061,12 +2313,7 @@ impl Renderer {
                 }
             }
             GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
-                let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view.screen_to_world(view.screen_size);
-                let view_bounds = grafito_geometry::AABB::new(
-                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
-                );
+                let view_bounds = viewport_world_bounds(view);
                 for w in pencil.points.windows(2) {
                     let a = w[0];
                     let b = w[1];
@@ -3095,6 +3342,18 @@ impl Renderer {
         if !include_overlays && !gpu_2d_base_owns(document, obj) {
             return;
         }
+        // Culling de viewport: si el objeto tiene extensión mundial acotada y
+        // su AABB no intersecta el viewport (expandido por el trazo), se omite
+        // la teselación completa. `object_world_aabb` devuelve `None` para
+        // objetos no acotados o con mapeo (ComplexMapping/Transformed), que
+        // nunca se cullan.
+        let view_bounds = viewport_world_bounds(view_transform);
+        if let Some(aabb) = object_world_aabb(view_transform, document, obj) {
+            let margin = object_cull_margin_world(obj, view_transform.scale);
+            if !aabb_intersects(&aabb, &view_bounds, margin) {
+                return;
+            }
+        }
         match obj {
             GeoObject::Point(p) if include_overlays => {
                 let screen = view_transform.world_to_screen(p.position);
@@ -3109,12 +3368,6 @@ impl Renderer {
                 let end = Point2::new(
                     document.resolve_expr(&l.end_x_expr, l.end.x),
                     document.resolve_expr(&l.end_y_expr, l.end.y),
-                );
-                let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                let view_bounds = grafito_geometry::AABB::new(
-                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
                 );
                 let clipped = match l.kind {
                     grafito_core::LineKind::Segment => {
@@ -3154,12 +3407,6 @@ impl Renderer {
                 Self::add_polygon_stroke(vertices, indices, &screen_verts, poly.width, poly.color);
             }
             GeoObject::Pencil(pencil) if pencil.points.len() >= 2 => {
-                let world_tl = view_transform.screen_to_world(glam::Vec2::new(0.0, 0.0));
-                let world_br = view_transform.screen_to_world(view_transform.screen_size);
-                let view_bounds = grafito_geometry::AABB::new(
-                    Point2::new(world_tl.x.min(world_br.x), world_tl.y.min(world_br.y)),
-                    Point2::new(world_tl.x.max(world_br.x), world_tl.y.max(world_br.y)),
-                );
                 for w in pencil.points.windows(2) {
                     let a = w[0];
                     let b = w[1];

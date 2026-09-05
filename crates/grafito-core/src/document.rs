@@ -288,6 +288,65 @@ pub struct Document {
     /// Secuencias vivas: DataTable backing con recálculo automático al cambiar variables.
     #[serde(default)]
     pub live_sequences: HashMap<ObjectId, LiveSequenceBinding>,
+    /// Rastro por objeto (GeoGebra "trace"): ids con estela activada. Persiste
+    /// (`#[serde(default)]` = migración automática desde JSON viejo); el
+    /// contenido de la estela (`trails`) es efímero y nunca se serializa.
+    #[serde(default)]
+    trace_enabled: BTreeMap<ObjectId, bool>,
+    /// Muestras de la estela por objeto (efímeras, fuera de `PartialEq`/hash).
+    #[serde(skip)]
+    trails: BTreeMap<ObjectId, TrailBuffer>,
+}
+
+/// Máximo de muestras por estela de rastro (512 pts × 16 B ≈ 8 KiB/objeto).
+pub const MAX_TRAIL_POINTS: usize = 512;
+
+/// Buffer FIFO de muestras 2D para el rastro de un objeto.
+///
+/// Efímero: filtra `NaN`/`Inf` al empujar, evicciona el más antiguo al superar
+/// [`MAX_TRAIL_POINTS`]. El renderer lo dibuja con fade `(i+1)/len`.
+#[derive(Debug, Clone, Default)]
+pub struct TrailBuffer {
+    points: Vec<Point2>,
+}
+
+impl TrailBuffer {
+    /// Buffer vacío.
+    pub fn new() -> Self {
+        Self { points: Vec::new() }
+    }
+
+    /// Empuja una muestra; ignora no-finitos. Retorna `true` si se guardó.
+    pub fn push(&mut self, p: Point2) -> bool {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return false;
+        }
+        if self.points.len() >= MAX_TRAIL_POINTS {
+            self.points.remove(0);
+        }
+        self.points.push(p);
+        true
+    }
+
+    /// Vacía el buffer.
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    /// Número de muestras.
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// ¿Vacío?
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    /// Copia ordenada (más antigua primero) para el renderer.
+    pub fn as_vec(&self) -> Vec<Point2> {
+        self.points.clone()
+    }
 }
 
 impl Default for Document {
@@ -315,6 +374,8 @@ impl Default for Document {
             version: 0,
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
             live_sequences: HashMap::new(),
+            trace_enabled: BTreeMap::new(),
+            trails: BTreeMap::new(),
         }
     }
 }
@@ -799,6 +860,8 @@ impl Document {
         let orphaned = self.constraints.remove_object(id);
         self.spatial_dirty = true;
         self.selection.retain(|&s| s != id);
+        self.trace_enabled.remove(&id);
+        self.trails.remove(&id);
         self.spreadsheet_coordinate_points
             .retain(|_, point_id| *point_id != id);
         self.live_sequences.remove(&id);
@@ -2700,6 +2763,57 @@ impl Document {
 
     pub fn is_selected(&self, id: ObjectId) -> bool {
         self.selection.contains(&id)
+    }
+
+    /// ¿Tiene el objeto el rastro activado? (`Rastro[etiqueta]`).
+    pub fn is_trace(&self, id: ObjectId) -> bool {
+        self.trace_enabled.get(&id).copied().unwrap_or(false)
+    }
+
+    /// Activa/desactiva el rastro. Desactivar purga la estela residual.
+    /// Retorna `false` si el objeto no existe (sin mutar nada).
+    /// Hace `bump_version` para invalidar cachés de render.
+    pub fn set_trace(&mut self, id: ObjectId, trace: bool) -> bool {
+        if !self.objects.contains_key(&id) {
+            return false;
+        }
+        if trace {
+            self.trace_enabled.insert(id, true);
+        } else {
+            self.trace_enabled.remove(&id);
+            self.trails.remove(&id);
+        }
+        self.bump_version();
+        true
+    }
+
+    /// Empuja una muestra a la estela. Solo guarda si el rastro está activo;
+    /// filtra no-finitos y evicciona FIFO en [`MAX_TRAIL_POINTS`].
+    pub fn push_trail_sample(&mut self, id: ObjectId, p: Point2) -> bool {
+        if !self.is_trace(id) {
+            return false;
+        }
+        let trail = self.trails.entry(id).or_default();
+        trail.push(p)
+    }
+
+    /// Purga la estela sin desactivar el rastro.
+    pub fn clear_trail(&mut self, id: ObjectId) {
+        if let Some(trail) = self.trails.get_mut(&id) {
+            trail.clear();
+        }
+    }
+
+    /// Muestras ordenadas (más antigua primero) para el renderer. Vacío si
+    /// el rastro está apagado o hay <1 muestra.
+    pub fn trail_points(&self, id: ObjectId) -> Vec<Point2> {
+        if !self.is_trace(id) {
+            return Vec::new();
+        }
+        self.trails
+            .get(&id)
+            .map(TrailBuffer::as_vec)
+            .unwrap_or_default()
     }
 
     /// Find object near a screen point (in world coordinates).
@@ -5548,5 +5662,85 @@ mod tests {
         } else {
             panic!("expected midpoint point after move");
         }
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use crate::PointObj;
+    use grafito_geometry::Point2;
+
+    fn point_doc(label: &str, x: f64, y: f64) -> (Document, ObjectId) {
+        let mut doc = Document::new();
+        let id = doc
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(x, y)).with_label(label),
+            ))
+            .expect("punto");
+        (doc, id)
+    }
+
+    #[test]
+    fn trace_toggle_persists_and_clears_trail() {
+        let (mut doc, id) = point_doc("A", 1.0, 2.0);
+        assert!(!doc.is_trace(id));
+        assert!(doc.set_trace(id, true));
+        assert!(doc.is_trace(id));
+        assert!(doc.push_trail_sample(id, Point2::new(1.0, 2.0)));
+        assert_eq!(doc.trail_points(id).len(), 1);
+        assert!(doc.set_trace(id, false));
+        assert!(!doc.is_trace(id));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trace_rejects_unknown_and_filters_nonfinite() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(!doc.set_trace(ObjectId::new(), true));
+        assert!(!doc.push_trail_sample(id, Point2::new(0.0, 0.0)));
+        assert!(!doc.push_trail_sample(id, Point2::new(f64::NAN, f64::INFINITY)));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trail_fifo_caps_at_512_and_survives_serde() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(doc.set_trace(id, true));
+        for i in 0..(MAX_TRAIL_POINTS + 10) {
+            let x = i as f64;
+            assert!(doc.push_trail_sample(id, Point2::new(x, 0.0)));
+        }
+        let pts = doc.trail_points(id);
+        assert_eq!(pts.len(), MAX_TRAIL_POINTS);
+        assert!((pts[0].x - 10.0).abs() < 1e-12);
+        // trace persiste, trail no.
+        let json = serde_json::to_string(&doc).expect("serializa");
+        assert!(json.contains("trace_enabled"));
+        assert!(!json.contains("\"trails\""));
+        let back: Document = serde_json::from_str(&json).expect("deserializa");
+        assert!(back.is_trace(id));
+        assert!(back.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trace_entries_dropped_with_object() {
+        let (mut doc, id) = point_doc("A", 0.0, 0.0);
+        assert!(doc.set_trace(id, true));
+        assert!(doc.push_trail_sample(id, Point2::new(0.0, 0.0)));
+        assert!(doc.remove_object(id).is_some());
+        assert!(!doc.is_trace(id));
+        assert!(doc.trail_points(id).is_empty());
+    }
+
+    #[test]
+    fn trail_buffer_unit() {
+        let mut buf = TrailBuffer::new();
+        assert!(buf.is_empty());
+        assert!(!buf.push(Point2::new(f64::NAN, 0.0)));
+        assert!(buf.push(Point2::new(1.0, 2.0)));
+        assert_eq!(buf.len(), 1);
+        buf.clear();
+        assert!(buf.is_empty());
     }
 }

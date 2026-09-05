@@ -1,0 +1,16 @@
+[package]
+name = "grafito-classroom"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Aula colaborativa de Grafito: asistencia y dashboard de aprendizaje accionable"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

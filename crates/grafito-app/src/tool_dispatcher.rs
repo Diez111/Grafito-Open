@@ -25,6 +25,54 @@ pub struct ToolState {
     /// en `drag_started` y se actualiza en cada tick del drag. Al soltar,
     /// si solo tiene 1 punto, se elimina (no es un trazo válido).
     pub drawing_pencil: Option<ObjectId>,
+    /// Lados del polígono regular (memoria de sesión). `resolve_polygon_sides`
+    /// lo combina con la variable `n` del documento; 0 = sin preferencia.
+    pub polygon_sides: u32,
+}
+
+/// Lados mínimos/máximos para el polígono regular.
+pub const MIN_POLYGON_SIDES: u32 = 3;
+/// Lados máximos para el polígono regular.
+pub const MAX_POLYGON_SIDES: u32 = 64;
+/// Default documentado cuando no hay variable `n` ni memoria de sesión.
+pub const DEFAULT_POLYGON_SIDES: u32 = 5;
+/// Variable del documento que parametriza `n` cuando existe como slider.
+pub const POLYGON_SIDES_VARIABLE: &str = "n";
+
+/// Resuelve el `n` del polígono regular sin diálogos (Piel pura):
+/// 1. variable `n` del documento (slider) si es entera y está en rango;
+/// 2. `state.polygon_sides` (último uso de la sesión) si está en rango;
+/// 3. [`DEFAULT_POLYGON_SIDES`] como primer uso documentado.
+#[must_use]
+pub fn resolve_polygon_sides(state: &ToolState, document: &Document) -> u32 {
+    if let Some(value) = document.get_variable(POLYGON_SIDES_VARIABLE) {
+        if value.is_finite() {
+            let rounded = value.round();
+            if (value - rounded).abs() <= 1e-9
+                && rounded >= f64::from(MIN_POLYGON_SIDES)
+                && rounded <= f64::from(MAX_POLYGON_SIDES)
+            {
+                return rounded as u32;
+            }
+        }
+    }
+    if (MIN_POLYGON_SIDES..=MAX_POLYGON_SIDES).contains(&state.polygon_sides) {
+        state.polygon_sides
+    } else {
+        DEFAULT_POLYGON_SIDES
+    }
+}
+
+/// Valida y memoriza `n` en la sesión; fuera de 3..=64 devuelve error honesto sin mutar.
+pub fn set_polygon_sides(state: &mut ToolState, n: u32) -> Result<(), String> {
+    if (MIN_POLYGON_SIDES..=MAX_POLYGON_SIDES).contains(&n) {
+        state.polygon_sides = n;
+        Ok(())
+    } else {
+        Err(format!(
+            "lados {n} fuera de rango {MIN_POLYGON_SIDES}..={MAX_POLYGON_SIDES}"
+        ))
+    }
 }
 
 impl ToolState {
@@ -97,7 +145,7 @@ pub fn dispatch_tool(
             "Select start point",
             "Vector created",
         ),
-        Tool::RegularPolygon => handle_regular_polygon(state, world),
+        Tool::RegularPolygon => handle_regular_polygon(state, document, world),
         Tool::Polygon => handle_polygon(state, document, world),
         Tool::Function => ToolResult {
             objects: vec![],
@@ -161,6 +209,9 @@ pub fn dispatch_tool(
         }
         Tool::Tangent => handle_tangent(state, document, world),
         Tool::Perpendicular => handle_perpendicular(state, document, world),
+        Tool::Parallel => handle_parallel(state, document, world),
+        Tool::Arc => handle_arc(state, document, world),
+        Tool::Sector => handle_sector(state, document, world),
         Tool::Locus => handle_locus(state, document, world),
         Tool::Distance => handle_measure(state, document, world, "Distance"),
         Tool::Angle => handle_measure(state, document, world, "Angle"),
@@ -928,22 +979,164 @@ fn handle_perpendicular(
     state.pending.push(world);
     if state.pending.len() >= 2 {
         let pts = state.pending[..2].to_vec();
-        let cmd = format!(
-            "PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]",
-            pts[0].x, pts[0].y, pts[1].x, pts[1].y
-        );
+        // GeoGebra: si los clics caen sobre punto+recta existentes, usa etiquetas.
+        let cmd =
+            perpendicular_parallel_command(document, &pts, "Perpendicular").unwrap_or_else(|| {
+                format!(
+                    "PerpendicularBisector[({:.2},{:.2}), ({:.2},{:.2})]",
+                    pts[0].x, pts[0].y, pts[1].x, pts[1].y
+                )
+            });
         let mut c = cmd;
         grafito_command::commands::process_input(document, &mut c);
         state.pending.clear();
         ToolResult {
             objects: vec![],
-            message: Some("Perpendicular bisector created".into()),
+            message: Some("Perpendicular creada".into()),
             reset_tool: true,
         }
     } else {
         ToolResult {
             objects: vec![],
             message: Some("Select 2nd point".into()),
+            reset_tool: false,
+        }
+    }
+}
+
+/// Resuelve `Comando[punto, recta]` por etiquetas si los clics caen sobre un
+/// punto y una recta existentes (cualquier orden). `None` si no hay ese par:
+/// el llamador usa su fallback honesto (mediatriz o guía).
+fn perpendicular_parallel_command(
+    document: &mut Document,
+    pts: &[Point2],
+    cmd_name: &str,
+) -> Option<String> {
+    if pts.len() < 2 {
+        return None;
+    }
+    let tol = 10.0 / document.view().scale;
+    let classify = |obj: &GeoObject| {
+        (
+            obj.label().to_owned(),
+            matches!(obj, GeoObject::Point(_)),
+            matches!(obj, GeoObject::Line(_)),
+        )
+    };
+    let mut point_label: Option<String> = None;
+    let mut line_label: Option<String> = None;
+    for p in pts.iter().take(2) {
+        let hit = document
+            .pick_object(*p, tol)
+            .and_then(|id| document.get_object(id).map(classify));
+        if let Some((label, is_point, is_line)) = hit {
+            if is_point && point_label.is_none() {
+                point_label = Some(label.clone());
+            }
+            if is_line && line_label.is_none() {
+                line_label = Some(label);
+            }
+        }
+    }
+    match (point_label, line_label) {
+        (Some(p), Some(l)) => Some(format!("{cmd_name}[{p}, {l}]")),
+        _ => None,
+    }
+}
+
+fn handle_parallel(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() >= 2 {
+        let pts = state.pending[..2].to_vec();
+        match perpendicular_parallel_command(document, &pts, "Parallel") {
+            Some(cmd) => {
+                let mut c = cmd;
+                grafito_command::commands::process_input(document, &mut c);
+                state.pending.clear();
+                ToolResult {
+                    objects: vec![],
+                    message: Some("Paralela creada".into()),
+                    reset_tool: true,
+                }
+            }
+            None => {
+                state.pending.clear();
+                ToolResult {
+                    objects: vec![],
+                    message: Some(
+                        "Paralela necesita un punto y una recta existentes: clic en cada uno"
+                            .into(),
+                    ),
+                    reset_tool: false,
+                }
+            }
+        }
+    } else {
+        ToolResult {
+            objects: vec![],
+            message: Some("Select 2nd point".into()),
+            reset_tool: false,
+        }
+    }
+}
+
+fn handle_arc(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() >= 3 {
+        let pts = state.pending[..3].to_vec();
+        // Tres puntos libres: el motor resuelve centro/radio/ángulos o erra honesto.
+        let cmd = format!(
+            "Arc[({:.2},{:.2}),({:.2},{:.2}),({:.2},{:.2})]",
+            pts[0].x, pts[0].y, pts[1].x, pts[1].y, pts[2].x, pts[2].y
+        );
+        let mut c = cmd;
+        grafito_command::commands::process_input(document, &mut c);
+        state.pending.clear();
+        ToolResult {
+            objects: vec![],
+            message: Some("Arco creado (o error honesto si colineales)".into()),
+            reset_tool: true,
+        }
+    } else {
+        ToolResult {
+            objects: vec![],
+            message: Some(format!("Select point {}/3", state.pending.len() + 1)),
+            reset_tool: false,
+        }
+    }
+}
+
+fn handle_sector(state: &mut ToolState, document: &mut Document, world: Point2) -> ToolResult {
+    state.pending.push(world);
+    if state.pending.len() >= 3 {
+        let pts = state.pending[..3].to_vec();
+        let radius = pts[0].distance(&pts[1]);
+        let start_deg = (pts[1].y - pts[0].y)
+            .atan2(pts[1].x - pts[0].x)
+            .to_degrees();
+        let mut end_deg = (pts[2].y - pts[0].y)
+            .atan2(pts[2].x - pts[0].x)
+            .to_degrees();
+        if end_deg <= start_deg {
+            end_deg += 360.0;
+        }
+        let cmd = format!(
+            "Sector[({:.2},{:.2}),{:.2},{:.2},{:.2}]",
+            pts[0].x, pts[0].y, radius, start_deg, end_deg
+        );
+        let mut c = cmd;
+        grafito_command::commands::process_input(document, &mut c);
+        state.pending.clear();
+        ToolResult {
+            objects: vec![],
+            message: Some("Sector creado".into()),
+            reset_tool: true,
+        }
+    } else {
+        let hints = ["Select center", "Select radius point", "Select end angle"];
+        ToolResult {
+            objects: vec![],
+            message: Some(hints[state.pending.len().min(2)].into()),
             reset_tool: false,
         }
     }
@@ -978,13 +1171,17 @@ fn handle_two_click_line(
     }
 }
 
-fn handle_regular_polygon(state: &mut ToolState, world: Point2) -> ToolResult {
+fn handle_regular_polygon(state: &mut ToolState, document: &Document, world: Point2) -> ToolResult {
     state.pending.push(world);
     if state.pending.len() >= 2 {
         let center = state.pending[0];
         let vertex = state.pending[1];
         let r = center.distance(&vertex);
-        let n = 5;
+        // n paramétrico: variable `n` (slider) > memoria de sesión > 5.
+        // Se memoriza lo resuelto para que la preferencia sobreviva aunque
+        // la variable `n` se borre después.
+        let n = resolve_polygon_sides(state, document);
+        let _ = set_polygon_sides(state, n);
         let start_angle = (vertex.y - center.y).atan2(vertex.x - center.x);
         let verts: Vec<Point2> = (0..n)
             .map(|i| {
@@ -1004,5 +1201,89 @@ fn handle_regular_polygon(state: &mut ToolState, world: Point2) -> ToolResult {
             message: Some("Select center".into()),
             reset_tool: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatcher_new_arms_tests {
+    use super::*;
+
+    fn empty_doc() -> Document {
+        Document::new()
+    }
+
+    #[test]
+    fn parallel_without_point_line_pair_guides_honestly() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        // Primer clic: pide segundo punto.
+        let r1 = dispatch_tool(Tool::Parallel, &mut state, &mut doc, Point2::new(0.0, 0.0));
+        assert!(!r1.reset_tool);
+        // Segundo clic sin objetos: guía honesta, sin mutación.
+        let before = doc.object_count();
+        let r2 = dispatch_tool(Tool::Parallel, &mut state, &mut doc, Point2::new(1.0, 1.0));
+        assert_eq!(doc.object_count(), before);
+        let msg = r2.message.expect("guía");
+        assert!(msg.contains("punto") && msg.contains("recta"), "{msg}");
+    }
+
+    #[test]
+    fn parallel_with_point_and_line_creates_parallel() {
+        use grafito_core::{LineObj, PointObj};
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        doc.try_add_object(GeoObject::Point(
+            PointObj::new(Point2::new(0.0, 1.0)).with_label("A"),
+        ))
+        .expect("punto A");
+        doc.try_add_object(GeoObject::Line(
+            LineObj::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0)).with_label("r"),
+        ))
+        .expect("recta r");
+        let before = doc.object_count();
+        dispatch_tool(Tool::Parallel, &mut state, &mut doc, Point2::new(0.0, 1.0));
+        let r = dispatch_tool(Tool::Parallel, &mut state, &mut doc, Point2::new(2.0, 0.0));
+        assert!(r.reset_tool, "debe resetear tras crear");
+        assert!(
+            doc.object_count() > before,
+            "Parallel[A,r] debe crear la paralela"
+        );
+    }
+
+    #[test]
+    fn arc_three_clicks_delegates_to_motor() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        for (i, p) in [(0.0, 0.0), (2.0, 0.0), (1.0, 1.0)].iter().enumerate() {
+            let r = dispatch_tool(Tool::Arc, &mut state, &mut doc, Point2::new(p.0, p.1));
+            if i < 2 {
+                assert!(!r.reset_tool, "pide punto {}/3", i + 2);
+            }
+        }
+        // El motor crea el arco o erra honesto sin panic; el flujo resetea.
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn sector_three_clicks_emit_degrees() {
+        let mut state = ToolState::default();
+        let mut doc = empty_doc();
+        for p in [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)] {
+            dispatch_tool(Tool::Sector, &mut state, &mut doc, Point2::new(p.0, p.1));
+        }
+        assert!(state.pending.is_empty(), "flujo completo limpia pending");
+    }
+
+    #[test]
+    fn polygon_sides_resolve_variable_session_default() {
+        let state = ToolState::default();
+        let doc = empty_doc();
+        assert_eq!(resolve_polygon_sides(&state, &doc), DEFAULT_POLYGON_SIDES);
+        assert_eq!(DEFAULT_POLYGON_SIDES, 5);
+        let mut state = ToolState::default();
+        set_polygon_sides(&mut state, 8).expect("n=8 válido");
+        assert_eq!(resolve_polygon_sides(&state, &doc), 8);
+        assert!(set_polygon_sides(&mut state, 2).is_err());
+        assert!(set_polygon_sides(&mut state, 65).is_err());
     }
 }

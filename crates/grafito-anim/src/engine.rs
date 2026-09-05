@@ -207,6 +207,8 @@ pub enum AnimEngineState {
         format: String,
     },
     /// Reintentando tras error transitorio: intento N con backoff.
+    /// NOTA v3: representación solamente — ningún código construye esta
+    /// variante ni reintenta automáticamente (ver doc de `submit`).
     Retrying {
         attempt: u32,
         backoff_ms: u64,
@@ -541,6 +543,13 @@ impl AnimEngine {
 
     /// Envia un nuevo pedido y devuelve su id. Solo en Ready (SB1).
     /// Propaga `duration_ms` al worker (antes se perdía en `into_request` sin campo).
+    ///
+    /// NOTA v3 (honesta): NO hay cola FIFO — el engine atiende un solo job por
+    /// vez; un segundo `submit` en `Running` se rechaza hasta que el actual
+    /// termine (`shutdown` + `spawn`/`wait_ready` de nuevo). `AnimEngineState`
+    /// expone `Retrying` solo como representación; no existe loop de reintento
+    /// automático. El test `submit_while_running_is_rejected_no_fifo_queue`
+    /// pinnea este comportamiento.
     pub fn submit(&mut self, request: AnimRequest) -> Result<AnimJobId, String> {
         if !self.state.can_submit() {
             return Err(format!(
@@ -1636,5 +1645,25 @@ with tempfile.TemporaryDirectory() as td:
 print("sandbox path-traversal OK")
 "#;
         run_sandbox_check(script).unwrap();
+    }
+
+    // ── v3: sin cola FIFO (single-flight) ───────────────────────────────
+    #[test]
+    fn submit_while_running_is_rejected_no_fifo_queue() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let (_guard, config) = stub_engine();
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine.wait_ready().unwrap();
+        let _first = engine.submit(derivada_request("derivada")).unwrap();
+        // Segundo submit con el primero en curso: rechazado, no encolado.
+        let err = engine.submit(derivada_request("otra")).unwrap_err();
+        assert!(
+            err.contains("wait_ready"),
+            "sin cola FIFO: segundo submit rechazado, got: {err}"
+        );
+        let _ = engine.shutdown();
     }
 }

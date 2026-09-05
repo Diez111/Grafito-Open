@@ -309,6 +309,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Dinámica
 
 - `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
+- `Rastro[objeto]`: Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.) Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Rastro[objeto, estado]`. Alias: `Estela`.
 ## Análisis
 
 - `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.

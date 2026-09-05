@@ -384,10 +384,11 @@ fn stable_toolbar_groups_do_not_expose_unavailable_placeholder_tools() {
             );
         }
     }
-    let (_, constraint_tools) = ToolGroupId::Constraint.def();
-    assert!(constraint_tools
-        .iter()
-        .any(|(tool, _, _)| *tool == Tool::Locus));
+    let (_, curve_tools) = ToolGroupId::Curve.def();
+    assert!(
+        curve_tools.iter().any(|(tool, _, _)| *tool == Tool::Locus),
+        "Locus vive solo en GROUP_CURVE canónico (dedup: un Tool un grupo), no en Constraint"
+    );
 }
 
 #[test]

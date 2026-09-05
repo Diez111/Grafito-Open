@@ -2819,6 +2819,68 @@ fn run_slider_command(
     }
 }
 
+/// Activa/desactiva el rastro (trace) de un objeto: al arrastrarlo deja una
+/// estela con fade. `Rastro[etiqueta]` alterna; `Rastro[etiqueta, true|false]`
+/// fija el estado. Trazo libre (Pencil) no soporta rastro: error honesto.
+/// (`Trace` con matriz sigue siendo traza matricial: otro handler.)
+fn run_rastro_command(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+) -> Option<CommandOutcome> {
+    if args.is_empty() || args.len() > 2 {
+        return None;
+    }
+    let label = args[0].trim().trim_matches('"').trim_matches('\'');
+    let id = match find_object_by_label(document, label) {
+        Some(id) => id,
+        None => {
+            return Some(CommandOutcome::Error(format!(
+                "Rastro: no existe el objeto '{label}'"
+            )));
+        }
+    };
+    let enable = if args.len() == 2 {
+        match args[1].trim().to_lowercase().as_str() {
+            "true" | "verdadero" | "si" | "sí" | "1" | "on" => true,
+            "false" | "falso" | "no" | "0" | "off" => false,
+            _ => {
+                return Some(CommandOutcome::Error(
+                    "Rastro: el segundo argumento debe ser true|false".into(),
+                ));
+            }
+        }
+    } else {
+        // Alterna según el estado actual.
+        if document.get_object(id).is_none() {
+            return Some(CommandOutcome::Error(format!(
+                "Rastro: no existe el objeto '{label}'"
+            )));
+        }
+        !document.is_trace(id)
+    };
+    if matches!(document.get_object(id), Some(GeoObject::Pencil(_))) {
+        return Some(CommandOutcome::Error(
+            "Rastro: el trazo libre no soporta rastro (usa puntos, rectas o curvas)".into(),
+        ));
+    }
+    if !document.set_trace(id, enable) {
+        return Some(CommandOutcome::Error(format!(
+            "Rastro: no existe el objeto '{label}'"
+        )));
+    }
+    input_text.clear();
+    Some(CommandOutcome::Message(format!(
+        "Rastro[{}]: {}",
+        label.trim(),
+        if enable {
+            "activado — arrastra el objeto para ver la estela"
+        } else {
+            "desactivado"
+        }
+    )))
+}
+
 fn run_tabletext_command(
     document: &mut Document,
     args: &[String],
@@ -3409,6 +3471,9 @@ fn handle_aula_commands(
             run_tabletext_command(document, &cmd.args, input_text)
         }
         "slider" | "deslizador" => run_slider_command(document, &cmd.args, input_text),
+        // Rastro (estela por objeto). "trace"/"traza" NO se tocan: son la
+        // traza matricial (handler matrices). Canónico español GeoGebra.
+        "rastro" | "estela" => run_rastro_command(document, &cmd.args, input_text),
         _ => None,
     }
 }
@@ -18575,6 +18640,55 @@ fn matrix_from_columns(cols: &[Vec<f64>]) -> Option<Matrix> {
 mod tests {
     use super::*;
     use grafito_core::{Document, GeoObject, ImplicitCurveObj, RelationOperator};
+
+    #[test]
+    fn rastro_command_toggles_sets_and_rejects() {
+        use grafito_core::PointObj;
+        use grafito_geometry::Point2;
+        let mut doc = Document::new();
+        let mut input = String::new();
+        doc.try_add_object(GeoObject::Point(
+            PointObj::new(Point2::new(1.0, 2.0)).with_label("A"),
+        ))
+        .expect("punto A");
+        let out = run_rastro_command(&mut doc, &["A".to_string()], &mut input)
+            .expect("Rastro[A] responde");
+        assert!(
+            matches!(out, CommandOutcome::Message(_)),
+            "toggle on: {out:?}"
+        );
+        let id = find_object_by_label(&doc, "A").expect("A existe");
+        assert!(doc.is_trace(id));
+        let out = run_rastro_command(
+            &mut doc,
+            &["A".to_string(), "false".to_string()],
+            &mut input,
+        )
+        .expect("Rastro[A,false] responde");
+        assert!(matches!(out, CommandOutcome::Message(_)), "off: {out:?}");
+        assert!(!doc.is_trace(id));
+        let out = run_rastro_command(&mut doc, &["ZZZ".to_string()], &mut input)
+            .expect("Rastro[ZZZ] responde");
+        assert!(
+            matches!(out, CommandOutcome::Error(_)),
+            "desconocido: {out:?}"
+        );
+        assert!(run_rastro_command(&mut doc, &[], &mut input).is_none());
+    }
+
+    #[test]
+    fn rastro_command_dispatches_via_process_input() {
+        use grafito_core::PointObj;
+        use grafito_geometry::Point2;
+        let mut doc = Document::new();
+        doc.try_add_object(GeoObject::Point(
+            PointObj::new(Point2::new(0.0, 0.0)).with_label("P"),
+        ))
+        .expect("punto P");
+        process_input(&mut doc, &mut "Rastro[P]".to_string());
+        let id = find_object_by_label(&doc, "P").expect("P existe");
+        assert!(doc.is_trace(id));
+    }
 
     #[test]
     fn test_next_implicit_label_assigns_i_first() {

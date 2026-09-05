@@ -80,6 +80,8 @@ pub enum Tool {
     PolarCurve,
     ImplicitCurve,
     VectorField2D,
+    Arc,
+    Sector,
     // Construction tools
     Segment,
     Ray,
@@ -87,6 +89,7 @@ pub enum Tool {
     RegularPolygon,
     Tangent,
     Perpendicular,
+    Parallel,
     Locus,
     Midpoint,
     // Measurement tools
@@ -165,12 +168,15 @@ impl Tool {
             Tool::PolarCurve => "PolarCurve",
             Tool::ImplicitCurve => "ImplicitCurve",
             Tool::VectorField2D => "VectorField2D",
+            Tool::Arc => "Arc",
+            Tool::Sector => "Sector",
             Tool::Segment => "Segment",
             Tool::Ray => "Ray",
             Tool::Vector => "Vector",
             Tool::RegularPolygon => "RegularPolygon",
             Tool::Tangent => "Tangent",
             Tool::Perpendicular => "Perpendicular",
+            Tool::Parallel => "Parallel",
             Tool::Locus => "Locus",
             Tool::Midpoint => "Midpoint",
             Tool::Distance => "Distance",
@@ -241,12 +247,15 @@ impl Tool {
             | Tool::PolarCurve
             | Tool::ImplicitCurve
             | Tool::VectorField2D
+            | Tool::Arc
+            | Tool::Sector
             | Tool::Segment
             | Tool::Ray
             | Tool::Vector
             | Tool::RegularPolygon
             | Tool::Tangent
             | Tool::Perpendicular
+            | Tool::Parallel
             | Tool::Locus
             | Tool::Midpoint
             | Tool::Distance
