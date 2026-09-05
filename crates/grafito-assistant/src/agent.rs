@@ -1875,6 +1875,7 @@ mod tests {
             per_turn_timeout: per_turn,
             total_span: total,
             max_output_chars: 2_048,
+            ..Default::default()
         }
     }
 

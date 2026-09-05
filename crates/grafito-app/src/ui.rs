@@ -681,7 +681,7 @@ fn draw_geometry_utility_contents(
         ui.label(
             egui::RichText::new("Espacio de trabajo")
                 .color(theme.text_secondary)
-                .size(12.0)
+                .size(grafito_ui::tokens::TYPE_SM)
                 .strong(),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

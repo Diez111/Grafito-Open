@@ -11,7 +11,45 @@ target/
 .cargo/
 !.cargo/config.toml
 .codex/
-.opencode/
+# .opencode: se excluyen CONTENIDOS (no el dir) para que las negaciones
+# del harness curado funcionen (con `/.opencode/` git poda sin evaluarlas).
+/.opencode/*
+# Harness curado versionado (bulk skills, node_modules y cachés siguen ignorados)
+!/.opencode/agents/
+/.opencode/agents/*
+!/.opencode/agents/*.md
+!/.opencode/commands/
+/.opencode/commands/*
+!/.opencode/commands/*.md
+!/.opencode/plugins/
+/.opencode/plugins/*
+!/.opencode/plugins/memory-keeper.ts
+!/.opencode/skills/
+/.opencode/skills/*
+!/.opencode/skills/skills-catalog/
+/.opencode/skills/skills-catalog/*
+!/.opencode/skills/skills-catalog/SKILL.md
+!/.opencode/skills/j-space/
+/.opencode/skills/j-space/*
+!/.opencode/skills/j-space/SKILL.md
+!/.opencode/skills/rust-performance/
+/.opencode/skills/rust-performance/*
+!/.opencode/skills/rust-performance/SKILL.md
+!/.opencode/skills/rust-ui-ux/
+/.opencode/skills/rust-ui-ux/*
+!/.opencode/skills/rust-ui-ux/SKILL.md
+!/.opencode/skills/token-optimizer/
+/.opencode/skills/token-optimizer/*
+!/.opencode/skills/token-optimizer/SKILL.md
+!/.opencode/skills/context-engineering/
+/.opencode/skills/context-engineering/*
+!/.opencode/skills/context-engineering/SKILL.md
+!/.opencode/skills/grafito-architecture/
+/.opencode/skills/grafito-architecture/*
+!/.opencode/skills/grafito-architecture/SKILL.md
+!/.opencode/skills/profiling/
+/.opencode/skills/profiling/*
+!/.opencode/skills/profiling/SKILL.md
 .commandcode/
 .megamemory/
 # AGENTS.md is required for CI MSRV check (1.88) — do not ignore

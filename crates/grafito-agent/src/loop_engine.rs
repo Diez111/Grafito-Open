@@ -34,6 +34,13 @@ pub struct AgentBudget {
     pub total_span: Duration,
     /// Máximo de caracteres de la respuesta final.
     pub max_output_chars: usize,
+    /// Tope acumulado de caracteres (system + mensajes + resultados de tools).
+    /// Evita que la conversación crezca sin control entre turnos.
+    pub max_total_chars: usize,
+    /// Reintentos de llamadas al proveedor con backoff (nunca de dispatches).
+    pub max_retries: u32,
+    /// Delay base del backoff entre reintentos (se duplica por intento).
+    pub retry_base_delay_ms: u64,
 }
 
 impl Default for AgentBudget {
@@ -43,6 +50,9 @@ impl Default for AgentBudget {
             per_turn_timeout: Duration::from_secs(30),
             total_span: Duration::from_secs(120),
             max_output_chars: 8_192,
+            max_total_chars: 48_000,
+            max_retries: 2,
+            retry_base_delay_ms: 200,
         }
     }
 }
@@ -147,6 +157,9 @@ where
 }
 
 /// Variante que inyecta un ledger J-Space (Goal/Core/Verified/Open/Next).
+/// El ledger se clona y evoluciona por turno: cada resultado de herramienta se
+/// registra (`Verified`/`Open`) y se re-emite como evento `Ledger` para la UI.
+/// El done-check final es real: sin pendientes abiertos y sin tools fallidas.
 #[allow(clippy::too_many_arguments)]
 pub fn run_agent_with_ledger<C, D>(
     completer: &C,
@@ -165,13 +178,13 @@ where
 {
     let started = Instant::now();
     let mut system_owned = system.to_owned();
-    if let Some(ledger) = ledger {
-        ledger.validate()?;
-        let render = ledger.render_bounded(MAX_LEDGER_RENDER_BYTES);
+    // Estado vivo del ledger: clon acotado que evoluciona con cada turno.
+    let mut tracked: Option<JSpaceLedger> = ledger.cloned();
+    if let Some(tracked) = tracked.as_ref() {
+        tracked.validate()?;
+        emit_ledger(&mut on_event, tracked);
+        let render = tracked.render_bounded(MAX_LEDGER_RENDER_BYTES);
         if !render.trim().is_empty() {
-            on_event(AgentEvent::Ledger {
-                render: render.clone(),
-            });
             system_owned.push_str("\n\nLedger de tarea:\n");
             system_owned.push_str(&render);
         }
@@ -184,6 +197,8 @@ where
     for tool in tools {
         tool.validate()?;
     }
+    let mut accumulated_chars: usize = messages.iter().map(message_chars).sum();
+    let mut all_tools_ok = true;
 
     let max_turns = budget.max_tool_turns.max(1);
     for turn in 0..=max_turns {
@@ -194,13 +209,18 @@ where
         if remaining.is_zero() {
             return Err("assistant agent loop exceeded its total span".into());
         }
+        if accumulated_chars > budget.max_total_chars {
+            return Err("assistant agent loop exceeded its total char budget".into());
+        }
         let per_turn_timeout = budget.per_turn_timeout.min(remaining);
-        let response = completer.complete(
+        let response = complete_with_retries(
+            completer,
             &messages,
             tools,
             completion_token_budget(budget.max_output_chars),
             per_turn_timeout,
             cancellation,
+            budget,
         )?;
         match response {
             AgentChatResponse::Text { content, truncated } => {
@@ -208,9 +228,13 @@ where
                     text: content.clone(),
                 });
                 let lower = content.to_ascii_lowercase();
-                let verified = !lower.contains("pendiente")
+                let text_ok = !lower.contains("pendiente")
                     && !lower.contains("sin verificar")
                     && !lower.contains("no pude");
+                let ledger_ok = tracked
+                    .as_ref()
+                    .is_none_or(|tracked| !tracked.has_open_items());
+                let verified = text_ok && all_tools_ok && ledger_ok;
                 return Ok(AgentOutcome {
                     final_text: content,
                     truncated,
@@ -239,11 +263,13 @@ where
                         })
                     })
                     .collect::<Vec<Value>>();
-                messages.push(json!({
+                let assistant_msg = json!({
                     "role": "assistant",
                     "content": null,
                     "tool_calls": tool_calls_json,
-                }));
+                });
+                accumulated_chars += message_chars(&assistant_msg);
+                messages.push(assistant_msg);
                 for call in &calls {
                     on_event(AgentEvent::ToolStarted {
                         name: call.name.clone(),
@@ -257,16 +283,69 @@ where
                         name: call.name.clone(),
                         ok: result.ok,
                     });
-                    messages.push(json!({
+                    all_tools_ok &= result.ok;
+                    if let Some(tracked) = tracked.as_mut() {
+                        tracked.record_tool_outcome(&call.name, result.ok, &result.content);
+                        emit_ledger(&mut on_event, tracked);
+                    }
+                    let tool_msg = json!({
                         "role": "tool",
                         "tool_call_id": result.call_id,
                         "content": result.content,
-                    }));
+                    });
+                    accumulated_chars += message_chars(&tool_msg);
+                    messages.push(tool_msg);
                 }
             }
         }
     }
     Err("assistant agent loop did not converge".into())
+}
+
+/// Re-emite el ledger acotado para la UI (misma variante `Ledger`, sin romper matches).
+fn emit_ledger(on_event: &mut impl FnMut(AgentEvent), tracked: &JSpaceLedger) {
+    let render = tracked.render_bounded(MAX_LEDGER_RENDER_BYTES);
+    if !render.trim().is_empty() {
+        on_event(AgentEvent::Ledger {
+            render: render.clone(),
+        });
+    }
+}
+
+/// Llama al proveedor con reintentos y backoff (solo transporte, nunca dispatches).
+/// No reintenta si hay cancelación ni cuando se agotan los intentos.
+fn complete_with_retries<C>(
+    completer: &C,
+    messages: &[Value],
+    tools: &[ToolSchema],
+    max_output_tokens: usize,
+    timeout: Duration,
+    cancellation: &Cancellation,
+    budget: &AgentBudget,
+) -> Result<AgentChatResponse, String>
+where
+    C: AgentCompleter,
+{
+    let mut attempt = 0u32;
+    loop {
+        match completer.complete(messages, tools, max_output_tokens, timeout, cancellation) {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if cancellation.is_cancelled() || attempt >= budget.max_retries {
+                    return Err(error);
+                }
+                attempt += 1;
+                let backoff_ms = budget
+                    .retry_base_delay_ms
+                    .saturating_mul(1u64 << attempt.min(6));
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+            }
+        }
+    }
+}
+
+fn message_chars(message: &Value) -> usize {
+    message.to_string().len()
 }
 
 fn completion_token_budget(max_output_chars: usize) -> usize {
@@ -524,5 +603,185 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.final_text, "recuperado");
+    }
+
+    #[test]
+    fn tracked_ledger_records_outcomes_and_reemits_progress() {
+        let completer = ScriptedCompleter {
+            responses: Mutex::new(vec![
+                AgentChatResponse::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: "call-1".into(),
+                        name: "echo".into(),
+                        arguments: json!({"value": "x"}),
+                    }],
+                },
+                AgentChatResponse::Text {
+                    content: "listo".into(),
+                    truncated: false,
+                },
+            ]),
+        };
+        let ledger = crate::ledger::JSpaceLedger::with_task("probar", "cerrar");
+        let mut events = Vec::new();
+        let outcome = run_agent_with_ledger(
+            &completer,
+            &EchoDispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &AgentBudget::default(),
+            Some(&ledger),
+            &Cancellation::default(),
+            |event| events.push(event),
+        )
+        .unwrap();
+        assert!(outcome.verified);
+        let ledger_renders: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Ledger { render } => Some(render.clone()),
+                _ => None,
+            })
+            .collect();
+        // Inicial + actualización por turno con la tool registrada.
+        assert!(ledger_renders.len() >= 2);
+        assert!(ledger_renders
+            .last()
+            .is_some_and(|render| render.contains("Verified: echo")));
+    }
+
+    #[test]
+    fn tracked_ledger_marks_unverified_when_tools_fail() {
+        struct FailingDispatcher;
+        impl ToolDispatcher for FailingDispatcher {
+            fn dispatch(&self, call: &ToolCall) -> ToolResult {
+                ToolResult::text(&call.id, false, "boom")
+            }
+        }
+        let completer = ScriptedCompleter {
+            responses: Mutex::new(vec![
+                AgentChatResponse::ToolCalls {
+                    calls: vec![ToolCall {
+                        id: "call-x".into(),
+                        name: "echo".into(),
+                        arguments: json!({}),
+                    }],
+                },
+                AgentChatResponse::Text {
+                    content: "recuperado".into(),
+                    truncated: false,
+                },
+            ]),
+        };
+        let ledger = crate::ledger::JSpaceLedger::with_task("probar", "cerrar");
+        let outcome = run_agent_with_ledger(
+            &completer,
+            &FailingDispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &AgentBudget::default(),
+            Some(&ledger),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.final_text, "recuperado");
+        // Hay un item abierto y una tool fallida: el done-check es real.
+        assert!(!outcome.verified);
+    }
+
+    #[test]
+    fn loop_aborts_when_total_char_budget_is_exceeded() {
+        let completer = ScriptedCompleter {
+            responses: Mutex::new(vec![AgentChatResponse::Text {
+                content: "x".into(),
+                truncated: false,
+            }]),
+        };
+        let budget = AgentBudget {
+            max_total_chars: 10,
+            ..Default::default()
+        };
+        let result = run_agent(
+            &completer,
+            &EchoDispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &budget,
+            &Cancellation::default(),
+            |_| {},
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("total char budget"));
+    }
+
+    #[test]
+    fn loop_retries_transient_provider_errors_with_backoff() {
+        struct FlakyCompleter {
+            failures_left: Mutex<u32>,
+        }
+        impl AgentCompleter for FlakyCompleter {
+            fn complete(
+                &self,
+                _messages: &[Value],
+                _tools: &[ToolSchema],
+                _max_output_tokens: usize,
+                _timeout: Duration,
+                _cancellation: &Cancellation,
+            ) -> Result<AgentChatResponse, String> {
+                let mut guard = self.failures_left.lock().unwrap_or_else(|p| {
+                    log::warn!("lock poisoned");
+                    p.into_inner()
+                });
+                if *guard > 0 {
+                    *guard -= 1;
+                    return Err("transient 503".into());
+                }
+                Ok(AgentChatResponse::Text {
+                    content: "al segundo intento".into(),
+                    truncated: false,
+                })
+            }
+        }
+        let budget = AgentBudget {
+            max_retries: 2,
+            retry_base_delay_ms: 1,
+            ..Default::default()
+        };
+        let outcome = run_agent(
+            &FlakyCompleter {
+                failures_left: Mutex::new(1),
+            },
+            &EchoDispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &budget,
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.final_text, "al segundo intento");
+
+        let no_retry = AgentBudget {
+            max_retries: 0,
+            ..Default::default()
+        };
+        let result = run_agent(
+            &FlakyCompleter {
+                failures_left: Mutex::new(1),
+            },
+            &EchoDispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &no_retry,
+            &Cancellation::default(),
+            |_| {},
+        );
+        assert!(result.is_err());
     }
 }

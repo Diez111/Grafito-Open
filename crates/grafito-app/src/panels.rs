@@ -180,10 +180,9 @@ fn parse_local_xy_values(row: &[String]) -> Result<(f64, f64), String> {
     Ok((x, y))
 }
 
-fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
-    // TODO: mover a background thread con std::thread::spawn + ctx.request_repaint()
-    // para no bloquear UI en archivos cercanos a 2MB. Lectura limitada a
-    // MAX_LOCAL_DATA_IMPORT_BYTES (2MB) via take() y sin unwrap/panic.
+pub(crate) fn load_local_xy_table(path: &Path) -> Result<LocalXYTable, String> {
+    // La lectura vive en worker (`spawn_csv_import`); esta función es pura I/O
+    // acotada: symlink_metadata + O_NOFOLLOW, take() 2MB, sin unwrap/panic.
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("No se pudo inspeccionar el archivo: {error}"))?;
     if !metadata.file_type().is_file() {
@@ -238,7 +237,7 @@ fn open_local_data_file(path: &Path) -> Result<File, String> {
     }
 }
 
-fn commit_local_xy_table(
+pub(crate) fn commit_local_xy_table(
     document: &mut Document,
     undo_stack: &mut VecDeque<Document>,
     redo_stack: &mut VecDeque<ChangeSet>,
@@ -264,50 +263,19 @@ fn commit_local_xy_table(
     Ok(data_id)
 }
 
-fn import_local_xy_table(app: &mut GrafitoApp) {
-    // TODO: mover a background thread (std::thread::spawn + canal + poll con ctx.request_repaint())
-    // ideal para UI 60fps; por ahora lectura limitada a 2MB sin panic.
+fn import_local_xy_table(app: &mut GrafitoApp, ctx: &egui::Context) {
+    // FileController: el diálogo rfd queda en UI thread (modal nativo);
+    // la lectura ≤2MB va a worker y el commit se aplica en `poll_background_jobs`.
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Datos CSV o TSV", &["csv", "tsv", "txt"])
         .pick_file()
     else {
         return;
     };
-    let table = match load_local_xy_table(&path) {
-        Ok(table) => table,
-        Err(error) => {
-            app.cas_result = format!("No se pudo importar la tabla: {error}");
-            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-            return;
-        }
-    };
-
-    let row_count = table.xs.len();
-    match commit_local_xy_table(
-        &mut app.document,
-        &mut app.undo_stack,
-        &mut app.redo_stack,
-        table,
-    ) {
-        Ok(data_id) => {
-            let label = app
-                .document
-                .get_object(data_id)
-                .map(|object| object.label().to_string())
-                .unwrap_or_else(|| "tabla".to_string());
-            app.cas_result = format!(
-                "Tabla local '{label}' importada con {row_count} pares; la ruta no se guardó."
-            );
-            app.notify(
-                app.cas_result.clone(),
-                grafito_ui::toast::ToastKind::Success,
-            );
-        }
-        Err(error) => {
-            app.cas_result = format!("No se pudo guardar la tabla local: {error}");
-            app.notify(app.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
-        }
-    }
+    app.pending_import_job = Some(crate::app::PendingImportJob {
+        receiver: crate::app::spawn_csv_import(path, ctx),
+    });
+    app.cas_result = "Importando tabla local…".to_string();
 }
 
 #[cfg(test)]
@@ -1412,7 +1380,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 "El punto rojo recorre el círculo unitario; el punto violeta muestra su imagen por la transformación compleja activa.",
                             )
                             .color(txt_dim)
-                            .size(10.5),
+                            .size(grafito_ui::tokens::TYPE_XS),
                         );
                         ui.add_space(SPACE_SM);
                     }
@@ -1522,8 +1490,8 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                     ui.add_space(6.0);
                     egui::Frame::none()
                         .fill(current_theme(ctx).input_bg)
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::same(8.0))
+                        .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_SM))
+                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
                         .show(ui, |ui| {
                             ui.label(egui::RichText::new(value_text).color(accent).size(TYPE_SM).strong());
                             ui.label(
@@ -1537,7 +1505,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                             ui.label(
                                 egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
                                     .color(txt_dim)
-                                    .size(10.5),
+                                    .size(grafito_ui::tokens::TYPE_XS),
                             );
                         });
 
@@ -1549,7 +1517,7 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                                 cos_t, sin_t, t
                             ))
                             .color(hdr_col)
-                            .size(10.5),
+                            .size(grafito_ui::tokens::TYPE_XS),
                         );
                     }
 
@@ -1632,7 +1600,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     ui.label(
                         egui::RichText::new("Estadística")
                             .color(accent)
-                            .size(15.0)
+                            .size(grafito_ui::tokens::TYPE_BASE)
                             .strong(),
                     );
                     ui.add_space(SPACE_SM);
@@ -1823,7 +1791,7 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         egui::pos2(bar.center().x, bar.min.y - 6.0),
                                         egui::Align2::CENTER_BOTTOM,
                                         c.to_string(),
-                                        egui::FontId::proportional(9.0),
+                                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                         txt_dim,
                                     );
                                 }
@@ -1833,14 +1801,14 @@ pub(crate) fn draw_statistics_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 egui::pos2(plot.min.x, plot_bot + 2.0),
                                 egui::Align2::LEFT_TOP,
                                 format_statistic(summary.minimum),
-                                egui::FontId::proportional(9.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                 txt_dim,
                             );
                             painter.text(
                                 egui::pos2(plot.max.x, plot_bot + 2.0),
                                 egui::Align2::RIGHT_TOP,
                                 format_statistic(summary.maximum),
-                                egui::FontId::proportional(9.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                                 txt_dim,
                             );
                         }
@@ -1870,7 +1838,7 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.label(
                 egui::RichText::new("Números Complejos")
                     .color(accent)
-                    .size(15.0)
+                    .size(grafito_ui::tokens::TYPE_BASE)
                     .strong(),
             );
             ui.add_space(SPACE_SM);
@@ -2049,7 +2017,7 @@ pub(crate) fn draw_attractor_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             ui.label(
                 egui::RichText::new("Dinámica y Atractores")
                     .color(accent)
-                    .size(15.0)
+                    .size(grafito_ui::tokens::TYPE_BASE)
                     .strong(),
             );
             ui.add_space(SPACE_SM);
@@ -2728,15 +2696,15 @@ pub(crate) fn draw_right_domain_coloring_panel(app: &mut GrafitoApp, ctx: &egui:
                     egui::Frame::none()
                         .fill(theme.input_bg)
                         .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::same(8.0))
+                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("Colores y Magnitud:").strong().color(hdr_col).size(TYPE_XS));
-                                ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(10.5));
+                                ui.label(egui::RichText::new("- Tono: Fase o angulo arg(f(z)).\n- Brillo: Magnitud |f(z)|. Negro = Raiz (0), Blanco = Polo (inf).").color(txt_dim).size(grafito_ui::tokens::TYPE_XS));
 
                                 ui.add_space(6.0);
                                 ui.label(egui::RichText::new("Derivabilidad y Wirtinger:").strong().color(hdr_col).size(TYPE_XS));
-                                ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(10.5));
+                                ui.label(egui::RichText::new("- Al graficar deriv_z_conj(f), f(z) es holomorfa solo en zonas negras (donde d/dzbar = 0, Cauchy-Riemann).\n- Las zonas coloreadas representan donde NO es derivable.").color(txt_dim).size(grafito_ui::tokens::TYPE_XS));
                             });
                         });
                 });
@@ -3049,7 +3017,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                                         ui.label(
                                             egui::RichText::new("Se muestran los primeros 24 valores.")
                                                 .color(theme.text_tertiary)
-                                                .size(10.0),
+                                                .size(grafito_ui::tokens::TYPE_XS),
                                         );
                                     }
                                 },
@@ -3073,7 +3041,7 @@ pub(crate) fn draw_right_regression_panel(app: &mut GrafitoApp, ctx: &egui::Cont
                     ui.add_space(6.0);
 
                     if ui.button("Importar CSV/TSV...").clicked() {
-                        import_local_xy_table(app);
+                        import_local_xy_table(app, ctx);
                     }
 
                     for (label, template) in [
@@ -3216,27 +3184,20 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("Exportar LaTeX").clicked() {
+                            // FileController: el diálogo rfd queda en UI thread (modal
+                            // nativo); el write va a worker y se notifica en el poll.
                             let latex = construction_log_to_latex(&app.construction_log);
                             if let Some(path) =
                                 rfd::FileDialog::new().add_filter("TeX", &["tex"]).save_file()
                             {
-                                if let Err(e) = crate::export::write_text_atomic(&path, &latex) {
-                                    app.cas_result =
-                                        format!("No se pudo exportar el protocolo: {e}");
-                                    app.notify(
-                                        format!("Error LaTeX: {}", e),
-                                        grafito_ui::toast::ToastKind::Error,
-                                    );
-                                } else {
-                                    app.cas_result = format!(
-                                        "Protocolo exportado a LaTeX -> {}",
-                                        path.display()
-                                    );
-                                    app.notify(
-                                        app.cas_result.clone(),
-                                        grafito_ui::toast::ToastKind::Success,
-                                    );
-                                }
+                                app.pending_text_job = Some(crate::app::PendingTextWriteJob {
+                                    receiver: crate::app::spawn_text_write(
+                                        path,
+                                        latex,
+                                        ctx,
+                                    ),
+                                });
+                                app.cas_result = "Exportando protocolo a LaTeX…".to_string();
                             }
                         }
                         if ui.button("Limpiar").clicked() {
@@ -3304,7 +3265,7 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                                     ui.label(
                                                         egui::RichText::new("(deshabilitado)")
                                                             .color(txt_dim)
-                                                            .size(10.0),
+                                                            .size(grafito_ui::tokens::TYPE_XS),
                                                     );
                                                 }
                                             });

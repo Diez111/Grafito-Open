@@ -47,21 +47,24 @@ pub(crate) const MAX_CONSTRUCTION_LOG: usize = 500;
 
 /// Job de guardado en background — evita bloquear UI thread (60fps) en `save_document`.
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
-#[allow(dead_code)]
 pub(crate) struct PendingSaveJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
-    pub path: PathBuf,
 }
 /// Job de apertura en background — evita bloquear UI thread en `choose_and_open_document`.
-#[allow(dead_code)]
 pub(crate) struct PendingOpenJob {
     pub receiver: Receiver<Result<(PathBuf, Document), String>>,
 }
 /// Job de export en background — evita bloquear UI thread en `export_with_dialog`.
-#[allow(dead_code)]
 pub(crate) struct PendingExportJob {
+    pub receiver: Receiver<Result<(PathBuf, String), String>>,
+}
+/// Job de importación CSV/TSV en background (lectura ≤2MB en worker).
+pub(crate) struct PendingImportJob {
+    pub receiver: Receiver<Result<crate::panels::LocalXYTable, String>>,
+}
+/// Job genérico de escritura de texto en background (p. ej. export LaTeX del protocolo).
+pub(crate) struct PendingTextWriteJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
-    pub format: crate::export::ExportFormat,
 }
 
 /// Presupuestos espejo de `grafito-ggb` (sin añadir dependencia para no tocar
@@ -360,14 +363,15 @@ mod autosave_recovery_tests {
 
 /// Spawns document save in background — evita bloquear UI thread (60fps).
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
-#[allow(dead_code)]
+/// Devuelve `None` si el OS rechaza el thread (el caller degrada a `SaveAttempt::Failed`).
 pub(crate) fn spawn_document_save(
     document: Document,
     path: PathBuf,
-    ctx: egui::Context,
-) -> Receiver<Result<PathBuf, String>> {
+    ctx: &egui::Context,
+) -> Option<Receiver<Result<PathBuf, String>>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let _ = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("document-save".into())
         .spawn(move || {
             let res = write_document_to_path(&document, &path)
@@ -375,16 +379,17 @@ pub(crate) fn spawn_document_save(
                 .map_err(|e| e.to_string());
             let _ = tx.send(res);
             ctx.request_repaint();
-        });
-    rx
+        })
+        .ok()?;
+    Some(rx)
 }
 
 /// Spawns document open in background — evita bloquear UI thread.
-#[allow(dead_code)]
 pub(crate) fn spawn_document_open(
     path: PathBuf,
-    ctx: egui::Context,
+    ctx: &egui::Context,
 ) -> Receiver<Result<(PathBuf, Document), String>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("document-open".into())
@@ -399,13 +404,14 @@ pub(crate) fn spawn_document_open(
 }
 
 /// Spawns export en background — evita bloquear UI thread en `export_with_dialog`.
-#[allow(dead_code)]
+/// Envía `(path, summary)` para preservar el UX del path sincrónico en el poll.
 pub(crate) fn spawn_export(
     document: Document,
     path: PathBuf,
     format: crate::export::ExportFormat,
-    ctx: egui::Context,
-) -> Receiver<Result<PathBuf, String>> {
+    ctx: &egui::Context,
+) -> Receiver<Result<(PathBuf, String), String>> {
+    let ctx = egui::Context::clone(ctx);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("export".into())
@@ -421,7 +427,45 @@ pub(crate) fn spawn_export(
                     crate::export::export_tikz(&document, &path).map_err(|e| e.to_string())
                 }
             };
-            let _ = tx.send(res.map(|_| path.clone()));
+            let _ = tx.send(res.map(|report| (path.clone(), report.summary())));
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Spawns importación CSV/TSV en background — lectura ≤2MB fuera del UI thread.
+/// El commit al documento ocurre en `poll_background_jobs` (mismo hilo que el sync).
+pub(crate) fn spawn_csv_import(
+    path: PathBuf,
+    ctx: &egui::Context,
+) -> Receiver<Result<crate::panels::LocalXYTable, String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("csv-import".into())
+        .spawn(move || {
+            let res = crate::panels::load_local_xy_table(&path);
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Spawns escritura de texto en background (export LaTeX del protocolo).
+pub(crate) fn spawn_text_write(
+    path: PathBuf,
+    text: String,
+    ctx: &egui::Context,
+) -> Receiver<Result<PathBuf, String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("text-write".into())
+        .spawn(move || {
+            let res = crate::export::write_text_atomic(&path, &text)
+                .map(|_| path.clone())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(res);
             ctx.request_repaint();
         });
     rx
@@ -1515,6 +1559,12 @@ pub struct GrafitoApp {
     /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
     /// UI thread, resultado aplicado con undo único vía `process_input`.
     pub(crate) pending_ggb_import_job: Option<PendingGgbImportJob>,
+    pub(crate) pending_import_job: Option<PendingImportJob>,
+    pub(crate) pending_text_job: Option<PendingTextWriteJob>,
+    /// Acción encadenada tras un guardado async (New/Open con cambios sin guardar).
+    /// `resolve_unsaved_decision` consume `lifecycle.pending_action`, así que la acción
+    /// viaja aquí y `poll_background_jobs` la ejecuta al confirmar el save.
+    pending_chained_action: Option<DocumentAction>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -2127,6 +2177,9 @@ impl GrafitoApp {
             pending_open_job: None,
             pending_export_job: None,
             pending_ggb_import_job: None,
+            pending_import_job: None,
+            pending_text_job: None,
+            pending_chained_action: None,
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -3020,8 +3073,19 @@ impl GrafitoApp {
         action: DocumentAction,
         ctx: &egui::Context,
     ) {
-        if let SaveAttempt::Saved(saved_action) = self.save_document(mode, ctx) {
-            self.perform_document_action(saved_action.unwrap_or(action), ctx);
+        // Guardado async: la acción encadenada viaja en `pending_chained_action`
+        // y `poll_background_jobs` la ejecuta al confirmar el save. Si el diálogo
+        // se cancela o el spawn falla, la cadena se descarta (igual que antes).
+        match self.save_document(mode, ctx) {
+            SaveAttempt::Saved(saved_action) => {
+                self.perform_document_action(saved_action.unwrap_or(action), ctx);
+            }
+            SaveAttempt::Pending => {
+                self.pending_chained_action = Some(action);
+            }
+            SaveAttempt::Cancelled | SaveAttempt::Failed => {
+                self.pending_chained_action = None;
+            }
         }
     }
 
@@ -3345,29 +3409,28 @@ impl GrafitoApp {
             return;
         };
 
-        // P1 I/O background placeholder — pattern spawn_profile_save con sync_channel(1) + request_repaint
-        // TODO(P1): migrar a `spawn_export` + `pending_export_job` + `poll_background_jobs` para 100% no bloqueante.
-        if let Some(ctx) = ctx {
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let doc_clone = self.document.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("export-placeholder".into())
-                .spawn(move || {
-                    let _ = tx.send(Ok::<PathBuf, String>(path_clone.clone()));
-                    ctx_clone.request_repaint();
-                    let _ = doc_clone.estimated_bytes();
-                });
-            let _ = rx.try_recv();
-        }
-
-        let result = match format {
-            crate::export::ExportFormat::Svg => crate::export::export_svg(&self.document, &path),
-            crate::export::ExportFormat::Png => crate::export::export_png(&self.document, &path),
-            crate::export::ExportFormat::Tikz => crate::export::export_tikz(&self.document, &path),
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // render+write van a worker y el summary se aplica en `poll_background_jobs`.
+        // Sin `ctx` (llamadas fuera del frame) se conserva el path sincrónico legacy.
+        let Some(ctx) = ctx else {
+            let result = match format {
+                crate::export::ExportFormat::Svg => {
+                    crate::export::export_svg(&self.document, &path)
+                }
+                crate::export::ExportFormat::Png => {
+                    crate::export::export_png(&self.document, &path)
+                }
+                crate::export::ExportFormat::Tikz => {
+                    crate::export::export_tikz(&self.document, &path)
+                }
+            };
+            apply_export_outcome(result, &mut self.cas_result, &mut self.toasts, self.ui_time);
+            return;
         };
-        apply_export_outcome(result, &mut self.cas_result, &mut self.toasts, self.ui_time);
+        self.pending_export_job = Some(PendingExportJob {
+            receiver: spawn_export(self.document.clone(), path, format, ctx),
+        });
+        self.notify("Exportando…", grafito_ui::toast::ToastKind::Info);
     }
 
     /// Ejecuta la acción elegida desde la paleta de comandos (Ctrl+K).
@@ -3504,60 +3567,23 @@ impl GrafitoApp {
             return SaveAttempt::Cancelled;
         };
 
-        // P1 I/O background: evita bloquear UI thread (60fps) — pattern `spawn_profile_save` (assistant.rs:41-51)
-        // con `sync_channel(1)` + `request_repaint`. El I/O real (write_document_to_path) se mueve a background
-        // thread y el resultado se polldea en `poll_background_jobs` (update). Para preservar `SaveAttempt::Saved`
-        // y el flujo `DocumentAction` en este turno, se mantiene write sincrónico con TODO de migración completa.
-        // TODO(P1): migrar a `spawn_document_save` + `pending_save_job` + `poll_background_jobs` para 100% no bloqueante.
-        // Minimal impl: spawn placeholder con sync_channel(1) y request_repaint para demostrar pattern.
-        {
-            let doc_clone = self.document.clone();
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("document-save-placeholder".into())
-                .spawn(move || {
-                    // Placeholder: en futuro mover `write_document_to_path(&doc_clone, &path_clone)` aquí
-                    let _ = tx.send(Ok::<PathBuf, String>(path_clone.clone()));
-                    ctx_clone.request_repaint();
-                    // Keep doc_clone alive to show intent
-                    let _ = doc_clone.estimated_bytes();
-                });
-            let _ = rx.try_recv();
-        }
-
-        let result = write_document_to_path(&self.document, &path);
-        match result {
-            Ok(_) => {
-                let pending_action = self
-                    .document_lifecycle
-                    .record_save_success(path.clone(), &self.document);
-                self.remember_recent_file(&path);
-                // Autosave: tras guardado exitoso limpiar debounce y borrar sidecar
-                self.autosave.mark_saved();
-                self.autosave_last_version = self.document.version;
-                if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(&path) {
-                    let _ = std::fs::remove_file(sidecar);
-                }
-                self.notify(
-                    format!("Documento guardado en {}", path.display()),
-                    grafito_ui::toast::ToastKind::Success,
-                );
-                SaveAttempt::Saved(pending_action)
-            }
-            Err(error) => {
-                let error = error.to_string();
-                log::error!("Save failed: {error}");
-                self.document_lifecycle.record_save_failure(error.clone());
-                self.cas_result = format!("No se pudo guardar: {error}");
-                self.notify(
-                    format!("Error al guardar: {error}"),
-                    grafito_ui::toast::ToastKind::Error,
-                );
-                SaveAttempt::Failed
-            }
-        }
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // el write va a worker y el resultado se aplica en `poll_background_jobs`,
+        // que continúa la acción pendiente vía `record_save_success`.
+        let Some(receiver) = spawn_document_save(self.document.clone(), path, ctx) else {
+            let error = "no se pudo lanzar el guardado en background".to_string();
+            log::error!("Save failed: {error}");
+            self.document_lifecycle.record_save_failure(error.clone());
+            self.cas_result = format!("No se pudo guardar: {error}");
+            self.notify(
+                format!("Error al guardar: {error}"),
+                grafito_ui::toast::ToastKind::Error,
+            );
+            return SaveAttempt::Failed;
+        };
+        self.pending_save_job = Some(PendingSaveJob { receiver });
+        self.notify("Guardando documento…", grafito_ui::toast::ToastKind::Info);
+        SaveAttempt::Pending
     }
 
     /// Polls background I/O jobs — save/open/export — y actualiza lifecycle + notifica.
@@ -3580,7 +3606,11 @@ impl GrafitoApp {
                         format!("Documento guardado en {}", path.display()),
                         grafito_ui::toast::ToastKind::Success,
                     );
-                    if let Some(action) = pending_action {
+                    // Continúa la acción encadenada: primero la del lifecycle (si la
+                    // hubiera), si no la guardada en `save_before_document_action`.
+                    if let Some(action) =
+                        pending_action.or_else(|| self.pending_chained_action.take())
+                    {
                         self.perform_document_action(action, ctx);
                     }
                     ctx.request_repaint();
@@ -3630,17 +3660,23 @@ impl GrafitoApp {
         // Export
         if let Some(job) = self.pending_export_job.take() {
             match job.receiver.try_recv() {
-                Ok(Ok(path)) => {
-                    self.notify(
-                        format!("Exportado a {}", path.display()),
+                // Mismo UX que el path sincrónico (`apply_export_outcome`): el worker
+                // ya calculó el summary, aquí solo se publica.
+                Ok(Ok((_path, summary))) => {
+                    self.cas_result = summary.clone();
+                    self.toasts.push(
+                        wrap_toast_message(&summary, 52),
                         grafito_ui::toast::ToastKind::Success,
+                        self.ui_time,
                     );
                     ctx.request_repaint();
                 }
                 Ok(Err(err)) => {
-                    self.notify(
-                        format!("Error al exportar: {err}"),
+                    self.cas_result = err.clone();
+                    self.toasts.push(
+                        wrap_toast_message(&err, 52),
                         grafito_ui::toast::ToastKind::Error,
+                        self.ui_time,
                     );
                     ctx.request_repaint();
                 }
@@ -3676,6 +3712,75 @@ impl GrafitoApp {
                 }
             }
         }
+        // Import CSV/TSV: el commit ocurre aquí (mismo hilo que el sync) con
+        // los mismos mensajes; la lectura ≤2MB ya ocurrió en el worker.
+        if let Some(job) = self.pending_import_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(table)) => {
+                    let row_count = table.xs.len();
+                    match crate::panels::commit_local_xy_table(
+                        &mut self.document,
+                        &mut self.undo_stack,
+                        &mut self.redo_stack,
+                        table,
+                    ) {
+                        Ok(data_id) => {
+                            let label = self
+                                .document
+                                .get_object(data_id)
+                                .map(|object| object.label().to_string())
+                                .unwrap_or_else(|| "tabla".to_string());
+                            self.cas_result = format!(
+                                "Tabla local '{label}' importada con {row_count} pares; la ruta no se guardó."
+                            );
+                            self.notify(
+                                self.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Success,
+                            );
+                        }
+                        Err(error) => {
+                            self.cas_result = format!("No se pudo guardar la tabla local: {error}");
+                            self.notify(
+                                self.cas_result.clone(),
+                                grafito_ui::toast::ToastKind::Error,
+                            );
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.cas_result = format!("No se pudo importar la tabla: {error}");
+                    self.notify(self.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_import_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
+        // Escritura genérica de texto (export LaTeX del protocolo).
+        if let Some(job) = self.pending_text_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(path)) => {
+                    self.cas_result = format!("Protocolo exportado a LaTeX -> {}", path.display());
+                    self.notify(
+                        self.cas_result.clone(),
+                        grafito_ui::toast::ToastKind::Success,
+                    );
+                    ctx.request_repaint();
+                }
+                Ok(Err(error)) => {
+                    self.cas_result = format!("No se pudo exportar el protocolo: {error}");
+                    self.notify(self.cas_result.clone(), grafito_ui::toast::ToastKind::Error);
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_text_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {}
+            }
+        }
     }
 
     fn choose_and_open_document(&mut self, ctx: &egui::Context) {
@@ -3686,41 +3791,12 @@ impl GrafitoApp {
             return;
         };
 
-        // P1 I/O background placeholder — pattern spawn_profile_save con sync_channel(1) + request_repaint
-        // TODO(P1): migrar a `spawn_document_open` + `pending_open_job` + `poll_background_jobs` para 100% no bloqueante.
-        {
-            let path_clone = path.clone();
-            let ctx_clone = ctx.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = std::thread::Builder::new()
-                .name("document-open-placeholder".into())
-                .spawn(move || {
-                    let _ = tx.send(Ok::<(PathBuf, Document), String>((
-                        path_clone.clone(),
-                        Document::new(),
-                    )));
-                    ctx_clone.request_repaint();
-                });
-            let _ = rx.try_recv();
-        }
-
-        match load_document_candidate(&path) {
-            Ok(document) => {
-                self.replace_document(document, Some(path.clone()));
-                self.remember_recent_file(&path);
-                self.notify(
-                    format!("Documento abierto desde {}", path.display()),
-                    grafito_ui::toast::ToastKind::Success,
-                );
-            }
-            Err(error) => {
-                log::error!("Load failed: {error}");
-                self.notify(
-                    format!("Error al cargar: {error}"),
-                    grafito_ui::toast::ToastKind::Error,
-                );
-            }
-        }
+        // FileController: el diálogo rfd queda en UI thread (modal nativo);
+        // la lectura va a worker y el replace se aplica en `poll_background_jobs`.
+        self.pending_open_job = Some(PendingOpenJob {
+            receiver: spawn_document_open(path, ctx),
+        });
+        self.notify("Abriendo documento…", grafito_ui::toast::ToastKind::Info);
     }
 
     /// F1-1: Archivo → "Importar GeoGebra (.ggb)…" con filtro `.ggb` (rfd).
@@ -5579,7 +5655,7 @@ impl eframe::App for GrafitoApp {
                         // que '[' y ']' se apilen verticalmente en 34px.
                         let zf_btn = egui::Button::new(
                             egui::RichText::new("[]")
-                                .size(12.0)
+                                .size(grafito_ui::tokens::TYPE_SM)
                                 .color(theme.text_primary),
                         )
                         .wrap_mode(egui::TextWrapMode::Extend)
@@ -5940,20 +6016,20 @@ impl eframe::App for GrafitoApp {
                                     );
                                 }
                             }
-                            ui.add_space(16.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_LG);
                             ui.label(
                                 egui::RichText::new("Grafito")
                                     .size(36.0)
                                     .strong()
                                     .color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)),
                             );
-                            ui.add_space(4.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
                             ui.label(
                                 egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                                     .size(14.0)
                                     .color(egui::Color32::from_white_alpha((180.0 * alpha) as u8)),
                             );
-                            ui.add_space(8.0);
+                            ui.add_space(grafito_ui::tokens::SPACE_SM);
                             ui.label(
                                 egui::RichText::new("Geometría interactiva - Algebra - Calculo")
                                     .size(13.0)
@@ -6284,42 +6360,24 @@ fn ggb_attr(tag: &str, name: &str) -> Option<String> {
     let needle = format!("{name}=");
     let mut from: usize = 0;
     while let Some(rest) = tag.get(from..) {
-        let Some(rel) = rest.find(&needle) else {
-            return None;
-        };
-        let Some(eq_end) = from.checked_add(rel)?.checked_add(needle.len()) else {
-            return None;
-        };
-        let Some(after_eq) = tag.get(eq_end..) else {
-            return None;
-        };
+        let rel = rest.find(&needle)?;
+        let eq_end = from.checked_add(rel)?.checked_add(needle.len())?;
+        let after_eq = tag.get(eq_end..)?;
         let trimmed = after_eq.trim_start();
         let skipped = after_eq.len().saturating_sub(trimmed.len());
-        let Some(val_start) = eq_end.checked_add(skipped) else {
-            return None;
-        };
-        let Some(quote) = trimmed.chars().next() else {
-            return None;
-        };
+        let val_start = eq_end.checked_add(skipped)?;
+        let quote = trimmed.chars().next()?;
         if quote != '"' && quote != '\'' {
-            let Some(next_from) = val_start.checked_add(1) else {
-                return None;
-            };
+            let next_from = val_start.checked_add(1)?;
             if next_from >= tag.len() {
                 return None;
             }
             from = next_from;
             continue;
         }
-        let Some(after_quote) = trimmed.get(1..) else {
-            return None;
-        };
-        let Some(end) = after_quote.find(quote) else {
-            return None;
-        };
-        let Some(value) = after_quote.get(..end) else {
-            return None;
-        };
+        let after_quote = trimmed.get(1..)?;
+        let end = after_quote.find(quote)?;
+        let value = after_quote.get(..end)?;
         if value.len() > GGB_MAX_ATTR_BYTES {
             return None;
         }
@@ -6452,7 +6510,7 @@ fn ggb_parse_report(xml: &[u8]) -> Result<GgbImportReport, String> {
                 }
             }
             if !mapped_done {
-                let reason = if inner.find("<coords").is_none() {
+                let reason = if !inner.contains("<coords") {
                     "point sin coords".to_string()
                 } else {
                     "point con coords inválidas".to_string()
@@ -6655,8 +6713,8 @@ fn ggb_parse_report(xml: &[u8]) -> Result<GgbImportReport, String> {
             } else {
                 let rhs = if exp_trim.contains('=') {
                     exp_trim
-                        .splitn(2, '=')
-                        .nth(1)
+                        .split_once('=')
+                        .map(|x| x.1)
                         .unwrap_or(exp_trim)
                         .trim()
                         .to_string()
@@ -6896,14 +6954,14 @@ impl GrafitoApp {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Grafito — pizarra geométrica interactiva")
-                            .size(16.0)
+                            .size(grafito_ui::tokens::TYPE_MD)
                             .strong()
                             .color(theme.text_primary),
                     );
                 });
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.label(
                     egui::RichText::new("• Construye con 5 herramientas esenciales — Mover, Punto, Recta, Círculo, Polígono")
                         .size(grafito_ui::tokens::TYPE_XS)
@@ -6919,9 +6977,9 @@ impl GrafitoApp {
                         .size(grafito_ui::tokens::TYPE_XS)
                         .color(theme.text_primary),
                 );
-                ui.add_space(12.0);
+                ui.add_space(grafito_ui::tokens::SPACE_MD);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.horizontal(|ui| {
                     let total_w = 3.0 * 120.0 + 2.0 * 8.0;
                     let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
@@ -6930,7 +6988,7 @@ impl GrafitoApp {
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Probar ejemplo").size(12.0))
+                            egui::Button::new(egui::RichText::new("Probar ejemplo").size(grafito_ui::tokens::TYPE_SM))
                                 .rounding(grafito_ui::tokens::RADIUS_MD)
                                 .fill(theme.accent)
                                 .stroke(egui::Stroke::NONE),
@@ -6947,7 +7005,7 @@ impl GrafitoApp {
                     if ui
                         .add_sized(
                             egui::vec2(120.0, 32.0),
-                            egui::Button::new(egui::RichText::new("Empezar vacío").size(12.0))
+                            egui::Button::new(egui::RichText::new("Empezar vacío").size(grafito_ui::tokens::TYPE_SM))
                                 .rounding(grafito_ui::tokens::RADIUS_MD)
                                 .fill(theme.panel_bg)
                                 .stroke(egui::Stroke::new(1.0, theme.separator)),
@@ -6961,7 +7019,7 @@ impl GrafitoApp {
                             egui::vec2(120.0, 32.0),
                             egui::Button::new(
                                 egui::RichText::new("No mostrar")
-                                    .size(12.0)
+                                    .size(grafito_ui::tokens::TYPE_SM)
                                     .color(theme.text_secondary),
                             )
                             .rounding(grafito_ui::tokens::RADIUS_MD)
@@ -6976,7 +7034,7 @@ impl GrafitoApp {
                         save_config(&cfg);
                     }
                 });
-                ui.add_space(4.0);
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
             });
         if !open {
             self.show_onboarding = false;
@@ -7002,7 +7060,7 @@ impl GrafitoApp {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         egui::RichText::new("Grafito")
-                            .size(28.0)
+                            .size(grafito_ui::tokens::TYPE_XXL)
                             .strong()
                             .color(theme.accent),
                     );
@@ -7014,16 +7072,16 @@ impl GrafitoApp {
                     );
                     ui.label(
                         egui::RichText::new(format!("Idioma: {}", self.locale.code()))
-                            .size(11.0)
+                            .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_tertiary),
                     );
-                    ui.add_space(12.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_MD);
                     ui.label(
                         egui::RichText::new(
                             "Calculadora gráfica interactiva para geometría, álgebra, \
                              cálculo, CAS y estadística. Rápida, precisa y simple.",
                         )
-                        .size(12.0)
+                        .size(grafito_ui::tokens::TYPE_SM)
                         .color(theme.text_primary),
                     );
                     ui.add_space(10.0);
@@ -7031,25 +7089,25 @@ impl GrafitoApp {
                     ui.add_space(10.0);
                     ui.label(
                         egui::RichText::new("Creado por Lautaro Agustin Diez")
-                            .size(12.0)
+                            .size(grafito_ui::tokens::TYPE_SM)
                             .strong()
                             .color(theme.text_primary),
                     );
                     ui.label(
                         egui::RichText::new("HECHO EN ARGENTINA")
-                            .size(11.0)
+                            .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_secondary),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
                     ui.label(
                         egui::RichText::new("Licencia GPL-3.0-or-later · Código abierto")
-                            .size(11.0)
+                            .size(grafito_ui::tokens::TYPE_XS)
                             .color(theme.text_tertiary),
                     );
                 });
                 ui.add_space(14.0);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
                 ui.vertical_centered(|ui| {
                     if ui
                         .add(
@@ -7487,6 +7545,9 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_open_job: None,
         pending_export_job: None,
         pending_ggb_import_job: None,
+        pending_import_job: None,
+        pending_text_job: None,
+        pending_chained_action: None,
         attractor_cache: std::collections::HashMap::new(),
         fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
         active_color_picker: None,

@@ -42,6 +42,13 @@ Quedan fuera: bash/fs/net que no sea el provider configurado, MCP, orquestación
 de subagentes y runtimes de sandbox. Las propuestas que mutan el documento
 siempre pasan por el pipeline existente con **Apply explícito del usuario**.
 
+> Deslinde de planos (2026-09-05): el "sin MCP / sin subagentes" de este documento
+> rige el **runtime de la app Grafito** (lo que corre en el escritorio del usuario).
+> El **harness de desarrollo opencode** (este repo como workspace) SÍ usa MCP
+> mínimos de lectura (`filesystem` scope `.`, `git`, `fetch`, `memory`,
+> `sequential-thinking`, `time`, `context7` — ver `opencode.json`) y subagentes
+> (ver `AGENTS.md`). Son dos perímetros distintos: estricto en prod, equipado en dev.
+
 ## Postura de seguridad
 
 1. Ninguna tool muta el documento sola: todo pasa por `ProposedPlan` + Apply.

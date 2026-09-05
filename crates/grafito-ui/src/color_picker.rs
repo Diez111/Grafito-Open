@@ -95,12 +95,12 @@ impl HsvColorPicker {
     pub fn show(&mut self, ui: &mut Ui, favorites: &mut [Color; 5]) -> ColorPickerOutcome {
         self.alpha = 1.0;
         let color_before = self.to_color();
-        ui.add_space(4.0);
+        ui.add_space(crate::tokens::SPACE_XS);
         // Rueda protagonista centrada
         ui.vertical_centered(|ui| {
             let _ = self.show_wheel(ui, 160.0);
         });
-        ui.add_space(16.0);
+        ui.add_space(crate::tokens::SPACE_LG);
         // Brillo — único control, ancho completo
         let w = ui.available_width().min(280.0);
         ui.vertical_centered(|ui| {
@@ -223,10 +223,10 @@ impl HsvColorPicker {
         let height = 22.0;
         ui.label(
             egui::RichText::new("Brillo")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(ui.visuals().weak_text_color()),
         );
-        ui.add_space(4.0);
+        ui.add_space(crate::tokens::SPACE_XS);
 
         let (response, mut painter) =
             ui.allocate_painter(Vec2::new(width, height), Sense::click_and_drag());
@@ -324,7 +324,7 @@ impl HsvColorPicker {
     fn show_opacity_slider(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
             egui::RichText::new("Opacidad")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(ui.visuals().weak_text_color()),
         );
         let response = ui.add_sized(
@@ -344,10 +344,10 @@ impl HsvColorPicker {
     fn show_preview(&mut self, ui: &mut Ui, width: f32) -> bool {
         ui.label(
             egui::RichText::new("Previsualización")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(ui.visuals().weak_text_color()),
         );
-        ui.add_space(4.0);
+        ui.add_space(crate::tokens::SPACE_XS);
 
         let height = 32.0;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
@@ -438,10 +438,10 @@ impl HsvColorPicker {
         let mut outcome = ColorPickerOutcome::default();
         ui.label(
             egui::RichText::new("Favoritos")
-                .size(11.0)
+                .size(crate::tokens::TYPE_XS)
                 .color(ui.visuals().weak_text_color()),
         );
-        ui.add_space(4.0);
+        ui.add_space(crate::tokens::SPACE_XS);
 
         let item_w = 32.0;
         let spacing = 8.0;

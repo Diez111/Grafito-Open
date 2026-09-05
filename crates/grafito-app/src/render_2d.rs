@@ -1984,7 +1984,7 @@ impl GrafitoApp {
 
         // Tick marks and labels — log-appropriate or linear
         let text_color = current_theme(painter.ctx()).axis_label;
-        let font = egui::FontId::proportional(12.0);
+        let font = egui::FontId::proportional(grafito_ui::tokens::TYPE_SM);
         let minor_tick = Stroke::new(0.5, text_color);
 
         // X-axis ticks
@@ -2254,7 +2254,7 @@ impl GrafitoApp {
                 p + Vec2::new(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
                 format!("{}({:.2})", spec.name, t),
-                egui::FontId::proportional(11.0),
+                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                 theme.text_primary,
             );
         }
@@ -2292,14 +2292,14 @@ impl GrafitoApp {
                         unit_x + Vec2::new(8.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         "cos",
-                        egui::FontId::proportional(11.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                         theme.text_secondary,
                     );
                     painter.text(
                         to_pos(Point2::new(0.0, 1.0)) + Vec2::new(0.0, -8.0),
                         egui::Align2::CENTER_BOTTOM,
                         "sin",
-                        egui::FontId::proportional(11.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                         theme.text_secondary,
                     );
                 }
@@ -2363,7 +2363,7 @@ impl GrafitoApp {
             card.left_bottom() + Vec2::new(12.0, -28.0),
             egui::Align2::LEFT_BOTTOM,
             format!("cos θ = {:.3}   sin θ = {:.3}", t.cos(), t.sin()),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
             theme.text_secondary,
         );
     }
@@ -2515,7 +2515,7 @@ impl GrafitoApp {
             z_pos + Vec2::new(7.0, -7.0),
             egui::Align2::LEFT_BOTTOM,
             "z=e^(it)",
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
             theme.text_primary,
         );
 
@@ -2530,7 +2530,7 @@ impl GrafitoApp {
                 w_pos + Vec2::new(7.0, -7.0),
                 egui::Align2::LEFT_BOTTOM,
                 format!("{}({})", label, self.document.complex_base_symbol),
-                egui::FontId::proportional(11.0),
+                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                 theme.text_primary,
             );
         }
@@ -2553,14 +2553,14 @@ impl GrafitoApp {
             card.min + Vec2::new(12.0, 34.0),
             egui::Align2::LEFT_TOP,
             format!("z(t) = {:.3} {:+.3}i", z.re, z.im),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
             theme.text_secondary,
         );
         painter.text(
             card.min + Vec2::new(12.0, 56.0),
             egui::Align2::LEFT_TOP,
             format!("Imagen activa: {}", expr),
-            egui::FontId::proportional(11.0),
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
             image_color,
         );
     }
@@ -3380,7 +3380,7 @@ impl GrafitoApp {
                         pos + Vec2::new(size + 2.0, -size - 2.0),
                         egui::Align2::LEFT_BOTTOM,
                         label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3440,7 +3440,7 @@ impl GrafitoApp {
                         canvas_rect.min + Vec2::new(mid.x, mid.y) + Vec2::new(0.0, -8.0),
                         egui::Align2::CENTER_BOTTOM,
                         label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3466,7 +3466,7 @@ impl GrafitoApp {
                         pos + Vec2::new(radius + 2.0, -radius - 2.0),
                         egui::Align2::LEFT_BOTTOM,
                         label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3510,7 +3510,7 @@ impl GrafitoApp {
                         centroid,
                         egui::Align2::CENTER_CENTER,
                         label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3542,7 +3542,7 @@ impl GrafitoApp {
                                 end + Vec2::new(6.0, -6.0),
                                 egui::Align2::LEFT_BOTTOM,
                                 label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -3760,7 +3760,7 @@ impl GrafitoApp {
                                     label_position,
                                     egui::Align2::CENTER_TOP,
                                     label,
-                                    egui::FontId::proportional(12.0),
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                     label_color,
                                 );
                             }
@@ -3797,7 +3797,7 @@ impl GrafitoApp {
                             + Vec2::new(s.x, s.y + el.ry as f32 * view.scale as f32 + 14.0),
                         egui::Align2::CENTER_TOP,
                         &el.label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3835,7 +3835,7 @@ impl GrafitoApp {
                         canvas_rect.min + Vec2::new(s.x, s.y - 8.0),
                         egui::Align2::CENTER_BOTTOM,
                         &pb.label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -3883,7 +3883,7 @@ impl GrafitoApp {
                         canvas_rect.min + Vec2::new(s.x, s.y),
                         egui::Align2::CENTER_BOTTOM,
                         &hb.label,
-                        egui::FontId::proportional(12.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                         label_color,
                     );
                 }
@@ -4034,7 +4034,7 @@ impl GrafitoApp {
                         canvas_rect.min + Vec2::new(s.x, s.y - 12.0),
                         egui::Align2::CENTER_BOTTOM,
                         &rl.label,
-                        egui::FontId::proportional(11.0),
+                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
                         to_color32(rl.color),
                     );
                 }
@@ -4165,7 +4165,7 @@ impl GrafitoApp {
                                 position + Vec2::new(0.0, 14.0),
                                 egui::Align2::CENTER_TOP,
                                 label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }
@@ -4370,7 +4370,7 @@ impl GrafitoApp {
                                 canvas_rect.min + Vec2::new(start.x, start.y - 8.0),
                                 egui::Align2::CENTER_BOTTOM,
                                 label,
-                                egui::FontId::proportional(12.0),
+                                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
                                 label_color,
                             );
                         }

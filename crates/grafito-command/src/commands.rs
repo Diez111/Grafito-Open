@@ -8006,20 +8006,18 @@ fn handle_remaining_cas_commands(
             for ch in expr_raw.chars().chain(std::iter::once(' ')) {
                 if ch.is_ascii_alphanumeric() || ch == '_' {
                     current.push(ch);
-                } else {
-                    if !current.is_empty() {
-                        let lower = current.to_lowercase();
-                        if !reserved.contains(lower.as_str())
-                            && !seen.contains(&current)
-                            && is_math_identifier(&current)
-                            && current != "x"
-                        {
-                            // Filtra funciones de una letra como exp etc ya reservadas.
-                            seen.insert(current.clone());
-                            param_names.push(current.clone());
-                        }
-                        current.clear();
+                } else if !current.is_empty() {
+                    let lower = current.to_lowercase();
+                    if !reserved.contains(lower.as_str())
+                        && !seen.contains(&current)
+                        && is_math_identifier(&current)
+                        && current != "x"
+                    {
+                        // Filtra funciones de una letra como exp etc ya reservadas.
+                        seen.insert(current.clone());
+                        param_names.push(current.clone());
                     }
+                    current.clear();
                 }
             }
             if param_names.is_empty() {

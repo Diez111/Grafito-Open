@@ -1,0 +1,556 @@
+# SKILLS instaladas en local (.opencode/skills, gitignored)
+
+Total: **528** validadas (name regex + description 1-1024). 8 curadas Grafito + resto importado.
+
+La IA elige con el tool skill por nombre. Si el listado pesa en contexto, esconder familias ruidosas con permission.skill (ver final).
+
+## Top picks por tarea Grafito
+
+| Tarea | Skills |
+|---|---|
+| UI escandinava egui | skills-catalog, rust-ui-ux, design-tokens, frontend-design, ui-visual-composition, minimalist-ui, high-end-visual-design, web-design-guidelines, wcag-audit, ux-writing |
+| Rust workspace | rust-best-practices, rust-skills, rust-engineer, rust-systems, rust-pro, rust-architect, rust-performance |
+| Render wgpu | webgpu-skill, rust-gpu, profiling, rust-performance |
+| TUI/debug | ratatui, tui-development, egui-terminal, ui-design |
+| Memoria harness | token-optimizer, context-engineering + MCP/plugin (ver MEMORY.md) |
+| Orquestacion | orchestrator, opencode-ensemble + catalogo |
+| Calidad/release | tdd-workflow, reviewer, debugger, git-release, senior-architect |
+
+## Repos fuente (46, clones depth-1 en /tmp/opencode/skill-src)
+
+AutomatorAlex_opencode-background-tasks, Leonxlnx_taste-skill, Mte90_dotfiles, NeoLabHQ_context-engineering-kit, NewMediaStudio_design-system-skills, PedroHBO_opencode-config-skills, Sayem7456_opencode-engineering-skills, TheArchitectit_awesome-opencode-skills, Tyler-R-Kendrick_agent-skills, alexgreensh_token-optimizer, anthropics_skills, apollographql_skills, basicmachines-co_basic-memory, bwbioinfo_skill_dioxus, cazala_webgpu-skill, christopherlouet_wcag-audit, composio-community_opencode-skills, content-designer_ux-writing-skill, dchuk_claude-code-tauri-skills, ehmo_platform-design-skills, ffsshhttiikk_opencode-agents-skills, heyreed_agent-skills, hueyexe_frontend-agent-skills, hueyexe_opencode-ensemble, ibelick_ui-skills, joshuadavidthomas_opencode-agent-memory, joshuadavidthomas_opencode-agent-skills, jshsakura_awesome-opencode-skills, julianoczkowski_designer-skills, kdcokenny_opencode-background-agents, leonardomso_rust-skills, lifesized_figma-design-sync, mattbx_shadcn-skills, melonask_axum-skills, mgifford_accessibility-skills, microsoft_skills, nanlong_rust-architect, nextlevelbuilder_ui-ux-pro-max-skill, oakoss_agent-skills, rasimme_figma-agent, salmanneomtech_Opencode-Skills, sarperarikan_accessimind-codex-agent-skill, simota_agent-skills, sleekdotdesign_agent-skills, solinkz_micro-interactions-skill, vercel-labs_agent-skills
+
+## Lista completa (nombre = dirname = frontmatter name)
+
+- academy-guide — >
+- accessibility-inclusive-design — "Use when designing, critiquing, implementing, or revising UI/UX/frontend work for accessibility and inclusion."
+- accord — "Authoring unified specification packages across Business/Development/Design teams via staged elaboration (L0 Vision, L1
+- adversarial-review — Cross-vendor adversarial code review of the current branch. Two different model families (Claude + Codex/GPT) review the
+- ai — |
+- ai-cost-optimization — Optimize LLM and AI application cost through prompt efficiency, caching, model routing, batching, retrieval control, eva
+- ai-evaluation — Design and review evaluation workflows for LLM, RAG and AI systems, including test sets, metrics, judge prompts, reliabi
+- ai-system-architecture — Design, review and document AI system architecture, covering problem framing, model vs. rule decisions, LLM/RAG/ML pipel
+- alexgreensh-token-optimizer-token-optimizer — Audit a Claude Code or Codex setup for context-window waste, then fix it and measure the savings. Use when context feels
+- algorithmic-art — Creating algorithmic art using p5.js with seeded randomness and interactive parameter exploration. Use this when users r
+- android — Material Design 3 and Android platform guidelines. Use when building Android apps with Jetpack Compose or XML layouts, i
+- angular-patterns — Angular development patterns including signals, standalone components, dependency injection, NgRx, HTTP services, and pe
+- anvil — "Building CLI/TUI tools and configuring personal developer environments. Use for terminal interfaces, dotfiles, shell/ed
+- api-design — REST API design patterns including resource naming, status codes, pagination, filtering, error responses, versioning, an
+- apollo-client — >
+- apollo-connectors — >
+- apollo-federation — >
+- apollo-ios — >
+- apollo-kotlin — >
+- apollo-mcp-server — >
+- apollo-router — >
+- apollo-router-plugin-creator — >
+- apollo-server — >
+- appinsights-instrumentation — "Instrument web applications to send telemetry data to Azure Application Insights for observability and monitoring. USE 
+- architect — "Designing new skill agents via gap analysis, overlap detection, SKILL.md + reference generation, and Nexus integration.
+- artisan — "Implementing production frontend code for React/Vue/Svelte: hooks design, state management, Server Components, form han
+- atelier — "Orchestrating design-to-implementation pipelines (code to visual to code closed loop), persisting a project design syst
+- atlas — Analyzing dependencies, circular references, and God Classes; authoring ADRs/RFCs. Use for architecture improvement, mod
+- attest — "Verifying spec compliance: extracts ACs from specs, adversarially checks conformance, generates BDD scenarios and trace
+- azure-ai — "Use for Azure AI: Search, Speech, Foundry, OpenAI, Document Intelligence. Helps with search, vector/hybrid search, spee
+- azure-aigateway — |
+- azure-compliance — |
+- azure-cost-optimization — |
+- azure-deploy — "Execute Azure deployments after preparation and validation are complete. USE FOR: azd up, azd deploy, push to Azure, pu
+- azure-diagnostics — |
+- azure-kusto — |
+- azure-messaging-workflows — Workflow for building scalable messaging systems on Microsoft Azure using queues, event-driven architecture, pub/sub sys
+- azure-networking — |
+- azure-observability — Azure Observability Services including Azure Monitor, Application Insights, Log Analytics, Alerts, and Workbooks. Provid
+- azure-observability-workflows — Workflow for implementing observability systems on Microsoft Azure using logging, monitoring, tracing, telemetry, metric
+- azure-postgres — Create new Azure Database for PostgreSQL Flexible Server instances and configure passwordless authentication with Micros
+- azure-prepare — "REQUIRED FIRST STEP: You MUST invoke this skill BEFORE generating ANY Azure application code, infrastructure files, or 
+- azure-resource-visualizer — |
+- azure-role-selector — |
+- azure-storage — Azure Storage Services including Blob Storage, File Shares, Queue Storage, Table Storage, and Data Lake. Provides object
+- azure-validate — "**CRITICAL**: Run azure-validate before deploying Azure resources. Validates Azure deployment readiness. USE FOR: asses
+- backend-patterns — Backend architecture patterns, API design, database optimization, and server-side best practices for Node.js, Express, a
+- banner-design — "Design banners for social media, ads, website heroes, creative assets, and print. Multiple art direction options with o
+- baseline-ui — Quickly deslop UI code by fixing spacing, hierarchy, typography, and small layout issues. Use when the interface needs a
+- bazaar — "Orchestrating super-premium landing-page pipelines (Discover to Launch) across 6 craft axes with rubrics and quality ga
+- beacon — "Engineering observability and reliability: SLO/SLI design, distributed tracing, alerting, dashboards, capacity planning
+- blender-geometry-nodes — Workflow for creating procedural systems in Blender using Geometry Nodes, procedural materials, node-based modeling, and
+- blender-hard-surface-modeling — Workflow for creating precise hard surface models in Blender using clean topology, subdivision workflows, bevel systems,
+- blender-python-integration — Workflow for using Claude to generate Blender Python scripts, automate 3D workflows, and create procedural scenes, anima
+- blender-rigging-animation — End-to-end workflow for setting up Blender, rigging a character, and creating a simple animation with a clear output (re
+- bm-checkpoint — Create an immutable Codex handoff in Basic Memory and return an exact bm-orient resume command.
+- bm-decide — Capture a durable engineering decision in Basic Memory with rationale, alternatives, consequences, and affected work.
+- bm-orient — Resume from an exact Basic Memory checkpoint or orient Codex from current graph and repository evidence.
+- bm-remember — Quickly save a small fact, reminder, or user preference into Basic Memory from Codex without turning it into a full deci
+- bm-setup — Set up Basic Memory for Codex at user or project level by mapping a Basic Memory project and seeding schemas.
+- bm-share — Share a personal Basic Memory note to a configured team project from Codex with attribution and explicit confirmation.
+- bm-status — Report the Basic Memory for Codex configuration, reachability, hook expectations, recent Codex checkpoints, and active t
+- bm-writing — Apply the user-customizable writing standard for Basic Memory notes created or substantially revised by Codex. Use with 
+- bolt — "Optimizing frontend (re-render, memoization, lazy loading) and backend (N+1, indexing, caching, async) performance, plu
+- bond — "Designing retention strategy, re-engagement, and churn prevention: retention analysis frameworks, re-engagement trigger
+- brand — Brand voice, visual identity, messaging frameworks, asset management, brand consistency. Activate for branded content, t
+- brand-guidelines — Applies Anthropic's official brand colors and typography to any sort of artifact that may benefit from having Anthropic'
+- brandkit — Premium brand-kit image generation skill for creating high-end brand-guidelines boards, logo systems, identity decks, an
+- breach — "Designing red team attack scenarios, threat models, MITRE ATT&CK/OWASP application, Purple Team exercises, and AI/LLM r
+- brief-to-tasks — Break a design brief into an ordered checklist of independently buildable tasks using vertical slices. Saves as a markdo
+- brutalist-skill — Raw mechanical interfaces fusing Swiss typographic print with military terminal aesthetics. Rigid grids, extreme type sc
+- builder — "Implementing robust business logic, API integrations, data models, and reproducible AI image-generation code with type 
+- canon — "Assessing standards, regulatory controls, and legal-document coverage with cited evidence and proposed wording. Use for
+- canvas — "Visualizing code, specs, or context as Mermaid, ASCII, or draw.io diagrams: flowcharts, sequence/state/class/ER, Journe
+- canvas-design — Create beautiful visual art in .png and .pdf documents using design philosophy. You should use this skill when the user 
+- cast — "Casting personas: rapid generation from diverse inputs, registry-based persistence and lifecycle, data-driven evolution
+- cazala-webgpu-skill — Design, implement, debug, review, and optimize portable WebGPU applications and WGSL shaders. Use when building render o
+- chain — "Auditing skill/plugin/MCP supply chains and live package compromise: manifests, hidden injection, IoC scans, persistenc
+- chisel — "Converting a supplied prompt into an executable specification: detects vague quality/quantity/explanation/style/design/
+- cicd-pipelines — CI/CD pipeline patterns with GitHub Actions, GitLab CI, build automation, deployment strategies, and infrastructure as c
+- claude-api — |-
+- claude-seo-workflows — Workflow for performing SEO research, content optimization, keyword strategy, technical SEO analysis, and search-focused
+- claude-subconscious-workflows — Workflow for running background reasoning, reflective analysis, hidden planning layers, and iterative self-improvement s
+- clause — "Reviewing legal documents for Terms of Service, Privacy Policy, and Tokushoho compliance. Detects clause gaps and flags
+- cloak — "Engineering privacy and data governance: PII detection, data flow mapping, consent patterns, GDPR/CCPA-compliant implem
+- cloud-aws — Cloud best practices in AWS for data and backend systems. Use for IAM role design, VPC/networking, storage (S3), and com
+- cmux — End-user control of cmux topology and routing (windows, workspaces, panes/surfaces, focus, moves, reorder, identify, tri
+- cmux-markdown — Open markdown files in a formatted viewer panel with live reload. Use when you need to display plans, documentation, or 
+- cmux-settings — "View and edit cmux settings in ~/.config/cmux/cmux.json. Use when the user wants to change cmux preferences (appearance
+- cmux-workspace — "Work inside the current cmux workspace and terminal. Use for cmux workspace, current workspace, caller surface, panes, 
+- code-review — Use when reviewing Basic Machines code for house style, architecture risk, pre-merge hardening, or whether a change fits
+- coding-standards — Universal coding standards, best practices, and patterns for TypeScript, JavaScript, React, and Node.js development.
+- compass — "Navigating the skill ecosystem and guiding onboarding. Lists agents, recommends best fit for tasks. Don't use for task 
+- compete — "Triggers when researching competitive or professional positioning: market intelligence, engineer brands, profiles, and 
+- composio-cli — Operate external SaaS apps (Slack, GitHub, Gmail, Notion, Linear, and 1000+ more) from the terminal via the Composio CLI
+- composio-community-opencode-skills-context-engineering — Workflow for managing, structuring, compressing, and orchestrating context effectively for Claude and AI agent systems t
+- composition-patterns — React composition patterns that scale. Use when refactoring components with
+- content-designer-ux-writing-skill — Create user-centered, accessible interface copy (microcopy) for digital products including buttons, labels, error messag
+- context-engineering — Gestiona contexto opencode con precedence, discovery, prune y anti-amnesia en compaction.
+- create-design-md — Create or update a DESIGN.md from an existing product repository or public website. Use when asked to document an interf
+- crest — "Building engineer self-branding by turning technical contributions into a professional brand. Use for GitHub/LinkedIn/b
+- crypt — "Designing cryptographic architecture: algorithm selection, key management, E2EE, KMS integration, signature verificatio
+- cue — "Writing and producing product videos: scripts, storyboards, narration, and reproducible Playwright demo recordings. Use
+- cull — "Scanning and eradicating supply-chain malware (Shai-Hulud/S1ngularity npm/PyPI worms): IoC scan, OS/IDE persistence, sa
+- darwin — "Orchestrating ecosystem self-evolution: lifecycle-phase detection, agent relevance, cross-agent knowledge synthesis, ev
+- data-processing — Practical data processing using Pandas, Polars, and NumPy. Use for data cleaning, transformation, and analysis tasks in 
+- database-migrations — Database migration patterns for Alembic, Prisma, Django, and Go, including rollback strategies, zero-downtime migrations
+- deploy-to-vercel — Deploy applications and websites to Vercel. Use when the user requests deployment actions like "deploy my app", "deploy 
+- design — "Comprehensive design skill: brand identity, design tokens, UI styling, logo generation (55 styles, Gemini, Atlas Cloud,
+- design-brief — Create a design brief through an interactive interview, codebase exploration, and experience design decisions. Saved as 
+- design-flow — Run the full design-to-build workflow as a guided sequence. Orchestrates all designer skills in order, from grilling thr
+- design-qa — Run a design QA pass on a feature in UAT — compare what was actually built against the Figma design and report where it 
+- design-review — Run a structured design critique against the brief and codebase. Checks visual hierarchy, consistency, responsiveness, a
+- design-system — Token architecture, component specifications, and slide generation. Three-layer tokens (primitive→semantic→component), C
+- design-systems-frontend-architecture — "Use when building reusable frontend systems, design tokens, component contracts, responsive layouts, CSS strategy, or d
+- design-tokens — Generate a design tokens file (CSS variables or Tailwind config) based on a chosen aesthetic philosophy, with light and 
+- dev — |
+- devcontainer — |
+- dioxus-component-dev — Create, design, and optimize Dioxus components with proper patterns, hooks, props, and RSX syntax. Use when building UI 
+- dioxus-fullstack-dev — Build fullstack web applications with Dioxus using server functions, SSR, hydration, and API integration. Use when creat
+- dioxus-project-setup — Set up a new Dioxus project with proper structure, configuration, and boilerplate code. Use when creating new Dioxus app
+- dioxus-routing — Implement client-side routing in Dioxus applications using dioxus-router. Use when building multi-page applications, set
+- dioxus-state-management — Manage application state in Dioxus using signals, stores, context, and global state patterns. Use when implementing reac
+- director — "Producing automated feature demo videos via Playwright E2E tests: scenario design, recording config, implementation pat
+- discernment-nudge — >
+- doc-coauthoring — Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, pr
+- docker-patterns — # Skill: docker-patterns # Docker: Containers, Compose, Security & Orchestration Comprehensive Docker skill for OpenCode
+- documentation-lookup — Use up-to-date library and framework docs via Context7 MCP instead of training data. Activates for setup questions, API 
+- docx — "Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx files) or Word templa
+- dotnet — |
+- e2e-testing — Playwright E2E testing patterns, Page Object Model, configuration, CI/CD integration, artifact management, and flaky tes
+- echo — "Simulating users to evaluate existing flows and generate synthetic demand: cognitive walkthroughs, feature requests, un
+- entra-app-registration — |
+- experience-spec — Generate an Experience Spec — an engineering build document specifying screen states, interactions, motion, accessibilit
+- experiment — "Designing A/B tests: hypothesis docs, sample size, feature flags, significance analysis, CUPED, SRM detection, switchba
+- fastapi-backend — Build, review and debug production FastAPI services, including routing, validation, authentication, SQLAlchemy, backgrou
+- field — "Conducting user research: interview guides, usability test plans, qualitative analysis, persona creation, journey mappi
+- file-test-bug — "File a GitHub issue for local integration test failures. TRIGGERS: file test bug, report test failure, create bug for t
+- fine-tuning — Fine-tune LLMs using Axolotl, Unsloth, TRL or LLaMA-Factory, covering data preparation, training configuration, LoRA/QLo
+- fix-pr-issues — Use when addressing Basic Memory pull request feedback, failed checks, or Codex review blockers, then re-running the lat
+- fixing-accessibility — Audit and fix HTML accessibility issues including ARIA labels, keyboard navigation, focus management, color contrast, an
+- fixing-metadata — >
+- fixing-motion-performance — Audit and fix animation performance issues including layout thrashing, compositor properties, scroll-linked motion, and 
+- fleet-auditor — "Cross-system agent token/cost audit (Claude Code, Codex, OpenClaw, Hermes, OpenCode): idle burns, model misrouting, con
+- flow — "Implementing CSS/JS animations for hover effects, loading states, modal transitions, and gesture interactions. Use for 
+- flux — "Refracting thinking by challenging assumptions, combining cross-domain knowledge, and shifting perspectives to reframe 
+- forge — "Building rapid prototypes for frontend (UI components/pages) and backend (API mocks, simple servers). Use to validate n
+- forms-inputs-checkout — "Use when designing, critiquing, or implementing forms, inputs, validation, checkout, registration, payment, or any data
+- frame — "Extracting and structuring design context from Figma via MCP Server for downstream implementation agents. Use for Figma
+- frontend-design — Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthe
+- frontend-design-systems — Workflow for generating production-quality frontend interfaces using React, Tailwind CSS, and shadcn/ui with strong focu
+- frontend-patterns — Frontend development patterns for React, Angular, state management, performance optimization, and UI best practices.
+- funnel — "Constructing landing pages from a focused section to a premium multi-stage studio pipeline: structure, copy, conversion
+- gateway — "Designing and reviewing APIs: OpenAPI spec generation, versioning strategy, breaking change detection, REST/GraphQL bes
+- gauge — "Auditing SKILL.md normalization and compliance: scans the 21-item checklist, classifies violations, produces fix snippe
+- gear — "Managing dependencies, CI/CD, advanced GitHub Actions workflows, containers, secrets, and operational config. Use for b
+- git-commit — Execute git commit with conventional commit message analysis, intelligent staging, and message generation. Use when user
+- git-helper — Provides git workflow assistance, branch management, and commit message optimization
+- gpt-tasteskill — Elite UX/UI & Advanced GSAP Motion Engineer. Enforces Python-driven true randomization for layout variance, strict AIDA 
+- grafito-architecture — Arquitectura 16 crates Grafito, presupuestos, gates y deuda conocida.
+- graphql — GraphQL API design, schema definition, resolvers, mutations, subscriptions, and best practices for Python/FastAPI and No
+- graphql-operations — >
+- graphql-schema — >
+- grill-me — Interview the user relentlessly about a plan or design until reaching shared understanding, resolving each branch of the
+- grok — Designing regex, parsers, and DSLs for grammar authoring and ReDoS-safe regex. Not for REST APIs (Gateway) or DB schemas
+- grove — "Designing and auditing repository structure for humans and LLM agents: layouts, monorepos, docs/tests/scripts, progress
+- growth — "Optimizing SEO (meta/OGP/JSON-LD/headings), SMO (social sharing), CRO (CTA/form/exit-intent), and GEO (AI citation opti
+- guardian — Gatekeeping Git/PR by classifying change essence and recommending granularity, naming, and strategy. Use when PR prepara
+- harvest — Collecting GitHub PR data and generating work reports. Retrieves PR info via gh commands to auto-generate weekly/monthly
+- hearth — "Generating and auditing personal dev environment configs (zsh/tmux/neovim/ghostty) and automating the macOS desktop via
+- helm — "Simulating business strategy via short/mid/long-term scenario planning from financial, market, and competitive data. Ap
+- hermes — Use the Basic Memory knowledge graph for persistent memory across sessions. Search before answering; capture decisions, 
+- hone — "Auditing AI CLI configs and designing, configuring, or debugging Claude Code hooks. Use for Codex/agy/Claude Code confi
+- iac — |
+- idea-to-plan — Turn a vague idea or feature request into a written, reviewable spec and implementation plan before any code is written.
+- image-to-code-skill — Elite website image-to-code skill for Codex. For visually important web tasks, it must first generate the design image(s
+- imagegen-frontend-mobile — Elite mobile app image-generation skill for creating premium, app-native screen concepts and flows. Designed for iOS, An
+- imagegen-frontend-web — Elite frontend image-direction skill for generating premium, conversion-aware website design references. CRITICAL OUTPUT
+- improve-ui — Audit an existing product surface against its own design evidence, identify verified UI problems, and write self-contain
+- infographics — Use when generating Basic Memory PR, changelog, release, or weekly images from Codex.
+- information-architecture — Define the structural layer of a product or site before visual design begins. Covers navigation, content hierarchy, page
+- information-architecture-navigation — "Use when organizing, critiquing, or implementing navigation, labels, taxonomy, hierarchy, search, content grouping, or 
+- ink — "Generating SVG icons/illustrations, designing icon systems, and constructing sprite symbols. Use when vector assets are
+- instrumentation — Add Pydantic Logfire observability to applications. Use this skill whenever the user asks to "add logfire", "instrument 
+- interaction-patterns-components — "Use when choosing, critiquing, or designing UI interaction patterns and reusable components for web, mobile, SaaS, dash
+- internal-comms — A set of resources to help me write all kinds of internal communications, using the formats that my company likes to use
+- ios — Apple Human Interface Guidelines for iPhone. Use when building, reviewing, or refactoring SwiftUI/UIKit interfaces for i
+- ipados — Apple Human Interface Guidelines for iPad. Use when building iPad-optimized interfaces, implementing multitasking, point
+- j-space — Workspace ledger Goal/Core/Verified/Open/Next con gating fast/full/loop para Grafito.
+- judge — "Reviewing code via multi-engine orchestration (Claude + Codex) on three axes — secure, correct, and lean — shipping onl
+- latch — "Proposing, configuring, debugging, and maintaining Claude Code hooks (PreToolUse/PostToolUse/Stop and other lifecycle e
+- launch — "Planning releases and reporting delivery work from GitHub PR history. Use when versioning, CHANGELOGs, rollout or rollb
+- ledger — "Optimizing FinOps and cloud cost: IaC-based estimation, right-sizing, RI/SP recommendations, anomaly detection, budget 
+- legal — |
+- lens — "Comprehending and investigating codebases: structure mapping, feature discovery, data flow tracing for 'does X exist?' 
+- leonardomso-rust-skills — >
+- llm-app-security — Review and harden LLM-powered applications against prompt injection, data leakage, unsafe tool use, insecure retrieval a
+- llm-observability — Design and implement observability for LLM applications, including structured logging, tracing, metrics collection, cost
+- loom — "Designing a repository's operating layer — which project-local skills, recipes, and orchestration workflows it needs, a
+- lore — "Curating cross-agent knowledge and institutional memory: extracts patterns from agent journals into METAPATTERNS.md, de
+- macos — Apple Human Interface Guidelines for Mac. Use when building macOS apps with SwiftUI or AppKit, implementing menu bars, t
+- magi — "Deliberating decisions and founder priorities through multi-perspective, named-expert, and YC-style advisory lenses. Us
+- markdown-token-optimizer — "Analyzes markdown files for token efficiency. TRIGGERS: optimize markdown, reduce tokens, token count, token bloat, too
+- marketing-skills-workflows — Workflow for performing marketing strategy, SEO audits, audience positioning, content optimization, funnel analysis, and
+- matrix — "Controlling combinatorial explosion across multi-dimensional axes: minimum coverage sets, execution plans, test/deploy/
+- mcp-builder — Guide for creating high-quality MCP (Model Context Protocol) servers that enable LLMs to interact with external services
+- mcp-development — Build, test, debug and deploy MCP (Model Context Protocol) servers with Python or TypeScript, covering tool and resource
+- mcp-server-patterns — Build MCP servers with Node/TypeScript SDK — tools, resources, prompts, Zod validation, stdio vs Streamable HTTP. Use Co
+- melonask-axum-skills — "Comprehensive guide for building web applications and APIs with the axum Rust framework (by tokio-rs). Use this skill w
+- memory-capture — "Capture the current state of a working thread or conversation into a single coherent Basic Memory note — synthesize whe
+- memory-ci-capture — Synthesize GitHub delivery context into a concise Basic Memory project update. Use in CI after `bm ci collect` prepares 
+- memory-continue — "Resume prior work by rebuilding context from the Basic Memory knowledge graph — pick up where you left off using memory
+- memory-curate — "Curate the Basic Memory knowledge graph: find orphan notes and suggest links, propose typed relations, merge duplicates
+- memory-defrag — "Defragment and reorganize agent memory files: split bloated files, merge duplicates, remove stale information, and rest
+- memory-ingest — "Process unstructured external input (meeting transcripts, conversation logs, pasted documents) into structured Basic Me
+- memory-lifecycle — "Manage entity status transitions in Basic Memory: archive completed work, move notes between status folders, update fro
+- memory-literary-analysis — "Analyze a complete literary work into a structured Basic Memory knowledge graph. Covers schema design, entity seeding, 
+- memory-management — Workflow for building lightweight memory systems for Claude that improve long-term context retention, workflow continuit
+- memory-metadata-search — "Structured metadata search for Basic Memory: query notes by custom frontmatter fields using equality, range, array, and
+- memory-notes — "How to write well-structured Basic Memory notes: frontmatter, observations with semantic categories, relations with wik
+- memory-onboarding — "Guide someone new to Basic Memory through designing and building a complete personal knowledge system — interview them 
+- memory-reflect — "Sleep-time memory reflection: review recent conversations and daily notes, extract insights, and consolidate into long-
+- memory-research — "Research an external subject using web search, synthesize findings into a structured Basic Memory entity. Use when aske
+- memory-schema — "Schema lifecycle management for Basic Memory: discover unschemaed notes, infer schemas, create and edit schema definiti
+- memory-tasks — "Task management via Basic Memory schemas: create, track, and resume structured tasks that survive context compaction. U
+- mend — "Remediating known failure patterns automatically from Triage diagnoses and Beacon alerts: runbooks with safety-tier cla
+- message-brokers — Message queue patterns with RabbitMQ and Kafka, pub/sub, dead letter queues, and event-driven architecture for Python.
+- micro-interactions — >
+- micro-services — Microservices architecture patterns, service communication, event sourcing, CQRS, API gateway, and distributed system de
+- microsoft-foundry — |
+- minimalist-skill — Clean editorial-style interfaces. Warm monochrome palette, typographic contrast, flat bento grids, muted pastels. No gra
+- mint — "Generating test data and fixtures. Use when factory pattern design, boundary value data generation, synthetic data gene
+- model-serving-production — Design, review and harden production AI model-serving systems, including APIs, batching, latency, monitoring, fallback, 
+- morph — "Converting document formats (Markdown/Word/Excel/PDF/HTML) and generating reusable conversion scripts. Use for distribu
+- multi-agent-orchestration — Split a large task across parallel sub-agents with clean role boundaries and a merge step. Use when the user asks to "pa
+- muse — "Defining and managing design tokens, applying token systems to existing codebases, building design system foundations. 
+- native — "Implementing production iOS/Android/macOS native features (SwiftUI, Compose) and iterating a screen against a reference
+- nest — "Designing LLM-optimized folder structures: audits and restructures directories for context efficiency, progressive disc
+- nextjs-frontend — Build, review and debug production Next.js, React, TypeScript and JavaScript applications using safe server-client bound
+- nextjs-turbopack — Next.js 16+ and Turbopack — incremental bundling, FS caching, dev speed, and when to use Turbopack vs webpack.
+- nexus — "Orchestrating multi-specialist task chains and scope-adaptive product delivery: classifies intent, selects and executes
+- oath — "Auditing regulatory compliance (SOC2/PCI-DSS/HIPAA/ISO 27001): maps requirements, checks controls, designs audit trails
+- omen — Enumerating failure modes via pre-mortem analysis. Systematically identifies failure scenarios for plans, designs, and f
+- opencode-ensemble — "Use when coordinating multiple coding agents, delegating independent software work, managing OpenCode Ensemble teams, c
+- oracle — "Designing and evaluating AI/ML systems: prompt engineering, RAG design, LLM application patterns, AI safety, evaluation
+- orbit — "Running autonomous loops for nexus-autoloop. Generates script sets from goals, designs operation contracts, audits live
+- orchestration-airflow — # Skill: orchestration-airflow # Apache Airflow: DAG Design, TaskFlow, Orchestration & Deployment Comprehensive Airflow 
+- output-skill — Overrides default LLM truncation behavior. Enforces complete code generation, bans placeholder patterns, and handles tok
+- palette — Improving usability, interaction quality, cognitive load reduction, feedback design, and a11y compliance. Use when impro
+- pdf — Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables fr
+- pdm — "Navigating delivery status read-only: reconciles planned scope (specs/roadmap/PRD) against implemented code for what's 
+- pipe — "Designing GitHub Actions workflows in depth: trigger strategy, security hardening, performance optimization, PR automat
+- pixel — Generating pixel-accurate HTML/CSS code from image mockups (PNG/JPG/screenshots) and performing visual verification for 
+- playwright-mcp-workflows — Workflow for using Playwright with MCP-based agent systems to automate browsers, test applications, perform UI validatio
+- plea — "Role-playing as end users to generate authentic feature requests, surface unmet needs, and challenge team assumptions. 
+- polyglot — "Implementing i18n and l10n: extracts hardcoded strings to t() functions, integrates Intl API for date/currency/number f
+- port — "Designing web-to-iOS/Android porting strategy: feature parity matrices, native architecture maps, phased Strangler-Fig 
+- powerpoint-generation — Workflow for generating professional PowerPoint presentations from rough notes, outlines, documents, or ideas using stru
+- pptx — "Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includes: creati
+- pr-create — Use when explicitly creating or updating a Basic Memory pull request. This compatibility entry point delegates the full 
+- pr-description — Use when opening or updating a GitHub PR - writes a detailed PR description that explains what changed, why it changed, 
+- pr-review-loop — Enforce the Basic Machines GitHub PR review loop before merging. Use whenever Codex is preparing to merge, squash-merge,
+- probe — "Integrating OWASP ZAP/Burp Suite/Nuclei, planning penetration tests, executing DAST, and scanning for vulnerabilities. 
+- product-design-engineer — Senior product designer and front-end design engineer for SaaS products. Use when the user needs product design thinking
+- production-readiness — Assess whether Python, FastAPI, Next.js, TypeScript and PostgreSQL applications are ready for safe production deployment
+- profiling — Mide con puffin, criterion y wgpu-profiler antes de optimizar. Usa feature profile.
+- prompt-engineering — Design, test, and optimize prompts for LLMs, including system prompts, few-shot, chain-of-thought, template management, 
+- prompt-injection-defense — Design, review and implement defenses against direct and indirect prompt injection in LLM applications, including input 
+- prose — Writing user-facing UX text including microcopy, error messages, voice and tone design, onboarding copy, and accessibili
+- prototype — Build a throwaway prototype to flush out a design before committing to it. Routes between two branches — a runnable term
+- prune — "Cleaning up the skill ecosystem: auditing the agent roster for overlap and inactivity, proposing merges and sunset plan
+- pull-request — Drive GitHub pull request work end to end. Use when Codex is asked to open, update, describe, push to, monitor, review, 
+- pulse — "Defining KPIs, tracking events, and dashboards: North Star Metric, funnel and cohort analysis, test-intelligence views.
+- python — |
+- python-patterns — # Skill: python-patterns # Python: Idiomatic Patterns, Best Practices & Code Review Comprehensive Python skill for OpenC
+- python-quality — Write, review and refactor production-quality Python code with strong typing, safe error handling, testing, maintainabil
+- pythonic-code — >-
+- quill — "Adding JSDoc/TSDoc, updating READMEs, replacing any types with proper definitions, and adding high-value comments to co
+- radar — "Adding edge-case tests, repairing flaky tests, and improving coverage. Use when test gaps need filling or regressions n
+- rag-quality-review — Review and improve retrieval-augmented generation systems for chunking, retrieval quality, grounding, citation reliabili
+- rally — "Orchestrating multi-session parallel execution via Claude Code Agent Teams API and Codex CLI Subagents — launch, manage
+- rank — "Quantifying priority by scoring competing items with ICE/RICE/WSJF/MoSCoW/Cost of Delay/Kano. No code. Use to prioritiz
+- react-best-practices — React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, r
+- react-native-skills — React Native and Expo best practices for building performant mobile apps. Use
+- react-patterns — React development patterns including hooks, state management with Redux/Context, React Query, performance optimization, 
+- react-view-transitions — Guide for implementing smooth, native-feeling animations using React's View Transition API (`<ViewTransition>` component
+- redesign-skill — Upgrades existing websites and apps to premium quality. Audits current design, identifies generic AI patterns, and appli
+- redis-cache — Redis caching strategies, session management, rate limiting, pub/sub patterns, and data structures for Python and Node.j
+- relay — "Integrating messaging platforms and bots: channel adapters, webhook handlers, WebSocket servers, event-driven architect
+- remotion-animation-rules — Workflow for building technically correct Remotion animations using frame-based rendering, spring physics, useCurrentFra
+- remotion-creative-storytelling — Workflow for collaboratively developing creative concepts, hooks, story structure, and audience-focused narratives for R
+- remotion-image-video-masking — Workflow for creating advanced masking effects in Remotion using layered compositions, image/video masking, text occlusi
+- remotion-layout-debugging — Workflow for diagnosing and fixing layout instability, text jumping, resizing issues, and rendering inconsistencies in R
+- repo-context-packaging — Package a codebase into a compact, structured context bundle for an AI agent. Use when the user wants to "give the whole
+- repository-navigation — Navigate unfamiliar repositories efficiently by building a compact repo map, finding relevant files, tracing callers, an
+- resume-checkpoint — Pull a prior session's checkpoint on demand when the user is continuing prior work. Returns fenced, source-labeled, scru
+- riff — "Brainstorming interactively to deepen ideas via four modes (Expand/Propose/Evaluate/Subtract). Does not write code. Not
+- ripple — "Analyzing pre-change impact across vertical (dependency chains, files) and horizontal (pattern consistency, naming) dim
+- rover — >
+- rust-architect — Use when designing or architecting Rust applications, creating comprehensive project documentation, planning async/await
+- rust-best-practices — >
+- rust-performance — Perf Rust para Grafito egui/wgpu. Usa puffin, rayon, wgpu compute, lyon, spade. Mide antes de optimizar.
+- rust-ui-ux — UI escandinava egui para Grafito. Usa tokens TYPE/SPACE/RADIUS y progressive disclosure 5/8/17.
+- saga — Designing narratives that tell product and feature use cases as customer-centric stories. Use when customer experience s
+- sage — "Advising founders YC-style — socratic probing to surface the #1 bottleneck, anti-pattern detection, and 1-2 week action
+- sayem7456-opencode-engineering-skills-context-engineering — Build, preserve, compress, and reuse task context across complex OpenCode sessions without losing decisions, constraints
+- scaffold — "Provisioning infrastructure via cloud IaC (Terraform/OpenTofu/CloudFormation/Pulumi) and local dev environments (Docker
+- schema — Designing database schemas, migrations, and multi-tenant architecture: RLS, tenant routing, provisioning, quotas, and is
+- scout — "Investigating bugs via root cause analysis, reproduction steps, and impact assessment. Investigation-only — finds why b
+- scribe — "Authoring standalone and cross-team specifications: PRD/SRS/HLD/LLD, staged L0-L4 unified packages, BDD acceptance crit
+- security — # Skill: security # Security: Code Review, Backend, Cloud & DevSecOps Comprehensive security skill for OpenCode — covers
+- security-review — Review Python, FastAPI, SQLAlchemy, Next.js, TypeScript and JavaScript code for security vulnerabilities, authorization 
+- seek — "Designing search engines and vector DBs for full-text, vector, and hybrid retrieval, including permission-aware retriev
+- sensei — "Iteratively improve skill frontmatter compliance using the Ralph loop pattern. USE FOR: run sensei, sensei help, improv
+- sentinel — "Analyzing code statically for security flaws: hardcoded secrets, SQL injection, input validation, security headers, dep
+- setup-project — Onboard a new codebase for design system sync with Figma. Detects or extracts tokens, configures sync mappings, runs bas
+- shadcn-component-discovery — Discover shadcn-compatible components and registries across the entire ecosystem before writing any custom UI. Use PROAC
+- shadcn-component-review — Review custom components and layouts against shadcn design patterns, visual style conventions (Vega, Nova, Maia, Lyra, M
+- shard — "Designing multi-tenant architectures with tenant isolation strategies, RLS, routing, and scale design for SaaS. Use whe
+- sherpa — "Guiding workflows by decomposing complex tasks (Epics) into Atomic Steps under 15 minutes each, with progress tracking 
+- shift — "Orchestrating migrations, upgrades, and modernization across frameworks, libraries, APIs, databases, and dependencies. 
+- siege — "Verifying system resilience via load testing, contract testing, chaos engineering, and mutation testing. Use for limit 
+- sigil — "Designing a repository's project-local operating layer and generating its skills, recipes, workflows, and routing map. 
+- sketch — "Generating AI image-generation code using the Gemini API. Handles text-to-image generation, image editing, and prompt o
+- skill-authoring — "Guidelines for writing Agent Skills. TRIGGERS: create a skill, new skill, write a skill, skill template, skill structur
+- skill-creator — Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a sk
+- skill-doc-authoring — Write a well-formed agent SKILL.md from a workflow, SOP, or repeated procedure. Use when the user wants to "create a ski
+- skill-improvement-opportunity-logger — Workflow for observing work sessions, identifying recurring inefficiencies or weaknesses, logging improvement opportunit
+- skill-installer — Install and manage Dioxus agent skills from the official repository. Use when setting up new development environments or
+- skill-orchestrator — Select the right lead skill and supporting skills for a task, reduce overlapping instructions, control verbosity, and pr
+- skills-catalog — Router maestro de 200+ skills. Úsalo primero para elegir qué skill instalar según proyecto.
+- slack-gif-creator — Knowledge and utilities for creating animated GIFs optimized for Slack. Provides constraints, validation tools, and anim
+- slides — Create strategic HTML presentations with Chart.js, design tokens, responsive layouts, copywriting formulas, and contextu
+- snap — "Automating iOS UI via XCUITest and fastlane snapshot pipelines for App Store screenshots. Not for cross-platform E2E (V
+- soft-skill — Teaches the AI to design like a high-end agency. Defines the exact fonts, spacing, shadows, card structures, and animati
+- spark — "Proposing new features leveraging existing data/logic as Markdown specifications. Use when brainstorming new features, 
+- specs — |
+- sql-expert — # Skill: sql # SQL Expert: Query Writing, Optimization & Database Design Comprehensive SQL skill for OpenCode — covers q
+- sqlalchemy-postgres — Build, review, debug and optimize SQLAlchemy and PostgreSQL code, including sessions, transactions, pooling, migrations,
+- stage — "Generating slides via Marp, reveal.js, or Slidev, designing narrative arcs, and optimizing conference talks with WPM-ca
+- stitch-skill — Semantic Design System Skill for Google Stitch. Generates agent-friendly DESIGN.md files that enforce premium, anti-gene
+- stream — "Designing ETL/ELT pipelines, visualizing data flows, selecting batch/streaming approaches, and architecting Kafka/Airfl
+- structured-output-reliability — Design, review and debug reliable structured outputs from LLMs, including JSON schemas, validation, retries, repair stra
+- structured-project-execution — Execute a large multi-step project without losing the thread — track plan, progress, and decisions in a durable file. Us
+- summon — "Channeling the documented thinking of named notable figures (an 'itako' medium) — their mental models, heuristics, and 
+- svg — >
+- sweep — "Detecting unnecessary files, unused code, and orphaned files, and proposing safe deletion. Not for removal execution (B
+- swiftui — "API reference: SwiftUI. Query for views, layouts, navigation, @State/@Binding/@Observable, view modifiers, NavigationSt
+- swiftui-effects-api — This skill should be used when the user asks to "add blur effect", "apply shadow", "adjust opacity/brightness", "use ble
+- swiftui-gestures — "Implement, review, or improve SwiftUI gesture handling. Use when adding tap, long press, drag, magnify, or rotate gestu
+- swiftui-iconography-api — This skill should be used when the user asks to "add SF Symbols", "animate icons", "use symbol effects", "apply symbol r
+- swiftui-input-api — This skill should be used when the user asks to "add TextField", "implement text input", "create pickers/sliders", "hand
+- swiftui-layout-components — "Build SwiftUI layouts using stacks, grids, lists, scroll views, forms, and controls. Covers VStack/HStack/ZStack, LazyV
+- swiftui-liquid-glass — "Implement, review, or improve SwiftUI Liquid Glass effects for iOS 26+. Covers glassEffect modifier, GlassEffectContain
+- swiftui-material-api — This skill should be used when the user asks to "add material background", "apply translucent overlay", "use .regularMat
+- swiftui-navigation — "Implement SwiftUI navigation patterns including NavigationStack, NavigationSplitView, sheet presentation, tab-based nav
+- swiftui-patterns — "Build SwiftUI views with modern MV architecture, state management, and view composition patterns. Covers @Observable ow
+- swiftui-performance — "Audit and improve SwiftUI runtime performance. Use when diagnosing slow rendering, janky scrolling, high CPU, memory us
+- swiftui-presentation-api — This skill should be used when the user asks to "present sheet", "show popover", "create alert", "add confirmation dialo
+- swiftui-pro — Comprehensively reviews SwiftUI code for best practices on modern APIs, maintainability, and performance. Use when readi
+- swiftui-programming-skill — Expertise in SwiftUI for building declarative user interfaces, including SF Symbols integration and best practices.
+- swiftui-typography-api — This skill should be used when the user asks to "set font", "use text styles", "apply font weight", "use custom fonts", 
+- swiftui-ui-patterns — "Use when writing, reviewing, or refactoring SwiftUI views. Covers state management, view composition, performance, mode
+- swiftui-uikit-interop — "Bridges UIKit and SwiftUI by wrapping UIKit views and view controllers in SwiftUI with UIViewRepresentable and UIViewCo
+- swiftui-view-refactor — Refactor and review SwiftUI view files for consistent structure, dependency injection, and Observation usage. Use when a
+- swiftui-webkit — "Embeds and controls web content in SwiftUI with WebKit for SwiftUI, including WebView, WebPage, navigation policies, Ja
+- sync-from-figma — Read Figma variables and diff against CSS tokens. Activate with "/sync-from-figma". Supports --dry-run. Reads variable c
+- sync-to-figma — Push design tokens and components from code to Figma via Console MCP. Activate with "/sync-to-figma". Updates existing d
+- system-architecture — Design, review and document system architecture, covering system context, components, service boundaries, data flow, com
+- tables — >
+- tabletopkit — "Create multiplayer spatial board games using TabletopKit on visionOS. Use when building tabletop game experiences with 
+- tailwindcss — Tailwind CSS v4 utility-first styling patterns including responsive design, dark mode, and custom configuration. Use whe
+- tanstack-query — TanStack Query v5 data fetching patterns including useSuspenseQuery, useQuery, mutations, cache management, and API serv
+- tanstack-router — TanStack Router file-based routing patterns including route creation, navigation, loaders, type-safe routing, and lazy l
+- taste-skill — Anti-slop frontend skill for landing pages, portfolios, and redesigns. The agent reads the brief, infers the right desig
+- taste-skill-v1 — The original v1 taste-skill, preserved for projects depending on its exact behavior. The current default is `design-tast
+- tauri-android-distribution — Guides the user through distributing Tauri applications for Android, including Google Play Store submission, APK and AAB
+- tauri-app-resources — Assists with managing Tauri application resources including app icons setup and generation, embedding static files and a
+- tauri-architecture — Teaches Claude about Tauri's core architecture, including the Rust backend, webview integration, Core-Shell design patte
+- tauri-binary-size — Guides users through Tauri binary size optimization techniques to produce small, efficient desktop application bundles u
+- tauri-calling-frontend — Guides developers through Tauri v2 event system for calling frontend from Rust, covering emit functions, event payloads,
+- tauri-calling-rust — Guides the user through calling Rust backend functions from the Tauri frontend using the invoke function, defining comma
+- tauri-capabilities — Guides users through configuring Tauri capabilities for security and access control, covering capability files, permissi
+- tauri-code-signing — Guides the user through Tauri application code signing and notarization for Android, iOS, Linux, macOS, and Windows plat
+- tauri-configuration — Guides developers through Tauri v2 configuration including tauri.conf.json structure, Cargo.toml settings, environment-s
+- tauri-crabnebula — Guides the user through distributing Tauri applications via CrabNebula Cloud, including pipeline setup, cloud configurat
+- tauri-csp — Guides users through configuring Content Security Policy (CSP) in Tauri v2 applications to prevent XSS attacks and enhan
+- tauri-debugging — Helps users debug Tauri v2 applications across VS Code, RustRover, IntelliJ, and Neovim. Covers console debugging, WebVi
+- tauri-ecosystem-security — Guides developers through Tauri ecosystem security practices including security auditing, dependency management, vulnera
+- tauri-frontend-events — Teaches how to subscribe to and listen for Tauri events in the frontend using the events API, including typed event hand
+- tauri-frontend-js — Guides Claude through configuring JavaScript frontend frameworks for Tauri v2 desktop applications, including Next.js, N
+- tauri-frontend-rust — Guides the user through integrating Rust-based WASM frontend frameworks with Tauri v2, covering Leptos and Trunk setup, 
+- tauri-http-headers — Guides developers through configuring HTTP headers security in Tauri v2 applications, covering security headers, custom 
+- tauri-ios-distribution — Guides users through distributing Tauri applications to the iOS App Store, including Apple Developer enrollment, Xcode c
+- tauri-ipc — Teaches the assistant about Tauri IPC (Inter-Process Communication) patterns including brownfield and isolation approach
+- tauri-lifecycle-security — Assists developers with understanding Tauri application lifecycle security threats spanning development, build, distribu
+- tauri-linux-packaging — Guides users through packaging Tauri v2 applications for Linux distributions including AppImage, Debian (.deb), RPM, Fla
+- tauri-macos-distribution — Guides users through distributing Tauri applications on macOS, including creating DMG installers, configuring app bundle
+- tauri-migration — Assists users with migrating Tauri applications from v1 to v2 stable, and from v2 beta to v2 stable, covering breaking c
+- tauri-nodejs-sidecar — Guides users through running Node.js as a sidecar process in Tauri applications, enabling JavaScript backend functionali
+- tauri-permissions — Guides the user through configuring Tauri permissions, including the security permission system, allow and deny lists, p
+- tauri-pipeline-github — Guides users through setting up Tauri GitHub Actions CI/CD pipelines and workflows for automated building, testing, and 
+- tauri-plugin-permissions — Guides users through configuring Tauri plugin permissions, capabilities, and security. Covers platform-specific capabili
+- tauri-plugins — Guides the user through Tauri plugin development, including creating plugin extensions, configuring permissions, and bui
+- tauri-process-model — Explains the Tauri process model architecture including the Core process, WebView process, inter-process communication, 
+- tauri-project-setup — Helps users create and initialize new Tauri v2 projects for building cross-platform desktop and mobile applications. Cov
+- tauri-runtime-authority — Explains how the Tauri runtime authority enforces security policies during application execution, covering ACL-based acc
+- tauri-scope — Guides users through configuring Tauri command scopes for security, including filesystem restrictions, URL patterns, dyn
+- tauri-sidecar — Teaches the assistant how to embed and execute external binaries (sidecars) in Tauri applications, including configurati
+- tauri-splashscreen — Guides the user through adding a Tauri splashscreen, splash screen, loading screen, or startup screen to their applicati
+- tauri-system-tray — Guides the user through implementing Tauri system tray functionality, including tray icon setup, tray menu creation, han
+- tauri-testing — Guides developers through testing Tauri applications including unit testing with mock runtime, mocking Tauri APIs, WebDr
+- tauri-updating-dependencies — Assists users with updating Tauri dependencies including the Tauri CLI, Rust crates, JavaScript packages, and checking f
+- tauri-window-customization — Guides users through Tauri window customization including custom titlebar implementation, transparent windows, window de
+- tauri-windows-distribution — Guides users through distributing Tauri applications on Windows, including creating MSI and NSIS installers, customizing
+- tdd — ../../../commands/tdd.md
+- tdd-guide — ../../../engineering-team/tdd-guide/SKILL.md
+- tdd-workflow — Drive implementation with the red-green-refactor test-first loop. Use when the user asks to build a feature "with TDD", 
+- team-communications — ../../../project-management/team-communications/SKILL.md
+- tech-debt — ../../../commands/tech-debt.md
+- tech-debt-tracker — ../../../engineering/tech-debt-tracker/SKILL.md
+- tech-stack-evaluator — ../../../engineering-team/tech-stack-evaluator/SKILL.md
+- template — Replace with description of the skill and when Claude should use it.
+- tempo — Designing scheduling and time-aware logic for cron, timezone/DST, retry/backoff, and business-calendar systems. Use when
+- terraform-engineer — Use when implementing infrastructure as code with Terraform across AWS, Azure, or GCP. Invoke for module development (cr
+- terraform-patterns — ../../../engineering/terraform-patterns/SKILL.md
+- test-master — Generates test files, creates mocking strategies, analyzes code coverage, designs test architectures, and produces test 
+- test-skill — A test skill to verify all plugin tools work correctly - use_skill, read_skill_file, run_skill_script, find_skills
+- testing — |
+- testing-and-debugging — Debug defects systematically, reproduce failures, identify root causes, add focused regression tests, and verify fixes s
+- testrail — ../../../engineering-team/playwright-pro/skills/testrail/SKILL.md
+- text-to-speech — # Text-to-Speech Skills Free text-to-speech, voice cloning, and audio generation APIs. ## Coqui AI - FREE, OPEN SOURCE R
+- the-fool — Use when challenging ideas, plans, decisions, or proposals using structured critical reasoning. Invoke to play devil's a
+- theme-factory — Toolkit for styling artifacts with a theme. These artifacts can be slides, docs, reportings, HTML landing pages, etc. Th
+- threat-detection — ../../../engineering-team/threat-detection/SKILL.md
+- three-best-practices — Three.js performance optimization and best practices guidelines. Use when writing, reviewing, or optimizing Three.js cod
+- threejs-animation — Three.js animation - keyframe animation, skeletal animation, morph targets, animation mixing. Use when animating objects
+- threejs-fundamentals — Three.js scene setup, cameras, renderer, Object3D hierarchy, coordinate systems. Use when setting up 3D scenes, creating
+- threejs-geometry — Three.js geometry creation - built-in shapes, BufferGeometry, custom geometry, instancing. Use when creating 3D shapes, 
+- threejs-interaction — Three.js interaction - raycasting, controls, mouse/touch input, object selection. Use when handling user input, implemen
+- threejs-lighting — Three.js lighting - light types, shadows, environment lighting. Use when adding lights, configuring shadows, setting up 
+- threejs-loaders — Three.js asset loading - GLTF, textures, images, models, async patterns. Use when loading 3D models, textures, HDR envir
+- threejs-materials — Three.js materials - PBR, basic, phong, shader materials, material properties. Use when styling meshes, working with tex
+- threejs-postprocessing — Three.js post-processing - EffectComposer, bloom, DOF, screen effects. Use when adding visual effects, color grading, bl
+- threejs-shaders — Three.js shaders - GLSL, ShaderMaterial, uniforms, custom effects. Use when creating custom visual effects, modifying ve
+- threejs-textures — Three.js textures - texture types, UV mapping, environment maps, texture settings. Use when working with images, UV coor
+- tipkit — "Implement, review, or improve in-app tips and onboarding using Apple's TipKit framework. Use when adding feature discov
+- titan — "Delivering working code fastest via build-first product delivery through minimum agent chains; S/M scopes skip planning
+- tlc-spec-driven — Project and feature planning with 4 adaptive phases - Specify, Design, Tasks, Execute. Auto-sizes depth by complexity. C
+- token-coach — Plan a token-efficient Claude Code or Codex setup, or get a quick health check. Coaching, not the full audit (use token-
+- token-dashboard — Open the Token Optimizer dashboard in your browser (context usage, quality, savings). Use to view the dashboard.
+- token-optimizer — Ahorra tokens con LLMLingua-2, compaction prune, prompt-cache y routing small_model.
+- token-saver — Reduce token usage during OpenCode sessions by reading files selectively, summarizing context, avoiding unnecessary outp
+- tome — "Converting technical knowledge into durable learning documents and publishable articles. Use for diff-based teaching, d
+- tools — |
+- tooltips — >
+- touch-pointer — >
+- trace — "Analyzing session replays, extracting persona-based behavioral patterns, and storytelling UX issues. Reads the 'why' fr
+- trail — "Investigating git history, analyzing regression root causes, and performing code archaeology. Time-travels through comm
+- trawl — "Architecting crawl and scraping systems: distributed crawler topology, URL frontier, politeness, compliance. Architectu
+- triage — "Responding to incidents: identifies impact scope, formulates recovery procedures, creates postmortems. Use when inciden
+- tuner — "Tuning database queries via EXPLAIN ANALYZE, query plan optimization, index recommendations, and slow query detection. 
+- tvos — Apple Human Interface Guidelines for Apple TV. Use when building tvOS apps with focus-based navigation, Siri Remote inpu
+- typescript — |
+- typescript-pro — Implements advanced TypeScript type systems, creates custom type guards, utility types, and branded types, and configure
+- ui-design-system — ../../../product-team/ui-design-system/SKILL.md
+- ui-percept-rapid-feedback — Use for fast, deterministic UI quality feedback in quick-math-swift. Runs capture plus ui-percept with stricter aestheti
+- ui-skills-root — Use before UI-related work to select the smallest useful UI Skills context through the ui-skills CLI.
+- ui-styling — Create beautiful, accessible user interfaces with shadcn/ui components (built on Radix UI + Tailwind), Tailwind CSS util
+- ui-ux-design — Design, review and improve high-quality responsive user interfaces and user experiences for Next.js, React, TypeScript a
+- ui-ux-pro-max — "UI/UX design intelligence for web, mobile, and desktop. This skill should be used when designing, building, reviewing, 
+- ui-visual-composition — "Use when creating, critiquing, or refining visual UI, including hierarchy, spacing, typography, color, depth, imagery, 
+- unreal-engine-skill — >
+- upstream-first — >
+- user-personalization — >
+- user-story — ../../../commands/user-story.md
+- usernotifications — "API reference: UserNotifications. Query for local/remote notifications, triggers, notification content."
+- ux-copy — Write, evaluate, and improve UX copy and microcopy for software products. Use whenever the user needs help with button l
+- ux-research-discovery-testing — "Use when planning UX research, discovery interviews, usability tests, synthesis, or evidence-backed product recommendat
+- ux-researcher-designer — ../../../product-team/ux-researcher-designer/SKILL.md
+- ux-usability-foundations — "Use when designing, critiquing, or improving an interface for usability, including affordances, feedback, constraints, 
+- ux-writing-content-design — "Use when writing, critiquing, or implementing product UX copy, microcopy, labels, CTAs, empty states, onboarding, error
+- vector — Automating browsers via Playwright and Chrome DevTools for data collection, form interaction, screenshot capture, and ne
+- vector-database-engineer — Designs embedding pipelines and vector search systems using FAISS, Pinecone, Qdrant, and Weaviate for semantic retrieval
+- vercel-cli-with-tokens — Deploy and manage projects on Vercel using token-based authentication. Use when working with Vercel CLI using access tok
+- vercel-composition-patterns — React composition patterns that scale. Use when refactoring components with
+- vercel-optimize — "Use for Vercel cost and performance optimization on deployed projects, especially Next.js, SvelteKit, Nuxt, and limited
+- vercel-react-best-practices — Workflow for building production-quality React applications using Vercel-style best practices focused on readability, pe
+- vercel-react-native-skills — React Native and Expo best practices for building performant mobile apps. Use
+- video-content-strategist — ../../../marketing-skill/video-content-strategist/SKILL.md
+- vigil — "Engineering detection rules (Sigma/YARA), detection coverage mapping, threat hunting hypotheses, Purple Team Blue side,
+- vision — "Directing UI/UX creative work — redesigns, new designs, trend application, Design System construction, Muse/Palette/Flo
+- vision-framework — "Implement computer vision features including text recognition (OCR), face detection, barcode scanning, image segmentati
+- visionos — Apple Human Interface Guidelines for Apple Vision Pro. Use when building spatial computing apps, implementing eye/hand i
+- vitrine — "Authoring Storybook stories, component catalogs, and Visual Regression integration (CSF 3.0/Factories, Storybook 10 ESM
+- voice — "Collecting user feedback via NPS surveys, review analysis, sentiment analysis, feedback classification, and insight ext
+- void — "Verifying YAGNI, cutting scope, and proposing complexity reductions. A 'subtraction' agent questioning the justificatio
+- voyager — "Authoring web and native E2E tests, including Playwright, Appium, XCUITest, device farms, visual regression, and App St
+- vue-expert — Builds Vue 3 components with Composition API patterns, configures Nuxt 3 SSR/SSG projects, sets up Pinia stores, scaffol
+- vue-expert-js — Creates Vue 3 components, builds vanilla JS composables, configures Vite projects, and sets up routing and state managem
+- watchos — Apple Human Interface Guidelines for Apple Watch. Use when building watchOS apps, complications, or workout features. Tr
+- wcag-audit — Audit web accessibility against WCAG 2.1/2.2 AA. Scans UI code for violations across 11 categories (images, forms, keybo
+- weatherkit — "Fetch current, hourly, and daily weather forecasts and display required attribution using WeatherKit. Use when integrat
+- weave — "Designing workflows and state machines. Use when state transition design, invalid transition detection, Saga patterns, 
+- web — Web platform design and accessibility guidelines. Use when building web interfaces, auditing accessibility, implementing
+- web-artifacts-builder — Suite of tools for creating elaborate, multi-component claude.ai HTML artifacts using modern frontend web technologies (
+- web-components — Use when building Web Components, custom elements, shadow DOM, or working with Lit, Stencil, or other web component libr
+- web-design-guidelines — Review UI code for Web Interface Guidelines compliance. Use when asked to "review my UI", "check accessibility", "audit 
+- webapp-testing — Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functional
+- webgpu-skill — WebGPU/WGSL guidance for initialization, render/compute pipelines, shader authoring, debugging, and performance; use whe
+- webgpu-threejs-tsl — Comprehensive guide for developing WebGPU-enabled Three.js applications using TSL (Three.js Shading Language). Covers We
+- webshell-detect — Help detect and analyze web shells using reference samples for defensive security
+- websocket-engineer — Use when building real-time communication systems with WebSockets or Socket.IO. Invoke for bidirectional messaging, hori
+- webxr — |
+- widgetkit — "Implement, review, or improve widgets, Live Activities, and controls using WidgetKit and ActivityKit. Use when building
+- wordlist — Access and filter SecLists wordlists for authorized security testing
+- wordpress-pro — Develops custom WordPress themes and plugins, creates and registers Gutenberg blocks and block patterns, configures WooC
+- writing-guidelines — Review docs/prose for Writing Guidelines compliance. Use when asked to "review my docs", "check writing style", "audit p
+- x-twitter-growth — ../../../marketing-skill/x-twitter-growth/SKILL.md
+- xcodebuildmcp — This skill should be used when the user asks to "build the Xcode project", "run tests", "debug the app", "capture logs",
+- xcodebuildmcp-cli — This skill should be used when the user asks to "build via CLI", "run tests from terminal", "debug from command line", o
+- xcuitest — "API reference: XCUITest. Query for element queries, waiting patterns, Swift 6 @MainActor, assertions, screenshots, laun
+- xlsx — "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to:
+- xss-test — Generate XSS payloads and test strategies for authorized web application security testing
+- yjs — |
+- zen — "Refactoring code: variable naming, function extraction, magic number constants, dead code removal. Does not change beha
+- zig-developer — Zig systems programming, comptime metaprogramming, allocator strategies, and C interop
+- zine — Authoring tech blog/article series for note/Zenn/Qiita/dev.to. Not for specs (Scribe) or microcopy (Prose).
+
+## Contexto (mitigación aplicada 2026-09-05)
+
+Cada skill suma ~100 chars al tool skill en cada llamada. `opencode.json:permission.skill` ya esconde 47 (`swiftui-*`, `threejs-*`, `three-*`, `azure-*`, `angular-*`; siguen en disco y se reactivan borrando una línea). Candidatas siguientes si hace falta: `tauri-*` (39), codenames genéricos de una palabra.

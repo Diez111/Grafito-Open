@@ -122,7 +122,13 @@ pub(crate) enum UnsavedResolution {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SaveAttempt {
+    /// Guardado sin diálogo previo que terminó en este turno (reservado para
+    /// futuros paths sincrónicos; el flujo normal es `Pending` + poll).
+    #[allow(dead_code)]
     Saved(Option<DocumentAction>),
+    /// Guardado delegado a worker: el resultado llega en `poll_background_jobs`,
+    /// que continúa la acción pendiente vía `record_save_success`.
+    Pending,
     Cancelled,
     Failed,
 }
