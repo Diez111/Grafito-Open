@@ -1,7 +1,7 @@
 ---
 description: Orquestador supervisor que descompone en workers paralelos y fusiona resultados.
 mode: primary
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 temperature: 0.2
 permission:
   task:

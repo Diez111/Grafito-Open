@@ -1,7 +1,7 @@
 ---
 description: Revisor staff-engineer de PRs Rust con foco en seguridad, perf y deuda.
 mode: subagent
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 temperature: 0.1
 permission:
   edit: deny

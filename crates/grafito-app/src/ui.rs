@@ -1019,6 +1019,12 @@ fn dialog_contents(
     save_error: Option<&String>,
     decision: &mut Option<UnsavedDecision>,
 ) {
+    // A11Y: Esc descarta el modal persistente con la opción segura (Cancelar).
+    // El orden Tab lo da egui por orden de creación: Cancelar → Descartar →
+    // Guardar (el foco arranca en la opción segura).
+    if decision.is_none() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        *decision = Some(UnsavedDecision::Cancel);
+    }
     let theme = current_theme(ui.ctx());
     // Scandinavian: centered chapter, 24 outer, 16 between, single concise body — no duplicate subtitle
     egui::Frame::none()

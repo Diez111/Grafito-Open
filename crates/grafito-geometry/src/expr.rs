@@ -1024,6 +1024,59 @@ pub fn eval_function_with_vars(
     })
 }
 
+/// Umbral F10-D (perf medido): batches cuyo `size_hint` inferior queda debajo
+/// se evalúan escalares para no pagar el spawn de rayon (~10µs). Probe
+/// N=4000 `sin(x)+x^2-cos(2x)`: 267µs seq → 146µs par8 (1.83x).
+const RAYON_BATCH_THRESHOLD: usize = 1024;
+
+/// Evalúa un AST ya sustituido/simplificado sobre un Vec, en paralelo.
+/// `collect` preserva el orden → resultado idéntico al loop escalar.
+fn eval_prepared_1d_par(ast: &crate::ast::Expr, var_name: &str, xs: Vec<f64>) -> Vec<Option<f64>> {
+    use rayon::prelude::*;
+    let chunk = (xs.len() / rayon::current_num_threads().max(1)).max(64);
+    xs.par_chunks(chunk)
+        .map(|c| {
+            c.iter()
+                .map(|&x| {
+                    let res = ast.eval_at(var_name, x);
+                    if res.is_nan() {
+                        None
+                    } else {
+                        Some(res)
+                    }
+                })
+                .collect::<Vec<Option<f64>>>()
+        })
+        .collect::<Vec<Vec<Option<f64>>>>()
+        .concat()
+}
+
+/// Variante 2D del batch paralelo (domain coloring, implícitas, superficies).
+fn eval_prepared_2d_par(
+    ast: &crate::ast::Expr,
+    var1_name: &str,
+    var2_name: &str,
+    pts: Vec<(f64, f64)>,
+) -> Vec<Option<f64>> {
+    use rayon::prelude::*;
+    let chunk = (pts.len() / rayon::current_num_threads().max(1)).max(64);
+    pts.par_chunks(chunk)
+        .map(|c| {
+            c.iter()
+                .map(|&(v1, v2)| {
+                    let res = ast.eval_2d(var1_name, v1, var2_name, v2);
+                    if res.is_nan() {
+                        None
+                    } else {
+                        Some(res)
+                    }
+                })
+                .collect::<Vec<Option<f64>>>()
+        })
+        .collect::<Vec<Vec<Option<f64>>>>()
+        .concat()
+}
+
 pub fn eval_batch_1d(
     expr: &str,
     var_name: &str,
@@ -1078,6 +1131,9 @@ pub fn eval_batch_1d(
     // FAST PATH: try to parse with our custom AST
     if let Ok(mut ast) = crate::ast::parse_ast(&expr_clean) {
         ast = ast.substitute_vars(vars, &[var_name]).simplify();
+        if xs.size_hint().0 >= RAYON_BATCH_THRESHOLD {
+            return Ok(eval_prepared_1d_par(&ast, var_name, xs.collect()));
+        }
         let mut results = Vec::new();
         for x in xs {
             let res = ast.eval_at(var_name, x);
@@ -1157,6 +1213,14 @@ pub fn eval_batch_2d(
         ast = ast
             .substitute_vars(vars, &[var1_name, var2_name])
             .simplify();
+        if points.size_hint().0 >= RAYON_BATCH_THRESHOLD {
+            return Ok(eval_prepared_2d_par(
+                &ast,
+                var1_name,
+                var2_name,
+                points.collect(),
+            ));
+        }
         let mut results = Vec::new();
         for (v1, v2) in points {
             let res = ast.eval_2d(var1_name, v1, var2_name, v2);
@@ -2236,6 +2300,46 @@ pub fn eval_integral_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_par_sobre_umbral_coincide_con_escalar_punto_a_punto() {
+        // F10-D: el path rayon (>=1024) debe dar bit a bit lo mismo que el
+        // evaluador puntual. N=1500 cruza RAYON_BATCH_THRESHOLD.
+        let vars = HashMap::new();
+        let n = RAYON_BATCH_THRESHOLD + 476;
+        let xs: Vec<f64> = (0..n)
+            .map(|i| -10.0 + 20.0 * (i as f64) / (n as f64))
+            .collect();
+        let got = eval_batch_1d("sin(x) + x^2 - cos(2*x)", "x", xs.iter().copied(), &vars)
+            .expect("batch");
+        assert_eq!(got.len(), n);
+        for (i, &x) in xs.iter().enumerate() {
+            let expected = evaluate("sin(x) + x^2 - cos(2*x)", &[("x".to_string(), x)]).ok();
+            assert_eq!(got[i], expected, "mismatch en x={x}");
+        }
+    }
+    #[test]
+    fn batch_2d_par_sobre_umbral_coincide_con_punto_a_punto() {
+        let vars = HashMap::new();
+        let n = RAYON_BATCH_THRESHOLD + 100;
+        let pts: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 * 0.01, (i as f64 * 0.02).sin()))
+            .collect();
+        let got =
+            eval_batch_2d("x^2 + y^2", "x", "y", pts.iter().copied(), &vars).expect("batch2d");
+        assert_eq!(got.len(), n);
+        for (i, &(x, y)) in pts.iter().enumerate() {
+            let expected =
+                evaluate("x^2 + y^2", &[("x".to_string(), x), ("y".to_string(), y)]).ok();
+            assert_eq!(got[i], expected, "mismatch en ({x},{y})");
+        }
+    }
+    #[test]
+    fn batch_chico_bajo_umbral_sigue_escalar_y_correcto() {
+        // N=10 < umbral: path escalar intacto, mismo resultado.
+        let vars = HashMap::new();
+        let got = eval_batch_1d("x^2", "x", [1.0, 2.0, 3.0].into_iter(), &vars).expect("batch");
+        assert_eq!(got, vec![Some(1.0), Some(4.0), Some(9.0)]);
+    }
     #[test]
     fn test_eval_syntax() {
         println!("sin(1.0): {:?}", eval_function("sin(1.0)", 1.0));

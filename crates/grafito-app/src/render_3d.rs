@@ -3345,6 +3345,85 @@ impl GrafitoApp {
     }
 }
 
+/// Paridad GeoGebra 3D del frente F10-C: medidas exactas y vistas ortográficas.
+///
+/// El cálculo vive en el cerebro puro (`grafito_core::symbolic::solids`);
+/// este módulo solo formatea para la piel y proyecta a píxeles egui.
+/// Vista del canvas 3D: perspectiva orbital u ortográfica (alzado/planta/perfil).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+pub(crate) enum OrthoProjection {
+    /// Perspectiva con cámara orbital (defecto GeoGebra).
+    #[default]
+    Perspective,
+    /// Alzado: plano XY.
+    Front,
+    /// Planta: plano XZ.
+    Top,
+    /// Perfil: plano YZ.
+    Side,
+}
+
+impl OrthoProjection {
+    /// Nombre estable para UI y comandos.
+    #[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Perspective => "perspectiva",
+            Self::Front => "alzado",
+            Self::Top => "planta",
+            Self::Side => "perfil",
+        }
+    }
+
+    /// Indica si la vista es ortográfica (sin fuga de perspectiva).
+    #[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+    pub(crate) const fn is_orthographic(self) -> bool {
+        !matches!(self, Self::Perspective)
+    }
+}
+
+/// Proyecta un punto del mundo a píxeles egui bajo vista ortográfica con
+/// escala `pixels_per_unit` y centro de canvas. `None` si no es finito.
+#[allow(dead_code)] // F10-C: wiring selector de vista en canvas 3D (P2).
+pub(crate) fn project_point_ortho(
+    point: Point3D,
+    view: OrthoProjection,
+    pixels_per_unit: f32,
+    center: Pos2,
+) -> Option<Pos2> {
+    if !pixels_per_unit.is_finite() || pixels_per_unit <= 0.0 {
+        return None;
+    }
+    let (x, y) = match view {
+        OrthoProjection::Front => (point.x, point.y),
+        OrthoProjection::Top => (point.x, point.z),
+        OrthoProjection::Side => (point.y, point.z),
+        OrthoProjection::Perspective => return None,
+    };
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let pixels = (x * f64::from(pixels_per_unit)) as f32;
+    let vertical = (y * f64::from(pixels_per_unit)) as f32;
+    if !pixels.is_finite() || !vertical.is_finite() {
+        return None;
+    }
+    Some(Pos2::new(center.x + pixels, center.y - vertical))
+}
+
+/// Etiqueta de medida exacta `V=… A=…` o `None` si el sólido no tiene
+/// forma cerrada (cuádrica, superficies: ver `solid_measure_status`).
+#[allow(dead_code)] // F10-C: wiring etiqueta de medida en inspector 3D (P2).
+pub(crate) fn solid_measure_text(object: &GeoObject) -> Option<String> {
+    let volume = grafito_core::symbolic::solid_volume(object)?;
+    let area = grafito_core::symbolic::solid_area(object)?;
+    if !volume.is_finite() || !area.is_finite() {
+        return None;
+    }
+    Some(format!("V={volume:.4} A={area:.4}"))
+}
+
 #[cfg(test)]
 mod gpu_overlay_tests {
     use super::*;
@@ -3500,5 +3579,49 @@ mod gpu_overlay_tests {
             grafito_render::quadric_ellipsoid_params(&shifted).expect("shifted ellipsoid");
         assert!((ellipsoid.center.x - 1.0).abs() < 1.0e-9);
         assert!((ellipsoid.radii.x - 2.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn ortho_projection_names_and_axes() {
+        assert_eq!(OrthoProjection::Front.name(), "alzado");
+        assert_eq!(OrthoProjection::Top.name(), "planta");
+        assert_eq!(OrthoProjection::Side.name(), "perfil");
+        assert!(!OrthoProjection::Perspective.is_orthographic());
+        assert!(OrthoProjection::Top.is_orthographic());
+
+        let center = egui::pos2(400.0, 300.0);
+        let point = grafito_geometry::Point3D::new(1.0, 2.0, 3.0);
+        let front =
+            project_point_ortho(point, OrthoProjection::Front, 50.0, center).expect("alzado");
+        assert_eq!(front, egui::pos2(450.0, 200.0));
+        let top = project_point_ortho(point, OrthoProjection::Top, 50.0, center).expect("planta");
+        assert_eq!(top, egui::pos2(450.0, 150.0));
+        let side = project_point_ortho(point, OrthoProjection::Side, 50.0, center).expect("perfil");
+        assert_eq!(side, egui::pos2(500.0, 150.0));
+        assert_eq!(
+            project_point_ortho(point, OrthoProjection::Perspective, 50.0, center),
+            None
+        );
+        assert_eq!(
+            project_point_ortho(point, OrthoProjection::Front, 0.0, center),
+            None
+        );
+    }
+
+    #[test]
+    fn solid_measure_text_is_exact_or_honest_none() {
+        use grafito_core::{GeoObject, Quadric3DObj, Sphere3DObj};
+
+        let sphere = GeoObject::Sphere3D(Sphere3DObj::new(
+            grafito_geometry::Point3D::new(0.0, 0.0, 0.0),
+            1.0,
+        ));
+        let text = solid_measure_text(&sphere).expect("esfera mide exacto");
+        assert!(text.starts_with("V=") && text.contains(" A="));
+
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert_eq!(solid_measure_text(&quadric), None);
     }
 }

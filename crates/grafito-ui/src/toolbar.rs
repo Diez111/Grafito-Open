@@ -567,6 +567,46 @@ fn entry_display_name(tool: Tool, fallback: &'static str, locale: Locale) -> &'s
     }
 }
 
+// ── A11Y resto (F10-B): foco visible + live-region, render puro sin I/O ──
+
+/// Live-region polite para lectores de pantalla, sin widgets nuevos.
+///
+/// Etiqueta una respuesta YA existente (`WidgetInfo` → backend AccessKit).
+/// No crea `Area`s ni reservas: se verificó que un `Area` flotante rompe el
+/// hover/clic de `ui.interact` en egui 0.29 (tests de toasts). Render puro,
+/// sin I/O ni spawn. Límite honesto: egui 0.29 no expone rol ARIA-live; esto
+/// es lo mejor disponible sin subir egui (P2).
+pub fn tag_live_region(response: &egui::Response, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    response.widget_info(move || {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text.clone())
+    });
+}
+
+/// Texto polite de la herramienta actual. Puro: deriva de `Tool`, sin I/O.
+pub fn toolbar_live_text(current: Tool, locale: Locale) -> String {
+    let name = tool_label(tool_slug(current), locale);
+    let name = if name.is_empty() {
+        tool_slug(current)
+    } else {
+        name
+    };
+    match locale {
+        Locale::Es => format!("Herramienta: {name}"),
+        Locale::En => format!("Tool: {name}"),
+    }
+}
+
+/// Enter/Espacio activan el control enfocado por teclado (paridad con clic).
+fn key_activates_focused(ui: &Ui, response: &egui::Response) -> bool {
+    response.has_focus()
+        && ui.input(|input| {
+            input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+        })
+}
+
 // ── Vector icon drawing functions ──
 
 fn icon_move(painter: &Painter, rect: Rect, color: Color32) {
@@ -1108,7 +1148,7 @@ pub fn toolbar_filtered_localized(
 ) -> egui::Response {
     let theme = current_theme(ui.ctx());
 
-    egui::Frame::none()
+    let frame = egui::Frame::none()
         .fill(theme.toolbar_bg)
         .inner_margin(egui::Margin::symmetric(4.0, TOOLBAR_VERTICAL_PADDING))
         .show(ui, |ui| {
@@ -1124,8 +1164,12 @@ pub fn toolbar_filtered_localized(
                     }
                 });
             }
-        })
-        .response
+        });
+    // A11Y live-region: anuncia la herramienta vigente etiquetando el frame
+    // (respuesta existente, sin widgets nuevos). Lee `current_tool` tras el
+    // frame: si cambió en este mismo frame, se anuncia la nueva.
+    tag_live_region(&frame.response, toolbar_live_text(*current_tool, locale));
+    frame.response
 }
 
 /// Toolbar inline para top bar Scandinavian single-bar — sin `Frame` duplicado.
@@ -1186,6 +1230,11 @@ fn compact_toolbar_overflow(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Más herramientas")
     });
     let response = response.on_hover_text("Más herramientas");
+    // A11Y: foco visible + Enter/Espacio abren el menú (paridad con clic).
+    if response.has_focus() {
+        theme.paint_focus_ring(ui.painter(), rect);
+    }
+    let key_activate = key_activates_focused(ui, &response);
     let progress = ui.ctx().animate_bool(
         ui.id().with("compact_toolbar_overflow_state"),
         response.hovered(),
@@ -1206,7 +1255,7 @@ fn compact_toolbar_overflow(
         interpolate_color(theme.text_secondary, theme.text_primary, progress),
     );
 
-    if response.clicked() {
+    if response.clicked() || key_activate {
         ui.memory_mut(|memory| memory.toggle_popup(popup_id));
     }
     show_compact_toolbar_overflow(
@@ -1310,6 +1359,12 @@ fn tool_group(
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let resp = resp.on_hover_text(label);
+    // A11Y: foco visible (anillo 2px del tema) + Enter/Espacio = clic.
+    // El orden Tab lo da egui por orden de creación (orden de `groups`, 5/8/17).
+    if resp.has_focus() {
+        theme.paint_focus_ring(ui.painter(), rect);
+    }
+    let key_activate = key_activates_focused(ui, &resp);
 
     let state_progress = ui.ctx().animate_bool(
         ui.id()
@@ -1355,7 +1410,7 @@ fn tool_group(
         draw_group_menu_indicator(ui.painter(), rect, theme.text_tertiary);
     }
 
-    if resp.clicked() {
+    if resp.clicked() || key_activate {
         if tools.len() > 1 {
             ui.memory_mut(|memory| memory.toggle_popup(popup_id));
         } else if let Some((tool, _, _)) = tools.first() {
@@ -1771,5 +1826,43 @@ mod tests {
         );
         assert_eq!(current, Tool::Select);
         assert_eq!(locale, Locale::En);
+    }
+
+    #[test]
+    fn toolbar_live_text_names_the_current_tool() {
+        use crate::i18n::Locale;
+        let es = toolbar_live_text(Tool::Line, Locale::Es);
+        assert!(es.starts_with("Herramienta: "), "{es}");
+        assert!(es.len() > "Herramienta: ".len());
+        let en = toolbar_live_text(Tool::Line, Locale::En);
+        assert!(en.starts_with("Tool: "), "{en}");
+        // Cambiar de herramienta cambia el anuncio (el lector anuncia el cambio).
+        assert_ne!(
+            toolbar_live_text(Tool::Line, Locale::Es),
+            toolbar_live_text(Tool::Circle, Locale::Es)
+        );
+    }
+
+    #[test]
+    fn live_region_tags_without_new_widgets() {
+        use crate::i18n::Locale;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1_280.0, 160.0))),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Vacío: no etiqueta (sin nodo fantasma).
+                    let (_, noop) = ui.allocate_exact_size(egui::Vec2::ZERO, egui::Sense::hover());
+                    tag_live_region(&noop, String::new());
+                    // Con texto: etiqueta la respuesta existente.
+                    let (_, tagged) =
+                        ui.allocate_exact_size(egui::Vec2::ZERO, egui::Sense::hover());
+                    tag_live_region(&tagged, toolbar_live_text(Tool::Line, Locale::Es));
+                });
+            },
+        );
     }
 }

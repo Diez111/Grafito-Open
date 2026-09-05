@@ -242,3 +242,25 @@ Notas:
 | Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/app.rs:4135-4144`, `:4268-4278` |
 | Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:4922-5033`, gating `:1763`, `utils.rs:46-48` |
 | Rail 60px, drawer 292..440, panel izq 180+45% | `crates/grafito-ui/src/tokens.rs:151-164,207-210`; `app/src/ui.rs:549-552,727-731`; `app/src/panels.rs:1201-1206,2125-2132` |
+
+## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
+
+Cerebro puro en `crates/grafito-core/src/symbolic/` (`csv.rs`, `solids.rs`,
+`exchange.rs`, `mod.rs` con `groebner_gate`); piel fina en
+`crates/grafito-app/src/render_3d.rs` (`OrthoProjection`,
+`project_point_ortho`, `solid_measure_text`); helps honestos en
+`crates/grafito-command/src/command_registry.rs` (Groebner 2×2, Net L).
+Sin tocar geometría exacta, A11Y ni perf; sin `unwrap` (gates §9).
+
+| Categoría | Grafito hoy (archivo) | GeoGebra | Esfuerzo |
+|---|---|---|---|
+| Capas | `symbolic/exchange.rs` (`LayerTable` 0..=255 + visibilidad) | capas con orden | S cerrado (API; wiring panel P2) |
+| Bar/Pie | `symbolic/exchange.rs` (`bar_chart_stub`/`pie_chart_stub` validan y derivan a Histogram) | BarChart/PieChart | S cerrado honesto |
+| Tabla viva lectura | `symbolic/exchange.rs` (`datatable_rows`/`cell`/`to_csv` sobre `DataTableObj`) | spreadsheet viva | S cerrado (edición P2) |
+| Volumen/área 3D | `symbolic/solids.rs` (esfera/cubo/cilindro/cono/toro/tetra/pirámide/prisma exactos; cuádrica → `None` + `solid_measure_status`) | Volume/Area 3D | S cerrado |
+| Vistas ortográficas | `symbolic/solids.rs` (`OrthoView` alzado/planta/perfil) + `render_3d.rs` (`OrthoProjection`, píxeles egui) | vistas 3D | S cerrado (cableado cámara P2) |
+| Groebner | `symbolic/mod.rs` (`groebner_gate`: 2×2 lineal exacto, >2×2 `Err` → Eliminate) | CAS Groebner | S cerrado; Buchberger = L (F10.W5) |
+| PDF | `symbolic/exchange.rs` (`document_to_pdf` 1.4 mínimo, 1 pág.); vectorial `printpdf` pendiente lead en `app/src/export.rs:3850-3880` | export PDF | M parcial (bloqueador: dep `printpdf` por crate) |
+| CSV RFC 4180 | `symbolic/csv.rs` (`to_csv` CRLF + `parse_csv` con `""`, cotas 20k filas/10M) | import/export CSV | S cerrado (wiring UI P2) |
+| Clipboard SVG/PNG | `symbolic/exchange.rs` (SVG real punto/círculo/polígono/texto; PNG `Err` honesto) | copiar SVG/PNG | S+M parcial (bloqueador: raster `image`/`tiny-skia` en app) |
+| Gruntz / Risch / marching cubes / Net / iroh / CRDT | `symbolic/exchange.rs` (`l_stub` siempre `Err` + diseño en mensaje) | CAS y P2P | L solo diseño + stub (F10.W5) |

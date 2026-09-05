@@ -1149,6 +1149,25 @@ pub fn paint_mascot_room(
 }
 
 /// Habitáculo Pou: pared, piso, ventana + cama + stats hambre/felicidad muy visibles. Scandinavian shell, contenido playful.
+/// Texto polite del estado de Pou para la live-region del lector.
+/// Puro (`&Estado`): hambre/felicidad/ánimo, sin I/O ni spawn.
+pub fn pou_room_live_text(state: &MascotRoomState) -> String {
+    let mood = match MascotMood::from_u8(state.mood) {
+        MascotMood::Happy => "contento",
+        MascotMood::Sleepy => "somnoliento",
+        MascotMood::Hungry => "hambriento",
+        MascotMood::Annoyed => "molesto",
+        MascotMood::Excited => "emocionado",
+        MascotMood::Idle => "tranquilo",
+    };
+    format!(
+        "Pou {}: hambre {:.0}%, felicidad {:.0}%.",
+        mood,
+        state.hunger.clamp(0.0, 100.0),
+        state.happiness.clamp(0.0, 100.0)
+    )
+}
+
 pub fn draw_mascot_room(ctx: &egui::Context, state: &mut MascotRoomState) -> Option<Action> {
     use crate::tokens::{
         RADIUS_LG, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_SM, TYPE_XS,
@@ -1234,6 +1253,25 @@ pub fn draw_mascot_room(ctx: &egui::Context, state: &mut MascotRoomState) -> Opt
             if room_resp.clicked() {
                 action = Some(MascotRoomAction::Poke);
             }
+            // A11Y: foco visible (anillo 2px) + Enter/Espacio = poke (paridad
+            // con clic); Esc suelta el foco. El lector recibe el estado vía
+            // live-text en `widget_info` (render puro, sin I/O).
+            if room_resp.has_focus() {
+                theme.paint_focus_ring(ui.painter(), room_rect);
+            }
+            if room_resp.has_focus()
+                && ui.input(|input| {
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+                })
+            {
+                action = Some(MascotRoomAction::Poke);
+            }
+            if room_resp.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                room_resp.surrender_focus();
+            }
+            room_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, pou_room_live_text(state))
+            });
             room_resp.on_hover_text("Toca a Pou — ¡reacciona!");
             ui.add_space(SPACE_MD);
             // Stats muy visibles — barras gruesas 10px con valor dentro y colores semánticos
@@ -1553,5 +1591,19 @@ mod tests {
         // No llamamos a painter real porque requiere ctx; solo test de tipos.
         assert_eq!(MascotMood::Idle as u8, 0);
         let _ = rect;
+    }
+
+    #[test]
+    fn room_live_text_reports_status_in_spanish() {
+        let state = MascotRoomState {
+            hunger: 80.0,
+            happiness: 60.0,
+            mood: MascotMood::Hungry as u8,
+            ..Default::default()
+        };
+        let text = pou_room_live_text(&state);
+        assert!(text.contains("hambriento"), "{text}");
+        assert!(text.contains("80%"), "{text}");
+        assert!(text.contains("60%"), "{text}");
     }
 }

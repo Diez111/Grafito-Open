@@ -1,7 +1,7 @@
 ---
 description: Prepara releases con changelog desde PRs mergeadas y publica el tag con gh.
 mode: subagent
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 temperature: 0.1
 permission:
   edit: deny

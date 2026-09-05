@@ -1,7 +1,7 @@
 ---
 description: Ahorra tokens con routing, caché y compresión. Decide qué va a small_model.
 mode: subagent
-model: opencode-go/deepseek-v4-flash
+model: opencode-go/muse-spark-1.3-contributor
 temperature: 0.1
 permission:
   edit: deny

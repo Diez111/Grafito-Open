@@ -2,6 +2,7 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::*;
+    use crate::{function_sampling, implicit_curve};
     use grafito_geometry::*;
     use std::collections::HashMap;
 

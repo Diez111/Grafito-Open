@@ -7,7 +7,14 @@
 //! - Segment-Segment (orientation tests)
 //! - Function-Line (Newton root finding)
 //! - Function-Function (Newton root finding)
+//! - Line-Conic (exact quadratic substitution, [`line_conic`])
+//! - Conic-Conic (circle pairs delegated; general case is an honest
+//!   [`ConicConicOutcome::Unsupported`] stub, see [`conic_conic`])
+//!
+//! Tolerances in the conic routines derive from [`crate::lines::geom_eps`]
+//! evaluated at the problem scale instead of fixed magic constants.
 
+use crate::lines::geom_eps;
 use crate::Point2;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,6 +281,211 @@ fn newton(f: &dyn Fn(f64) -> f64, initial: f64, max_iter: usize) -> f64 {
     }
 }
 
+/// General conic: `a*x^2 + b*x*y + c*y^2 + d*x + e*y + f = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Conic {
+    /// Coefficient of `x^2`.
+    pub a: f64,
+    /// Coefficient of `x*y`.
+    pub b: f64,
+    /// Coefficient of `y^2`.
+    pub c: f64,
+    /// Coefficient of `x`.
+    pub d: f64,
+    /// Coefficient of `y`.
+    pub e: f64,
+    /// Constant term.
+    pub f: f64,
+}
+
+impl Conic {
+    /// Build a conic from general coefficients. Returns `None` for
+    /// non-finite coefficients or the all-zero (whole-plane) form.
+    pub fn from_general(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Option<Self> {
+        let coeffs = [a, b, c, d, e, f];
+        if coeffs.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        if coeffs.iter().all(|v| *v == 0.0) {
+            return None;
+        }
+        Some(Self { a, b, c, d, e, f })
+    }
+
+    /// Circle `(x - cx)^2 + (y - cy)^2 = r^2` as a general conic.
+    pub fn circle(center: Point2, radius: f64) -> Option<Self> {
+        if !center.x.is_finite() || !center.y.is_finite() {
+            return None;
+        }
+        if !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            a: 1.0,
+            b: 0.0,
+            c: 1.0,
+            d: -2.0 * center.x,
+            e: -2.0 * center.y,
+            f: center.x * center.x + center.y * center.y - radius * radius,
+        })
+    }
+
+    /// Evaluate the implicit form at `p`.
+    pub fn eval(&self, p: Point2) -> f64 {
+        self.a * p.x * p.x
+            + self.b * p.x * p.y
+            + self.c * p.y * p.y
+            + self.d * p.x
+            + self.e * p.y
+            + self.f
+    }
+
+    /// Largest coefficient magnitude; used as the tolerance scale.
+    fn magnitude(&self) -> f64 {
+        self.a
+            .abs()
+            .max(self.b.abs())
+            .max(self.c.abs())
+            .max(self.d.abs())
+            .max(self.e.abs())
+            .max(self.f.abs())
+    }
+
+    /// Recover `(center, radius)` when this conic is (numerically) a circle:
+    /// `b ~= 0` and `a ~= c != 0`. Returns `None` otherwise.
+    pub fn as_circle(&self, eps: f64) -> Option<(Point2, f64)> {
+        let tol = if eps.is_finite() && eps > 0.0 {
+            eps
+        } else {
+            1e-12
+        };
+        let scale = self.magnitude().max(1.0);
+        if self.a.abs() <= tol * scale || (self.a - self.c).abs() > tol * scale {
+            return None;
+        }
+        if self.b.abs() > tol * scale {
+            return None;
+        }
+        let cx = -self.d / (2.0 * self.a);
+        let cy = -self.e / (2.0 * self.a);
+        let r2 = (self.d * self.d + self.e * self.e) / (4.0 * self.a * self.a) - self.f / self.a;
+        if !cx.is_finite() || !cy.is_finite() || !r2.is_finite() || r2 <= 0.0 {
+            return None;
+        }
+        Some((Point2::new(cx, cy), r2.sqrt()))
+    }
+}
+
+/// Intersection of the infinite line through `p1`–`p2` with a conic.
+///
+/// Exact substitution `p(t) = p1 + t*(p2-p1)` into the conic yields a
+/// quadratic `A*t^2 + B*t + C = 0` solved in closed form. `scale` is a
+/// characteristic length of the problem (see [`crate::lines::geom_eps`]).
+pub fn line_conic(p1: Point2, p2: Point2, conic: &Conic, scale: f64) -> IntersectionResult {
+    if !p1.x.is_finite() || !p1.y.is_finite() || !p2.x.is_finite() || !p2.y.is_finite() {
+        return IntersectionResult::None;
+    }
+    let coeffs = [conic.a, conic.b, conic.c, conic.d, conic.e, conic.f];
+    if coeffs.iter().any(|v| !v.is_finite()) {
+        return IntersectionResult::None;
+    }
+
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    if !dx.is_finite() || !dy.is_finite() {
+        return IntersectionResult::None;
+    }
+    let coord_scale = p1.x.abs().max(p1.y.abs()).max(dx.abs()).max(dy.abs());
+    let eps = geom_eps(scale.max(coord_scale).max(conic.magnitude()));
+
+    let dir2 = dx * dx + dy * dy;
+    if dir2 <= eps * eps {
+        return IntersectionResult::None;
+    }
+
+    let a2 = conic.a * dx * dx + conic.b * dx * dy + conic.c * dy * dy;
+    let b2 = 2.0 * conic.a * p1.x * dx
+        + conic.b * (p1.x * dy + p1.y * dx)
+        + 2.0 * conic.c * p1.y * dy
+        + conic.d * dx
+        + conic.e * dy;
+    let c2 = conic.eval(p1);
+
+    // Degenerate whole-plane conic contains the line.
+    if a2.abs() <= eps && b2.abs() <= eps {
+        if c2.abs() <= eps * coord_scale.max(1.0).max(conic.magnitude()) {
+            return IntersectionResult::Infinite;
+        }
+        return IntersectionResult::None;
+    }
+
+    // Linear (line parallel to a parabola axis, single crossing).
+    if a2.abs() <= eps * (b2.abs() + 1.0) && b2.abs() > 0.0 {
+        let t = -c2 / b2;
+        if !t.is_finite() {
+            return IntersectionResult::None;
+        }
+        return IntersectionResult::One(Point2::new(p1.x + t * dx, p1.y + t * dy));
+    }
+
+    let disc = b2 * b2 - 4.0 * a2 * c2;
+    let disc_tol = eps * (b2 * b2 + (4.0 * a2 * c2).abs()).max(1.0);
+    if disc < -disc_tol {
+        IntersectionResult::None
+    } else if disc.abs() <= disc_tol {
+        let t = -b2 / (2.0 * a2);
+        if !t.is_finite() {
+            return IntersectionResult::None;
+        }
+        IntersectionResult::One(Point2::new(p1.x + t * dx, p1.y + t * dy))
+    } else {
+        if disc < 0.0 {
+            return IntersectionResult::None;
+        }
+        let sqrt_d = disc.sqrt();
+        let t1 = (-b2 - sqrt_d) / (2.0 * a2);
+        let t2 = (-b2 + sqrt_d) / (2.0 * a2);
+        if !t1.is_finite() || !t2.is_finite() {
+            return IntersectionResult::None;
+        }
+        IntersectionResult::Two(
+            Point2::new(p1.x + t1 * dx, p1.y + t1 * dy),
+            Point2::new(p1.x + t2 * dx, p1.y + t2 * dy),
+        )
+    }
+}
+
+/// Honest outcome of a conic-conic intersection query.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConicConicOutcome {
+    /// Intersection points (empty when disjoint, up to 4 in general).
+    Points(Vec<Point2>),
+    /// Not implemented: carries the reason so callers never get a silent lie.
+    Unsupported(&'static str),
+}
+
+/// Intersection of two conics.
+///
+/// Circle–circle pairs delegate to [`circle_circle`]. Every other pair
+/// requires a general quartic solver, which is out of scope: those return
+/// [`ConicConicOutcome::Unsupported`] with the reason attached.
+pub fn conic_conic(k1: &Conic, k2: &Conic, scale: f64) -> ConicConicOutcome {
+    let eps = geom_eps(scale.max(k1.magnitude()).max(k2.magnitude()));
+    match (k1.as_circle(eps), k2.as_circle(eps)) {
+        (Some((c1, r1)), Some((c2, r2))) => match circle_circle(c1, r1, c2, r2) {
+            IntersectionResult::None => ConicConicOutcome::Points(Vec::new()),
+            IntersectionResult::One(p) => ConicConicOutcome::Points(vec![p]),
+            IntersectionResult::Two(p1, p2) => ConicConicOutcome::Points(vec![p1, p2]),
+            IntersectionResult::Infinite => {
+                ConicConicOutcome::Unsupported("coincident circles: infinite intersections")
+            }
+        },
+        _ => ConicConicOutcome::Unsupported(
+            "general conic-conic intersection needs a quartic solver: not implemented",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +643,93 @@ mod tests {
         assert!(matches!(
             circle_circle(Point2::new(0.0, 0.0), 0.0, Point2::new(1.0, 0.0), 1.0),
             IntersectionResult::None
+        ));
+    }
+
+    #[test]
+    fn line_conic_matches_line_circle_on_secant() {
+        let conic = Conic::circle(Point2::new(0.0, 0.0), 1.0).expect("valid circle");
+        let result = line_conic(Point2::new(-2.0, 0.0), Point2::new(2.0, 0.0), &conic, 2.0);
+        match result {
+            IntersectionResult::Two(p1, p2) => {
+                assert!((p1.x.abs() - 1.0).abs() < 1e-9, "got {p1:?}");
+                assert!((p2.x.abs() - 1.0).abs() < 1e-9, "got {p2:?}");
+                assert!(p1.y.abs() < 1e-9 && p2.y.abs() < 1e-9);
+            }
+            other => panic!("expected secant Two, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn line_conic_tangent_and_miss() {
+        let conic = Conic::circle(Point2::new(0.0, 0.0), 1.0).expect("valid circle");
+        let tangent = line_conic(Point2::new(1.0, -2.0), Point2::new(1.0, 2.0), &conic, 2.0);
+        assert!(
+            matches!(tangent, IntersectionResult::One(p) if (p.x - 1.0).abs() < 1e-9 && p.y.abs() < 1e-9),
+            "got {tangent:?}"
+        );
+        let miss = line_conic(Point2::new(2.0, -2.0), Point2::new(2.0, 2.0), &conic, 2.0);
+        assert!(matches!(miss, IntersectionResult::None), "got {miss:?}");
+    }
+
+    #[test]
+    fn line_conic_hits_parabola_twice() {
+        // y = x^2  <=>  -x^2 + y = 0.
+        let parabola = Conic::from_general(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0).expect("valid");
+        let result = line_conic(
+            Point2::new(-2.0, 0.0),
+            Point2::new(2.0, 4.0),
+            &parabola,
+            4.0,
+        );
+        match result {
+            IntersectionResult::Two(p1, p2) => {
+                for p in [p1, p2] {
+                    assert!((p.y - p.x * p.x).abs() < 1e-9, "off parabola: {p:?}");
+                }
+            }
+            other => panic!("expected Two, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn line_conic_rejects_degenerate_inputs() {
+        let conic = Conic::circle(Point2::new(0.0, 0.0), 1.0).expect("valid circle");
+        assert!(matches!(
+            line_conic(Point2::new(1.0, 1.0), Point2::new(1.0, 1.0), &conic, 1.0),
+            IntersectionResult::None
+        ));
+        assert!(Conic::from_general(0.0, 0.0, 0.0, 0.0, 0.0, 0.0).is_none());
+        assert!(Conic::from_general(f64::NAN, 0.0, 0.0, 0.0, 0.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn conic_conic_delegates_circle_pairs() {
+        let k1 = Conic::circle(Point2::new(0.0, 0.0), 2.0).expect("valid");
+        let k2 = Conic::circle(Point2::new(2.0, 0.0), 2.0).expect("valid");
+        match conic_conic(&k1, &k2, 4.0) {
+            ConicConicOutcome::Points(pts) => {
+                assert_eq!(pts.len(), 2);
+                for p in pts {
+                    assert!((p.x - 1.0).abs() < 1e-9, "got {p:?}");
+                }
+            }
+            other => panic!("expected Points, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conic_conic_stub_is_honest_for_general_pairs() {
+        let parabola = Conic::from_general(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0).expect("valid");
+        let circle = Conic::circle(Point2::new(0.0, 0.0), 1.0).expect("valid");
+        assert!(matches!(
+            conic_conic(&parabola, &circle, 2.0),
+            ConicConicOutcome::Unsupported(_)
+        ));
+        // Coincident circles must not fake points.
+        assert!(matches!(
+            conic_conic(&circle, &circle, 2.0),
+            ConicConicOutcome::Unsupported(_)
         ));
     }
 }

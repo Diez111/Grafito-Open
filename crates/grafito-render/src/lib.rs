@@ -1686,8 +1686,12 @@ impl Renderer {
         dark_mode: bool,
         include_overlays: bool,
     ) -> (Vec<Vertex>, Vec<u32>) {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
+        // F10-D alloc reuse (S): pre-reserva heurística por conteo para evitar
+        // los primeros reallocs del frame. Baseline many_objects/100: 234µs
+        // (veredicto post-cambio en reporte F10-D).
+        let est = document.object_count().saturating_mul(96).max(512);
+        let mut vertices = Vec::with_capacity(est);
+        let mut indices = Vec::with_capacity(est.saturating_mul(3).max(768));
 
         if include_overlays {
             Self::build_grid_static(&mut vertices, &mut indices, view, dark_mode);

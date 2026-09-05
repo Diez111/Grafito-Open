@@ -1509,6 +1509,8 @@ pub struct GrafitoApp {
     deferred_file_actions: DeferredFileActions,
     /// Timestamp de inicio de la app (splash screen). None = ya pasó.
     pub splash_start: Option<Instant>,
+    /// One-shot F10-D (cold start instrumentado): log de first_frame una vez.
+    startup_first_frame_logged: bool,
     /// Textura retenida mientras el splash la referencia en sus primitivas egui.
     /// LRU: tamaño 1, se libera con `ctx.forget_image("splash_logo")` al cerrar splash para no retener GPU.
     splash_logo: Option<egui::TextureHandle>,
@@ -1980,6 +1982,9 @@ impl GrafitoApp {
         self.tool_state.clear();
     }
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // F10-D cold start instrumentado: t0 del constructor; al final de
+        // `new` se loguea la duración + first_frame en el primer `update`.
+        let startup_t0 = Instant::now();
         // Scandinavian: Instala Inter Variable como fuente principal (calm, 500/600)
         {
             let mut fonts = egui::FontDefinitions::default();
@@ -2111,7 +2116,7 @@ impl GrafitoApp {
         let current_view = perspective.view_mode();
         debug_assert_eq!(current_view, ViewMode::D2);
         debug_assert_eq!(perspective.canvas_mode(), crate::CanvasMode::D2);
-        Self {
+        let app = Self {
             document,
             current_tool: Tool::default(),
             previous_tool: Tool::default(),
@@ -2148,6 +2153,7 @@ impl GrafitoApp {
             cas_history: VecDeque::new(),
             sidebar_tab: 0,
             splash_start: Some(Instant::now()),
+            startup_first_frame_logged: false,
             splash_logo: None,
             mora_texture: None,
             mora_texture_load_attempted: false,
@@ -2252,7 +2258,16 @@ impl GrafitoApp {
             advanced_red_opt_in,
             locale,
             classroom,
-        }
+        };
+        // F10-D cold start instrumentado (S): duración real del constructor.
+        // El first_frame se loguea en el primer `update` (bloque splash).
+        log::info!(
+            "startup: new() listo en {}ms ({} objetos, gpu={})",
+            startup_t0.elapsed().as_millis(),
+            app.document.object_count(),
+            app.use_gpu,
+        );
+        app
     }
 
     /// Ruta única para que los widgets pidan repintado periódico coalescido (F17).
@@ -5958,6 +5973,15 @@ impl eframe::App for GrafitoApp {
             let total_ms = 1500_u128;
             let fade_out_start_ms = 1000_u128;
             let elapsed_ms = elapsed.as_millis();
+            // F10-D cold start instrumentado: first_frame real una sola vez.
+            if !self.startup_first_frame_logged {
+                self.startup_first_frame_logged = true;
+                log::info!(
+                    "startup: first_frame en {}ms ({} objetos)",
+                    elapsed_ms,
+                    self.document.object_count(),
+                );
+            }
             if elapsed_ms < total_ms {
                 let _theme = grafito_ui::theme::current_theme(ctx);
                 let alpha = if elapsed_ms < fade_out_start_ms {
@@ -6032,6 +6056,22 @@ impl eframe::App for GrafitoApp {
                             ui.add_space(grafito_ui::tokens::SPACE_SM);
                             ui.label(
                                 egui::RichText::new("Geometría interactiva - Algebra - Calculo")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
+                            );
+                            // F10-D splash progreso real (S): fase derivada del
+                            // estado (objetos cargados + elapsed), sin % falso.
+                            let phase = if self.document.object_count() > 0 {
+                                format!(
+                                    "Documento · {} objetos · {}ms",
+                                    self.document.object_count(),
+                                    elapsed_ms
+                                )
+                            } else {
+                                format!("Iniciando… {}ms", elapsed_ms)
+                            };
+                            ui.label(
+                                egui::RichText::new(phase)
                                     .size(13.0)
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
                             );
@@ -7525,6 +7565,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         document_lifecycle: DocumentLifecycle::new(&document_snapshot),
         deferred_file_actions: DeferredFileActions::default(),
         splash_start: None,
+        startup_first_frame_logged: false,
         splash_logo: None,
         mora_texture: None,
         mora_texture_load_attempted: false,

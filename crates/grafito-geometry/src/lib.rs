@@ -33,6 +33,8 @@ pub mod discrete;
 pub mod exact;
 pub mod expr;
 pub mod fractals;
+pub mod function_sampling;
+pub mod implicit_curve;
 pub mod integral;
 pub mod intersections;
 pub mod interval;

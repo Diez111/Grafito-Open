@@ -3644,11 +3644,17 @@ fn draw_panel_contents(
                     .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(6.0))
                     .show(ui, |ui| {
-                        ui.label(
+                        let err_resp = ui.label(
                             egui::RichText::new(error)
                                 .color(theme.danger)
                                 .size(crate::tokens::TYPE_XS),
                         );
+                        // A11Y live-region: etiqueta la respuesta existente
+                        // (sin widgets nuevos: un `Area` flotante rompería el
+                        // hover en egui 0.29). Fuente única: assistant_live_text.
+                        if let Some(live) = assistant_live_text(state) {
+                            crate::toolbar::tag_live_region(&err_resp, live);
+                        }
                         if state.proposal_correction_available
                             && ui.small_button("Pedir una corrección").clicked()
                         {
@@ -4363,7 +4369,8 @@ fn draw_assistant_composer(
     // Composer Scandinavian: input limpio hairline 10%, radio 12, sin outer_margin oscuro
     // F5 quiet: TextEdit::multiline con wrap (default egui) y altura fija 44px
     // (28px y 1 línea cuando colapsa en paneles angostos o bajos) — no requiere ScrollArea envolvente.
-    egui::Frame::none()
+    let mut editor_had_focus = false;
+    let composer_frame = egui::Frame::none()
         .fill(theme.input_bg)
         .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
         .rounding(crate::tokens::RADIUS_MD)
@@ -4391,6 +4398,17 @@ fn draw_assistant_composer(
                     ui.input(|input| input.modifiers.shift),
                     state.can_submit(),
                 );
+                editor_had_focus = editor.has_focus();
+                // A11Y: Esc descarta lo persistente — turno en curso → Cancelar
+                // (acción pura, el app decide); si no, suelta el foco y
+                // conserva el borrador.
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    if state.is_pending && !state.is_cancelling {
+                        action = Some(AssistantUiAction::Cancel);
+                    } else {
+                        editor.surrender_focus();
+                    }
+                }
                 ui.add_space(crate::tokens::SPACE_XS);
                 ui.horizontal(|ui| {
                     // Adjuntar con estilo ghost macOS
@@ -4489,7 +4507,7 @@ fn draw_assistant_composer(
                     });
                     if state.is_pending {
                         ui.add_space(crate::tokens::SPACE_XS);
-                        ui.add(
+                        let pending_resp = ui.add(
                             egui::Label::new(
                                 egui::RichText::new(
                                     "Estoy pensando… esperá que termine para mandar otra pregunta.",
@@ -4499,6 +4517,10 @@ fn draw_assistant_composer(
                             )
                             .wrap(),
                         );
+                        // A11Y live-region sobre la respuesta existente.
+                        if let Some(live) = assistant_live_text(state) {
+                            crate::toolbar::tag_live_region(&pending_resp, live);
+                        }
                     } else if over_budget {
                         ui.add_space(crate::tokens::SPACE_XS);
                         ui.add(
@@ -4515,6 +4537,11 @@ fn draw_assistant_composer(
                 });
             });
         });
+    // A11Y: foco visible en el composer (anillo 2px del tema) cuando el
+    // editor tiene el foco. El orden Tab lo da egui por orden de creación.
+    if editor_had_focus {
+        theme.paint_focus_ring(ui.painter(), composer_frame.response.rect);
+    }
 
     if !state.attachments.is_empty() {
         ui.add_space(SPACE_XS);
@@ -6637,6 +6664,18 @@ fn suggestion_prompts(has_focus: bool) -> [(&'static str, &'static str); 5] {
     }
 }
 
+/// Texto polite para la live-region del lector. Puro (`&Estado`): error >
+/// turno en curso > silencio. Sin I/O ni spawn.
+pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
+    if let Some(error) = state.error.as_ref() {
+        return Some(format!("Asistente: error. {error}"));
+    }
+    if state.is_pending {
+        return Some("Asistente pensando, esperá que termine.".to_owned());
+    }
+    None
+}
+
 fn should_submit_on_enter(
     editor_has_focus: bool,
     enter_pressed: bool,
@@ -7140,6 +7179,60 @@ mod tests {
         assert!(!should_submit_on_enter(true, true, true, true));
         assert!(!should_submit_on_enter(false, true, false, true));
         assert!(!should_submit_on_enter(true, true, false, false));
+    }
+
+    #[test]
+    fn assistant_live_text_prioritizes_error_over_pending() {
+        let idle = AssistantPanelState::default();
+        assert!(assistant_live_text(&idle).is_none());
+        let pending = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        let announced = assistant_live_text(&pending).expect("pending anuncia");
+        assert!(announced.contains("pensando"));
+        let mut failed = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        failed.error = Some("corte de red".to_owned());
+        let announced = assistant_live_text(&failed).expect("error anuncia");
+        assert!(announced.contains("corte de red"));
+    }
+
+    #[test]
+    fn escape_in_composer_cancels_the_running_turn() {
+        let ctx = egui::Context::default();
+        let mut state = AssistantPanelState {
+            is_pending: true,
+            ..Default::default()
+        };
+        let action = {
+            let mut action = None;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        action = draw_assistant_composer(ui, &mut state, false);
+                    });
+                },
+            );
+            action
+        };
+        assert!(matches!(action, Some(AssistantUiAction::Cancel)));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode-go/muse-spark-1.2-contributor",
-  "small_model": "opencode-go/deepseek-v4-flash",
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "small_model": "opencode-go/muse-spark-1.3-contributor",
   "subagent_depth": 2,
   "compaction": {
     "auto": true,
@@ -30,34 +30,34 @@
     "plan": {
       "description": "Planificador barato: arch, budgets, DAG",
       "mode": "primary",
-      "model": "opencode-go/deepseek-v4-flash",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.1,
       "permission": "allow"
     },
     "build": {
       "description": "Constructor principal Rust",
       "mode": "primary",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.2,
       "permission": "allow"
     },
     "cerebro-audit": {
       "description": "Auditor cerebro puro Rust: core/geometry/command sin egui/wgpu, invariants type-safety",
       "mode": "subagent",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.1,
       "permission": "allow"
     },
     "piel-ui": {
       "description": "Especialista egui/wgpu Piel: render &Estado sin I/O, tokens, performance",
       "mode": "subagent",
-      "model": "opencode-go/muse-spark-1.2-contributor",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.2
     },
     "perf-profiler": {
       "description": "Profiler Rust: puffin, rayon, wgpu, lyon, spade. Mide antes de optimizar",
       "mode": "subagent",
-      "model": "opencode-go/deepseek-v4-flash",
+      "model": "opencode-go/muse-spark-1.3-contributor",
       "temperature": 0.15
     }
   },

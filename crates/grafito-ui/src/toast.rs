@@ -78,7 +78,24 @@ impl ToastManager {
         });
     }
 
+    /// Descarta el persistente más reciente (errores sin auto-dismiss).
+    /// Puro, sin I/O: lo llama `draw` con Esc y los tests directo.
+    /// Devuelve true si descartó algo.
+    pub fn dismiss_top_persistent(&mut self) -> bool {
+        if let Some(pos) = self.toasts.iter().rposition(|t| t.is_persistent()) {
+            self.toasts.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn draw(&mut self, ui: &mut egui::Ui, current_time: f64) {
+        // A11Y: Esc descarta el persistente más reciente (los errores no
+        // salen solos; el lector ya anunció el texto vía live-region).
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.dismiss_top_persistent();
+        }
         self.toasts
             .retain(|t| current_time - t.created < t.duration);
         if self.toasts.is_empty() {
@@ -187,6 +204,9 @@ impl ToastManager {
                 self.toasts.remove(index);
             }
         }
+        // A11Y live-region: cada toast ya expone su texto vía `widget_info`
+        // en el `interact`; el lector anuncia el push sin widgets extra
+        // (un `Area` flotante rompería el hover — verificado en tests).
         self.last_time = Some(current_time);
     }
 }
@@ -396,5 +416,36 @@ mod tests {
             draw_with_pointer(&ctx, &mut manager, 0.6, Vec::new()),
             baseline
         );
+    }
+
+    #[test]
+    fn dismiss_top_persistent_drops_only_errors() {
+        let mut manager = ToastManager::default();
+        assert!(!manager.dismiss_top_persistent());
+        manager.push("info", ToastKind::Info, 0.0);
+        assert!(!manager.dismiss_top_persistent());
+        assert_eq!(manager.toasts.len(), 1);
+        manager.push("boom", ToastKind::Error, 0.0);
+        manager.push("info2", ToastKind::Info, 0.0);
+        assert!(manager.dismiss_top_persistent());
+        assert_eq!(manager.toasts.len(), 2);
+        assert!(manager.toasts.iter().all(|t| !t.is_persistent()));
+    }
+
+    #[test]
+    fn escape_dismisses_persistent_toast_in_draw() {
+        let ctx = egui::Context::default();
+        let mut manager = ToastManager::default();
+        manager.push("boom", ToastKind::Error, 0.0);
+        let esc = vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }];
+        let baseline = draw_with_pointer(&ctx, &mut ToastManager::default(), 0.5, Vec::new());
+        assert_eq!(draw_with_pointer(&ctx, &mut manager, 0.5, esc), baseline);
+        assert!(manager.toasts.is_empty());
     }
 }
