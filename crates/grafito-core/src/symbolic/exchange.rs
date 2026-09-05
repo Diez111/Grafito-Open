@@ -88,6 +88,34 @@ impl LayerTable {
             .collect()
     }
 
+    /// Capas no vacías `(capa, cantidad)` en orden ascendente, en una sola
+    /// pasada sobre el documento. La piel la usa para listar sin escanear
+    /// 256 capas (O(n) en vez de O(256·n)).
+    pub fn used_layers(&self, document: &Document) -> Vec<(u32, usize)> {
+        let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for (id, _) in document.objects_iter_sorted() {
+            *counts.entry(self.layer_of(*id)).or_default() += 1;
+        }
+        counts.into_iter().collect()
+    }
+
+    /// Visibilidad conjunta de una capa: `true` si todos sus objetos están
+    /// visibles (vacía = `true` por vacuidad; la piel solo la llama con
+    /// capas de [`Self::used_layers`]).
+    pub fn is_layer_visible(&self, document: &Document, layer: u32) -> bool {
+        document
+            .objects_iter_sorted()
+            .filter(|(id, _)| self.layer_of(**id) == layer)
+            .all(|(_, object)| object.is_visible())
+    }
+
+    /// Descarta asignaciones a objetos que ya no existen (recarga de
+    /// documento). La piel la llama al dibujar para acotar memoria.
+    pub fn prune_missing(&mut self, document: &Document) {
+        self.layers
+            .retain(|id, _| document.get_object(*id).is_some());
+    }
+
     /// Aplica visibilidad a toda la capa; devuelve cuántos objetos tocó.
     pub fn set_layer_visible(&self, document: &mut Document, layer: u32, visible: bool) -> usize {
         let mut touched = 0;
@@ -399,6 +427,48 @@ mod tests {
         assert_eq!(touched, 1);
         assert!(document.get_object(a).is_some());
         assert!(layers.assign(a, MAX_LAYERS + 1).is_err());
+    }
+
+    #[test]
+    fn used_layers_lists_counts_sorted_in_one_pass() {
+        let mut document = Document::new();
+        let a = document
+            .try_add_object(point_fixture("A"))
+            .expect("punto fixture");
+        let b = document
+            .try_add_object(point_fixture("B"))
+            .expect("punto fixture");
+        let c = document
+            .try_add_object(point_fixture("C"))
+            .expect("punto fixture");
+        let mut layers = LayerTable::new();
+        layers.assign(c, 7).expect("capa fixture");
+        layers.assign(b, 2).expect("capa fixture");
+        // `a` queda en la capa 0 por defecto.
+        assert_eq!(layers.used_layers(&document), vec![(0, 1), (2, 1), (7, 1)]);
+        assert_eq!(layers.layer_of(a), 0);
+    }
+
+    #[test]
+    fn layer_visibility_is_conjunctive_and_prune_drops_missing() {
+        let mut document = Document::new();
+        let a = document
+            .try_add_object(point_fixture("A"))
+            .expect("punto fixture");
+        let mut layers = LayerTable::new();
+        // Capa vacía: vacuamente visible; la piel no la lista.
+        assert!(layers.is_layer_visible(&document, 9));
+        assert!(layers.is_layer_visible(&document, 0));
+        layers.set_layer_visible(&mut document, 0, false);
+        assert!(!layers.is_layer_visible(&document, 0));
+        layers.set_layer_visible(&mut document, 0, true);
+        assert!(layers.is_layer_visible(&document, 0));
+        // Tras vaciar el documento por reconstrucción, prune limpia.
+        let fresh = Document::new();
+        layers.assign(a, 3).expect("capa fixture");
+        layers.prune_missing(&fresh);
+        assert_eq!(layers.used_layers(&fresh), vec![]);
+        assert_eq!(layers.layer_of(a), 0);
     }
 
     #[test]

@@ -5,6 +5,14 @@
 //! La resolución local es determinista. El transporte remoto sólo construye y
 //! ejecuta peticiones OpenAI-compatibles desde un hilo de trabajo; nunca se
 //! llama desde la UI ni persiste claves de API.
+//!
+//! Feature `assistant-net` (default ON): habilita `reqwest` y todo el
+//! transporte (`request_remote*`, `shared_http_client`, ...). Sin la feature
+//! sólo compila la resolución local + stubs honestos `NoNetwork`; los helpers
+//! puros remotos (endpoints/payloads/parseos) quedan sin llamantes y se
+//! permite `dead_code` en esa configuración (el build default los usa y el
+//! lint sigue vigente ahí).
+#![cfg_attr(not(feature = "assistant-net"), allow(dead_code))]
 
 pub mod agent;
 pub mod harness;
@@ -26,7 +34,9 @@ use grafito_geometry::{
 use grafito_pedagogy::{PedagogicalLevel, Scaffold, ScaffoldEngine, SocraticFsm};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use serde_json::{json, Value};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+#[cfg(feature = "assistant-net")]
+use std::io::Read;
 use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -34,7 +44,9 @@ use std::sync::{
     Arc,
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "assistant-net")]
+use std::time::Instant;
 use url::Url;
 
 const RESIDUAL_EPSILON: f64 = 128.0 * f64::EPSILON;
@@ -82,6 +94,12 @@ const RETRY_AFTER_MAX_SECS: u64 = 120;
 /// `effective_remote_timeout`).
 const REMOTE_TIMEOUT_MIN_MS: u64 = 100;
 const REMOTE_TIMEOUT_MAX_MS: u64 = 120_000;
+/// Error honesto cuando el build es sin red (`--no-default-features`, sin
+/// `assistant-net`): el transporte remoto no existe y el llamante debe usar
+/// resolución local o informar al usuario. Sin URL ni claves.
+#[cfg(not(feature = "assistant-net"))]
+const NO_NETWORK_MESSAGE: &str =
+    "assistant network support is disabled in this build (feature assistant-net is off)";
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
 const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 const REMOTE_RESPONSE_GUIDANCE: &str = "Begin with `## Enfoque` and three to five concise, checkable steps. Do not reveal private chain-of-thought or hidden reasoning. Only catalog items marked [EJECUTABLE] may appear in grafito or grafito-scene fences; [REFERENCIA] items are explanatory only. A grafito fence must copy catalogued syntax exactly: use Function[expr] only, with no domain/sample arguments, and never use if or frac expressions. For a Fourier request, emit an executable Function only for a finite numeric partial sum. When the user gives no signal or order, a clearly labelled square-wave example may use `Function[(4/pi)*(sin(x)+sin(3*x)/3+sin(5*x)/5)]`; otherwise use the supplied finite values. Never emit a general Fourier transform, symbolic a_n or b_n coefficients, unknown N, or sum(...) as an executable proposal. A grafito-scene contains two to eight one-line executable commands and is for an atomic construction such as multiple Segment3D edges; never use Script, Polyhedron, or NumericArray. If Grafito cannot represent it with catalogued syntax, explain it in Markdown instead of emitting a fence.";
@@ -1050,6 +1068,7 @@ fn parse_retry_after_secs(value: &str) -> Option<u64> {
     })
 }
 
+#[cfg(feature = "assistant-net")]
 fn retry_after_secs_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -1303,6 +1322,9 @@ enum SseStreamOutcome {
 ///   reintento no-streaming con el mismo presupuesto y el timeout remanente
 ///   (>=1s; sin tiempo remanente se devuelve error `schema` sin reintentar).
 ///   Transporte, cancelación, presupuesto y `response.failed` NO reintentan.
+///
+/// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
+#[cfg(feature = "assistant-net")]
 pub fn request_responses_completion_streaming(
     endpoint: Url,
     base_payload: Value,
@@ -1372,6 +1394,20 @@ pub fn request_responses_completion_streaming(
     }
 }
 
+/// Stub sin red: el transporte SSE no existe sin `assistant-net`.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_responses_completion_streaming(
+    _endpoint: Url,
+    _base_payload: Value,
+    _api_key: Option<&str>,
+    _cancellation: &CancellationToken,
+    _timeout: Duration,
+    _max_output_chars: usize,
+    _progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<RemoteCompletion, String> {
+    Err(NO_NETWORK_MESSAGE.into())
+}
+
 /// Lee un cuerpo `text/event-stream` con deadline absoluta y cancelación.
 ///
 /// Drena por chunks (sin `chunk()`: el cliente bloqueante expone `Read`),
@@ -1379,6 +1415,7 @@ pub fn request_responses_completion_streaming(
 /// EOF abrupto tras deltas válidos conserva el parcial marcado `truncated`;
 /// EOF sin ningún evento → `FallbackToNonStreaming` (el servidor no habla
 /// SSE y el llamante reintenta sin `stream`).
+#[cfg(feature = "assistant-net")]
 fn read_responses_sse_stream(
     response: reqwest::blocking::Response,
     timeout: Duration,
@@ -2214,6 +2251,9 @@ pub struct RemoteCompletion {
 ///
 /// Las claves se leen exclusivamente desde la variable de entorno configurada
 /// dentro del hilo y nunca se almacenan ni se incluyen en los errores.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_on_worker(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -2234,11 +2274,24 @@ pub fn request_remote_on_worker(
     })
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
 /// Inicia una petición remota usando una clave de memoria de una sesión de UI.
 ///
 /// La clave se consume sólo dentro del worker y nunca se serializa ni se informa
 /// en errores. Una clave `None` es válida para proveedores sin autenticación,
 /// como una instancia local de Ollama.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_with_api_key_on_worker(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -2246,6 +2299,17 @@ pub fn request_remote_with_api_key_on_worker(
     cancellation: CancellationToken,
 ) -> JoinHandle<Result<RemoteCompletion, String>> {
     std::thread::spawn(move || request_remote(settings, request, api_key, cancellation))
+}
+
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
 }
 
 /// Contexto socrático de sesión para el guard remoto (intentos + scaffold).
@@ -2296,6 +2360,9 @@ pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) 
 /// La clave viaja sólo en el worker, igual que
 /// `request_remote_with_api_key_on_worker`: nunca se serializa ni se informa
 /// en errores.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_streaming_with_api_key_on_worker(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -2355,10 +2422,26 @@ pub fn request_remote_streaming_with_api_key_on_worker(
     })
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_streaming_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _request: AssistantRequest,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+    _delta_tx: SyncSender<String>,
+    _guard: Option<SocraticGuardContext>,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
 /// Consulta los identificadores de modelos disponibles en un proveedor remoto.
 ///
 /// Sólo devuelve `data[].id`, con tamaño y cantidad acotados; no propaga la
 /// metadata ni la respuesta completa del proveedor a la interfaz.
+///
+/// Sin `assistant-net`: stub honesto que retorna `Err(NoNetwork)` en el worker.
+#[cfg(feature = "assistant-net")]
 pub fn request_remote_models_with_api_key_on_worker(
     settings: ProviderSettings,
     api_key: Option<String>,
@@ -2423,6 +2506,17 @@ pub fn request_remote_models_with_api_key_on_worker(
     })
 }
 
+/// Stub sin red: el worker existe para conservar la firma, pero falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+pub fn request_remote_models_with_api_key_on_worker(
+    _settings: ProviderSettings,
+    _api_key: Option<String>,
+    _cancellation: CancellationToken,
+) -> JoinHandle<Result<Vec<String>, String>> {
+    std::thread::spawn(|| Err(NO_NETWORK_MESSAGE.into()))
+}
+
+#[cfg(feature = "assistant-net")]
 fn request_remote(
     settings: ProviderSettings,
     request: AssistantRequest,
@@ -2547,6 +2641,7 @@ fn remote_error_category(error: &str) -> &'static str {
     }
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_fusion_completion(
     settings: &ProviderSettings,
     request: &AssistantRequest,
@@ -2565,6 +2660,7 @@ fn request_fusion_completion(
     )
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_fusion_completion_with_endpoints(
     draft_endpoint: Url,
     audit_endpoint: Url,
@@ -2619,6 +2715,7 @@ fn request_fusion_completion_with_endpoints(
     })
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_openai_completion(
     endpoint: Url,
     payload: Value,
@@ -2637,6 +2734,7 @@ fn request_openai_completion(
 
 /// POST a la Responses API (`{base}/responses`) con Bearer saneado.
 /// La usa Muse Spark, que por Chat Completions devuelve 500 instantáneo.
+#[cfg(feature = "assistant-net")]
 fn request_responses_completion(
     endpoint: Url,
     payload: Value,
@@ -2737,6 +2835,7 @@ fn responses_completion_text(body: &Value) -> Result<(String, bool), String> {
     Ok((text, truncated))
 }
 
+#[cfg(feature = "assistant-net")]
 fn request_anthropic_completion(
     endpoint: Url,
     payload: Value,
@@ -2788,6 +2887,7 @@ fn request_anthropic_completion(
 /// clave): timeout lleva "timed out", fallo de conexión/DNS/TLS lleva
 /// "could not connect", el resto lleva "request failed". La UI mapea cada
 /// caso a un mensaje distinto en criollo.
+#[cfg(feature = "assistant-net")]
 pub(crate) fn transport_error(
     context: &str,
     error: &reqwest::Error,
@@ -2824,6 +2924,7 @@ pub(crate) fn sanitize_api_key(key: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
+#[cfg(feature = "assistant-net")]
 fn send_openai_request(
     call: reqwest::blocking::RequestBuilder,
     cancellation: &CancellationToken,
@@ -2949,6 +3050,7 @@ fn response_content_error(reason: &str) -> String {
 /// Se construye una única vez y su pool de conexiones se reutiliza entre
 /// peticiones, evitando el costo de TLS y de crear un `Client` por llamada.
 /// El timeout de cada petición se aplica sobre la `RequestBuilder`.
+#[cfg(feature = "assistant-net")]
 fn shared_http_client() -> Result<&'static reqwest::blocking::Client, String> {
     static CLIENT: std::sync::OnceLock<Result<reqwest::blocking::Client, String>> =
         std::sync::OnceLock::new();
@@ -2992,6 +3094,7 @@ fn response_body_limit(max_output_chars: usize) -> usize {
         .saturating_add(MAX_RESPONSE_ENVELOPE_BYTES)
 }
 
+#[cfg(feature = "assistant-net")]
 fn read_bounded_response_body(
     response: reqwest::blocking::Response,
     max_bytes: usize,
@@ -3018,8 +3121,10 @@ mod tests {
         AssistantRequest, ConversationTurn, ImmutableDocumentContext,
     };
     use image::{DynamicImage, Rgba, RgbaImage};
+    use std::io::Cursor;
+    #[cfg(feature = "assistant-net")]
     use std::{
-        io::{Cursor, Read, Write},
+        io::{Read, Write},
         net::TcpListener,
         thread,
     };
@@ -3404,6 +3509,7 @@ mod tests {
         assert!(validate_endpoint("http://[::1]:11434/v1").is_ok());
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn shared_http_client_reuses_a_single_client_instance() {
         let first = shared_http_client().expect("shared client builds");
@@ -3588,6 +3694,7 @@ mod tests {
         assert!(!rendered.contains("/home/"));
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn cancelled_remote_request_exits_before_any_network_attempt() {
         let mut request = request("2 + 2");
@@ -3644,6 +3751,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn minimax_wire_uses_anthropic_headers_and_response_shape() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3684,6 +3792,7 @@ mod tests {
         assert_eq!(response.text, "draft");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_wire_uses_bearer_and_response_shape() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3732,6 +3841,7 @@ mod tests {
         assert!(!response.truncated);
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_returns_only_the_deepseek_audited_answer() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3796,6 +3906,7 @@ mod tests {
         assert_eq!(response.text, "audited answer");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn fusion_discards_the_draft_when_deepseek_audit_fails() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3945,6 +4056,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_reports_429_with_retry_after_without_sleeping() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3981,6 +4093,7 @@ mod tests {
         assert!(!error.contains("test-key"), "{error}");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_truncates_long_500_body_without_secrets() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4025,6 +4138,7 @@ mod tests {
         assert!(long_body.starts_with(snippet));
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_stub_marks_incomplete_as_truncated_with_partial_text() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4175,6 +4289,7 @@ mod tests {
     /// cuerpo se envía en dos `write_all` + `flush` con 50ms en medio para
     /// forzar reensamblado en el lector SSE. Retorna la dirección y las
     /// peticiones crudas en orden para aserciones en el hilo del test.
+    #[cfg(feature = "assistant-net")]
     fn serve_stub_replies(
         replies: Vec<(Vec<u8>, &'static str, bool)>,
     ) -> (std::net::SocketAddr, thread::JoinHandle<Vec<String>>) {
@@ -4210,6 +4325,7 @@ mod tests {
         (address, server)
     }
 
+    #[cfg(feature = "assistant-net")]
     fn telling_guard_context() -> SocraticGuardContext {
         use grafito_pedagogy::{Scaffold, SocraticFsm};
         SocraticGuardContext {
@@ -4222,10 +4338,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "assistant-net")]
     fn remote_wire_request(problem: &str) -> AssistantRequest {
         AssistantRequest::remote(problem, ImmutableDocumentContext::empty(0))
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_responses_reassembles_fragmented_deltas_with_progress() {
         let body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
@@ -4262,6 +4380,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_falls_back_to_non_streaming_when_server_never_speaks_sse() {
         let json_body =
@@ -4311,6 +4430,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn streaming_completion_flows_into_telling_guard() {
         // El worker aplica `guard_remote_completion` sobre el resultado del
@@ -4371,6 +4491,7 @@ mod tests {
         assert_eq!(allowed.text, "La solución es x = 4");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn guarded_chat_worker_blocks_telling_on_the_non_streaming_path() {
         let chat_body = br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"La respuesta es x = 2"}}]}"#
@@ -4429,5 +4550,76 @@ mod tests {
         let lowered = requests[0].to_ascii_lowercase();
         assert!(!lowered.contains("text/event-stream"), "{lowered}");
         assert!(!requests[0].contains("\"stream\":true"), "{}", requests[0]);
+    }
+
+    /// Sin `assistant-net` los workers remotos existen por firma pero fallan
+    /// honesto (sin red, sin panic, sin I/O).
+    #[cfg(not(feature = "assistant-net"))]
+    #[test]
+    fn remote_workers_report_disabled_network_honestly() {
+        let settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "local");
+        let cancellation = CancellationToken::default();
+        let disabled = "assistant-net";
+
+        let remote =
+            request_remote_on_worker(settings.clone(), request("2 + 2"), cancellation.clone())
+                .join()
+                .expect("stub worker joins");
+        assert!(
+            matches!(remote, Err(ref error) if error.contains(disabled)),
+            "{remote:?}"
+        );
+
+        let with_key = request_remote_with_api_key_on_worker(
+            settings.clone(),
+            request("2 + 2"),
+            None,
+            cancellation.clone(),
+        )
+        .join()
+        .expect("stub worker joins");
+        assert!(
+            matches!(with_key, Err(ref error) if error.contains(disabled)),
+            "{with_key:?}"
+        );
+
+        let (delta_tx, _delta_rx) = std::sync::mpsc::sync_channel::<String>(8);
+        let streaming = request_remote_streaming_with_api_key_on_worker(
+            settings.clone(),
+            request("2 + 2"),
+            None,
+            cancellation.clone(),
+            delta_tx,
+            None,
+        )
+        .join()
+        .expect("stub worker joins");
+        assert!(
+            matches!(streaming, Err(ref error) if error.contains(disabled)),
+            "{streaming:?}"
+        );
+
+        let models =
+            request_remote_models_with_api_key_on_worker(settings, None, cancellation.clone())
+                .join()
+                .expect("stub worker joins");
+        assert!(
+            matches!(models, Err(ref error) if error.contains(disabled)),
+            "{models:?}"
+        );
+
+        let direct = request_responses_completion_streaming(
+            Url::parse("http://127.0.0.1:9/responses").expect("test endpoint parses"),
+            json!({"model": "muse-spark-1.3-contributor"}),
+            None,
+            &cancellation,
+            Duration::from_secs(5),
+            256,
+            None,
+        );
+        assert!(
+            matches!(direct, Err(ref error) if error.contains(disabled)),
+            "{direct:?}"
+        );
     }
 }

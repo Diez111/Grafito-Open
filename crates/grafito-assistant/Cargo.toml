@@ -18,10 +18,17 @@ grafito-geometry.workspace = true
 grafito-pedagogy.workspace = true
 grafito-profile.workspace = true
 image.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+
+[features]
+# E3: transporte remoto opcional. Default ON para no romper el build
+# existente; `--no-default-features` compila sólo resolución local con
+# stubs honestos `NoNetwork` en `request_remote*` (ver lib.rs).
+default = ["assistant-net"]
+assistant-net = ["dep:reqwest"]
 
 [lints]
 workspace = true

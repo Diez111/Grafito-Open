@@ -116,11 +116,11 @@ expect_used = "warn"
 chunks_exact_to_as_chunks = "allow"
 
 [features]
-# TODO(E3/G18): keyring/reqwest opcionales tras `assistant-net` (default ON).
-# Intento previo REVERTIDO (rompía resolución: grafito-assistant/assistant-net
-# no existe y faltan gates cfg en assistant_credentials.rs + request_remote*).
-# Diseño válido documentado en crates/grafito-app/Cargo.toml. El marcador
-# `assistant-net = []` queda como no-op hasta implementar los gates.
-# Ahorro estimado si se completa: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
+# E3 completado (oleada S): `assistant-net` (default ON) es el interruptor de
+# red. Gates reales en `crates/grafito-app/Cargo.toml` (`dep:keyring` +
+# `grafito-assistant/assistant-net`) y `crates/grafito-assistant/Cargo.toml`
+# (`dep:reqwest`) con stubs honestos sin red. Este marcador raíz queda como
+# no-op del paquete `grafito-release-tests` (sin dependencias que reenviar).
+# Ahorro estimado con `--no-default-features`: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
 default = ["assistant-net"]
 assistant-net = []

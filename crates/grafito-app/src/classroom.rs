@@ -1,8 +1,10 @@
-//! Aula loopback F0 sin red — ClassroomPanel + ShareCode + QR pseudo.
+//! Aula loopback F0 sin red — ClassroomPanel + ShareCode + QR real.
 //!
 //! Fase C1: el panel existe testeado pero no estaba cableado. Este módulo es
 //! Piel pura: `ui()` no hace I/O ni spawn, solo renderiza `&Estado`.
-//! El QR se dibuja con líneas/rects egui sin dep `qrcode` (loopback).
+//! El QR es real y escaneable vía `qrcode` 0.14 (`generate_qr_modules`):
+//! codifica `grafito://aula/{código}`; si el código es vacío/inválido o el
+//! encoder falla, el panel muestra fallback de texto honesto (sin QR falso).
 
 use egui::{Color32, Rect, Vec2};
 use grafito_ui::tokens::{
@@ -10,7 +12,7 @@ use grafito_ui::tokens::{
     SPACE_XS, SPACE_XXL, TYPE_BASE, TYPE_SM, TYPE_XS,
 };
 
-/// Lado del QR pseudo del ShareCode — derivado de tokens (sin hardcodes):
+/// Lado del QR del ShareCode — derivado de tokens (sin hardcodes):
 /// `PANEL_LEFT_DEFAULT − SPACE_XXL − SPACE_XL − SPACE_LG` = 180.
 pub const CLASSROOM_QR_SIDE: f32 = PANEL_LEFT_DEFAULT - SPACE_XXL - SPACE_XL - SPACE_LG;
 
@@ -202,10 +204,57 @@ impl ClassroomPanel {
     }
 }
 
-/// Dibuja un QR pseudo con rects egui (sin dep qrcode). 21×21 grid con
-/// finder patterns y datos deterministas derivados del `code`.
+/// Payload escaneable del QR para un código de sala. `None` honesto si el
+/// código es vacío o inválido (`ShareCode::new` lo rechaza: longitud 1..=64,
+/// sólo ASCII alfanumérico + `-`/`_`).
+pub fn qr_payload_for_code(code: &str) -> Option<String> {
+    ShareCode::new(code)?;
+    Some(format!("grafito://aula/{code}"))
+}
+
+/// Genera la grid booleana de un QR REAL con `qrcode` 0.14 (core, sin
+/// features de imagen/svg: sólo `QrCode::new` + `into_colors`).
+///
+/// Codifica `grafito://aula/{código}`. Retorna `None` honesto con código
+/// vacío/inválido o si el encoder falla (p. ej. payload excede la capacidad
+/// QR). Grid cuadrada de lado `width()` (≥21 según versión), `true` = módulo
+/// oscuro. Pura, sin I/O, testeable.
+pub fn generate_qr_modules(code: &str) -> Option<Vec<Vec<bool>>> {
+    let payload = qr_payload_for_code(code)?;
+    let qr = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+    let width = qr.width();
+    if width == 0 {
+        return None;
+    }
+    let colors = qr.into_colors();
+    if colors.len() != width.saturating_mul(width) {
+        return None;
+    }
+    let mut grid = Vec::with_capacity(width);
+    for row in colors.chunks(width) {
+        grid.push(
+            row.iter()
+                .map(|color| *color == qrcode::Color::Dark)
+                .collect(),
+        );
+    }
+    Some(grid)
+}
+
+/// Dibuja el QR REAL del `code` con rects egui. Si `generate_qr_modules`
+/// falla (código vacío/inválido o encoder sin capacidad), fallback honesto
+/// de texto en vez de un QR falso que no escanea.
 pub fn draw_share_qr(ui: &mut egui::Ui, code: &str, size: f32) {
-    let grid = generate_qr_grid(code);
+    let Some(grid) = generate_qr_modules(code) else {
+        ui.label(
+            egui::RichText::new(
+                "QR no disponible para este código — compartí el código de sala como texto.",
+            )
+            .size(TYPE_XS)
+            .color(ui.visuals().weak_text_color()),
+        );
+        return;
+    };
     let n = grid.len() as f32;
     let cell = size / n.max(1.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
@@ -230,57 +279,6 @@ pub fn draw_share_qr(ui: &mut egui::Ui, code: &str, size: f32) {
     }
     // Borde fino alrededor del QR para contraste
     painter.rect_stroke(rect, SPACE_XS, egui::Stroke::new(1.0, Color32::BLACK));
-}
-
-/// Genera grid 21×21 determinista para `code`. Pura, sin I/O, testeable.
-#[allow(clippy::needless_range_loop, clippy::manual_range_contains)]
-pub fn generate_qr_grid(code: &str) -> Vec<Vec<bool>> {
-    const N: usize = 21;
-    let mut grid = vec![vec![false; N]; N];
-    // Finder patterns en 3 esquinas (estándar QR)
-    for &(ox, oy) in &[(0, 0), (N - 7, 0), (0, N - 7)] {
-        for dy in 0..7 {
-            for dx in 0..7 {
-                let x = ox + dx;
-                let y = oy + dy;
-                let is_border = dx == 0 || dx == 6 || dy == 0 || dy == 6;
-                let is_inner = (2..=4).contains(&dx) && (2..=4).contains(&dy);
-                grid[y][x] = is_border || is_inner;
-            }
-        }
-    }
-    // Separadores blancos (una celda entre finder y datos) ya están en false
-    // Resto: datos pseudo-random deterministas del code
-    let seed0 = code
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(131).wrapping_add(b as u64));
-    let mut seed = if seed0 == 0 {
-        0x9e3779b97f4a7c15
-    } else {
-        seed0
-    };
-    for y in 0..N {
-        for x in 0..N {
-            // No sobrescribir finders ni sus separadores (banda de 8)
-            let in_top_finder = y < 8 && (x < 8 || x >= N - 8);
-            let in_bottom_finder = y >= N - 8 && x < 8;
-            if in_top_finder || in_bottom_finder {
-                continue;
-            }
-            // LCG simple para bit determinista
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let bit = (seed >> 33) & 1 == 1;
-            grid[y][x] = bit;
-        }
-    }
-    // Timing patterns (fila 6 y col 6 alternado) sobre los datos para realismo
-    for i in 8..N - 8 {
-        grid[6][i] = i % 2 == 0;
-        grid[i][6] = i % 2 == 0;
-    }
-    // Dark module fijo (versión QR)
-    grid[N - 8][8] = true;
-    grid
 }
 
 /// Entry point para `GrafitoApp` (left drawer). Crea SidePanel y delega a `ClassroomPanel::ui`.
@@ -396,28 +394,28 @@ mod tests {
 
     #[test]
     fn qr_grid_is_deterministic_and_has_finder_patterns() {
-        let g1 = generate_qr_grid("AULA-123");
-        let g2 = generate_qr_grid("AULA-123");
+        let g1 = generate_qr_modules("AULA-123").expect("QR real genera");
+        let g2 = generate_qr_modules("AULA-123").expect("QR real genera");
         assert_eq!(g1, g2, "mismo código -> misma grid");
-        let g3 = generate_qr_grid("AULA-999");
+        let g3 = generate_qr_modules("AULA-999").expect("QR real genera");
         assert_ne!(g1, g3, "código distinto -> grid distinta");
-        assert_eq!(g1.len(), 21);
-        assert_eq!(g1[0].len(), 21);
-        // Finder top-left: esquinas borde negro, centro negro
+        let n = g1.len();
+        assert!(n >= 21, "versión QR mínima 21×21, fue {n}");
+        assert!(g1.iter().all(|row| row.len() == n), "grid cuadrada");
+        // Finder top-left del QR real: esquinas borde negro, centro negro
         assert!(g1[0][0]);
         assert!(g1[0][6]);
         assert!(g1[6][0]);
         assert!(g1[3][3], "centro finder");
-        // Verificar que el finder existe sin tautología
-        assert!(g1[0][0] || g1[6][6]);
-        // Dark module
-        assert!(g1[13][8]);
+        // Dark module del estándar (fila N-8, col 8)
+        assert!(g1[n - 8][8]);
     }
 
     #[test]
     fn qr_grid_different_codes_produce_different_data_area() {
-        let a = generate_qr_grid("code-a");
-        let b = generate_qr_grid("code-b");
+        let a = generate_qr_modules("code-a").expect("QR real genera");
+        let b = generate_qr_modules("code-b").expect("QR real genera");
+        assert_eq!(a.len(), b.len());
         // Comparar zona central (10,10) debería diferir con alta prob
         let mut diff = 0;
         for y in 8..13 {
@@ -440,8 +438,8 @@ mod tests {
         let mut panel = ClassroomPanel::new();
         panel.set_opt_in(true);
         let code = panel.share_code().unwrap().as_str().to_owned();
-        let grid = generate_qr_grid(&code);
-        assert_eq!(grid.len(), 21);
+        let grid = generate_qr_modules(&code).expect("QR real genera");
+        assert!(grid.len() >= 21);
     }
 
     #[test]
@@ -482,5 +480,45 @@ mod tests {
                 - grafito_ui::tokens::SPACE_LG
         );
         assert_eq!(CLASSROOM_QR_SIDE % 4.0, 0.0);
+    }
+
+    #[test]
+    fn qr_payload_encodes_join_uri_for_valid_code() {
+        assert_eq!(
+            qr_payload_for_code("AULA-ABC123").as_deref(),
+            Some("grafito://aula/AULA-ABC123")
+        );
+        assert_eq!(qr_payload_for_code(""), None);
+        assert_eq!(qr_payload_for_code("bad code!"), None);
+        assert_eq!(qr_payload_for_code(&"a".repeat(65)), None);
+    }
+
+    #[test]
+    fn qr_real_generates_deterministic_scannable_grid() {
+        let first = generate_qr_modules("AULA-ABC123").expect("QR real genera");
+        let second = generate_qr_modules("AULA-ABC123").expect("QR real genera");
+        assert_eq!(first, second, "mismo código -> misma grid");
+        let n = first.len();
+        assert!(n >= 21, "versión QR mínima 21×21, fue {n}");
+        assert!(
+            first.iter().all(|row| row.len() == n),
+            "grid cuadrada {n}×{n}"
+        );
+        // Finder top-left del QR real: esquina y centro oscuros.
+        assert!(first[0][0]);
+        assert!(first[3][3]);
+        // Hay módulos oscuros y claros (no vacía ni sólida).
+        let dark = first.iter().flatten().filter(|cell| **cell).count();
+        assert!(dark > 0 && dark < n * n);
+        // Código distinto -> grid distinta.
+        let other = generate_qr_modules("AULA-XYZ999").expect("QR real genera");
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn qr_real_fails_honestly_with_empty_or_invalid_code() {
+        assert_eq!(generate_qr_modules(""), None);
+        assert_eq!(generate_qr_modules("bad code!"), None);
+        assert_eq!(generate_qr_modules(&"a".repeat(65)), None);
     }
 }

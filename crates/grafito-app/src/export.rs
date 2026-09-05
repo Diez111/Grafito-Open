@@ -1,6 +1,9 @@
 //! File I/O: save/load documents and export images.
 
 use anyhow::{Context, Result as AnyResult};
+use grafito_core::symbolic::{
+    clipboard_png_stub, datatable_to_csv, document_to_pdf, ExchangeError, MAX_EXCHANGE_OBJECTS,
+};
 use grafito_core::{Document, GeoObject, LineKind, ObjectId, RelationOperator};
 use grafito_geometry::{Color, Point2, ViewTransform, AABB};
 use grafito_whiteboard::WhiteboardElement;
@@ -12,6 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Receiver;
 
 const MAX_PNG_DIMENSION: u32 = 8_192;
 const MAX_PNG_PIXELS: u64 = 16_777_216;
@@ -31,11 +35,14 @@ const MAX_PROJECTED_COORDINATE: f64 = 1.0e12;
 static NEXT_EXPORT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Formatos de exportacion profesional admitidos por la aplicacion.
-// NOTE(2026-09-05, EXPORT): PDF vectorial pendiente de la dependencia
-// `printpdf` (puro Rust, sin binarios externos; tectonic/wkhtmltopdf vetados).
-// `Cargo.toml` lo cablea el lead; mientras tanto `export_pdf` es un stub
-// honesto (`ExportError::Unavailable`, destino intacto). No se añade
-// `ExportFormat::Pdf` para no romper los `match` exhaustivos de `app.rs`.
+// NOTE(2026-09-05, OLEADA-M): PDF interino real de 1 página vía
+// `grafito_core::symbolic::document_to_pdf` (1.4 mínimo, conteo + hasta 40
+// etiquetas, sin geometría inventada). El vectorial con `printpdf` sigue
+// pendiente del lead (requiere alta en `Cargo.toml`, fuera de este frente;
+// `printpdf` hoy solo está como workspace-dep sin cablear a grafito-app).
+// `export_pdf` devuelve `(path, summary)` —el mismo tipo del canal de
+// `PendingExportJob`— a propósito: no se añade `ExportFormat::Pdf` para no
+// romper los `match` exhaustivos de `app.rs` ni inventar comandos de paleta.
 // La pizarra (`Document.whiteboard`) ya entra en SVG/PNG/TikZ vía
 // `SceneBuilder::append_whiteboard` / `TikzMathWriter::emit_whiteboard`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3847,36 +3854,165 @@ pub(crate) fn export_tikz_with_mode(
     export_document_with_tikz_mode(document, path, options, mode)
 }
 
-fn pdf_unavailable() -> ExportError {
-    ExportError::Unavailable {
-        feature: "PDF",
-        reason: "vectorial pendiente de la dependencia printpdf (puro Rust, sin binarios externos)"
-            .to_string(),
+fn pdf_failure(reason: impl Into<String>) -> String {
+    reason.into()
+}
+
+fn map_core_exchange_error(context: &'static str, error: ExchangeError) -> String {
+    match error {
+        ExchangeError::TooManyObjects { got } => format!(
+            "{context} no reemplazó el destino; {got} objetos exceden el límite {MAX_EXCHANGE_OBJECTS}"
+        ),
+        ExchangeError::InvalidData { feature, detail } => {
+            format!("{context} no reemplazó el destino; dato inválido en {feature}: {detail}")
+        }
+        ExchangeError::NotImplemented { feature, hint } => {
+            format!("{context} no reemplazó el destino; {feature} pendiente: {hint}")
+        }
     }
 }
 
-/// Stub honesto de exportación PDF vectorial: re-emitir `Path`/`Text` exige
-/// `printpdf`, que solo el lead puede añadir en `Cargo.toml` (ver resumen
-/// EXPORT). Nunca toca el destino: siempre devuelve `Unavailable`, así los
-/// presupuestos (dimensión, píxeles, bytes) quedan intactos por construcción.
-#[allow(dead_code)] // Pendiente de cableado UI por el lead (ver resumen EXPORT).
+/// Exporta el PDF interino de 1 página (conteo + etiquetas, sin geometría
+/// inventada). Puro + escritura atómica: ningún error toca el destino.
+/// Devuelve `(path, summary)` como el canal de `PendingExportJob`.
 pub(crate) fn export_pdf(
     document: &Document,
     path: impl AsRef<Path>,
-) -> std::result::Result<ExportReport, ExportError> {
-    let _ = (document, path.as_ref());
-    Err(pdf_unavailable())
+) -> Result<(PathBuf, String), String> {
+    let path = path.as_ref();
+    let bytes = document_to_pdf(document)
+        .map_err(|error| pdf_failure(map_core_exchange_error("PDF", error)))?;
+    if bytes.len() > MAX_EXPORT_OUTPUT_BYTES {
+        return Err(pdf_failure(format!(
+            "PDF no reemplazó el destino; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
+            bytes.len()
+        )));
+    }
+    write_file_atomic(path, &bytes).map_err(|error| {
+        pdf_failure(format!("PDF no pudo escribir {}: {error}", path.display()))
+    })?;
+    let total = document.objects_iter_sorted().count();
+    let hidden = document
+        .objects_iter()
+        .filter(|(_, object)| !object.is_visible())
+        .count();
+    Ok((
+        path.to_path_buf(),
+        format!(
+            "PDF exportado: {total} objetos ({hidden} ocultos) -> {}",
+            path.display()
+        ),
+    ))
 }
 
-/// Variante con opciones explícitas del stub honesto de PDF.
-#[allow(dead_code)] // Pendiente de cableado UI por el lead (ver resumen EXPORT).
-pub(crate) fn export_pdf_with_options(
+/// Spawns PDF en background — mismo contrato que `spawn_export` en `app.rs`
+/// (canal `Result<(PathBuf, String), String>` apto para `PendingExportJob`).
+/// Render + write van al worker; el summary se publica en `poll_background_jobs`.
+pub(crate) fn spawn_pdf_export(
+    document: Document,
+    path: PathBuf,
+    ctx: &egui::Context,
+) -> Receiver<Result<(PathBuf, String), String>> {
+    let ctx = egui::Context::clone(ctx);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("pdf-export".into())
+        .spawn(move || {
+            let _ = tx.send(export_pdf(&document, &path));
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Texto CSV RFC 4180 de una tabla viva del documento (puro, sin I/O).
+/// Devuelve `(etiqueta, csv)`; el write va al worker vía [`spawn_csv_export`].
+pub(crate) fn datatable_csv_text(
     document: &Document,
-    path: impl AsRef<Path>,
-    options: ExportOptions,
-) -> std::result::Result<ExportReport, ExportError> {
-    let _ = (document, path.as_ref(), options);
-    Err(pdf_unavailable())
+    table: ObjectId,
+) -> Result<(String, String), String> {
+    let object = document.get_object(table).ok_or_else(|| {
+        "CSV no reemplazó el destino; la tabla ya no está en el documento".to_string()
+    })?;
+    let data = match object {
+        GeoObject::DataTable(data) => data,
+        other => {
+            return Err(format!(
+                "CSV no reemplazó el destino; '{}' no es una tabla de datos (es {})",
+                other.label(),
+                other.name()
+            ));
+        }
+    };
+    let csv = datatable_to_csv(data).map_err(|error| map_core_exchange_error("CSV", error))?;
+    Ok((data.label.clone(), csv))
+}
+
+/// Spawns escritura CSV en background — canal apto para `PendingExportJob`;
+/// el summary lleva etiqueta + filas reales del texto generado.
+pub(crate) fn spawn_csv_export(
+    csv_text: String,
+    label: String,
+    path: PathBuf,
+    ctx: &egui::Context,
+) -> Receiver<Result<(PathBuf, String), String>> {
+    let ctx = egui::Context::clone(ctx);
+    let rows = csv_text.lines().count().saturating_sub(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("csv-export".into())
+        .spawn(move || {
+            let result = write_text_atomic(&path, &csv_text)
+                .map(|()| {
+                    let shown = if label.is_empty() { "tabla" } else { &label };
+                    (
+                        path.clone(),
+                        format!(
+                            "Tabla '{shown}' exportada a CSV ({rows} filas) -> {}",
+                            path.display()
+                        ),
+                    )
+                })
+                .map_err(|error| {
+                    format!(
+                        "CSV no reemplazó el destino; no pudo escribir {}: {error}",
+                        path.display()
+                    )
+                });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    rx
+}
+
+/// Tallo seguro para `set_file_name` del diálogo (etiqueta → `[A-Za-z0-9_-]`,
+/// máx. 64; fallback `"tabla"`). Puro y testeado.
+pub(crate) fn sanitize_export_stem(raw: &str) -> String {
+    let stem: String = raw
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
+        .take(64)
+        .collect();
+    if stem.is_empty() {
+        "tabla".to_string()
+    } else {
+        stem
+    }
+}
+
+/// Portapapeles PNG honesto: el core exige raster (`image`/`tiny-skia` en
+/// app, fuera del frente F10-C), así que hoy siempre es `Unavailable` con
+/// destino intacto. Mantiene viva la variante para el mensaje honesto.
+pub(crate) fn clipboard_png_honest() -> Result<Vec<u8>, ExportError> {
+    clipboard_png_stub().map_err(|error| match error {
+        ExchangeError::NotImplemented { feature, hint } => ExportError::Unavailable {
+            feature: "Portapapeles PNG",
+            reason: format!("{feature}: {hint}"),
+        },
+        other => ExportError::Encoding {
+            format: ExportFormat::Png,
+            reason: other.to_string(),
+        },
+    })
 }
 
 pub(crate) fn write_text_atomic(path: impl AsRef<Path>, text: &str) -> io::Result<()> {
@@ -5476,30 +5612,73 @@ mod tests {
     }
 
     #[test]
-    fn pdf_export_reports_honest_unavailable_and_preserves_destination() {
+    fn pdf_interim_writes_one_page_and_reports_counts() {
         let document = common_2d_document();
+        let total = document.objects_iter_sorted().count();
         let path = temp_export_path("pdf");
-        std::fs::write(&path, b"existing destination").expect("write sentinel");
-
-        let error = export_pdf(&document, &path).expect_err("PDF aun no disponible");
+        let (written, summary) = export_pdf(&document, &path).expect("PDF interino fixture");
+        assert_eq!(written, path);
         assert!(
-            error
-                .to_string()
-                .contains("PDF no disponible en esta build"),
+            summary.contains(&format!("{total} objetos")),
+            "summary honesto esperado, fue: {summary}"
+        );
+        let bytes = std::fs::read(&path).expect("pdf escrito");
+        assert!(bytes.starts_with(b"%PDF-1.4"));
+        assert!(bytes.windows(5).any(|w| w == b"%%EOF"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pdf_failure_preserves_destination() {
+        let document = common_2d_document();
+        // Sin nombre de archivo el write atómico falla antes de tocar nada.
+        let error = export_pdf(&document, "").expect_err("destino inválido debe fallar");
+        assert!(
+            error.contains("no pudo escribir"),
             "error honesto esperado, fue: {error}"
         );
-        let options_error = export_pdf_with_options(&document, &path, ExportOptions::new(320, 240))
-            .expect_err("PDF aun no disponible con opciones");
+    }
+
+    #[test]
+    fn datatable_csv_text_is_honest_rfc4180() {
+        use grafito_core::DataTableObj;
+        let mut document = Document::new();
+        let id = document
+            .try_add_object(GeoObject::DataTable(
+                DataTableObj::new("x", "y", vec![1.0, 2.0], vec![3.0, 4.0])
+                    .with_label("mediciones"),
+            ))
+            .expect("tabla fixture");
+        let (label, csv) = datatable_csv_text(&document, id).expect("csv fixture");
+        assert!(csv.starts_with("x,y\r\n"), "cabeza + CRLF, fue: {csv:?}");
+        assert!(csv.contains("1,3\r\n"));
+        assert_eq!(label, "mediciones");
+        // Id inexistente y objeto no-tabla fallan honesto sin I/O.
+        let missing =
+            datatable_csv_text(&document, ObjectId::new()).expect_err("id ausente debe fallar");
+        assert!(missing.contains("ya no está"));
+        let point_id = document
+            .try_add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))))
+            .expect("punto fixture");
+        let not_table = datatable_csv_text(&document, point_id).expect_err("no-tabla debe fallar");
+        assert!(not_table.contains("no es una tabla de datos"));
+    }
+
+    #[test]
+    fn sanitize_export_stem_keeps_safe_chars_with_fallback() {
+        assert_eq!(sanitize_export_stem("Mi tabla 2026!"), "Mitabla2026");
+        assert_eq!(sanitize_export_stem("a-b_c"), "a-b_c");
+        assert_eq!(sanitize_export_stem("!!!"), "tabla");
+        assert_eq!(sanitize_export_stem(""), "tabla");
+        assert!(!sanitize_export_stem("áé").is_empty());
+    }
+
+    #[test]
+    fn clipboard_png_stays_honest_unavailable() {
+        let error = clipboard_png_honest().expect_err("PNG pendiente");
         assert!(
-            options_error
-                .to_string()
-                .contains("PDF no disponible en esta build"),
-            "error honesto esperado, fue: {options_error}"
+            error.to_string().contains("no disponible en esta build"),
+            "error honesto esperado, fue: {error}"
         );
-        assert_eq!(
-            std::fs::read(&path).expect("sentinel remains"),
-            b"existing destination"
-        );
-        let _ = std::fs::remove_file(path);
     }
 }

@@ -904,6 +904,9 @@ fn build_agent_payload(
 }
 
 /// Envía una petición agéntica y devuelve texto final o llamadas de herramienta.
+///
+/// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
+#[cfg(feature = "assistant-net")]
 fn request_agent_completion(
     settings: &ProviderSettings,
     api_key: Option<&str>,
@@ -963,6 +966,20 @@ fn request_agent_completion(
     let body: Value = serde_json::from_slice(&response_bytes)
         .map_err(|_| "assistant agent response JSON is invalid".to_string())?;
     parse_agent_completion(&body)
+}
+
+/// Stub sin red: conserva la firma para `RemoteAgentCompleter`, falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+fn request_agent_completion(
+    _settings: &ProviderSettings,
+    _api_key: Option<&str>,
+    _messages: &[Value],
+    _tools: &[ToolSchema],
+    _max_output_tokens: usize,
+    _timeout: Duration,
+    _cancellation: &Cancellation,
+) -> Result<AgentChatResponse, String> {
+    Err(crate::NO_NETWORK_MESSAGE.into())
 }
 
 /// Parsea la primera elección de un completion agéntico (texto o tool_calls).
@@ -1312,6 +1329,9 @@ fn parse_responses_agent_turn(body: &Value) -> Result<AgentChatResponse, String>
 /// Reusa `crate::responses_endpoint` (público), `crate::sanitize_api_key` y
 /// `crate::transport_error` (`pub(crate)`), más el cliente compartido y la
 /// lectura acotada ya usados por el path Chat de este archivo.
+///
+/// Sin `assistant-net`: stub honesto que siempre retorna `Err(NoNetwork)`.
+#[cfg(feature = "assistant-net")]
 fn post_responses_output(
     settings: &ProviderSettings,
     api_key: Option<&str>,
@@ -1348,6 +1368,18 @@ fn post_responses_output(
     let response_bytes = crate::read_bounded_response_body(response, MAX_RESPONSES_BODY_BYTES)?;
     serde_json::from_slice(&response_bytes)
         .map_err(|_| "assistant agent responses response JSON is invalid".to_string())
+}
+
+/// Stub sin red: conserva la firma para `request_responses_agent_turn`, falla honesto.
+#[cfg(not(feature = "assistant-net"))]
+fn post_responses_output(
+    _settings: &ProviderSettings,
+    _api_key: Option<&str>,
+    _payload: &Value,
+    _timeout: Duration,
+    _cancellation: &Cancellation,
+) -> Result<Value, String> {
+    Err(crate::NO_NETWORK_MESSAGE.into())
 }
 
 /// Un turno Responses: traduce los mensajes Chat del loop a
@@ -1863,12 +1895,14 @@ mod tests {
 
     // ── Tests Responses API (Muse Spark, sin imágenes) ───────────────────────
 
+    #[cfg(feature = "assistant-net")]
     fn spark_stub_settings(port: u16) -> ProviderSettings {
         ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "muse-spark-test")
             .with_endpoint(format!("http://127.0.0.1:{port}/v1"))
             .expect("loopback stub endpoint is valid")
     }
 
+    #[cfg(feature = "assistant-net")]
     fn spark_budget(per_turn: Duration, total: Duration) -> AgentBudget {
         AgentBudget {
             max_tool_turns: 4,
@@ -1880,6 +1914,7 @@ mod tests {
     }
 
     /// Sirve `scripted` como respuestas 200 JSON en orden, guardando cada body.
+    #[cfg(feature = "assistant-net")]
     fn spawn_responses_stub(
         scripted: Vec<Value>,
         seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -2018,6 +2053,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_runs_function_call_output_then_final_text() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2087,6 +2123,7 @@ mod tests {
         stub.join().expect("stub joins");
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_cancels_mid_loop_after_first_dispatch() {
         struct CancellingDispatcher {
@@ -2139,6 +2176,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "assistant-net")]
     #[test]
     fn responses_loop_reports_per_turn_timeout() {
         use std::io::{Read, Write};
@@ -2194,5 +2232,25 @@ mod tests {
             "per-turn timeout surfaces transport timeout, got: {error}"
         );
         slow.join().expect("stub joins");
+    }
+
+    /// Sin `assistant-net` el completador agéntico existe por firma pero falla
+    /// honesto (sin red, sin panic, sin I/O).
+    #[cfg(not(feature = "assistant-net"))]
+    #[test]
+    fn agent_completer_reports_disabled_network_honestly() {
+        let settings = ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "local");
+        let completer = RemoteAgentCompleter::new(settings, None);
+        let result = completer.complete(
+            &[],
+            &[],
+            16,
+            Duration::from_secs(5),
+            &Cancellation::default(),
+        );
+        assert!(
+            matches!(result, Err(ref error) if error.contains("assistant-net")),
+            "{result:?}"
+        );
     }
 }

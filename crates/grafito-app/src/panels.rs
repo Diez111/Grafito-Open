@@ -1,7 +1,12 @@
 //! Paneles laterales removibles e inspectores (CAS, vista, estadística, propiedades).
 
+use crate::export::{
+    clipboard_png_honest, datatable_csv_text, sanitize_export_stem, spawn_csv_export,
+    spawn_pdf_export,
+};
 use crate::GrafitoApp;
 use egui::Color32;
+use grafito_core::symbolic::{clipboard_svg, LayerTable, MAX_LAYERS};
 use grafito_core::{
     CasWorksheetStatus, ChangeSet, DataTableObj, Document, GeoObject, ObjectId,
     RegularPolytopeNDObj, ScatterPlotObj,
@@ -20,6 +25,32 @@ use std::io::Read;
 use std::path::Path;
 
 const MAX_LOCAL_DATA_IMPORT_BYTES: usize = 2_000_000;
+
+/// Estado del panel Capas (oleada M): `LayerTable` del core + capa elegida
+/// para asignar. Vive en la memoria temporal de egui (sin I/O, sin campos
+/// nuevos en `GrafitoApp`); las ids de documentos cerrados se podan al
+/// dibujar vía [`LayerTable::prune_missing`].
+#[derive(Debug, Clone, Default)]
+struct LayerPanelState {
+    table: LayerTable,
+    selected_layer: u32,
+}
+
+/// Botón pill centrado de ancho completo para la sección Exportación
+/// (mismo estilo que el histórico "Exportar SVG").
+fn export_pill_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let btn = egui::Button::new(
+        egui::RichText::new(label)
+            .size(TYPE_SM)
+            .strong()
+            .color(theme.keyboard_enter_text),
+    )
+    .fill(theme.keyboard_enter_bg)
+    .stroke(egui::Stroke::NONE)
+    .rounding(RADIUS_PILL);
+    ui.add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LocalXYTable {
@@ -1164,6 +1195,23 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     let theme = current_theme(ctx);
     let accent = theme.accent;
 
+    // Estado Capas (oleada M): vive en temp egui; se poda y escribe de vuelta
+    // alrededor del frame. Solo lectura del documento fuera de los handlers.
+    let layer_panel_id = egui::Id::new("grafito_layer_panel_state");
+    let mut layer_state: LayerPanelState = ctx
+        .data_mut(|data| data.get_temp::<LayerPanelState>(layer_panel_id))
+        .unwrap_or_default();
+    layer_state.table.prune_missing(&app.document);
+    let selection: Option<(ObjectId, String, u32)> = app.selected_object.and_then(|id| {
+        app.document.get_object(id).map(|object| {
+            (
+                id,
+                object.label().to_string(),
+                layer_state.table.layer_of(id),
+            )
+        })
+    });
+
     egui::SidePanel::left("view_panel")
         .show_separator_line(false)
         .default_width(PANEL_LEFT_DEFAULT)
@@ -1294,33 +1342,366 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             );
                             ui.add_space(CARD_SPACING);
 
-                            // Exportación — vectorial pill centered
+                            // Capas — orden + visibilidad (oleada M, API F10-C).
+                            // Piel pura: lee &Estado, muta documento con snapshot
+                            // de undo; el diálogo/trabajo pesado no aplica aquí
+                            // (solo toggles y assigns en memoria).
+                            draw_inspector_section(
+                                ui,
+                                "Capas",
+                                "Ordená objetos en capas 0..=255 y alterná su visibilidad conjunta.",
+                                |ui| {
+                                    let used = layer_state.table.used_layers(&app.document);
+                                    if used.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "Sin objetos: todo lo nuevo entra en la capa 0.",
+                                            )
+                                            .size(TYPE_XS)
+                                            .color(current_theme(ui.ctx()).text_secondary),
+                                        );
+                                    }
+                                    for (layer, count) in used {
+                                        let visible = layer_state.table.is_layer_visible(
+                                            &app.document,
+                                            layer,
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "Capa {layer} · {count} obj"
+                                                ))
+                                                .size(TYPE_SM),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    let action =
+                                                        if visible { "Ocultar" } else { "Mostrar" };
+                                                    if ui
+                                                        .small_button(action)
+                                                        .on_hover_text(format!(
+                                                            "Cambia la visibilidad de los {count} objetos de la capa {layer} (con deshacer)"
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        let mut snap =
+                                                            crate::app::DeferredPanelSnapshot::new(
+                                                                app.undo_stack.len(),
+                                                            );
+                                                        snap.capture(&app.document);
+                                                        let touched = layer_state
+                                                            .table
+                                                            .set_layer_visible(
+                                                                &mut app.document,
+                                                                layer,
+                                                                !visible,
+                                                            );
+                                                        if touched > 0 {
+                                                            app.cas_result = format!(
+                                                                "Capa {layer} {} ({touched} obj)",
+                                                                if visible {
+                                                                    "oculta"
+                                                                } else {
+                                                                    "visible"
+                                                                }
+                                                            );
+                                                        }
+                                                        snap.save_if_semantically_changed(
+                                                            &mut app.document,
+                                                            &mut app.undo_stack,
+                                                            &mut app.redo_stack,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    ui.add_space(SPACE_XS);
+                                    let selection_text = selection
+                                        .as_ref()
+                                        .map(|(_, label, layer)| {
+                                            let name = if label.is_empty() {
+                                                "<sin etiqueta>"
+                                            } else {
+                                                label
+                                            };
+                                            format!("Selección: {name} (capa {layer})")
+                                        })
+                                        .unwrap_or_else(|| {
+                                            "Sin selección: elegí un objeto en el lienzo."
+                                                .to_string()
+                                        });
+                                    ui.label(
+                                        egui::RichText::new(selection_text)
+                                            .size(TYPE_XS)
+                                            .color(current_theme(ui.ctx()).text_secondary),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("Asignar a capa:").size(TYPE_SM),
+                                        );
+                                        ui.add(
+                                            egui::DragValue::new(
+                                                &mut layer_state.selected_layer,
+                                            )
+                                            .range(0..=MAX_LAYERS)
+                                            .speed(1),
+                                        );
+                                        if ui
+                                            .add_enabled(
+                                                selection.is_some(),
+                                                egui::Button::new(
+                                                    egui::RichText::new("Asignar").size(TYPE_SM),
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "Mueve el objeto seleccionado a la capa elegida",
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some((id, label, _)) = selection.as_ref() {
+                                                match layer_state
+                                                    .table
+                                                    .assign(*id, layer_state.selected_layer)
+                                                {
+                                                    Ok(()) => {
+                                                        let name = if label.is_empty() {
+                                                            "<sin etiqueta>"
+                                                        } else {
+                                                            label
+                                                        };
+                                                        app.cas_result = format!(
+                                                            "'{name}' → capa {}",
+                                                            layer_state.selected_layer
+                                                        );
+                                                    }
+                                                    Err(error) => {
+                                                        app.cas_result = format!(
+                                                            "No se pudo asignar: {error}"
+                                                        );
+                                                        app.notify(
+                                                            app.cas_result.clone(),
+                                                            grafito_ui::toast::ToastKind::Error,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                            ui.add_space(CARD_SPACING);
+
+                            // Exportación — vectorial pill centered + oleada M:
+                            // PNG/TikZ/PDF/CSV y portapapeles. Piel pura: el
+                            // diálogo rfd queda en UI thread (modal nativo);
+                            // render+write van a workers y el summary se aplica
+                            // en `poll_background_jobs`.
                             draw_inspector_section(
                                 ui,
                                 "Exportación",
-                                "Generá un archivo vectorial del lienzo actual.",
+                                "Generá un archivo del lienzo actual o copialo al portapapeles.",
                                 |ui| {
-                                    let theme = current_theme(ui.ctx());
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new("Exportar SVG")
-                                            .size(TYPE_SM)
-                                            .strong()
-                                            .color(theme.keyboard_enter_text),
-                                    )
-                                    .fill(theme.keyboard_enter_bg)
-                                    .stroke(egui::Stroke::NONE)
-                                    .rounding(RADIUS_PILL);
-                                    if ui
-                                        .add_sized([ui.available_width(), ZOOM_ICON_HIT], btn)
+                                    for format in [
+                                        crate::export::ExportFormat::Svg,
+                                        crate::export::ExportFormat::Png,
+                                        crate::export::ExportFormat::Tikz,
+                                    ] {
+                                        if export_pill_button(
+                                            ui,
+                                            &format!("Exportar {}", format.display_name()),
+                                        )
                                         .clicked()
-                                    {
-                                        app.export_with_dialog(crate::export::ExportFormat::Svg, None);
+                                        {
+                                            app.export_with_dialog(format, Some(ui.ctx()));
+                                        }
                                     }
+                                    if export_pill_button(ui, "Exportar PDF").on_hover_text(
+                                        "Interino de 1 página: conteo + etiquetas (vectorial con printpdf pendiente del lead)",
+                                    ).clicked()
+                                    {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("PDF", &["pdf"])
+                                            .set_file_name("grafito_export.pdf")
+                                            .save_file()
+                                        {
+                                            app.pending_export_job = Some(
+                                                crate::app::PendingExportJob {
+                                                    receiver: spawn_pdf_export(
+                                                        app.document.clone(),
+                                                        path,
+                                                        ui.ctx(),
+                                                    ),
+                                                },
+                                            );
+                                            app.notify(
+                                                "Exportando PDF…",
+                                                grafito_ui::toast::ToastKind::Info,
+                                            );
+                                        }
+                                    }
+                                    let tables: Vec<(ObjectId, String, usize)> = app
+                                        .document
+                                        .objects_iter_sorted()
+                                        .filter_map(|(id, object)| match object {
+                                            GeoObject::DataTable(table) => Some((
+                                                *id,
+                                                table.label.clone(),
+                                                table.xs.len(),
+                                            )),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if !tables.is_empty() {
+                                        ui.add_space(SPACE_XS);
+                                        ui.label(
+                                            egui::RichText::new("Tablas (CSV RFC 4180)")
+                                                .size(TYPE_XS)
+                                                .color(
+                                                    current_theme(ui.ctx()).text_secondary,
+                                                ),
+                                        );
+                                    }
+                                    for (id, label, rows) in tables {
+                                        ui.horizontal(|ui| {
+                                            let name = if label.is_empty() {
+                                                "<sin etiqueta>"
+                                            } else {
+                                                &label
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{name} · {rows} filas"
+                                                ))
+                                                .size(TYPE_SM),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if ui
+                                                        .small_button("CSV")
+                                                        .on_hover_text(
+                                                            "Descarga honesta: escribe el CSV real o informa el error",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        match datatable_csv_text(&app.document, id)
+                                                        {
+                                                            Ok((table_label, csv)) => {
+                                                                let stem = sanitize_export_stem(
+                                                                    &table_label,
+                                                                );
+                                                                if let Some(path) =
+                                                                    rfd::FileDialog::new()
+                                                                        .add_filter(
+                                                                            "CSV",
+                                                                            &["csv"],
+                                                                        )
+                                                                        .set_file_name(format!(
+                                                                            "{stem}.csv"
+                                                                        ))
+                                                                        .save_file()
+                                                                {
+                                                                    app.pending_export_job = Some(
+                                                                        crate::app::PendingExportJob {
+                                                                            receiver:
+                                                                                spawn_csv_export(
+                                                                                    csv,
+                                                                                    table_label,
+                                                                                    path,
+                                                                                    ui.ctx(),
+                                                                                ),
+                                                                        },
+                                                                    );
+                                                                    app.notify(
+                                                                        "Exportando CSV…",
+                                                                        grafito_ui::toast::ToastKind::Info,
+                                                                    );
+                                                                }
+                                                            }
+                                                            Err(error) => {
+                                                                app.cas_result = error.clone();
+                                                                app.notify(
+                                                                    error,
+                                                                    grafito_ui::toast::ToastKind::Error,
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    }
+                                    ui.add_space(SPACE_XS);
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .small_button("Copiar SVG")
+                                            .on_hover_text(
+                                                "Copia el SVG real del lienzo al portapapeles",
+                                            )
+                                            .clicked()
+                                        {
+                                            match clipboard_svg(&app.document) {
+                                                Ok(svg) => {
+                                                    let bytes = svg.len();
+                                                    ui.ctx().output_mut(|out| {
+                                                        out.copied_text = svg;
+                                                    });
+                                                    app.cas_result = format!(
+                                                        "SVG copiado al portapapeles ({bytes} bytes)"
+                                                    );
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Success,
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.cas_result = format!(
+                                                        "No se pudo copiar SVG: {error}"
+                                                    );
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if ui
+                                            .small_button("Copiar PNG")
+                                            .on_hover_text(
+                                                "Pendiente honesto: exige raster con image/tiny-skia (fuera del frente F10-C); usa Copiar SVG",
+                                            )
+                                            .clicked()
+                                        {
+                                            match clipboard_png_honest() {
+                                                Ok(_) => {
+                                                    app.cas_result =
+                                                        "PNG listo pero sin portapapeles en esta build; usa Copiar SVG"
+                                                            .to_string();
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                                Err(error) => {
+                                                    app.cas_result = error.to_string();
+                                                    app.notify(
+                                                        app.cas_result.clone(),
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
                                 },
                             );
                         });
                 });
         });
+
+    // Escribe de vuelta el estado Capas (asigns del frame).
+    ctx.data_mut(|data| data.insert_temp(layer_panel_id, layer_state));
 }
 
 /// Panel derecho: controles de la animación trigonométrica.
@@ -3368,5 +3749,20 @@ mod domain_coloring_mutation_tests {
             1.5,
         ));
         assert_eq!(document.version, revision + 1);
+    }
+}
+
+#[cfg(test)]
+mod layer_panel_tests {
+    use super::LayerPanelState;
+    use grafito_core::Document;
+
+    #[test]
+    fn layer_panel_state_defaults_empty_on_layer_zero() {
+        let state = LayerPanelState::default();
+        assert_eq!(state.selected_layer, 0);
+        let document = Document::new();
+        assert_eq!(state.table.used_layers(&document), vec![]);
+        assert!(state.table.is_layer_visible(&document, 0));
     }
 }
