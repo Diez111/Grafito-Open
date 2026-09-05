@@ -12,7 +12,9 @@
 //! assert!(!scaffold.question.is_empty());
 //! ```
 
+pub mod bkt;
 pub mod curriculum;
+pub mod exam;
 pub mod exercise;
 pub mod feedback;
 pub mod level;
