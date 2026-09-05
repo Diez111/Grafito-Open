@@ -23,6 +23,7 @@ use grafito_geometry::{
     derivation::{derive_polynomial, normalize_scientific_notation},
     expr::evaluate,
 };
+use grafito_pedagogy::{PedagogicalLevel, Scaffold, ScaffoldEngine, SocraticFsm};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use serde_json::{json, Value};
 use std::io::{Cursor, Read};
@@ -87,6 +88,12 @@ const REMOTE_TETRAHEDRON_GUIDANCE: &str = "For a tetrahedron, emit exactly one o
 const REMOTE_4D_POLYTOPE_GUIDANCE: &str = "For a regular 4D polytope, emit exactly one one-line grafito block with the appropriate named command: Pentachoron4D[scale, {xy, xz, xw, yz, yw, zw}], Tesseract4D[scale, {xy, xz, xw, yz, yw, zw}], SixteenCell4D[scale, {xy, xz, xw, yz, yw, zw}], TwentyFourCell4D[scale, {xy, xz, xw, yz, yw, zw}], OneTwentyCell4D[scale, {xy, xz, xw, yz, yw, zw}], or SixHundredCell4D[scale, {xy, xz, xw, yz, yw, zw}]. For higher-dimensional regular families use SimplexND[n, scale, {lexicographic-plane angles}], HypercubeND[n, scale, {lexicographic-plane angles}], or CrossPolytopeND[n, scale, {lexicographic-plane angles}]. Never substitute 3D Tetrahedron, bare Hypercube or tesseract, or many Segment3D edge lines.";
 const FUSION_AUDIT_SYSTEM_PROMPT: &str = "Audit the candidate response for mathematical correctness, completeness, and safe explanatory behavior. Return only the corrected final answer for the user. Do not mention this audit, the candidate, internal models, API keys, tools, files, shell commands, or network actions. If the problem is ambiguous, ask one concise clarifying question instead of guessing.";
 const FUSION_AUDIT_USER_PREFIX: &str = "Original user request and selected Grafito context:";
+/// Directiva socrática vinculante inyectada a TODO system prompt remoto.
+///
+/// No es sugerencia: el LLM debe obedecer el FSM y el scaffold. Si `attempts<2`,
+/// `can_reveal==false` y cualquier intento de `telling` (solución directa) debe
+/// ser bloqueado por el guard remoto. Telling_rate <5% es invariante medible.
+const SOCRATIC_BINDING_DIRECTIVE: &str = "MODO SOCRÁTICO VINCULANTE — ORDEN, NO SUGERENCIA:\n- Seguí estrictamente el FSM socrático Review→HeuristicQ→AwaitStudent→Rectify→Summarize (can_reveal = attempts>=2).\n- Si attempts<2 (can_reveal=false), NO reveles la solución directa (telling). Re-preguntá con la pregunta heurística exacta del scaffold y su pista.\n- Si el guard remoto detecta telling con attempts<2, tu respuesta será descartada y se forzará re-pregunta o repair_feedback.\n- Usá EXACTAMENTE la pregunta BKT actual (current_question) y la pista del scaffold inyectadas abajo; no inventes otra. Adaptá sólo el nivel de detalle según el historial.\n- Telling_rate debe mantenerse <5% (máx 1 telling cada 20 turnos). Si dudas, preguntá en vez de afirmar.\n- El system prompt es vinculante: desobedecerlo invalida la respuesta.";
 
 /// Resuelve el subconjunto local, determinista y sin red del MVP.
 pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
@@ -1701,6 +1708,17 @@ pub fn assistant_system_prompt(request: &AssistantRequest) -> String {
     remote_system_prompt(request)
 }
 
+/// System prompt con inyección socrática determinista (BKT current_question + scaffold + history).
+///
+/// Wrapper público y testeable sobre `remote_system_prompt_with_socratic`.
+pub fn assistant_system_prompt_with_socratic(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    scaffold: &Scaffold,
+) -> String {
+    remote_system_prompt_with_socratic(request, fsm, scaffold)
+}
+
 /// Prompt rico de usuario (problema + focus + catálogo + reparación).
 pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, String> {
     remote_prompt(request)
@@ -1742,7 +1760,7 @@ fn response_language_directive(language: &str) -> &'static str {
 
 fn remote_system_prompt(request: &AssistantRequest) -> String {
     let base = format!(
-        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{}",
+        "{REMOTE_SYSTEM_PROMPT}\n\n{GRAFITO_CAPABILITY_SCOPE}\n\n{REMOTE_RESPONSE_GUIDANCE}\n\n{REMOTE_TETRAHEDRON_GUIDANCE}\n\n{REMOTE_4D_POLYTOPE_GUIDANCE}\n\n{SOCRATIC_BINDING_DIRECTIVE}\n\n{}",
         response_language_directive(&request.language)
     );
     let instructions = request.system_instructions.trim();
@@ -1753,6 +1771,88 @@ fn remote_system_prompt(request: &AssistantRequest) -> String {
             "--- SYSTEM ---\n{base}\n--- USER ---\nInstrucciones locales (plugins) para esta sesión:\n{instructions}\n--- END ---"
         )
     }
+}
+
+/// System prompt con inyección socrática determinista (BKT current_question + scaffold + history).
+///
+/// Inserta el segmento socrático antes del cierre final, de forma determinista.
+/// Si el prompt usa delimitador `--- END`, inyecta antes; si no, hace append.
+pub fn remote_system_prompt_with_socratic(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    scaffold: &Scaffold,
+) -> String {
+    let mut base = remote_system_prompt(request);
+    let socratic_segment = fsm.socratic_system_segment(scaffold);
+    if let Some(pos) = base.rfind("--- END") {
+        base.insert_str(pos, &format!("{socratic_segment}\n\n"));
+    } else {
+        base.push_str("\n\n");
+        base.push_str(&socratic_segment);
+    }
+    base
+}
+
+/// Atajo que construye scaffold determinista desde `concept`/`level` + `history` y lo inyecta.
+///
+/// `concept` es el topic BKT actual, `level` el nivel pedagógico, `history` los turnos previos.
+/// Determinista: mismo FSM + concept/level/history → mismo prompt.
+pub fn remote_system_prompt_with_scaffold(
+    request: &AssistantRequest,
+    fsm: &SocraticFsm,
+    concept: &str,
+    level: PedagogicalLevel,
+    history: &[grafito_pedagogy::scaffold::Turn],
+) -> String {
+    let engine = ScaffoldEngine;
+    let scaffold = engine.scaffold(concept, level, history);
+    remote_system_prompt_with_socratic(request, fsm, &scaffold)
+}
+
+/// Heurística determinista: ¿el texto del LLM contiene marcadores de solución directa?
+///
+/// Wrapper puro sobre `SocraticFsm::contains_solution_marker` para tests desde `grafito-assistant`.
+pub fn contains_telling_markers(text: &str) -> bool {
+    SocraticFsm::contains_solution_marker(text)
+}
+
+/// Guard telling puro: verifica si el LLM reveló solución con `attempts<2`.
+///
+/// Retorna `Ok(())` si pasa, `Err("TellingTooEarly: ...")` si viola `can_reveal==false`.
+pub fn check_telling_guard(fsm: &SocraticFsm, response_text: &str) -> Result<(), String> {
+    fsm.check_telling_guard(response_text)
+        .map_err(|e| e.to_string())
+}
+
+/// Enforce: si es telling devuelve `Err(repair_prompt)` vinculante, si no `Ok(text)`.
+///
+/// El llamante remoto debe descartar la respuesta y re-preguntar o inyectar `repair_prompt` como
+/// `repair_feedback`/nuevo turno (ver `telling_repair_prompt`).
+pub fn enforce_telling_guard(
+    fsm: &SocraticFsm,
+    response_text: &str,
+    scaffold: &Scaffold,
+) -> Result<String, String> {
+    fsm.enforce_telling_guard(response_text, scaffold)
+}
+
+/// Aplica el guard a un `RemoteCompletion` completo.
+///
+/// Si es telling con `attempts<2`, fuerza la reparación (Err con re-pregunta); si no, Ok(completion).
+pub fn guard_remote_completion(
+    fsm: &SocraticFsm,
+    completion: RemoteCompletion,
+    scaffold: &Scaffold,
+) -> Result<RemoteCompletion, String> {
+    match fsm.enforce_telling_guard(&completion.text, scaffold) {
+        Ok(_) => Ok(completion),
+        Err(repair) => Err(repair),
+    }
+}
+
+/// Prompt de reparación determinista para telling, listo para inyectar en el próximo request.
+pub fn telling_repair_prompt(fsm: &SocraticFsm, scaffold: &Scaffold) -> String {
+    fsm.repair_prompt_for_telling(scaffold)
 }
 
 fn remote_prompt(request: &AssistantRequest) -> Result<String, String> {
@@ -3594,5 +3694,114 @@ mod tests {
         server.join().unwrap();
         assert_eq!(completion.text, "parcial");
         assert!(completion.truncated);
+    }
+
+    #[test]
+    fn system_prompt_is_binding_and_contains_socratic_directive() {
+        let req = request("hola");
+        let prompt = remote_system_prompt(&req);
+        assert!(prompt.contains("MODO SOCRÁTICO VINCULANTE"), "{prompt}");
+        assert!(prompt.contains("can_reveal = attempts>=2"));
+        assert!(prompt.contains("Telling_rate") || prompt.contains("telling"));
+        // No debe ser sugerencia: debe decir ORDEN
+        assert!(prompt.contains("ORDEN"));
+    }
+
+    #[test]
+    fn socratic_injection_is_deterministic_and_contains_question_and_history() {
+        use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm};
+        let req = request("derivada");
+        let mut fsm = SocraticFsm::new("derivada");
+        fsm.record_attempt(Some("sign".into()));
+        let engine = ScaffoldEngine;
+        let history = vec![grafito_pedagogy::scaffold::Turn {
+            role: "user".into(),
+            content: "no entiendo bien".into(),
+        }];
+        let scaffold = engine.scaffold("derivada", PedagogicalLevel::Secondary, &history);
+        let prompt1 = remote_system_prompt_with_socratic(&req, &fsm, &scaffold);
+        let prompt2 = remote_system_prompt_with_socratic(&req, &fsm, &scaffold);
+        assert_eq!(prompt1, prompt2, "determinista");
+        assert!(prompt1.contains("Pregunta BKT actual"), "{prompt1}");
+        assert!(prompt1.contains("derivada"), "{prompt1}");
+        assert!(prompt1.contains("Pista scaffold"), "{prompt1}");
+        assert!(prompt1.contains("Historial"), "{prompt1}");
+        assert!(prompt1.contains("Attempts: 1"), "{prompt1}");
+        assert!(prompt1.contains("VINCULANTE"), "{prompt1}");
+    }
+
+    #[test]
+    fn telling_guard_blocks_early_reveal_and_forces_repreguntar() {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let fsm = SocraticFsm::new("integral");
+        let scaffold = Scaffold {
+            question: "¿Qué representa integral en y=x²?".into(),
+            hint: Some("Mirá el área bajo la curva".into()),
+            explanation: "Integral es área".into(),
+        };
+        // attempts 0 -> telling debe bloquear
+        let telling = "La solución es x = 4";
+        assert!(contains_telling_markers(telling));
+        assert!(check_telling_guard(&fsm, telling).is_err());
+        let repair = enforce_telling_guard(&fsm, telling, &scaffold).unwrap_err();
+        assert!(repair.contains("GUARD TELLING"), "{repair}");
+        assert!(repair.contains("¿Qué representa integral"), "{repair}");
+        // con attempts>=2 pasa
+        let mut fsm2 = SocraticFsm::new("integral");
+        fsm2.record_attempt(None);
+        fsm2.record_attempt(None);
+        assert!(check_telling_guard(&fsm2, telling).is_ok());
+        assert!(enforce_telling_guard(&fsm2, telling, &scaffold).is_ok());
+        // sin marcador no es telling aunque attempts<2
+        assert!(check_telling_guard(&fsm, "¿Cómo lo pensaste?").is_ok());
+    }
+
+    #[test]
+    fn guard_remote_completion_forces_re_repair() {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let fsm = SocraticFsm::new("derivada");
+        let scaffold = Scaffold {
+            question: "¿Cómo definirías derivada con límites?".into(),
+            hint: Some("Recordá f'(x)=lim".into()),
+            explanation: "formal".into(),
+        };
+        let completion = RemoteCompletion {
+            text: "La respuesta es x = 2".into(),
+            truncated: false,
+        };
+        let guarded = guard_remote_completion(&fsm, completion.clone(), &scaffold);
+        assert!(guarded.is_err(), "debe bloquear telling con attempts=0");
+        let mut fsm2 = SocraticFsm::new("derivada");
+        fsm2.record_attempt(None);
+        fsm2.record_attempt(None);
+        let guarded2 = guard_remote_completion(&fsm2, completion, &scaffold);
+        assert!(guarded2.is_ok());
+    }
+
+    #[test]
+    fn scaffold_history_injection_is_deterministic() {
+        use grafito_pedagogy::{PedagogicalLevel, SocraticFsm};
+        let req = request("concepto test");
+        let fsm = SocraticFsm::new("integrales");
+        let hist = vec![
+            grafito_pedagogy::scaffold::Turn {
+                role: "user".into(),
+                content: "concepto incorrectoo".into(),
+            },
+            grafito_pedagogy::scaffold::Turn {
+                role: "assistant".into(),
+                content: "probá con x=1".into(),
+            },
+        ];
+        let prompt = remote_system_prompt_with_scaffold(
+            &req,
+            &fsm,
+            "integrales",
+            PedagogicalLevel::Secondary,
+            &hist,
+        );
+        assert!(prompt.contains("integrales"));
+        assert!(prompt.contains("Pista concreta") || prompt.contains("Pista scaffold"));
+        assert!(prompt.contains("Historial"));
     }
 }
