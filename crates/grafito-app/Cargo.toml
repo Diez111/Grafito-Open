@@ -53,7 +53,7 @@ serde.workspace = true
 rayon.workspace = true
 num-complex.workspace = true
 rfd.workspace = true
-keyring.workspace = true
+keyring = { workspace = true }
 
 # This maintained profiler pair establishes the workspace Rust 1.92 minimum.
 puffin = { version = "=0.19.1", optional = true }
@@ -66,6 +66,11 @@ windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage
 libc = "0.2"
 
 [features]
+# TODO(E3/G18): keyring/reqwest opcionales tras `assistant-net` (default ON).
+# Intento previo revertido: requiere gates cfg(feature) en assistant_credentials.rs
+# + request_remote* de grafito-assistant + feature espejo allí. Sin eso, la
+# feature rompe la resolución (grafito-assistant/assistant-net no existe).
+# Ahorro estimado si se completa: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
 profile = ["puffin", "puffin_http", "eframe/puffin"]
 
 [build-dependencies]

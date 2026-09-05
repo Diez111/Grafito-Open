@@ -17,11 +17,85 @@ pub struct Scaffold {
     pub explanation: String,
 }
 
+impl Scaffold {
+    /// Segmento determinista y vinculante para el system prompt.
+    ///
+    /// Incluye pregunta BKT actual (scaffold.question), pista del misconception
+    /// y explicación, más historial acotado. Todo truncado a presupuestos fijos
+    /// para no romper `max_input_chars` (8192) ni `max_system_instructions` (4096).
+    /// Puro, sin I/O, 100% testeable: misma entrada → mismo segmento.
+    pub fn system_prompt_segment(&self, history: &[Turn]) -> String {
+        const MAX_FIELD_CHARS: usize = 500;
+        const MAX_HISTORY_TURNS: usize = 4;
+        const MAX_HISTORY_CONTENT_CHARS: usize = 180;
+        let mut out = String::new();
+        out.push_str("[SOCRATIC SCAFFOLD — VINCULANTE]\n");
+        let q: String = self.question.chars().take(MAX_FIELD_CHARS).collect();
+        out.push_str("Pregunta BKT actual (current_question): ");
+        out.push_str(&q);
+        out.push('\n');
+        if let Some(hint) = &self.hint {
+            let h: String = hint.chars().take(MAX_FIELD_CHARS).collect();
+            out.push_str("Pista scaffold (misconception): ");
+            out.push_str(&h);
+            out.push('\n');
+        } else {
+            out.push_str("Pista scaffold: (sin pista — pedí ejemplo concreto)\n");
+        }
+        let e: String = self.explanation.chars().take(MAX_FIELD_CHARS).collect();
+        out.push_str("Explicación: ");
+        out.push_str(&e);
+        out.push('\n');
+        out.push_str(&format!(
+            "Historial ({} turnos, muestra {}): ",
+            history.len(),
+            MAX_HISTORY_TURNS.min(history.len())
+        ));
+        if history.is_empty() {
+            out.push_str("(sin historial)");
+        } else {
+            for (idx, turn) in history.iter().take(MAX_HISTORY_TURNS).enumerate() {
+                let role: String = turn.role.chars().take(16).collect();
+                let content: String = turn
+                    .content
+                    .chars()
+                    .take(MAX_HISTORY_CONTENT_CHARS)
+                    .collect();
+                // Normaliza saltos para no romper prompt
+                let content = content.replace(['\n', '\r'], " ");
+                out.push_str(&format!("[{idx}:{role}:{content}] "));
+            }
+        }
+        out.push('\n');
+        out.push_str("INSTRUCCIÓN VINCULANTE: Usá EXACTAMENTE esta pregunta y pista. No inventes otra. Adaptá sólo el nivel de detalle según el historial. Si el estudiante pide solución directa con attempts<2, no la des: re-preguntá con la pista.");
+        out
+    }
+
+    /// Atajo sin historial.
+    pub fn system_prompt_segment_no_history(&self) -> String {
+        self.system_prompt_segment(&[])
+    }
+}
+
 /// Motor de scaffold — puro, sin I/O.
 #[derive(Debug, Clone, Default)]
 pub struct ScaffoldEngine;
 
 impl ScaffoldEngine {
+    /// Genera el segmento determinista listo para inyectar al system prompt.
+    ///
+    /// Wrapper puro que encadena `scaffold(concept, level, history)` + `system_prompt_segment(history)`.
+    /// Determinista y testeable: mismo concept/level/history → mismo segmento.
+    pub fn scaffold_system_segment(
+        &self,
+        concept: &str,
+        level: PedagogicalLevel,
+        history: &[Turn],
+    ) -> String {
+        let sc = self.scaffold(concept, level, history);
+        sc.system_prompt_segment(history)
+    }
+
     pub fn scaffold(&self, concept: &str, level: PedagogicalLevel, history: &[Turn]) -> Scaffold {
         let concept = concept.trim();
         if concept.is_empty() {
@@ -176,5 +250,60 @@ mod tests {
         let sc = eng.scaffold("derivada", PedagogicalLevel::Secondary, &[]);
         assert!(!sc.question.is_empty());
         assert!(sc.hint.is_some());
+    }
+
+    #[test]
+    fn system_prompt_segment_is_deterministic_and_bounded() {
+        let eng = ScaffoldEngine;
+        let history = vec![
+            Turn {
+                role: "user".into(),
+                content: "no entiendo bien".into(),
+            },
+            Turn {
+                role: "assistant".into(),
+                content: "probá con x=1".into(),
+            },
+        ];
+        let seg1 = eng.scaffold_system_segment("derivada", PedagogicalLevel::Secondary, &history);
+        let seg2 = eng.scaffold_system_segment("derivada", PedagogicalLevel::Secondary, &history);
+        assert_eq!(seg1, seg2, "determinista");
+        assert!(seg1.contains("Pregunta BKT actual"));
+        assert!(seg1.contains("Pista scaffold"));
+        assert!(seg1.contains("Historial (2 turnos"));
+        assert!(seg1.contains("VINCULANTE"));
+        // acotado
+        assert!(seg1.chars().count() < 2000);
+    }
+
+    #[test]
+    fn scaffold_segment_includes_history_adaptation() {
+        let eng = ScaffoldEngine;
+        let history = vec![Turn {
+            role: "user".into(),
+            content: "concepto incorrectoo me confundí".into(),
+        }];
+        let sc = eng.scaffold("integral", PedagogicalLevel::Secondary, &history);
+        let seg = sc.system_prompt_segment(&history);
+        // history adaptación debe haber agregado pista concreta
+        assert!(
+            sc.hint.as_deref().unwrap_or("").contains("Pista concreta")
+                || seg.contains("Pista concreta")
+                || seg.contains("concreto")
+        );
+        assert!(seg.contains("integral"));
+    }
+
+    #[test]
+    fn scaffold_segment_no_history_is_stable() {
+        let sc = Scaffold {
+            question: "¿Qué es la derivada?".into(),
+            hint: Some("Mirá la pendiente".into()),
+            explanation: "Es la tasa de cambio".into(),
+        };
+        let seg = sc.system_prompt_segment_no_history();
+        assert!(seg.contains("¿Qué es la derivada?"));
+        assert!(seg.contains("Mirá la pendiente"));
+        assert!(seg.contains("sin historial"));
     }
 }

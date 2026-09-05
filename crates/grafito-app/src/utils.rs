@@ -47,6 +47,9 @@ pub(crate) struct AppConfig {
     /// Onboarding 30s ya visto (Scandinavian, sin laberinto).
     #[serde(default)]
     pub(crate) onboarding_completed: bool,
+    /// Opt-in explícito para Aula/red avanzada (loopback F0 sin red).
+    #[serde(default)]
+    pub(crate) advanced_red_opt_in: bool,
 }
 
 fn default_full_permission() -> bool {
@@ -76,17 +79,121 @@ impl Default for AppConfig {
             assistant_full_permission: default_full_permission(),
             assistant_agent_mode: false,
             onboarding_completed: false,
+            advanced_red_opt_in: false,
         }
     }
 }
 
+pub(crate) const LEGACY_CONFIG_NAME: &str = "grafito_config.json";
+pub(crate) const LEGACY_PROFILE_NAME: &str = "grafito_profile.json";
+
+fn xdg_config_home() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            let mut base = std::path::PathBuf::from(home);
+            if base.as_os_str().is_empty() {
+                base = std::path::PathBuf::from(".");
+            }
+            base.push(".config");
+            base
+        })
+}
+
+fn xdg_data_home() -> std::path::PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME").unwrap_or_default();
+            let mut base = std::path::PathBuf::from(home);
+            if base.as_os_str().is_empty() {
+                base = std::path::PathBuf::from(".");
+            }
+            base.push(".local/share");
+            base
+        })
+}
+
+/// Intenta migrar el archivo legado `legacy` a `new_path` copiando si el
+/// legado existe y el nuevo no. No borra el legado. No hace I/O si
+/// no es necesario. Ignora errores de I/O (best-effort).
+fn try_migrate_legacy(new_path: &std::path::Path, legacy: &std::path::Path) {
+    if new_path.exists() || !legacy.exists() {
+        return;
+    }
+    // No migrar si el nuevo ya existe o el legado falta.
+    // Crear directorio padre del nuevo si falta, luego copiar.
+    if let Some(parent) = new_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::copy(legacy, new_path);
+}
+
+/// Helpers testeables sin tocar env global: resuelven rutas XDG dado un
+/// `xdg_home` y un `home` explícitos. `None` simula variable no seteada/vacía.
+#[cfg(test)]
+pub(crate) fn xdg_config_path_for(
+    xdg_config_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let base = xdg_config_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut b = home
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            if b.as_os_str().is_empty() {
+                b = std::path::PathBuf::from(".");
+            }
+            b.push(".config");
+            b
+        });
+    base.join("grafito").join(LEGACY_CONFIG_NAME)
+}
+
+#[cfg(test)]
+pub(crate) fn xdg_data_path_for(
+    xdg_data_home: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> std::path::PathBuf {
+    let base = xdg_data_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut b = home
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            if b.as_os_str().is_empty() {
+                b = std::path::PathBuf::from(".");
+            }
+            b.push(".local/share");
+            b
+        });
+    base.join("grafito").join(LEGACY_PROFILE_NAME)
+}
+
 fn config_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("grafito_config.json")
+    let path = xdg_config_home().join("grafito").join(LEGACY_CONFIG_NAME);
+    try_migrate_legacy(&path, std::path::Path::new(LEGACY_CONFIG_NAME));
+    // Best-effort: asegurar directorio existe para escrituras futuras (no bloquea si falla).
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    path
 }
 
 /// Ruta del perfil pedagógico del estudiante (memoria del tutor).
 pub(crate) fn profile_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("grafito_profile.json")
+    let path = xdg_data_home().join("grafito").join(LEGACY_PROFILE_NAME);
+    try_migrate_legacy(&path, std::path::Path::new(LEGACY_PROFILE_NAME));
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    path
 }
 
 /// Carga el perfil persistido; ante cualquier error devuelve un perfil vacío.
@@ -142,10 +249,19 @@ pub(crate) fn load_config() -> AppConfig {
 pub(crate) fn save_config(config: &AppConfig) {
     if let Ok(json) = serde_json::to_string_pretty(config) {
         let path = config_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Err(err) = std::fs::write(&path, json) {
             log::warn!("No se pudo guardar {}: {err}", path.display());
         }
     }
+}
+
+/// Export para tests: expone migración best-effort sin tocar env.
+#[cfg(test)]
+pub(crate) fn migrate_legacy_for_test(new_path: &std::path::Path, legacy: &std::path::Path) {
+    try_migrate_legacy(new_path, legacy);
 }
 
 /// Debounce de autosave para la UI (estado puro, sin I/O ni relojes internos).
@@ -156,14 +272,12 @@ pub(crate) fn save_config(config: &AppConfig) {
 /// re-serializar y re-validar el documento en cada keystroke. El caller pasa
 /// `now` explícito (epoch segundos) para que sea testeable y determinista.
 ///
-/// TODO(app.rs — otro agente): instanciar un `AutosaveDebouncer` en el estado
-/// de la app; llamar `mark_dirty(now)` en cada mutación del documento; en el
-/// tick (nunca en `Ui::`), si `should_autosave(now)` → escribir el sidecar en
+/// Flujo: `mark_dirty(now)` en cada mutación del documento; en el tick
+/// (nunca en `Ui::`), si `should_autosave(now)` → escribir el sidecar en
 /// background thread y llamar `mark_saved()`; tras `write_document_atomic`
 /// exitoso → `mark_saved()` + borrar el sidecar. Recovery al arranque con
 /// `grafito_core::persistence::load_autosave_candidate` + diálogo modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // TODO otro agente: instanciar en app.rs
 pub(crate) struct AutosaveDebouncer {
     /// Epoch de la última edición pendiente de autosave (`None` = limpio).
     last_dirty_epoch: Option<u64>,
@@ -171,7 +285,6 @@ pub(crate) struct AutosaveDebouncer {
     delay_secs: u64,
 }
 
-#[allow(dead_code)] // TODO otro agente: instanciar en app.rs
 impl AutosaveDebouncer {
     pub(crate) fn new() -> Self {
         Self {
@@ -180,6 +293,7 @@ impl AutosaveDebouncer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_delay(delay_secs: u64) -> Self {
         Self {
             last_dirty_epoch: None,
@@ -269,5 +383,110 @@ mod tests {
         let mut immediate = AutosaveDebouncer::with_delay(0);
         immediate.mark_dirty(77);
         assert!(immediate.should_autosave(77));
+    }
+
+    #[test]
+    fn xdg_config_path_respects_xdg_config_home() {
+        let xdg = std::path::Path::new("/tmp/xdg_config");
+        let home = std::path::Path::new("/home/user");
+        let path = xdg_config_path_for(Some(xdg), Some(home));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/xdg_config/grafito/grafito_config.json")
+        );
+        // Sin XDG, fallback a HOME/.config
+        let fallback = xdg_config_path_for(None, Some(home));
+        assert_eq!(
+            fallback,
+            std::path::PathBuf::from("/home/user/.config/grafito/grafito_config.json")
+        );
+        // XDG vacío también fallback
+        let empty = xdg_config_path_for(Some(std::path::Path::new("")), Some(home));
+        assert_eq!(empty, fallback);
+    }
+
+    #[test]
+    fn xdg_data_path_respects_xdg_data_home() {
+        let xdg = std::path::Path::new("/tmp/xdg_data");
+        let home = std::path::Path::new("/home/user");
+        let path = xdg_data_path_for(Some(xdg), Some(home));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/xdg_data/grafito/grafito_profile.json")
+        );
+        let fallback = xdg_data_path_for(None, Some(home));
+        assert_eq!(
+            fallback,
+            std::path::PathBuf::from("/home/user/.local/share/grafito/grafito_profile.json")
+        );
+        let empty = xdg_data_path_for(Some(std::path::Path::new("")), Some(home));
+        assert_eq!(empty, fallback);
+    }
+
+    #[test]
+    fn legacy_migration_copies_when_new_missing_and_legacy_exists() {
+        let tmp = std::env::temp_dir().join(format!(
+            "grafito_test_mig_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let legacy = tmp.join("legacy_grafito_config.json");
+        let new_path = tmp.join("xdg/grafito/grafito_config.json");
+        // Limpiar restos previos
+        let _ = std::fs::remove_file(&new_path);
+        let _ = std::fs::remove_file(&legacy);
+        std::fs::write(&legacy, br#"{"dark_mode":true}"#).expect("write legacy");
+        assert!(legacy.exists());
+        assert!(!new_path.exists());
+        migrate_legacy_for_test(&new_path, &legacy);
+        assert!(new_path.exists(), "migración copia al XDG");
+        assert!(legacy.exists(), "legado no borrado (copiar, no mover)");
+        let content = std::fs::read_to_string(&new_path).expect("read migrated");
+        assert_eq!(content, r#"{"dark_mode":true}"#);
+        // No sobrescribir si el nuevo ya existe
+        std::fs::write(&legacy, br#"{"dark_mode":false}"#).expect("overwrite legacy");
+        migrate_legacy_for_test(&new_path, &legacy);
+        let still = std::fs::read_to_string(&new_path).expect("read not overwritten");
+        assert_eq!(still, r#"{"dark_mode":true}"#, "no sobrescribe existente");
+        // Cleanup
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&new_path);
+        let _ = std::fs::remove_dir_all(tmp.join("xdg"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_migration_noop_when_legacy_missing() {
+        let tmp = std::env::temp_dir().join(format!(
+            "grafito_test_mig2_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let legacy = tmp.join("no_legacy.json");
+        let new_path = tmp.join("new.json");
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&new_path);
+        migrate_legacy_for_test(&new_path, &legacy);
+        assert!(!new_path.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn xdg_paths_end_with_grafito_subdir_and_filename() {
+        let cfg = xdg_config_path_for(None, Some(std::path::Path::new("/home/alice")));
+        assert!(cfg.ends_with("grafito/grafito_config.json"));
+        let data = xdg_data_path_for(None, Some(std::path::Path::new("/home/alice")));
+        assert!(data.ends_with("grafito/grafito_profile.json"));
+        // No relativo CWD
+        assert!(cfg.is_absolute());
+        assert!(data.is_absolute());
     }
 }

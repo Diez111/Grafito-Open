@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Pruebas de humo de release a nivel workspace para Grafito"
 
 [workspace]
-members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex"]
+members = ["crates/grafito-app", "crates/grafito-agent", "crates/grafito-anim", "crates/grafito-assistant", "crates/grafito-assistant-types", "crates/grafito-command", "crates/grafito-core", "crates/grafito-geometry", "crates/grafito-pedagogy", "crates/grafito-plugins", "crates/grafito-profile", "crates/grafito-render", "crates/grafito-ui", "crates/grafito-whiteboard", "crates/grafito-complex", "crates/grafito-ggb", "crates/grafito-classroom"]
 resolver = "2"
 
 [workspace.package]
@@ -32,7 +32,7 @@ grafito-command = { path = "crates/grafito-command" }
 grafito-geometry = { path = "crates/grafito-geometry" }
 grafito-render = { path = "crates/grafito-render" }
 grafito-ui = { path = "crates/grafito-ui" }
-grafito-assistant = { path = "crates/grafito-assistant" }
+grafito-assistant = { path = "crates/grafito-assistant", default-features = false }
 grafito-assistant-types = { path = "crates/grafito-assistant-types" }
 grafito-whiteboard = { path = "crates/grafito-whiteboard" }
 
@@ -96,6 +96,8 @@ keyring = { version = "3.6.2", default-features = false, features = ["apple-nati
 opt-level = 3
 lto = "thin"
 strip = true
+codegen-units = 1
+panic = "abort"
 
 [profile.dev]
 opt-level = 1
@@ -109,3 +111,13 @@ uninlined_format_args = "allow"
 unwrap_used = "deny"
 expect_used = "warn"
 chunks_exact_to_as_chunks = "allow"
+
+[features]
+# TODO(E3/G18): keyring/reqwest opcionales tras `assistant-net` (default ON).
+# Intento previo REVERTIDO (rompía resolución: grafito-assistant/assistant-net
+# no existe y faltan gates cfg en assistant_credentials.rs + request_remote*).
+# Diseño válido documentado en crates/grafito-app/Cargo.toml. El marcador
+# `assistant-net = []` queda como no-op hasta implementar los gates.
+# Ahorro estimado si se completa: ~2.5-3.5 MiB (~8-9% de 37.4 MiB).
+default = ["assistant-net"]
+assistant-net = []
