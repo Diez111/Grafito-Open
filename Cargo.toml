@@ -82,6 +82,9 @@ toml = "0.8"
 gif = "0.13"
 log = "0.4"
 env_logger = "0.11"
+# F10: QR real escaneable (MSRV 1.67) + PDF vectorial (MSRV 1.88 via lopdf).
+qrcode = { version = "0.14", default-features = false }
+printpdf = "0.12"
 # RUSTSEC-2026-0190 is fixed in 1.0.103; pin the minimum safe release.
 anyhow = "=1.0.103"
 rfd = "0.14"
