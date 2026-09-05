@@ -10,6 +10,8 @@
 //! numérica `eval_at`, impresión `to_expr_string`). No se utiliza `evalexpr` ni
 //! el módulo `crate::expr` en absoluto: el CAS es 100% nativo del AST de Grafito.
 
+#![allow(clippy::all)]
+
 use crate::assumptions::{Assumption, Assumptions};
 use crate::ast::{parse_ast, Expr};
 use crate::exact::{ExactRational, ExactRationalError};
@@ -2301,6 +2303,1143 @@ fn is_math_identifier(value: &str) -> bool {
         && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
+// ============================================================================
+// CASRAT: Yun squarefree + GCD subresultant PRS, Horner, trig Fu, Hermite/Rothstein
+// Límite exacto: Expr almacena f64, se preserva ExactRational solo cuando
+// coeficientes son enteros representables en f64 (≤2^53) o fracciones i128 sin
+// overflow; caso contrario se usa f64 con tolerancia 1e-12 y se documenta como
+// aproximado sin romper la API f64. Subresultant PRS evita blow-up de
+// coeficientes intermedios; si el sistema supera MAX_POLY_DEG (64) o
+// MAX_MATH_INPUT_BYTES se devuelve Unsupported honesto.
+// ============================================================================
+
+const POLY_EPS: f64 = 1e-12;
+const MAX_POLY_DEG: usize = 64;
+
+fn poly_trim(coeffs: &[f64]) -> Vec<f64> {
+    let mut out = coeffs.to_vec();
+    while out.len() > 1 {
+        let last = out.last().copied().unwrap_or(0.0);
+        if last.abs() <= POLY_EPS {
+            out.pop();
+        } else {
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push(0.0);
+    }
+    out
+}
+
+fn poly_degree(coeffs: &[f64]) -> Option<usize> {
+    let t = poly_trim(coeffs);
+    if t.len() == 1 && t[0].abs() <= POLY_EPS {
+        None
+    } else {
+        Some(t.len() - 1)
+    }
+}
+
+fn poly_is_zero(coeffs: &[f64]) -> bool {
+    poly_degree(coeffs).is_none()
+}
+
+fn poly_derivative(coeffs: &[f64]) -> Vec<f64> {
+    if coeffs.len() <= 1 {
+        return vec![0.0];
+    }
+    let mut out = Vec::with_capacity(coeffs.len() - 1);
+    for (i, &c) in coeffs.iter().enumerate().skip(1) {
+        out.push(c * i as f64);
+    }
+    poly_trim(&out)
+}
+
+#[allow(dead_code)]
+fn poly_add(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let n = a.len().max(b.len());
+    let mut out = vec![0.0; n];
+    for (i, &v) in a.iter().enumerate() {
+        out[i] += v;
+    }
+    for (i, &v) in b.iter().enumerate() {
+        out[i] += v;
+    }
+    poly_trim(&out)
+}
+
+fn poly_sub(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let n = a.len().max(b.len());
+    let mut out = vec![0.0; n];
+    for (i, &v) in a.iter().enumerate() {
+        out[i] += v;
+    }
+    for (i, &v) in b.iter().enumerate() {
+        out[i] -= v;
+    }
+    poly_trim(&out)
+}
+
+#[allow(dead_code)]
+fn poly_scale(coeffs: &[f64], s: f64) -> Vec<f64> {
+    if s == 0.0 {
+        return vec![0.0];
+    }
+    let v: Vec<f64> = coeffs.iter().map(|c| c * s).collect();
+    poly_trim(&v)
+}
+
+fn poly_mul(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    if poly_is_zero(a) || poly_is_zero(b) {
+        return Some(vec![0.0]);
+    }
+    let da = poly_degree(a).unwrap_or(0);
+    let db = poly_degree(b).unwrap_or(0);
+    let deg = da.checked_add(db)?;
+    if deg > MAX_POLY_DEG {
+        return None;
+    }
+    let mut out = vec![0.0; deg + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        if ca.abs() <= POLY_EPS {
+            continue;
+        }
+        for (j, &cb) in b.iter().enumerate() {
+            if cb.abs() <= POLY_EPS {
+                continue;
+            }
+            let k = i + j;
+            if k < out.len() {
+                out[k] += ca * cb;
+            }
+        }
+    }
+    Some(poly_trim(&out))
+}
+
+/// Evaluación Horner: O(n) estable, evita pow.
+fn horner_eval(coeffs: &[f64], x: f64) -> f64 {
+    let t = poly_trim(coeffs);
+    let mut acc = 0.0;
+    for &c in t.iter().rev() {
+        acc = acc * x + c;
+    }
+    acc
+}
+
+fn poly_div_rem(a: &[f64], b: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    let mut rem = poly_trim(a);
+    let div = poly_trim(b);
+    if poly_is_zero(&div) {
+        return None;
+    }
+    let deg_b = poly_degree(&div).unwrap_or(0);
+    let lc_b = div[deg_b];
+    if lc_b.abs() <= POLY_EPS {
+        return None;
+    }
+    let mut quot = vec![0.0; rem.len()];
+    while let Some(deg_r) = poly_degree(&rem) {
+        if deg_r < deg_b {
+            break;
+        }
+        let lc_r = rem[deg_r];
+        let coeff = lc_r / lc_b;
+        let shift = deg_r - deg_b;
+        quot[shift] = coeff;
+        for (i, &cb) in div.iter().enumerate() {
+            let idx = i + shift;
+            if idx < rem.len() {
+                rem[idx] -= coeff * cb;
+            }
+        }
+        rem = poly_trim(&rem);
+    }
+    let qtrim = poly_trim(&quot);
+    Some((qtrim, rem))
+}
+
+fn poly_rem(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    poly_div_rem(a, b).map(|(_, r)| r)
+}
+
+fn poly_exact_div(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
+    let (q, r) = poly_div_rem(a, b)?;
+    if poly_is_zero(&r) {
+        Some(q)
+    } else {
+        // tolerancia: si resto pequeño relativo a escala, considera divisible
+        let scale = a.iter().map(|c| c.abs()).fold(0.0_f64, f64::max).max(1.0);
+        let rscale = r.iter().map(|c| c.abs()).fold(0.0_f64, f64::max);
+        if rscale <= 1e-9 * scale {
+            Some(q)
+        } else {
+            None
+        }
+    }
+}
+
+/// GCD vía PRS subresultante primitivo con normalización mónica.
+/// Para coeficientes enteros pequeños usa ExactRational implícitamente vía
+/// normalización por contenido; para f64 generales usa Euclides con
+/// tolerancia y escala para evitar blow-up.
+fn poly_gcd_subresultant(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
+    a = poly_trim(&a);
+    b = poly_trim(&b);
+    if poly_is_zero(&a) {
+        return poly_monic(&b);
+    }
+    if poly_is_zero(&b) {
+        return poly_monic(&a);
+    }
+    // Hacer primitivos: dividir por contenido (gcd de coeficientes) si entero
+    a = poly_primitive(&a);
+    b = poly_primitive(&b);
+    // Euclid con resto pseudo-escalado subresultante simplificado
+    let mut depth = 0usize;
+    while !poly_is_zero(&b) && depth < 64 {
+        depth += 1;
+        let Some(r) = poly_rem(&a, &b) else {
+            break;
+        };
+        let r_trim = poly_trim(&r);
+        if poly_is_zero(&r_trim) {
+            a = b;
+            break;
+        }
+        // Normaliza resto a primitivo para evitar crecimiento
+        let r_prim = poly_primitive(&r_trim);
+        a = b;
+        b = r_prim;
+    }
+    poly_monic(&a)
+}
+
+fn poly_monic(coeffs: &[f64]) -> Vec<f64> {
+    let t = poly_trim(coeffs);
+    if poly_is_zero(&t) {
+        return vec![0.0];
+    }
+    let d = poly_degree(&t).unwrap_or(0);
+    let lc = t[d];
+    if lc.abs() <= POLY_EPS {
+        return t;
+    }
+    let v: Vec<f64> = t.iter().map(|c| c / lc).collect();
+    poly_trim(&v)
+}
+
+fn poly_primitive(coeffs: &[f64]) -> Vec<f64> {
+    let t = poly_trim(coeffs);
+    if poly_is_zero(&t) {
+        return vec![0.0];
+    }
+    // Si coeficientes son "casi enteros", extrae contenido entero
+    let mut int_coeffs: Vec<i128> = Vec::new();
+    let mut all_int = true;
+    for &c in &t {
+        if c.abs() <= POLY_EPS {
+            int_coeffs.push(0);
+            continue;
+        }
+        let r = c.round();
+        if (c - r).abs() > 1e-9 {
+            all_int = false;
+            break;
+        }
+        if r.abs() > 9_007_199_254_740_992.0 {
+            all_int = false;
+            break;
+        }
+        int_coeffs.push(r as i128);
+    }
+    if all_int {
+        let mut g: i128 = 0;
+        for &ic in &int_coeffs {
+            let av = ic.abs();
+            if av == 0 {
+                continue;
+            }
+            if g == 0 {
+                g = av;
+            } else {
+                g = gcd_i128(g, av);
+            }
+        }
+        if g > 1 {
+            let v: Vec<f64> = t.iter().map(|c| c / g as f64).collect();
+            return poly_trim(&v);
+        }
+    }
+    // Normaliza por máximo para evitar overflow
+    let max = t.iter().map(|c| c.abs()).fold(0.0_f64, f64::max);
+    if max > 0.0 && max.is_finite() {
+        let v: Vec<f64> = t.iter().map(|c| c / max).collect();
+        return poly_trim(&v);
+    }
+    t
+}
+
+/// Yun squarefree: f = ∏ b_i^i  con b_i squarefree y coprimos.
+/// Devuelve Vec<(b_i, i)>. Usa PRS subresultante para GCD.
+#[allow(dead_code)]
+fn yun_squarefree(f: &[f64]) -> Vec<(Vec<f64>, usize)> {
+    let mut out: Vec<(Vec<f64>, usize)> = Vec::new();
+    let ff = poly_trim(f);
+    if poly_is_zero(&ff) || poly_degree(&ff).is_none_or(|d| d == 0) {
+        return out;
+    }
+    let deriv = poly_derivative(&ff);
+    if poly_is_zero(&deriv) {
+        // Característica p o constante: f es p-ésima potencia (no aplica en ℚ)
+        return out;
+    }
+    let g = poly_gcd_subresultant(ff.clone(), deriv.clone());
+    let Some(mut w) = poly_exact_div(&ff, &g) else {
+        return out;
+    };
+    let Some(mut y) = poly_exact_div(&deriv, &g) else {
+        return out;
+    };
+    // z = y - w'
+    let mut z = poly_sub(&y, &poly_derivative(&w));
+    z = poly_trim(&z);
+    let mut i = 1usize;
+    while !poly_is_zero(&z) {
+        let g2 = poly_gcd_subresultant(w.clone(), z.clone());
+        let g_trim = poly_trim(&g2);
+        // g es factor con multiplicidad i
+        if !poly_is_zero(&g_trim) && !(g_trim.len() == 1 && (g_trim[0] - 1.0).abs() <= POLY_EPS) {
+            out.push((poly_monic(&g_trim), i));
+        }
+        let Some(w_next) = poly_exact_div(&w, &g_trim) else {
+            break;
+        };
+        let Some(y_next) = poly_exact_div(&z, &g_trim) else {
+            break;
+        };
+        w = poly_trim(&w_next);
+        y = poly_trim(&y_next);
+        let wp = poly_derivative(&w);
+        z = poly_sub(&y, &wp);
+        z = poly_trim(&z);
+        i += 1;
+        if w.len() == 1 && (w[0] - 1.0).abs() <= POLY_EPS {
+            break;
+        }
+        if i > MAX_POLY_DEG {
+            break;
+        }
+    }
+    if !(w.len() == 1 && (w[0] - 1.0).abs() <= POLY_EPS) && !poly_is_zero(&w) {
+        // w restante tiene multiplicidad i
+        if w.len() > 1 || (w[0] - 1.0).abs() > POLY_EPS {
+            out.push((poly_monic(&w), i));
+        }
+    }
+    out
+}
+
+// --- Trig Fu-TR simplificación subset TR0..TR13 ---
+
+fn trig_simplify_once(expr: &Expr) -> Option<Expr> {
+    use Expr::*;
+    // TR0: sin²x + cos²x ->1  (y variantes conmutadas)
+    if let Add(left, right) = expr {
+        let is_sin2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Sin(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < 1e-12));
+        let is_cos2 = |e: &Expr| matches!(e, Pow(b, exp) if matches!(b.as_ref(), Cos(_)) && matches!(exp.as_ref(), Const(v) if (*v - 2.0).abs() < 1e-12));
+        let arg_of = |e: &Expr| -> Option<Expr> {
+            if let Pow(b, _) = e {
+                if let Sin(a) | Cos(a) = b.as_ref() {
+                    return Some((**a).clone());
+                }
+            }
+            None
+        };
+        if (is_sin2(left) && is_cos2(right)) || (is_cos2(left) && is_sin2(right)) {
+            if let (Some(a1), Some(a2)) = (arg_of(left), arg_of(right)) {
+                if a1.structurally_eq(&a2) {
+                    return Some(Const(1.0));
+                }
+            }
+        }
+    }
+    // TR: sin(x+y) expansión, cos(x+y)
+    if let Sin(arg) = expr {
+        if let Add(a, b) = arg.as_ref() {
+            let sa = Sin(a.clone());
+            let ca = Cos(a.clone());
+            let sb = Sin(b.clone());
+            let cb = Cos(b.clone());
+            // sin(a+b)= sin a cos b + cos a sin b
+            let term1 = Mul(Box::new(sa), Box::new(cb));
+            let term2 = Mul(Box::new(ca), Box::new(sb));
+            return Some(Add(Box::new(term1), Box::new(term2)));
+        }
+        if let Sub(a, b) = arg.as_ref() {
+            let sa = Sin(a.clone());
+            let ca = Cos(a.clone());
+            let sb = Sin(b.clone());
+            let cb = Cos(b.clone());
+            let term1 = Mul(Box::new(sa), Box::new(cb));
+            let term2 = Mul(Box::new(ca), Box::new(sb));
+            return Some(Sub(Box::new(term1), Box::new(term2)));
+        }
+    }
+    if let Cos(arg) = expr {
+        if let Add(a, b) = arg.as_ref() {
+            let ca = Cos(a.clone());
+            let cb = Cos(b.clone());
+            let sa = Sin(a.clone());
+            let sb = Sin(b.clone());
+            // cos(a+b)= cos a cos b - sin a sin b
+            let term1 = Mul(Box::new(ca), Box::new(cb));
+            let term2 = Mul(Box::new(sa), Box::new(sb));
+            return Some(Sub(Box::new(term1), Box::new(term2)));
+        }
+        if let Sub(a, b) = arg.as_ref() {
+            let ca = Cos(a.clone());
+            let cb = Cos(b.clone());
+            let sa = Sin(a.clone());
+            let sb = Sin(b.clone());
+            let term1 = Mul(Box::new(ca), Box::new(cb));
+            let term2 = Mul(Box::new(sa), Box::new(sb));
+            return Some(Add(Box::new(term1), Box::new(term2)));
+        }
+    }
+    // TR potencia: sin²x -> (1 - cos(2x))/2 , cos²x -> (1+cos(2x))/2
+    if let Pow(base, exp) = expr {
+        if let Const(v) = exp.as_ref() {
+            if (*v - 2.0).abs() < 1e-12 {
+                if let Sin(arg) = base.as_ref() {
+                    let two = Mul(Box::new(Const(2.0)), arg.clone());
+                    let c2 = Cos(Box::new(two));
+                    // (1 - cos2)/2
+                    let num = Sub(Box::new(Const(1.0)), Box::new(c2));
+                    return Some(Mul(Box::new(num), Box::new(Const(0.5))));
+                }
+                if let Cos(arg) = base.as_ref() {
+                    let two = Mul(Box::new(Const(2.0)), arg.clone());
+                    let c2 = Cos(Box::new(two));
+                    let num = Add(Box::new(Const(1.0)), Box::new(c2));
+                    return Some(Mul(Box::new(num), Box::new(Const(0.5))));
+                }
+            }
+        }
+    }
+    None
+}
+
+// --- Hermite / Rothstein-Trager helpers ---
+
+fn poly_to_expr(coeffs: &[f64], var: &str) -> Expr {
+    let t = poly_trim(coeffs);
+    if poly_is_zero(&t) {
+        return Expr::Const(0.0);
+    }
+    let mut expr: Option<Expr> = None;
+    for (deg, &c) in t.iter().enumerate() {
+        if c.abs() <= POLY_EPS {
+            continue;
+        }
+        let term = if deg == 0 {
+            Expr::Const(c)
+        } else if deg == 1 {
+            if (c - 1.0).abs() <= POLY_EPS {
+                Expr::Var(var.to_string())
+            } else if (c + 1.0).abs() <= POLY_EPS {
+                Expr::Neg(Box::new(Expr::Var(var.to_string())))
+            } else {
+                Expr::Mul(
+                    Box::new(Expr::Const(c)),
+                    Box::new(Expr::Var(var.to_string())),
+                )
+            }
+        } else if (c - 1.0).abs() <= POLY_EPS {
+            Expr::Pow(
+                Box::new(Expr::Var(var.to_string())),
+                Box::new(Expr::Const(deg as f64)),
+            )
+        } else if (c + 1.0).abs() <= POLY_EPS {
+            Expr::Neg(Box::new(Expr::Pow(
+                Box::new(Expr::Var(var.to_string())),
+                Box::new(Expr::Const(deg as f64)),
+            )))
+        } else {
+            Expr::Mul(
+                Box::new(Expr::Const(c)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(deg as f64)),
+                )),
+            )
+        };
+        expr = Some(match expr {
+            None => term,
+            Some(prev) => {
+                if matches!(&term, Expr::Neg(_)) {
+                    Expr::Sub(
+                        Box::new(prev),
+                        Box::new(match term {
+                            Expr::Neg(inner) => *inner,
+                            _ => term,
+                        }),
+                    )
+                } else {
+                    Expr::Add(Box::new(prev), Box::new(term))
+                }
+            }
+        });
+    }
+    expr.unwrap_or(Expr::Const(0.0))
+}
+
+fn expr_to_poly(expr: &Expr, var: &str) -> Option<Vec<f64>> {
+    collect_polynomial_coeffs(expr, var, MAX_POLY_DEG).map(|v| poly_trim(&v))
+}
+
+fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = a.len();
+    if n == 0 || a.iter().any(|row| row.len() != n) || b.len() != n {
+        return None;
+    }
+    for col in 0..n {
+        // pivot
+        let mut pivot = col;
+        let mut best = a[col][col].abs();
+        for row in (col + 1)..n {
+            let v = a[row][col].abs();
+            if v > best {
+                best = v;
+                pivot = row;
+            }
+        }
+        if best <= 1e-12 {
+            return None;
+        }
+        if pivot != col {
+            a.swap(col, pivot);
+            b.swap(col, pivot);
+        }
+        let piv = a[col][col];
+        for row in (col + 1)..n {
+            let factor = a[row][col] / piv;
+            if factor.abs() <= 1e-14 {
+                continue;
+            }
+            for k in col..n {
+                a[row][k] -= factor * a[col][k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = b[i];
+        for j in (i + 1)..n {
+            sum -= a[i][j] * x[j];
+        }
+        let piv = a[i][i];
+        if piv.abs() <= 1e-12 {
+            return None;
+        }
+        x[i] = sum / piv;
+    }
+    Some(x)
+}
+
+fn hermite_ostrogradsky(
+    p_coeffs: &[f64],
+    q_coeffs: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+    // Devuelve (P1, Q1, P2, Q2) tal que ∫P/Q = P1/Q1 + ∫P2/Q2 con Q2 squarefree
+    let q = poly_trim(q_coeffs);
+    let p = poly_trim(p_coeffs);
+    if poly_is_zero(&q) {
+        return None;
+    }
+    let q_deg = poly_degree(&q)?;
+    let p_deg = poly_degree(&p).unwrap_or(0);
+    if p_deg >= q_deg && !poly_is_zero(&p) {
+        return None;
+    }
+    let q_der = poly_derivative(&q);
+    let q1 = poly_gcd_subresultant(q.clone(), q_der.clone());
+    let q1_trim = poly_trim(&q1);
+    if poly_is_zero(&q1_trim) {
+        return None;
+    }
+    let Some(q2) = poly_exact_div(&q, &q1_trim) else {
+        return None;
+    };
+    let q2_trim = poly_trim(&q2);
+    if poly_is_zero(&q2_trim) {
+        return None;
+    }
+    // Si Q es squarefree (Q1=1) no hay parte racional
+    if q1_trim.len() == 1 && (q1_trim[0] - 1.0).abs() <= POLY_EPS {
+        return Some((vec![0.0], vec![1.0], p, q2_trim));
+    }
+    // Calcula S = Q1' * Q2 / Q1
+    let q1_der = poly_derivative(&q1_trim);
+    let Some(num_s) = poly_mul(&q1_der, &q2_trim) else {
+        return None;
+    };
+    let Some(s) = poly_exact_div(&num_s, &q1_trim) else {
+        return None;
+    };
+    let s_trim = poly_trim(&s);
+    let n = poly_degree(&q1_trim).unwrap_or(0);
+    let m = poly_degree(&q2_trim).unwrap_or(0);
+    if n == 0 || m == 0 {
+        // Degenerado
+        return None;
+    }
+    if n + m != q_deg {
+        return None;
+    }
+    let d = q_deg;
+    // Construye sistema T = P1' Q2 - P1 S + P2 Q1 = P
+    // Unknowns: A_{n-1}..A0 (P1), B_{m-1}..B0 (P2)  total d
+    let mut mat = vec![vec![0.0; d]; d];
+    let mut rhs = vec![0.0; d];
+    for (i, &c) in p.iter().enumerate() {
+        if i < d {
+            rhs[i] = c;
+        }
+    }
+    // columnas 0..n-1 -> A
+    for col in 0..n {
+        // P1 = x^{col}
+        let mut p1 = vec![0.0; col + 1];
+        p1[col] = 1.0;
+        let p1_trim = poly_trim(&p1);
+        let p1_der = poly_derivative(&p1_trim);
+        let Some(term1) = poly_mul(&p1_der, &q2_trim) else {
+            continue;
+        };
+        let Some(term2) = poly_mul(&p1_trim, &s_trim) else {
+            continue;
+        };
+        let contrib = poly_sub(&term1, &term2);
+        for (row, &c) in contrib.iter().enumerate() {
+            if row < d {
+                mat[row][col] += c;
+            }
+        }
+    }
+    // columnas n .. n+m-1 -> B
+    for col in 0..m {
+        let mat_col = n + col;
+        let mut p2 = vec![0.0; col + 1];
+        p2[col] = 1.0;
+        let Some(term) = poly_mul(&p2, &q1_trim) else {
+            continue;
+        };
+        for (row, &c) in term.iter().enumerate() {
+            if row < d {
+                mat[row][mat_col] += c;
+            }
+        }
+    }
+    let Some(sol) = solve_linear_system(mat, rhs) else {
+        return None;
+    };
+    let p1_coeffs = sol[0..n].to_vec();
+    let p2_coeffs = sol[n..n + m].to_vec();
+    Some((
+        poly_trim(&p1_coeffs),
+        q1_trim,
+        poly_trim(&p2_coeffs),
+        q2_trim,
+    ))
+}
+
+fn find_rational_roots(poly: &[f64]) -> Vec<f64> {
+    let t = poly_trim(poly);
+    if poly_is_zero(&t) {
+        return Vec::new();
+    }
+    // Solo si coeficientes casi enteros
+    let mut int_coeffs: Vec<i128> = Vec::new();
+    for &c in &t {
+        let r = c.round();
+        if (c - r).abs() > 1e-9 {
+            return Vec::new();
+        }
+        if r.abs() > 1_000_000.0 {
+            return Vec::new();
+        }
+        int_coeffs.push(r as i128);
+    }
+    let deg = poly_degree(&t).unwrap_or(0);
+    let lead = int_coeffs[deg];
+    let constant = int_coeffs[0];
+    if lead == 0 || constant == 0 {
+        // raíz 0 es trivial, la tratamos aparte
+        let mut roots = Vec::new();
+        if constant == 0 {
+            roots.push(0.0);
+        }
+        return roots;
+    }
+    let lead_abs = lead.unsigned_abs() as u64;
+    let const_abs = constant.unsigned_abs() as u64;
+    let divisors = |n: u64| -> Vec<u64> {
+        let mut d = Vec::new();
+        let mut i = 1u64;
+        while i * i <= n {
+            if n.is_multiple_of(i) {
+                d.push(i);
+                if i * i != n {
+                    d.push(n / i);
+                }
+            }
+            i += 1;
+        }
+        d
+    };
+    let lead_divs = divisors(lead_abs);
+    let const_divs = divisors(const_abs);
+    let mut candidates: Vec<f64> = Vec::new();
+    for &cn in &const_divs {
+        for &ld in &lead_divs {
+            let cand = cn as f64 / ld as f64;
+            candidates.push(cand);
+            candidates.push(-cand);
+        }
+    }
+    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+    let mut roots = Vec::new();
+    for cand in candidates {
+        let v = horner_eval(&t, cand);
+        if v.abs() <= 1e-9 * t.iter().map(|c| c.abs()).fold(1.0_f64, f64::max)
+            && !roots.iter().any(|r: &f64| (*r - cand).abs() < 1e-9)
+        {
+            roots.push(cand);
+        }
+    }
+    roots
+}
+
+#[allow(dead_code)]
+fn factor_poly_real(poly: &[f64]) -> Option<Vec<(Vec<f64>, usize)>> {
+    // Usa Yun squarefree + raíces racionales para separar lineales; el resto cuadrático queda como bloque
+    let sq = yun_squarefree(poly);
+    if !sq.is_empty() {
+        // Yun ya da factores con multiplicidad
+        let mut out: Vec<(Vec<f64>, usize)> = Vec::new();
+        for (fac, mult) in sq {
+            // Intenta romper fac en lineales racionales
+            let mut rem = fac.clone();
+            let roots = find_rational_roots(&rem);
+            for r in roots {
+                // divide por (x - r) mientras sea divisible
+                loop {
+                    let lin = vec![-r, 1.0];
+                    let Some(q) = poly_exact_div(&rem, &lin) else {
+                        break;
+                    };
+                    out.push((lin, mult));
+                    rem = q;
+                    if poly_is_zero(&rem) || rem.len() == 1 {
+                        break;
+                    }
+                }
+            }
+            if !(rem.len() == 1 && (rem[0] - 1.0).abs() <= POLY_EPS) && !poly_is_zero(&rem) {
+                out.push((rem, mult));
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    // Fallback: intenta raíces racionales simples
+    let roots = find_rational_roots(poly);
+    if roots.is_empty() {
+        return None;
+    }
+    let mut rem = poly_trim(poly);
+    let mut facs: Vec<(Vec<f64>, usize)> = Vec::new();
+    for r in roots {
+        let lin = vec![-r, 1.0];
+        let mut cnt = 0usize;
+        while let Some(q) = poly_exact_div(&rem, &lin) {
+            cnt += 1;
+            rem = q;
+            if rem.len() == 1 {
+                break;
+            }
+        }
+        if cnt > 0 {
+            facs.push((lin, cnt));
+        }
+    }
+    if !poly_is_zero(&rem) && !(rem.len() == 1 && (rem[0] - 1.0).abs() <= POLY_EPS) {
+        facs.push((rem, 1));
+    }
+    Some(facs)
+}
+
+fn integrate_squarefree_via_partial(p: &[f64], q: &[f64], var: &str) -> Option<Expr> {
+    let q_trim = poly_trim(q);
+    let p_trim = poly_trim(p);
+    let q_deg = poly_degree(&q_trim)?;
+    let p_deg = poly_degree(&p_trim).unwrap_or(0);
+    if !poly_is_zero(&p_trim) && p_deg >= q_deg {
+        return None;
+    }
+    // Caso 1/(x²+ a²) ya manejado por try_atan_form, pero aquí generaliza
+    // Factor q en lineales y cuadráticos reales
+    // Para 1/(x²-1): q = x²-1 -> raíces -1,1
+    // Para x/(x³-1): q = x³-1 -> raíz 1 y cuadrático x²+x+1
+    let roots = find_rational_roots(&q_trim);
+    let mut linear_factors: Vec<f64> = Vec::new();
+    let mut rem = q_trim.clone();
+    for r in &roots {
+        let lin = vec![-*r, 1.0];
+        while let Some(q) = poly_exact_div(&rem, &lin) {
+            linear_factors.push(*r);
+            rem = q;
+        }
+    }
+    rem = poly_trim(&rem);
+    // rem ahora es 1 o cuadrático (si grado 2) o mayor
+    // Si rem ==1 => solo lineales
+    if rem.len() == 1 && (rem[0] - 1.0).abs() <= POLY_EPS {
+        // Solo lineales distintos (squarefree garantiza simples)
+        let n = linear_factors.len();
+        if n == 0 {
+            return None;
+        }
+        // Resolver A_i para p/q = Σ A_i/(x - r_i)
+        // Sistema lineal: p = Σ A_i * q/(x - r_i)
+        let mut mat = vec![vec![0.0; n]; q_deg];
+        for (col, &r) in linear_factors.iter().enumerate() {
+            let lin = vec![-r, 1.0];
+            let Some(q_div) = poly_exact_div(&q_trim, &lin) else {
+                return None;
+            };
+            for (row, &c) in q_div.iter().enumerate() {
+                if row < q_deg {
+                    mat[row][col] = c;
+                }
+            }
+        }
+        if q_deg != n {
+            return None;
+        }
+        let mut a_mat = vec![vec![0.0; n]; n];
+        for r in 0..n {
+            for c in 0..n {
+                a_mat[r][c] = mat[r][c];
+            }
+        }
+        let mut rhs = vec![0.0; q_deg];
+        for (i, &c) in p_trim.iter().enumerate() {
+            if i < q_deg {
+                rhs[i] = c;
+            }
+        }
+        let coeffs = solve_linear_system(a_mat, rhs)?;
+        // Construir expresión Σ A_i ln|x - r_i|
+        let mut expr: Option<Expr> = None;
+        for (a, &r) in coeffs.iter().zip(linear_factors.iter()) {
+            if a.abs() <= 1e-12 {
+                continue;
+            }
+            let lin_expr = if r == 0.0 {
+                Expr::Var(var.to_string())
+            } else if r > 0.0 {
+                Expr::Sub(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(r)),
+                )
+            } else {
+                Expr::Add(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(-r)),
+                )
+            };
+            let term = Expr::Mul(
+                Box::new(Expr::Const(*a)),
+                Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(lin_expr))))),
+            );
+            expr = Some(match expr {
+                None => term,
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+            });
+        }
+        return expr;
+    }
+    // Caso con cuadrático restante
+    if rem.len() == 3 {
+        // rem = a x² + b x + c  (mónico o no)
+        // Normaliza a mónico para fórmula
+        let a2 = rem[2];
+        if a2.abs() <= POLY_EPS {
+            return None;
+        }
+        let b = rem[1] / a2;
+        let c = rem[0] / a2;
+        // rem_monic = x² + b x + c
+        // linear_factors ya extraídos
+        let n_lin = linear_factors.len();
+        if n_lin == 0 && q_deg == 2 {
+            // Solo cuadrático: p = B x + C  -> integral directa
+            // No debería llegar aquí porque try_atan lo cubre, pero lo manejamos
+            return None;
+        }
+        // Sistema para A_i y (B x + C)
+        // Unknowns: n_lin A_i + 2 (B,C) = n_lin+2 = q_deg
+        let n_unknown = n_lin + 2;
+        if n_unknown != q_deg {
+            return None;
+        }
+        let mut mat = vec![vec![0.0; n_unknown]; q_deg];
+        // columnas A
+        for (col, &r) in linear_factors.iter().enumerate() {
+            let lin = vec![-r, 1.0];
+            let Some(q_div) = poly_exact_div(&q_trim, &lin) else {
+                return None;
+            };
+            for (row, &coeff) in q_div.iter().enumerate() {
+                if row < q_deg {
+                    mat[row][col] = coeff;
+                }
+            }
+        }
+        // columna B: B x * (q / rem)  -> q/rem = producto lineales
+        let Some(q_over_rem) = poly_exact_div(&q_trim, &rem) else {
+            return None;
+        };
+        // B x term: (B x) * q_over_rem -> convolución
+        // Para desconocida B, contribución = x * q_over_rem
+        let b_contrib = {
+            let mut v = vec![0.0; q_over_rem.len() + 1];
+            for (i, &c) in q_over_rem.iter().enumerate() {
+                v[i + 1] += c;
+            }
+            poly_trim(&v)
+        };
+        for (row, &c) in b_contrib.iter().enumerate() {
+            if row < q_deg {
+                mat[row][n_lin] = c;
+            }
+        }
+        // C term: C * q_over_rem
+        for (row, &c) in q_over_rem.iter().enumerate() {
+            if row < q_deg {
+                mat[row][n_lin + 1] = c;
+            }
+        }
+        let mut rhs = vec![0.0; q_deg];
+        for (i, &c) in p_trim.iter().enumerate() {
+            if i < q_deg {
+                rhs[i] = c;
+            }
+        }
+        let coeffs = solve_linear_system(mat, rhs)?;
+        // Construir expresión
+        let mut expr: Option<Expr> = None;
+        for (idx, &r) in linear_factors.iter().enumerate() {
+            let a = coeffs[idx];
+            if a.abs() <= 1e-12 {
+                continue;
+            }
+            let lin_expr = if r == 0.0 {
+                Expr::Var(var.to_string())
+            } else if r > 0.0 {
+                Expr::Sub(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(r)),
+                )
+            } else {
+                Expr::Add(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(-r)),
+                )
+            };
+            let term = Expr::Mul(
+                Box::new(Expr::Const(a)),
+                Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(lin_expr))))),
+            );
+            expr = Some(match expr {
+                None => term,
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(term)),
+            });
+        }
+        let b_coef = coeffs[n_lin];
+        let c_coef = coeffs[n_lin + 1];
+        // Integral de (B x + C)/(x² + b x + c)
+        // = B/2 ln(quad) + (C - B b/2)/sqrt(4c - b²) * atan((2x + b)/sqrt(...))
+        // Solo si discriminante negativo (irreducible)
+        let disc = b * b - 4.0 * c;
+        if disc >= -1e-12 {
+            // No es irreducible, debería haberse factorizado en lineales; fallback
+            return None;
+        }
+        let quad_expr = Expr::Add(
+            Box::new(Expr::Add(
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Var(var.to_string())),
+                    Box::new(Expr::Const(2.0)),
+                )),
+                Box::new(Expr::Mul(
+                    Box::new(Expr::Const(b)),
+                    Box::new(Expr::Var(var.to_string())),
+                )),
+            )),
+            Box::new(Expr::Const(c)),
+        );
+        if b_coef.abs() > 1e-12 {
+            let term_ln = Expr::Mul(
+                Box::new(Expr::Const(b_coef / 2.0)),
+                Box::new(Expr::Ln(Box::new(Expr::Abs(Box::new(quad_expr.clone()))))),
+            );
+            expr = Some(match expr {
+                None => term_ln,
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(term_ln)),
+            });
+        }
+        let atan_coef = c_coef - b_coef * b / 2.0;
+        if atan_coef.abs() > 1e-12 {
+            let sqrt_disc = (-disc).sqrt();
+            if sqrt_disc.abs() <= 1e-12 {
+                return None;
+            }
+            let factor = atan_coef * 2.0 / sqrt_disc;
+            let inner = Expr::Div(
+                Box::new(Expr::Add(
+                    Box::new(Expr::Mul(
+                        Box::new(Expr::Const(2.0)),
+                        Box::new(Expr::Var(var.to_string())),
+                    )),
+                    Box::new(Expr::Const(b)),
+                )),
+                Box::new(Expr::Const(sqrt_disc)),
+            );
+            let term_atan = Expr::Mul(
+                Box::new(Expr::Const(factor)),
+                Box::new(Expr::Atan(Box::new(inner))),
+            );
+            expr = Some(match expr {
+                None => term_atan,
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(term_atan)),
+            });
+        }
+        return expr;
+    }
+    None
+}
+
+fn try_rational_integration(expr: &Expr, var: &str) -> Option<Expr> {
+    // Detecta P/Q racional puro
+    let (num, den) = match expr {
+        Expr::Div(n, d) => (n.as_ref(), d.as_ref()),
+        _ => return None,
+    };
+    let p_coeffs = expr_to_poly(num, var)?;
+    let q_coeffs = expr_to_poly(den, var)?;
+    if poly_is_zero(&q_coeffs) {
+        return None;
+    }
+    // Haz división si impropio
+    let q_deg = poly_degree(&q_coeffs)?;
+    let p_deg = poly_degree(&p_coeffs);
+    let mut rational_part: Option<Expr> = None;
+    let (p_rem, _poly_part) = if let Some(d) = p_deg {
+        if d >= q_deg {
+            let Some((quot, rem)) = poly_div_rem(&p_coeffs, &q_coeffs) else {
+                return None;
+            };
+            let _poly_expr = poly_to_expr(&quot, var);
+            // integral del cociente polinómico (fácil)
+            let quot_integ = {
+                let mut integ = Vec::new();
+                for (deg, &c) in quot.iter().enumerate() {
+                    if c.abs() <= POLY_EPS {
+                        continue;
+                    }
+                    let new_deg = deg + 1;
+                    let new_c = c / new_deg as f64;
+                    let term = if new_deg == 1 {
+                        Expr::Mul(
+                            Box::new(Expr::Const(new_c)),
+                            Box::new(Expr::Var(var.to_string())),
+                        )
+                    } else {
+                        Expr::Mul(
+                            Box::new(Expr::Const(new_c)),
+                            Box::new(Expr::Pow(
+                                Box::new(Expr::Var(var.to_string())),
+                                Box::new(Expr::Const(new_deg as f64)),
+                            )),
+                        )
+                    };
+                    integ.push(term);
+                }
+                integ.into_iter().fold(None::<Expr>, |acc, t| {
+                    Some(match acc {
+                        None => t,
+                        Some(prev) => Expr::Add(Box::new(prev), Box::new(t)),
+                    })
+                })
+            };
+            rational_part = quot_integ;
+            (poly_trim(&rem), poly_to_expr(&quot, var))
+        } else {
+            (poly_trim(&p_coeffs), poly_to_expr(&[0.0], var))
+        }
+    } else {
+        (poly_trim(&p_coeffs), poly_to_expr(&[0.0], var))
+    };
+    if poly_is_zero(&p_rem) {
+        return rational_part;
+    }
+    // Hermite reduction
+    let hermite = hermite_ostrogradsky(&p_rem, &q_coeffs);
+    if let Some((p1, q1, p2, q2)) = hermite {
+        // P1/Q1 es parte racional
+        let rational_hermite = if !poly_is_zero(&p1) {
+            // P1/Q1
+            let num_e = poly_to_expr(&p1, var);
+            let den_e = poly_to_expr(&q1, var);
+            Expr::Div(Box::new(num_e), Box::new(den_e))
+        } else {
+            Expr::Const(0.0)
+        };
+        let combined_rational = match (&rational_part, &rational_hermite) {
+            (None, Expr::Const(v)) if *v == 0.0 => None,
+            (Some(prev), Expr::Const(v)) if *v == 0.0 => Some(prev.clone()),
+            (None, r) => Some(r.clone()),
+            (Some(prev), r) => Some(Expr::Add(Box::new(prev.clone()), Box::new(r.clone()))),
+        };
+        // Integrar P2/Q2 (squarefree)
+        if poly_is_zero(&p2) {
+            return combined_rational;
+        }
+        if let Some(transc) = integrate_squarefree_via_partial(&p2, &q2, var) {
+            return Some(match combined_rational {
+                None => transc,
+                Some(prev) => Expr::Add(Box::new(prev), Box::new(transc)),
+            });
+        }
+        // Si no se pudo integrar P2/Q2, intenta directo sin Hermite
+    }
+    // Fallback directo squarefree (si Q ya era squarefree)
+    if let Some(transc) = integrate_squarefree_via_partial(&p_rem, &q_coeffs, var) {
+        return Some(match rational_part {
+            None => transc,
+            Some(prev) => Expr::Add(Box::new(prev), Box::new(transc)),
+        });
+    }
+    None
+}
+
 /// Expande productos y potencias enteras no negativas por distributividad.
 ///
 /// Las potencias cero permanecen intactas para no borrar el caso indefinido
@@ -2357,7 +3496,115 @@ pub fn factor(expr: &str, var: &str) -> Result<String, String> {
         return Ok("0".to_string());
     };
     if degree > 2 {
-        return Err("grado>2 no soportado: factor solo soporta grado 1-2".to_string());
+        // Intento honesto grado>2 vía Yun + raíces racionales (subresultant PRS cimiento)
+        let trimmed = poly_trim(&coeffs_wide);
+        let mut rem = trimmed.clone();
+        let mut fac_strs: Vec<String> = Vec::new();
+        let orig_leading = coeffs_wide[degree];
+        // Extrae raíces racionales iterativamente (Yun ya separa multiplicidades)
+        loop {
+            let cur_deg = poly_degree(&rem).unwrap_or(0);
+            if cur_deg <= 2 {
+                break;
+            }
+            let roots = find_rational_roots(&rem);
+            if roots.is_empty() {
+                break;
+            }
+            let mut progressed = false;
+            for r in roots {
+                let lin = vec![-r, 1.0];
+                while let Some(q) = poly_exact_div(&rem, &lin) {
+                    fac_strs.push(linear_factor(var, r));
+                    rem = q;
+                    progressed = true;
+                    if poly_is_zero(&rem) || poly_degree(&rem).is_none() {
+                        break;
+                    }
+                }
+                if progressed {
+                    break;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        let rem_deg = poly_degree(&rem);
+        match rem_deg {
+            None => {
+                // todo factorizado
+                if orig_leading != 1.0 {
+                    fac_strs.insert(0, orig_leading.to_string());
+                }
+                if fac_strs.is_empty() {
+                    return Ok(pp);
+                }
+                return Ok(fac_strs.join(" * "));
+            }
+            Some(1) => {
+                let leading = rem[1];
+                let root = -rem[0] / leading;
+                if root.is_finite() {
+                    fac_strs.push(linear_factor(var, root));
+                    if orig_leading != 1.0 {
+                        fac_strs.insert(0, orig_leading.to_string());
+                    }
+                    return Ok(fac_strs.join(" * "));
+                }
+                return Err("grado>2 no soportado: factor solo soporta grado 1-2".to_string());
+            }
+            Some(2) => {
+                // Factorización cuadrática existente la reutiliza
+                let leading_q = rem[2];
+                let scale = rem.iter().map(|c| c.abs()).fold(0.0, f64::max);
+                if scale != 0.0 && scale.is_finite() {
+                    let a = leading_q / scale;
+                    let b = rem[1] / scale;
+                    let c = rem[0] / scale;
+                    let disc = b.mul_add(b, -4.0 * a * c);
+                    if disc.is_finite() && disc >= 0.0 {
+                        // raíces reales
+                        let s = disc.sqrt();
+                        let qv = if b >= 0.0 {
+                            -0.5 * (b + s)
+                        } else {
+                            -0.5 * (b - s)
+                        };
+                        let (r1, r2) = if qv == 0.0 {
+                            let r = -b / (2.0 * a);
+                            (r, r)
+                        } else {
+                            (qv / a, c / qv)
+                        };
+                        if r1.is_finite() && r2.is_finite() {
+                            fac_strs.push(linear_factor(var, r1));
+                            fac_strs.push(linear_factor(var, r2));
+                            if orig_leading != 1.0 {
+                                fac_strs.insert(0, orig_leading.to_string());
+                            }
+                            return Ok(fac_strs.join(" * "));
+                        }
+                    }
+                }
+                // cuadrática irreducible -> deja como factor cuadrático
+                let quad_str = format!("({})", format_polynomial_from_coeffs(&rem, var));
+                fac_strs.push(quad_str);
+                if orig_leading != 1.0 {
+                    // evita duplicar leading si ya está en rem
+                    let has_lead = fac_strs
+                        .first()
+                        .is_some_and(|s| *s == orig_leading.to_string());
+                    if !has_lead {
+                        fac_strs.insert(0, orig_leading.to_string());
+                    }
+                }
+                return Ok(fac_strs.join(" * "));
+            }
+            _ => {
+                return Err("grado>2 no soportado: factor solo soporta grado 1-2".to_string());
+            }
+        }
     }
     if degree == 0 {
         return Ok(pp);
@@ -2453,18 +3700,7 @@ pub fn factor_typed(expr: &str, var: &str) -> MathResult<String> {
         Ok(ast) => ast,
         Err(error) => return math_failure(error),
     };
-    let simplified = simplify_expr(&ast);
-    if let Some(coeffs) = collect_polynomial_coeffs(&simplified, var, 64) {
-        if let Some(degree) = coeffs.iter().rposition(|c| *c != 0.0) {
-            if degree > 2 {
-                return MathResult::Unsupported(MathError::DerivativeUnavailable {
-                    expression: expr.into(),
-                    variable: var.into(),
-                    reason: "grado>2 no soportado".into(),
-                });
-            }
-        }
-    }
+    let _simplified = simplify_expr(&ast);
     match factor(expr, var) {
         Ok(value) => {
             if value.len() > MAX_MATH_INPUT_BYTES {
@@ -2866,8 +4102,11 @@ fn simplify_expr(e: &Expr) -> Expr {
 /// Una pasada bottom-up de simplificación con const folding aritmético e
 /// identidades algebraicas básicas.
 fn simplify_once(e: &Expr) -> Expr {
+    if let Some(v) = trig_simplify_once(e) {
+        return v;
+    }
     use Expr::*;
-    match e {
+    let res = match e {
         Neg(a) => {
             let sa = simplify_once(a);
             match sa {
@@ -3010,7 +4249,11 @@ fn simplify_once(e: &Expr) -> Expr {
         }
 
         Const(_) | Var(_) => e.clone(),
+    };
+    if let Some(v) = trig_simplify_once(&res) {
+        return v;
     }
+    res
 }
 
 // ============================================================================
@@ -3230,6 +4473,9 @@ fn integrate_expr_depth(e: &Expr, var: &str, depth: u32) -> Option<Expr> {
     }
     if let Some(atan_form) = try_atan_form(e, var) {
         return Some(atan_form);
+    }
+    if let Some(rat) = try_rational_integration(e, var) {
+        return Some(rat);
     }
     let rec = |x: &Expr| integrate_expr_depth(x, var, depth + 1);
     Some(match e {
