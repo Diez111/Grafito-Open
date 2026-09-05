@@ -1543,6 +1543,405 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
     Err("assistant agent loop did not converge".into())
 }
 
+// ── F10 Aula/P2P+IA: telemetría, costos, cascada, juez (S/M honestos) ───────
+//
+// Cerebro puro: sin I/O, sin spawn, sin red. Todo local y acotado por
+// `RequestBudget` (8192 in / 2048 out / 8 pasos / 60s) y `AttachmentLimits`
+// (512 KiB / 1 MiB). PII nunca sale: solo nombres de tool + conteos.
+//
+// - `TurnTelemetry` + `AgentTelemetry`: por turno + costos visibles.
+// - `ModelCascade`: cadena primaria + fallbacks (ej. spark→deepseek).
+// - `judge_telling_heuristic`: contrato `revise > block` (S) + calibración
+//   `over-blocking ≤5%`. El juez LLM completo es L → `llm_judge_stub`.
+// - `ocr_local_stub`: OCR manuscrito local es L → siempre `Err` honesto.
+
+/// Tope de turnos registrados (igual que `RequestBudget::max_steps = 8`).
+pub const MAX_TELEMETRY_TURNS: usize = 8;
+/// Tope de modelos en cascada (primaria + 3 fallbacks).
+pub const MAX_CASCADE_MODELS: usize = 4;
+/// Longitud máxima de un nombre de modelo (igual que `ToolCall` name 64).
+pub const MAX_MODEL_NAME_LEN: usize = 64;
+
+/// Nombre de modelo validado: `1..=64`, ASCII alfanumérico + `-`/`_`<code>.</code>`+`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelName(String);
+
+impl ModelName {
+    /// Valida y construye. `Err` si vacío, largo o con caracteres no permitidos.
+    pub fn try_new(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("model name vacío".to_string());
+        }
+        if trimmed.len() > MAX_MODEL_NAME_LEN {
+            return Err(format!("model name excede {MAX_MODEL_NAME_LEN} bytes"));
+        }
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '+')
+        {
+            return Err("model name solo admite [A-Za-z0-9-_.+]".to_string());
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    /// Vista del nombre (ya validado).
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Telemetría de un turno del agente (S): latencia + chars + tool + éxito.
+///
+/// Todo local: no guarda prompts, respuestas ni PII — solo conteos y el
+/// nombre de la tool (ya allowlisted). `input_chars ≤ 8192`,
+/// `output_chars ≤ 2048`, `latency_ms ≤ 120_000` (cap absoluto del budget).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnTelemetry {
+    /// Índice de turno `0..=7` (igual que `max_steps`).
+    pub turn: usize,
+    /// Tool ejecutada en el turno (`None` si fue turno de texto final).
+    pub tool_name: Option<String>,
+    /// ¿La tool respondió `ok`? (texto final siempre `true`).
+    pub ok: bool,
+    /// Latencia del turno en ms (medida por el caller, saturante).
+    pub latency_ms: u64,
+    /// Chars de entrada consumidos en el turno (prompt + tools previas).
+    pub input_chars: usize,
+    /// Chars de salida producidos en el turno (texto o args serializados).
+    pub output_chars: usize,
+}
+
+impl TurnTelemetry {
+    /// Construye validando presupuestos. `Err` si excede topes.
+    pub fn try_new(
+        turn: usize,
+        tool_name: Option<&str>,
+        ok: bool,
+        latency_ms: u64,
+        input_chars: usize,
+        output_chars: usize,
+    ) -> Result<Self, String> {
+        if turn >= MAX_TELEMETRY_TURNS {
+            return Err(format!("turn {turn} excede {MAX_TELEMETRY_TURNS} turnos"));
+        }
+        if latency_ms > 120_000 {
+            return Err("latency_ms excede 120000".to_string());
+        }
+        if input_chars > 8_192 {
+            return Err("input_chars excede 8192".to_string());
+        }
+        if output_chars > 2_048 {
+            return Err("output_chars excede 2048".to_string());
+        }
+        let clean_tool = match tool_name {
+            None => None,
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    if trimmed.len() > 64 {
+                        return Err("tool_name excede 64 bytes".to_string());
+                    }
+                    if !trimmed
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                    {
+                        return Err("tool_name inválido".to_string());
+                    }
+                    Some(trimmed.to_string())
+                }
+            }
+        };
+        Ok(Self {
+            turn,
+            tool_name: clean_tool,
+            ok,
+            latency_ms,
+            input_chars,
+            output_chars,
+        })
+    }
+}
+
+/// Acumulador de telemetría del loop (costos visibles para la UI).
+///
+/// Cap `MAX_TELEMETRY_TURNS = 8`: `try_record` falla honesto si se excede
+/// (el loop real nunca supera `max_tool_turns ≤ 8` por `AgentBudget`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentTelemetry {
+    turns: Vec<TurnTelemetry>,
+}
+
+impl AgentTelemetry {
+    /// Acumulador vacío.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { turns: Vec::new() }
+    }
+
+    /// Registra un turno. `Err` si ya hay 8 (fail-closed, sin truncar).
+    pub fn try_record(&mut self, turn: TurnTelemetry) -> Result<(), String> {
+        if self.turns.len() >= MAX_TELEMETRY_TURNS {
+            return Err(format!(
+                "telemetría llena (máximo {MAX_TELEMETRY_TURNS} turnos)"
+            ));
+        }
+        // Orden creciente de turnos (contrato barato para la UI).
+        if let Some(last) = self.turns.last() {
+            if turn.turn < last.turn {
+                return Err("turn desordenado".to_string());
+            }
+        }
+        self.turns.push(turn);
+        Ok(())
+    }
+
+    /// Turnos registrados.
+    #[must_use]
+    pub fn turn_count(&self) -> usize {
+        self.turns.len()
+    }
+
+    /// Tools ejecutadas (turnos con `tool_name`).
+    #[must_use]
+    pub fn tool_calls(&self) -> usize {
+        self.turns.iter().filter(|t| t.tool_name.is_some()).count()
+    }
+
+    /// Tools con `ok = true`.
+    #[must_use]
+    pub fn tools_ok(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|t| t.tool_name.is_some() && t.ok)
+            .count()
+    }
+
+    /// Suma de `input_chars` (saturante).
+    #[must_use]
+    pub fn total_input_chars(&self) -> usize {
+        self.turns.iter().map(|t| t.input_chars).sum()
+    }
+
+    /// Suma de `output_chars` (saturante).
+    #[must_use]
+    pub fn total_output_chars(&self) -> usize {
+        self.turns.iter().map(|t| t.output_chars).sum()
+    }
+
+    /// Latencia total del loop en ms (saturante).
+    #[must_use]
+    pub fn total_latency_ms(&self) -> u64 {
+        self.turns.iter().map(|t| t.latency_ms).sum()
+    }
+
+    /// ¿Supera el `RequestBudget`? (`in > 8192` o `out > 2048` o `turnos > 8`).
+    #[must_use]
+    pub fn is_over_budget(&self, budget: &grafito_assistant_types::RequestBudget) -> bool {
+        self.total_input_chars() > budget.max_input_chars
+            || self.total_output_chars() > budget.max_output_chars
+            || self.turn_count() > budget.max_steps
+    }
+
+    /// Resumen visible para la UI (una línea, sin PII):
+    /// `"3 turnos · 2 tools (ok 1) · 1200/8192 in · 800/2048 out · 900ms"`.
+    #[must_use]
+    pub fn visible_summary(&self, budget: &grafito_assistant_types::RequestBudget) -> String {
+        format!(
+            "{} turnos · {} tools (ok {}) · {}/{} in · {}/{} out · {}ms",
+            self.turn_count(),
+            self.tool_calls(),
+            self.tools_ok(),
+            self.total_input_chars(),
+            budget.max_input_chars,
+            self.total_output_chars(),
+            budget.max_output_chars,
+            self.total_latency_ms(),
+        )
+    }
+}
+
+/// Cascada de modelos (S-M): primaria + fallbacks en orden visible.
+///
+/// No ejecuta red: solo define el orden que la app recorre (ej.
+/// `muse-spark → deepseek-v4-flash`, fallback de sesión ya existente en
+/// `grafito-app/src/assistant.rs:2470-2485`). Pura y acotada a 4 modelos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCascade {
+    primary: ModelName,
+    fallbacks: Vec<ModelName>,
+}
+
+impl ModelCascade {
+    /// Construye validando nombres y topes. `Err` si primaria vacía,
+    /// duplicados o más de 3 fallbacks.
+    pub fn try_new(primary: &str, fallbacks: &[&str]) -> Result<Self, String> {
+        let primary_name = ModelName::try_new(primary)?;
+        if fallbacks.len() > MAX_CASCADE_MODELS - 1 {
+            return Err(format!("cascada excede {} modelos", MAX_CASCADE_MODELS));
+        }
+        let mut seen = vec![primary_name.as_str().to_string()];
+        let mut clean_fallbacks = Vec::with_capacity(fallbacks.len());
+        for raw in fallbacks {
+            let name = ModelName::try_new(raw)?;
+            if seen.iter().any(|s| s == name.as_str()) {
+                return Err(format!("modelo duplicado en cascada: {}", name.as_str()));
+            }
+            seen.push(name.as_str().to_string());
+            clean_fallbacks.push(name);
+        }
+        Ok(Self {
+            primary: primary_name,
+            fallbacks: clean_fallbacks,
+        })
+    }
+
+    /// Cadena completa `[primaria, fallback...]` (para mostrar en la UI).
+    #[must_use]
+    pub fn chain(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(1 + self.fallbacks.len());
+        out.push(self.primary.as_str().to_string());
+        for fallback in &self.fallbacks {
+            out.push(fallback.as_str().to_string());
+        }
+        out
+    }
+
+    /// Siguiente modelo tras `failed`, o `None` si es el último o desconocido.
+    #[must_use]
+    pub fn next_after(&self, failed: &str) -> Option<String> {
+        let chain = self.chain();
+        let position = chain.iter().position(|name| name == failed)?;
+        chain.get(position.saturating_add(1)).cloned()
+    }
+
+    /// Primaria (para el payload inicial).
+    #[must_use]
+    pub fn primary(&self) -> &str {
+        self.primary.as_str()
+    }
+}
+
+/// Acción del juez ante una respuesta (contrato `revise > block`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeAction {
+    /// Respuesta aceptada tal cual.
+    Allow,
+    /// Telling temprano: NO se bloquea, se re-pregunta con el scaffold
+    /// (repara una vez vía `repair_feedback`, igual que `enforce_telling_guard`).
+    Revise,
+    /// Reservado para política futura (PII, inyección): hoy nunca se emite
+    /// por telling — el contrato exige `revise` antes que `block`.
+    Block,
+}
+
+/// Veredicto del juez heurístico (S, calibrado abajo).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TellingJudgeVerdict {
+    /// ¿Detectó telling (`attempts<2` + marcador de solución)?
+    pub is_telling: bool,
+    /// Confianza `0..=1` (0.9 telling, 0.1 no-telling, 0.5 vacío).
+    pub confidence: f64,
+    /// Acción según contrato (`Revise` si telling, `Allow` si no).
+    pub action: JudgeAction,
+    /// Pista de reparación (pregunta heurística) si `Revise`.
+    pub repair_hint: Option<String>,
+}
+
+/// Juez heurístico de telling (S, puro, sin LLM ni red).
+///
+/// - `attempts >= 2` (`can_reveal`) → `Allow` (aunque haya solución).
+/// - `attempts < 2` + marcador de solución (`crate::contains_telling_markers`)
+///   → `Revise` con `repair_hint` (contrato: nunca `Block` por telling).
+/// - Sin marcador → `Allow` (preguntar de más también enseña mal).
+/// - Texto vacío → `Allow` con confianza 0.5 (el loop pedirá aclaración).
+pub fn judge_telling_heuristic(
+    attempts: u8,
+    response_text: &str,
+    repair_hint: Option<&str>,
+) -> TellingJudgeVerdict {
+    if response_text.trim().is_empty() {
+        return TellingJudgeVerdict {
+            is_telling: false,
+            confidence: 0.5,
+            action: JudgeAction::Allow,
+            repair_hint: None,
+        };
+    }
+    if attempts >= 2 {
+        return TellingJudgeVerdict {
+            is_telling: false,
+            confidence: 0.9,
+            action: JudgeAction::Allow,
+            repair_hint: None,
+        };
+    }
+    if crate::contains_telling_markers(response_text) {
+        return TellingJudgeVerdict {
+            is_telling: true,
+            confidence: 0.9,
+            action: JudgeAction::Revise,
+            repair_hint: repair_hint
+                .map(|hint| hint.trim().to_string())
+                .filter(|hint| !hint.is_empty())
+                .map(|hint| hint.chars().take(500).collect()),
+        };
+    }
+    TellingJudgeVerdict {
+        is_telling: false,
+        confidence: 0.9,
+        action: JudgeAction::Allow,
+        repair_hint: None,
+    }
+}
+
+/// Tasa de over-blocking sobre fixtures `(texto, es_telling_real)`.
+///
+/// Fracción de NO-telling marcados como telling (`0..=1`). El contrato F10
+/// exige `≤5%` (máx 1 falso positivo cada 20 turnos, igual que `telling_rate`).
+/// Pura, `None` si no hay fixtures (evita división por cero).
+#[must_use]
+pub fn telling_overblocking_rate(fixtures: &[(&str, bool)]) -> Option<f64> {
+    let mut negatives = 0_usize;
+    let mut false_positives = 0_usize;
+    for (text, is_real_telling) in fixtures {
+        if *is_real_telling {
+            continue;
+        }
+        negatives = negatives.saturating_add(1);
+        // attempts=0: el caso más estricto (can_reveal=false).
+        let verdict = judge_telling_heuristic(0, text, None);
+        if verdict.is_telling {
+            false_positives = false_positives.saturating_add(1);
+        }
+    }
+    if negatives == 0 {
+        return None;
+    }
+    Some(false_positives as f64 / negatives as f64)
+}
+
+/// Stub honesto del juez LLM completo (L): requiere modelo remoto + N≥200.
+///
+/// El juez calibrado con LLM auditaría `telling` ambiguo (ironía, pasos
+/// parciales) con un modelo remoto y calibración EM sobre `≥200` turnos
+/// etiquetados. Fuera del frente (red + dataset). Hoy: heurístico S arriba.
+pub fn llm_judge_stub() -> Result<String, String> {
+    Err("llm-judge no implementado: diseño F10.W5 (auditoría remota con calibración N≥200); hoy juez heurístico revise>block".to_string())
+}
+
+/// Stub honesto de OCR manuscrito local (L): requiere visión local.
+///
+/// Transcribiría trazos/imagen a texto editable sin red (modelo on-device).
+/// Fuera del frente (peso + dataset). Hoy: el usuario edita la transcripción
+/// o usa un proveedor de visión explícito (ver `lib.rs:132`).
+pub fn ocr_local_stub() -> Result<String, String> {
+    Err("ocr-local no implementado: diseño F10.W5 (visión on-device acotada a 1MiP); hoy transcripción editable o visión remota explícita".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2252,5 +2651,156 @@ mod tests {
             matches!(result, Err(ref error) if error.contains("assistant-net")),
             "{result:?}"
         );
+    }
+
+    // ── Tests F10: telemetría + costos + cascada + juez ─────────────────────
+
+    #[test]
+    fn turn_telemetry_rejects_over_budget_values() {
+        assert!(TurnTelemetry::try_new(0, Some("evaluate_expr"), true, 100, 100, 100).is_ok());
+        assert!(TurnTelemetry::try_new(8, None, true, 100, 10, 10).is_err());
+        assert!(TurnTelemetry::try_new(0, None, true, 200_000, 10, 10).is_err());
+        assert!(TurnTelemetry::try_new(0, None, true, 100, 9_000, 10).is_err());
+        assert!(TurnTelemetry::try_new(0, None, true, 100, 10, 3_000).is_err());
+        assert!(TurnTelemetry::try_new(0, Some("bad tool!"), true, 100, 10, 10).is_err());
+        // Nombre vacío → None honesto.
+        let text_turn = TurnTelemetry::try_new(0, Some("   "), true, 10, 5, 5).expect("turn");
+        assert_eq!(text_turn.tool_name, None);
+    }
+
+    #[test]
+    fn agent_telemetry_accumulates_and_shows_visible_costs() {
+        let budget = grafito_assistant_types::RequestBudget::default();
+        assert_eq!(budget.max_input_chars, 8_192);
+        assert_eq!(budget.max_output_chars, 2_048);
+        assert_eq!(budget.max_steps, 8);
+        let mut telemetry = AgentTelemetry::new();
+        telemetry
+            .try_record(
+                TurnTelemetry::try_new(0, Some("evaluate_expr"), true, 200, 500, 100).expect("t0"),
+            )
+            .expect("record");
+        telemetry
+            .try_record(
+                TurnTelemetry::try_new(1, Some("scaffold"), true, 300, 700, 200).expect("t1"),
+            )
+            .expect("record");
+        telemetry
+            .try_record(TurnTelemetry::try_new(2, None, true, 400, 0, 500).expect("t2"))
+            .expect("record");
+        assert_eq!(telemetry.turn_count(), 3);
+        assert_eq!(telemetry.tool_calls(), 2);
+        assert_eq!(telemetry.tools_ok(), 2);
+        assert_eq!(telemetry.total_input_chars(), 1_200);
+        assert_eq!(telemetry.total_output_chars(), 800);
+        assert_eq!(telemetry.total_latency_ms(), 900);
+        assert!(!telemetry.is_over_budget(&budget));
+        let summary = telemetry.visible_summary(&budget);
+        assert!(summary.contains("3 turnos"), "{summary}");
+        assert!(summary.contains("1200/8192 in"), "{summary}");
+        assert!(summary.contains("800/2048 out"), "{summary}");
+        assert!(!summary.contains("api_key"));
+        // Llenar hasta 8 y el noveno falla honesto.
+        for turn in 3..8 {
+            telemetry
+                .try_record(TurnTelemetry::try_new(turn, None, true, 10, 10, 10).expect("fill"))
+                .expect("record");
+        }
+        assert_eq!(telemetry.turn_count(), 8);
+        assert!(telemetry
+            .try_record(TurnTelemetry::try_new(7, None, true, 10, 10, 10).expect("extra"))
+            .is_err());
+    }
+
+    #[test]
+    fn model_cascade_chain_and_fallback_are_visible() {
+        let cascade =
+            ModelCascade::try_new("muse-spark-1.3", &["deepseek-v4-flash"]).expect("cascada");
+        assert_eq!(cascade.primary(), "muse-spark-1.3");
+        assert_eq!(cascade.chain(), vec!["muse-spark-1.3", "deepseek-v4-flash"]);
+        assert_eq!(
+            cascade.next_after("muse-spark-1.3").as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(cascade.next_after("deepseek-v4-flash"), None);
+        assert_eq!(cascade.next_after("desconocido"), None);
+        // Duplicados y topes fallan honesto.
+        assert!(ModelCascade::try_new("a", &["a"]).is_err());
+        assert!(ModelCascade::try_new("", &[]).is_err());
+        assert!(ModelCascade::try_new("a", &["b", "c", "d", "e"]).is_err());
+        assert!(ModelName::try_new("bad name!").is_err());
+    }
+
+    #[test]
+    fn judge_prefers_revise_over_block_and_allows_after_two_attempts() {
+        // Telling temprano → Revise (nunca Block).
+        let early = judge_telling_heuristic(0, "La solución es x = 4", Some("¿Cómo lo pensaste?"));
+        assert!(early.is_telling);
+        assert_eq!(early.action, JudgeAction::Revise);
+        assert!(early.repair_hint.is_some());
+        assert!((early.confidence - 0.9).abs() < 1e-9);
+        // Mismo texto con attempts=2 → Allow (can_reveal).
+        let late = judge_telling_heuristic(2, "La solución es x = 4", None);
+        assert!(!late.is_telling);
+        assert_eq!(late.action, JudgeAction::Allow);
+        // Pregunta socrática → Allow.
+        let question = judge_telling_heuristic(0, "¿Cómo lo pensaste?", None);
+        assert!(!question.is_telling);
+        assert_eq!(question.action, JudgeAction::Allow);
+        // Vacío → Allow con confianza 0.5.
+        let empty = judge_telling_heuristic(0, "   ", None);
+        assert_eq!(empty.action, JudgeAction::Allow);
+        assert!((empty.confidence - 0.5).abs() < 1e-9);
+        // Contrato: ningún telling produce Block.
+        assert_ne!(early.action, JudgeAction::Block);
+    }
+
+    #[test]
+    fn judge_overblocking_stays_under_five_percent() {
+        // 20 no-telling (preguntas/pistas) + 2 telling reales.
+        let negatives = [
+            "¿Cómo lo pensaste?",
+            "¿Qué pasa si probás con x=1?",
+            "Contame tu idea primero.",
+            "¿Qué significa la pendiente acá?",
+            "Probá derivar término a término.",
+            "¿Qué te confunde del enunciado?",
+            "Revisemos el dominio juntos.",
+            "¿Qué esperás que pase cerca de cero?",
+            "Compará con el ejemplo de clase.",
+            "¿Cuál es tu primer paso?",
+            "Dibujá la recta tangente.",
+            "¿Qué unidad tiene el resultado?",
+            "Estimá antes de calcular.",
+            "¿Qué te dice el gráfico?",
+            "Escribí lo que sabés hasta ahora.",
+            "¿Qué cambiaría si el coeficiente fuera 2?",
+            "Leé el enunciado en voz alta.",
+            "¿Qué hipótesis podés probar?",
+            "Acordate de la definición de derivada.",
+            "¿Cómo verificás tu respuesta?",
+        ];
+        let mut fixtures: Vec<(&str, bool)> = negatives.iter().map(|text| (*text, false)).collect();
+        fixtures.push(("La solución es x = 4", true));
+        fixtures.push(("El resultado final es 42", true));
+        let rate = telling_overblocking_rate(&fixtures).expect("tasa");
+        assert!(
+            rate <= 0.05,
+            "over-blocking {rate} excede 5% (contrato revise>block)"
+        );
+        assert_eq!(telling_overblocking_rate(&[]), None);
+        assert_eq!(
+            telling_overblocking_rate(&[("La solución es 1", true)]),
+            None
+        );
+    }
+
+    #[test]
+    fn l_stubs_fail_honestly_without_network() {
+        let judge = llm_judge_stub().expect_err("L siempre falla");
+        assert!(judge.contains("llm-judge"));
+        assert!(judge.contains("N≥200"));
+        let ocr = ocr_local_stub().expect_err("L siempre falla");
+        assert!(ocr.contains("ocr-local"));
     }
 }

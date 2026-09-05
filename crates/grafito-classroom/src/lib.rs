@@ -1,25 +1,40 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! Grafito Classroom — aula colaborativa (Cerebro puro, sin egui/wgpu).
 //!
-//! Crate hoja del DAG: sin I/O, sin spawn, sin egui, testeable headless.
+//! Crate del DAG: sin I/O, sin spawn, sin egui, testeable headless.
 //! Provee [`TeacherDashboard`] para asistencia + dashboard de aprendizaje
-//! accionable (Fase C2). No añade deps ni I/O: solo `serde`/`serde_json` ya
-//! en workspace.
+//! accionable (Fase C2) + sesión con statem + transporte Loopback.
 //!
 //! # Roles
-//! - [`TeacherDashboard`] (`lib.rs:659-698` original): asistencia
+//! - [`TeacherDashboard`] (`lib.rs` original): asistencia
 //!   (`code`, `present`, `hands`, `names`, `exercise`, `snapshot_digest`)
 //!   extendida a métricas de aprendizaje accionables sin romper compat.
 //! - [`LearnerSnapshot`] minimal `{ name, bkt_p_known, misconception_counts }`
-//!   para desacoplar de `grafito-profile::StudentProfile` (crate distinta).
-//!   Si el caller dispone de `StudentProfile`, mapea a `LearnerSnapshot`
-//!   antes de llamar `from_live_with_profiles`.
+//!   con [`LearnerSnapshot::from_student_profile`] real hacia
+//!   `grafito-profile::StudentProfile` (dependencia hoja, sin ciclo).
+//! - [`session::ClassroomSession`]: statem `Idle → Lobby → Live → Closed`
+//!   + roster + manos (PII siempre local, BTreeMap determinista).
+//! - [`transport::LoopbackTransport`]: cola acotada 128 en memoria (sin red).
+//! - [`stubs`]: L honestos (iroh/CRDT/cifrado/offline solo diseño + `Err`).
 //!
 //! # Presupuestos (heredados)
 //! - `MAX_DASHBOARD_NAMES = 5_000` (coherente con `MAX_OBJECT_COUNT`)
 //! - `MAX_SNAPSHOT_DIGEST_LEN = 256`
 //! - `MAX_MISCONCEPTION_KINDS = 32` (cap agregado)
 //! - `MAX_BKT_SUMMARY_LEN = 128`
+
+pub mod session;
+pub mod stubs;
+pub mod transport;
+
+pub use session::{
+    ClassroomCode, ClassroomError, ClassroomPhase, ClassroomSession, LearnerName, RosterMember,
+    MAX_CLASSROOM_CODE_LEN, MAX_EXERCISE_CHARS, MAX_LEARNER_NAME_LEN, MAX_ROSTER_SIZE,
+};
+pub use transport::{
+    ClassroomMessage, ClassroomMessageKind, ClassroomTransport, LoopbackTransport,
+    MAX_MESSAGE_BYTES, MAX_TRANSPORT_QUEUE,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,10 +48,11 @@ pub const MAX_MISCONCEPTION_KINDS: usize = 32;
 /// Cap de entradas en `bkt_summary` (evita Vec ilimitado).
 pub const MAX_BKT_SUMMARY_LEN: usize = 128;
 
-/// Snapshot mínimo de un aprendiz para alimentar el dashboard sin depender
-/// de `grafito-profile` (evita ciclo de deps). Mapa 1:1 con `StudentProfile`
-/// si el caller lo dispone: `bkt_p_known` es `BranchState::bkt_p_known` o
-/// `mastery` medio; `misconception_counts` viene de `WorkingMemory`.
+/// Snapshot mínimo de un aprendiz para alimentar el dashboard.
+/// Mapeo 1:1 con `StudentProfile` vía [`Self::from_student_profile`]:
+/// `bkt_p_known` es la media de `BranchState::bkt_p_known` (o 0.3 si no hay
+/// ramas); `misconception_counts` viene de `WorkingMemory` (u8→usize,
+/// claves normalizadas); `branches_due` cuenta `next_review_epoch <= now`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LearnerSnapshot {
     /// Nombre display (trimmed, no vacío idealmente).
@@ -97,6 +113,58 @@ impl LearnerSnapshot {
         }
         self.misconception_counts = normalized;
         self
+    }
+
+    /// Mapeo real desde `StudentProfile` (PII siempre local, puro, sin I/O).
+    ///
+    /// - `name`: `profile.display_name()` (trim, fallback `"Estudiante"`).
+    /// - `bkt_p_known`: media de `branches.bkt_p_known` (solo finitos;
+    ///   `0.3` si no hay ramas, igual que `default_bkt_p_known`).
+    /// - `misconception_counts`: `working_memory.misconception_counts`
+    ///   (`u8→usize`, claves normalizadas, ceros ignorados).
+    /// - `branches_due`: `profile.branches_due(now).len()` (repaso vencido
+    ///   real; si el perfil nunca practicó, `0` y el dashboard infiere por BKT).
+    #[must_use]
+    pub fn from_student_profile(profile: &grafito_profile::StudentProfile, now: u64) -> Self {
+        let raw_name = profile.display_name().trim();
+        let name = if raw_name.is_empty() {
+            "Estudiante".to_string()
+        } else {
+            raw_name.chars().take(64).collect()
+        };
+        let mut sum = 0.0_f64;
+        let mut valid = 0_usize;
+        for branch in &profile.branches {
+            let value = sanitize_bkt(branch.bkt_p_known);
+            if value.is_finite() {
+                sum += value;
+                valid = valid.saturating_add(1);
+            }
+        }
+        let bkt = if valid > 0 {
+            sanitize_bkt(sum / valid as f64)
+        } else {
+            0.3
+        };
+        let mut counts = HashMap::new();
+        for (key, value) in &profile.working_memory.misconception_counts {
+            if *value == 0 {
+                continue;
+            }
+            let normalized = normalize_misconception_key(key);
+            if normalized.is_empty() {
+                continue;
+            }
+            let entry = counts.entry(normalized).or_insert(0_usize);
+            *entry = entry.saturating_add(usize::from(*value));
+        }
+        let due = profile.branches_due(now).len();
+        Self {
+            name,
+            bkt_p_known: bkt,
+            misconception_counts: counts,
+            branches_due: due,
+        }
     }
 }
 
@@ -282,6 +350,37 @@ impl TeacherDashboard {
         base.top_misconceptions = top;
 
         base
+    }
+
+    /// Constructor real desde `StudentProfile` (sin mapeo manual).
+    ///
+    /// Convierte cada perfil con [`LearnerSnapshot::from_student_profile`]
+    /// (`now` para `branches_due`) y delega en
+    /// [`Self::from_live_with_profiles`]. Puro, local, determinista.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_live_with_student_profiles(
+        code: String,
+        present: usize,
+        hands: usize,
+        names: Vec<String>,
+        exercise: Option<String>,
+        snapshot_digest: String,
+        profiles: &[grafito_profile::StudentProfile],
+        now: u64,
+    ) -> Self {
+        let snapshots: Vec<LearnerSnapshot> = profiles
+            .iter()
+            .map(|p| LearnerSnapshot::from_student_profile(p, now))
+            .collect();
+        Self::from_live_with_profiles(
+            code,
+            present,
+            hands,
+            names,
+            exercise,
+            snapshot_digest,
+            &snapshots,
+        )
     }
 
     /// Presentes según `present` vs `names.len()` (útil para UI).
@@ -740,5 +839,49 @@ mod tests {
         assert_eq!(sanitize_code("GRAF-1234"), "GRAF-1234");
         assert_eq!(sanitize_code(" $$$ "), "GRAF-0000");
         assert_eq!(sanitize_code("a b c"), "abc");
+    }
+
+    #[test]
+    fn learner_snapshot_from_student_profile_empty_defaults() {
+        let profile = grafito_profile::StudentProfile::new("  ");
+        let snapshot = LearnerSnapshot::from_student_profile(&profile, 1_000);
+        assert_eq!(snapshot.name, "Estudiante");
+        assert!((snapshot.bkt_p_known - 0.3).abs() < 1e-9);
+        assert!(snapshot.misconception_counts.is_empty());
+        assert_eq!(snapshot.branches_due, 0);
+    }
+
+    #[test]
+    fn learner_snapshot_from_student_profile_maps_bkt_and_misconceptions() {
+        let mut profile = grafito_profile::StudentProfile::new("Ana");
+        profile.record_outcome("algebra", "Álgebra", 100, true);
+        profile.working_memory.record_attempt("sign");
+        profile.working_memory.record_attempt("Sign");
+        profile.working_memory.record_attempt("fraction");
+        let snapshot = LearnerSnapshot::from_student_profile(&profile, 10_000_000);
+        assert_eq!(snapshot.name, "Ana");
+        assert!(snapshot.bkt_p_known > 0.3);
+        assert_eq!(snapshot.misconception_counts.get("sign"), Some(&2));
+        assert_eq!(snapshot.misconception_counts.get("fraction"), Some(&1));
+    }
+
+    #[test]
+    fn dashboard_from_live_with_student_profiles_is_real() {
+        let mut ana = grafito_profile::StudentProfile::new("Ana");
+        ana.record_outcome("algebra", "Álgebra", 100, true);
+        let luis = grafito_profile::StudentProfile::new("Luis");
+        let dashboard = TeacherDashboard::from_live_with_student_profiles(
+            "AULA-1".to_string(),
+            2,
+            0,
+            vec!["Ana".to_string(), "Luis".to_string()],
+            None,
+            "dig".to_string(),
+            &[ana, luis],
+            10_000_000,
+        );
+        assert_eq!(dashboard.present, 2);
+        assert_eq!(dashboard.bkt_summary.len(), 2);
+        assert!(dashboard.avg_mastery > 0.0);
     }
 }

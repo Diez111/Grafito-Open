@@ -112,15 +112,28 @@ impl BktState {
     }
 }
 
-/// Función pura: calcula el siguiente `p_known` sin mutar estado externo.
-/// Útil para `BranchState` que guarda solo `f64`.
-pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
-    let p = p_known.clamp(0.0, 1.0);
-    let guess = params.p_guess.clamp(0.0, 1.0);
-    let slip = params.p_slip.clamp(0.0, 1.0);
-    let learn = params.p_learn.clamp(0.0, 1.0);
-
-    // Evitar división por cero con pequeños épsilon.
+/// Posterior bayesiano puro sin el paso de aprendizaje (`p_learn`).
+///
+/// Es la `P(sabe|evidencia)` antes de aplicar `p_learn`: útil como
+/// `mastery` honesto derivado de BKT (el dashboard/aula lo usa como
+/// `posterior_mastery`). `bkt_update` = `posterior + (1-posterior)*p_learn`.
+/// Puro, NaN-safe, sin pánicos.
+pub fn bkt_posterior(p_known: f64, correct: bool, params: &BktParams) -> f64 {
+    let p = if p_known.is_finite() {
+        p_known.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
+    let guess = if params.p_guess.is_finite() {
+        params.p_guess.clamp(0.0, 1.0)
+    } else {
+        0.2
+    };
+    let slip = if params.p_slip.is_finite() {
+        params.p_slip.clamp(0.0, 1.0)
+    } else {
+        0.1
+    };
     let posterior = if correct {
         let num = p * (1.0 - slip);
         let denom = num + (1.0 - p) * guess;
@@ -138,7 +151,31 @@ pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
             num / denom
         }
     };
-    let posterior = posterior.clamp(0.0, 1.0);
+    posterior.clamp(0.0, 1.0)
+}
+
+/// Mastery honesto derivado del posterior BKT (`0..=1` como `f32`).
+///
+/// Convierte `bkt_p_known` (ya posterior tras `bkt_update`) a la escala del
+/// campo legacy `BranchState::mastery` (EMA) para comparar/migrar sin romper
+/// compat. NaN-safe: no finitos → `0.0`.
+#[must_use]
+pub fn mastery_from_bkt(bkt_p_known: f64) -> f32 {
+    if !bkt_p_known.is_finite() {
+        return 0.0;
+    }
+    bkt_p_known.clamp(0.0, 1.0) as f32
+}
+
+/// Función pura: calcula el siguiente `p_known` sin mutar estado externo.
+/// Útil para `BranchState` que guarda solo `f64`.
+pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
+    let posterior = bkt_posterior(p_known, correct, params);
+    let learn = if params.p_learn.is_finite() {
+        params.p_learn.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
     let next = posterior + (1.0 - posterior) * learn;
     next.clamp(0.0, 1.0)
 }
@@ -743,5 +780,41 @@ mod tests {
             sec > uni,
             "secundaria debe tener p_init mayor que uni avanzada: {sec} vs {uni}"
         );
+    }
+
+    #[test]
+    fn bkt_posterior_is_below_update_and_moves_correctly() {
+        let params = BktParams::default();
+        // Con acierto: posterior < update (update suma p_learn) y > prior.
+        let posterior = bkt_posterior(0.3, true, &params);
+        let updated = bkt_update(0.3, true, &params);
+        assert!(posterior > 0.3, "posterior con acierto sube: {posterior}");
+        assert!(
+            updated > posterior,
+            "update agrega aprendizaje: {updated} > {posterior}"
+        );
+        // Con fallo: posterior < prior y update > posterior (pero < prior).
+        let post_fail = bkt_posterior(0.5, false, &params);
+        let upd_fail = bkt_update(0.5, false, &params);
+        assert!(post_fail < 0.5, "posterior con fallo baja: {post_fail}");
+        assert!(upd_fail >= post_fail);
+        assert!(upd_fail < 0.5);
+    }
+
+    #[test]
+    fn bkt_posterior_nan_safe_and_bounded() {
+        let params = BktParams::default();
+        assert!(bkt_posterior(f64::NAN, true, &params).is_finite());
+        assert!((0.0..=1.0).contains(&bkt_posterior(f64::NAN, true, &params)));
+        assert!((0.0..=1.0).contains(&bkt_posterior(2.0, false, &params)));
+        assert!((0.0..=1.0).contains(&bkt_posterior(-1.0, true, &params)));
+    }
+
+    #[test]
+    fn mastery_from_bkt_clamps_and_handles_nan() {
+        assert!((mastery_from_bkt(0.7) - 0.7_f32).abs() < 1e-6);
+        assert_eq!(mastery_from_bkt(f64::NAN), 0.0);
+        assert_eq!(mastery_from_bkt(2.0), 1.0);
+        assert_eq!(mastery_from_bkt(-1.0), 0.0);
     }
 }

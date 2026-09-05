@@ -2063,6 +2063,7 @@ dependencies = [
 name = "grafito-classroom"
 version = "1.0.0"
 dependencies = [
+ "grafito-profile",
  "serde",
  "serde_json",
 ]
