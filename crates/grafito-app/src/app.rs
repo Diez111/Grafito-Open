@@ -167,6 +167,197 @@ pub(crate) struct PendingGgbImportJob {
     pub path: PathBuf,
 }
 
+/// ── A8 Recovery de autosave al arranque ──────────────────────────────────
+/// Gap crítico: el sidecar `.autosave` se escribía (`tick_autosave` en
+/// background) pero nunca se ofrecía recuperar (`load_autosave_candidate` /
+/// `should_offer_autosave` existían en core sin llamadas en app; el modal
+/// solo existía en comentarios de `persistence.rs:661-667`).
+/// Piel pura: todo I/O en background thread (spawn + `request_repaint`);
+/// `Ui::` solo lee `recovery_offer` / `recovery_corrupt` ya cargados.
+pub(crate) struct PendingAutosaveRecoveryJob {
+    pub receiver: Receiver<Result<Option<grafito_core::persistence::AutosaveCandidate>, String>>,
+    pub main_path: PathBuf,
+}
+
+/// Oferta de recuperación ya validada (sidecar estrictamente más nuevo).
+/// Vive en memoria tras el job en background; el modal solo la renderiza.
+pub(crate) struct AutosaveRecoveryOffer {
+    pub main_path: PathBuf,
+    pub sidecar_path: PathBuf,
+    pub document: Document,
+    pub main_modified_epoch: Option<u64>,
+    pub sidecar_modified_epoch: u64,
+    pub show_diff: bool,
+}
+
+/// Sidecar candidato pero corrupto: no se puede recuperar, la UI ofrece
+/// descartarlo. `main_path`/`sidecar_path` para el borrado best-effort.
+pub(crate) struct AutosaveRecoveryCorrupt {
+    pub main_path: PathBuf,
+    pub sidecar_path: PathBuf,
+    pub error: String,
+}
+
+// ── A8 tests recovery (solo región arranque/recovery) ────────────────
+// sidecar-nuevo→ofrece, sidecar-viejo→no ofrece, recuperar restaura.
+// Usan `load_autosave_candidate` (core, ya en background en prod) +
+// `accept_recovery_offer` / `recovery_diff_summary` (app, puros).
+#[cfg(test)]
+mod autosave_recovery_tests {
+    use super::*;
+
+    static NEXT_RECOVERY_TEST_ID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn recovery_temp_path(name: &str) -> PathBuf {
+        let id = NEXT_RECOVERY_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "grafito_recovery_{name}_{}_{}",
+            std::process::id(),
+            id
+        ))
+    }
+
+    fn recovery_doc_with_points(count: usize) -> Document {
+        let mut doc = Document::new();
+        for index in 0..count {
+            doc.add_point(Point2::new(index as f64, 0.0));
+        }
+        doc
+    }
+
+    fn cleanup_recovery_path(main: &Path) {
+        if let Some(sidecar) = grafito_core::persistence::autosave_sidecar_path(main) {
+            let _ = std::fs::remove_file(sidecar);
+        }
+        let _ = std::fs::remove_file(main);
+    }
+
+    #[test]
+    fn startup_file_arg_ignores_flags_y_vacios() {
+        assert_eq!(GrafitoApp::startup_file_arg_from(&[]), None);
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&[
+                "--help".to_string(),
+                "--profile".to_string(),
+                String::new(),
+                "-h".to_string(),
+            ]),
+            None
+        );
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&["--profile".to_string(), "nota.json".to_string(),]),
+            Some(PathBuf::from("nota.json"))
+        );
+        // NUL nunca es ruta válida.
+        assert_eq!(
+            GrafitoApp::startup_file_arg_from(&["a\0b.json".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn sidecar_nuevo_ofrece_recuperacion() {
+        let main = recovery_temp_path("nuevo");
+        cleanup_recovery_path(&main);
+        let main_doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let sidecar_doc = recovery_doc_with_points(3);
+        let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
+            .expect("write sidecar");
+        assert!(sidecar.exists());
+
+        let candidate =
+            grafito_core::persistence::load_autosave_candidate(&main).expect("load candidate");
+        let candidate = candidate.expect("sidecar más nuevo debe ofrecerse");
+        assert_eq!(candidate.document.object_count(), 3);
+        assert_eq!(candidate.sidecar_path, sidecar);
+
+        // Nivel app: la oferta alimenta el diff (conteo + fecha).
+        let mut app = super::dummy_grafito_app();
+        app.document = main_doc;
+        app.recovery_offer = Some(AutosaveRecoveryOffer {
+            main_path: candidate.main_path.clone(),
+            sidecar_path: candidate.sidecar_path.clone(),
+            document: candidate.document,
+            main_modified_epoch: candidate.main_modified_epoch,
+            sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+            show_diff: false,
+        });
+        let diff = app.recovery_diff_summary().expect("con oferta hay diff");
+        assert!(diff.contains('3'), "diff muestra autosave: {diff}");
+        assert!(diff.contains('2'), "diff muestra guardado: {diff}");
+
+        cleanup_recovery_path(&main);
+    }
+
+    #[test]
+    fn sidecar_viejo_no_ofrece_recuperacion() {
+        let main = recovery_temp_path("viejo");
+        cleanup_recovery_path(&main);
+        let doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        grafito_core::persistence::write_autosave_sidecar(&doc, &main).expect("write sidecar");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Reescribir el main lo deja más nuevo (o igual) que el sidecar:
+        // `should_offer` estricto (`>`) ya no ofrece.
+        grafito_core::persistence::write_document_atomic(&doc, &main).expect("rewrite main");
+
+        let stale = grafito_core::persistence::load_autosave_candidate(&main).expect("stale loads");
+        assert!(
+            stale.is_none(),
+            "sidecar igual o más viejo no debe ofrecerse"
+        );
+
+        cleanup_recovery_path(&main);
+    }
+
+    #[test]
+    fn recuperar_restaura_el_documento_del_sidecar() {
+        let main = recovery_temp_path("restaura");
+        cleanup_recovery_path(&main);
+        let main_doc = recovery_doc_with_points(2);
+        grafito_core::persistence::write_document_atomic(&main_doc, &main).expect("write main");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let sidecar_doc = recovery_doc_with_points(5);
+        let sidecar = grafito_core::persistence::write_autosave_sidecar(&sidecar_doc, &main)
+            .expect("write sidecar");
+
+        let candidate = grafito_core::persistence::load_autosave_candidate(&main)
+            .expect("load")
+            .expect("debe haber candidato");
+        assert_eq!(candidate.document.object_count(), 5);
+
+        let mut app = super::dummy_grafito_app();
+        app.document = main_doc;
+        assert_eq!(app.document.object_count(), 2);
+        app.recovery_offer = Some(AutosaveRecoveryOffer {
+            main_path: candidate.main_path.clone(),
+            sidecar_path: candidate.sidecar_path.clone(),
+            document: candidate.document,
+            main_modified_epoch: candidate.main_modified_epoch,
+            sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+            show_diff: false,
+        });
+
+        assert!(app.accept_recovery_offer(), "aceptar debe restaurar");
+        assert_eq!(
+            app.document.object_count(),
+            5,
+            "el documento debe ser el del sidecar"
+        );
+        assert!(app.recovery_offer.is_none(), "la oferta se consume");
+        assert!(
+            !sidecar.exists(),
+            "tras recuperar se borra el sidecar best-effort"
+        );
+
+        cleanup_recovery_path(&main);
+    }
+}
+
 /// Spawns document save in background — evita bloquear UI thread (60fps).
 /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
 #[allow(dead_code)]
@@ -1423,6 +1614,17 @@ pub struct GrafitoApp {
     /// Versión del documento vista en el último tick de autosave (para detectar
     /// mutaciones que no pasaron por `save_snapshot` y marcar dirty fallback).
     pub(crate) autosave_last_version: u64,
+    /// ── A8 Recovery al arranque ──
+    /// Job en background que llama `load_autosave_candidate` (nunca I/O en `Ui::`).
+    /// `None` = idle; `Some` = polling con `try_recv` en `update`.
+    pub(crate) pending_recovery_job: Option<PendingAutosaveRecoveryJob>,
+    /// Oferta lista para el modal (sidecar más nuevo ya validado). `Ui::` solo lee.
+    pub(crate) recovery_offer: Option<AutosaveRecoveryOffer>,
+    /// Sidecar más nuevo pero corrupto: el modal ofrece descartarlo.
+    pub(crate) recovery_corrupt: Option<AutosaveRecoveryCorrupt>,
+    /// Última ruta ya chequeada en esta sesión (evita re-spawn por frame).
+    /// Se resetea implícitamente al cambiar `current_path` (ver `maybe_start_recovery_check`).
+    pub(crate) recovery_checked_path: Option<PathBuf>,
     /// Opt-in explícito para Aula/red avanzada (loopback sin red).
     pub advanced_red_opt_in: bool,
     /// Idioma de la UI (ES/EN) — O2 i18n: persiste en `AppConfig.locale`,
@@ -1803,8 +2005,31 @@ impl GrafitoApp {
             (None, None)
         };
         let gpu_available = gpu_renderer.is_some();
-        let document = initial_document();
-        let document_lifecycle = DocumentLifecycle::new(&document);
+        // ── A8 arranque: si se pasó un archivo por CLI (`grafito doc.json`),
+        // cargarlo como documento inicial para que el chequeo de recovery
+        // (`maybe_start_recovery_check` en `update`) tenga un `main` conocido.
+        // I/O en constructor (no en `Ui::`); el sidecar se chequea en background.
+        let mut document = initial_document();
+        let mut document_lifecycle = DocumentLifecycle::new(&document);
+        let mut startup_recent: Option<String> = None;
+        if let Some(startup_path) = Self::startup_file_arg() {
+            if startup_path.is_file() {
+                match load_document_candidate(&startup_path) {
+                    Ok(loaded) => {
+                        document = loaded;
+                        document_lifecycle
+                            .establish_opened_document(startup_path.clone(), &document);
+                        startup_recent = Some(startup_path.to_string_lossy().into_owned());
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "startup file {} no se pudo abrir: {err}",
+                            startup_path.display()
+                        );
+                    }
+                }
+            }
+        }
 
         let config = load_config();
         let dark_mode = config.dark_mode;
@@ -1885,7 +2110,13 @@ impl GrafitoApp {
             whiteboard_left_pinned: false,
             show_whiteboard_assistant: true,
             profile,
-            recent_files: VecDeque::new(),
+            recent_files: startup_recent
+                .map(|recent| {
+                    let mut queue = VecDeque::new();
+                    queue.push_back(recent);
+                    queue
+                })
+                .unwrap_or_default(),
             document_lifecycle,
             deferred_file_actions: DeferredFileActions::default(),
             undo_stack: VecDeque::new(),
@@ -1959,6 +2190,12 @@ impl GrafitoApp {
             repaint_budget: RepaintBudget::default(),
             autosave: AutosaveDebouncer::new(),
             autosave_last_version,
+            // ── A8 recovery: arranca sin oferta; el primer `update` lanza el
+            // chequeo en background si `current_path` es `Some` (CLI o apertura).
+            pending_recovery_job: None,
+            recovery_offer: None,
+            recovery_corrupt: None,
+            recovery_checked_path: None,
             advanced_red_opt_in,
             locale,
             classroom,
@@ -2035,6 +2272,464 @@ impl GrafitoApp {
             self.autosave.mark_saved();
         } else {
             log::warn!("autosave: spawn failed");
+        }
+    }
+
+    // ── A8 Recovery al arranque (Piel pura) ──────────────────────────────
+    // El sidecar se escribe en background (`tick_autosave`); aquí se ofrece
+    // recuperar al arranque / al abrir un archivo con sidecar más nuevo.
+    // Todo I/O en background (`spawn_recovery_check` + `poll_recovery_job`);
+    // `draw_recovery_modal` solo lee memoria (cero I/O en `Ui::`).
+
+    /// Núcleo testeable de [`GrafitoApp::startup_file_arg`]: primer arg no-flag.
+    /// Puro, sin I/O, sin pánicos. Ignora flags (`-h`, `--profile`) y vacíos.
+    pub(crate) fn startup_file_arg_from(args: &[String]) -> Option<PathBuf> {
+        for arg in args {
+            if arg.is_empty() || arg.starts_with('-') {
+                continue;
+            }
+            if arg.contains('\0') {
+                continue;
+            }
+            let path = PathBuf::from(arg);
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            return Some(path);
+        }
+        None
+    }
+
+    /// Archivo pasado por CLI (`grafito doc.json`) para el arranque.
+    /// Lee `std::env::args` (sin I/O de archivos); el contenido se carga en `new`.
+    pub(crate) fn startup_file_arg() -> Option<PathBuf> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        Self::startup_file_arg_from(&args)
+    }
+
+    /// Lanza el chequeo de sidecar en background (nunca bloquea UI).
+    /// Pattern `spawn_profile_save` con `sync_channel(1)` + `request_repaint`.
+    /// Retorna `None` si el spawn falla (el caller loguea y marca chequeado).
+    pub(crate) fn spawn_recovery_check(
+        main_path: PathBuf,
+        ctx: &egui::Context,
+    ) -> Option<PendingAutosaveRecoveryJob> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let egui_ctx = ctx.clone();
+        let path_for_thread = main_path.clone();
+        let spawned = std::thread::Builder::new()
+            .name("autosave-recovery".into())
+            .spawn(move || {
+                let result = grafito_core::persistence::load_autosave_candidate(&path_for_thread)
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(result);
+                egui_ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            log::warn!("recovery: spawn failed for {}", main_path.display());
+            return None;
+        }
+        Some(PendingAutosaveRecoveryJob {
+            receiver: rx,
+            main_path,
+        })
+    }
+
+    /// Arranca el chequeo una vez por ruta (al arranque y al abrir archivos).
+    /// No hace I/O: solo spawnea el job en background. Si la ruta cambió desde
+    /// el último chequeo, descarta oferta/job viejos (el usuario navegó a otro archivo).
+    pub(crate) fn maybe_start_recovery_check(&mut self, ctx: &egui::Context) {
+        let Some(current) = self
+            .document_lifecycle
+            .current_path()
+            .map(|p| p.to_path_buf())
+        else {
+            return;
+        };
+        // Si el usuario cambió de archivo, la oferta/job viejos quedan obsoletos.
+        if let Some(job_path) = self.pending_recovery_job.as_ref().map(|job| &job.main_path) {
+            if *job_path != current {
+                self.pending_recovery_job = None;
+            }
+        }
+        if let Some(offer_path) = self.recovery_offer.as_ref().map(|offer| &offer.main_path) {
+            if *offer_path != current {
+                self.recovery_offer = None;
+            }
+        }
+        if let Some(corrupt_path) = self
+            .recovery_corrupt
+            .as_ref()
+            .map(|corrupt| &corrupt.main_path)
+        {
+            if *corrupt_path != current {
+                self.recovery_corrupt = None;
+            }
+        }
+        if self.pending_recovery_job.is_some()
+            || self.recovery_offer.is_some()
+            || self.recovery_corrupt.is_some()
+        {
+            return;
+        }
+        if self.recovery_checked_path.as_ref() == Some(&current) {
+            return;
+        }
+        match Self::spawn_recovery_check(current.clone(), ctx) {
+            Some(job) => {
+                self.pending_recovery_job = Some(job);
+            }
+            None => {
+                // Spawn falló: marcar chequeado para no reintentar por frame.
+                self.recovery_checked_path = Some(current);
+            }
+        }
+    }
+
+    /// Poll del job en background (nunca I/O, solo `try_recv`).
+    /// `Ok(None)` = sin sidecar o no más nuevo → marcar chequeado, sin modal.
+    /// `Ok(Some)` = oferta lista → modal. `Err` = sidecar más nuevo pero
+    /// corrupto → modal de descarte.
+    pub(crate) fn poll_recovery_job(&mut self) {
+        let Some(job) = self.pending_recovery_job.take() else {
+            return;
+        };
+        match job.receiver.try_recv() {
+            Ok(Ok(None)) => {
+                self.recovery_checked_path = Some(job.main_path);
+            }
+            Ok(Ok(Some(candidate))) => {
+                let offer = AutosaveRecoveryOffer {
+                    main_path: candidate.main_path.clone(),
+                    sidecar_path: candidate.sidecar_path.clone(),
+                    document: candidate.document,
+                    main_modified_epoch: candidate.main_modified_epoch,
+                    sidecar_modified_epoch: candidate.sidecar_modified_epoch,
+                    show_diff: false,
+                };
+                self.recovery_offer = Some(offer);
+                self.recovery_corrupt = None;
+                self.recovery_checked_path = Some(job.main_path);
+            }
+            Ok(Err(err)) => {
+                // Solo mostrar corrupto si hay sidecar del que hablar; si no hay
+                // nombre de archivo no hay nada que descartar.
+                match grafito_core::persistence::autosave_sidecar_path(&job.main_path) {
+                    Some(sidecar) => {
+                        self.recovery_corrupt = Some(AutosaveRecoveryCorrupt {
+                            main_path: job.main_path.clone(),
+                            sidecar_path: sidecar,
+                            error: err,
+                        });
+                        self.recovery_offer = None;
+                        self.recovery_checked_path = Some(job.main_path);
+                    }
+                    None => {
+                        self.recovery_checked_path = Some(job.main_path);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {
+                self.pending_recovery_job = Some(job);
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.recovery_checked_path = Some(job.main_path);
+            }
+        }
+    }
+
+    /// Resumen puro del diff opcional (conteo objetos + fecha epoch).
+    /// Sin I/O: compara la oferta ya cargada con el documento en memoria.
+    /// Retorna `None` si no hay oferta.
+    pub(crate) fn recovery_diff_summary(&self) -> Option<String> {
+        let offer = self.recovery_offer.as_ref()?;
+        let autosave_objects = offer.document.object_count();
+        let current_objects = self.document.object_count();
+        let main_fecha = offer
+            .main_modified_epoch
+            .map_or("sin guardado".to_string(), |epoch| format!("epoch {epoch}"));
+        Some(format!(
+            "Autosave: {autosave_objects} objetos · epoch {} / Guardado: {current_objects} objetos · {main_fecha}",
+            offer.sidecar_modified_epoch
+        ))
+    }
+
+    /// Acepta la oferta: restaura el sidecar como documento actual.
+    /// Llamar FUERA del closure de `Ui::` (el modal solo setea flags).
+    /// Borrado del sidecar best-effort (ignora `NotFound`); si falla se loguea.
+    /// Retorna `true` si había oferta y se restauró.
+    pub(crate) fn accept_recovery_offer(&mut self) -> bool {
+        let Some(offer) = self.recovery_offer.take() else {
+            return false;
+        };
+        let main_path = offer.main_path.clone();
+        let sidecar_path = offer.sidecar_path.clone();
+        self.replace_document(offer.document, Some(main_path.clone()));
+        self.remember_recent_file(&main_path);
+        self.recovery_corrupt = None;
+        self.recovery_checked_path = Some(main_path.clone());
+        if std::fs::remove_file(&sidecar_path).is_err() {
+            // Best-effort: el sidecar puede no existir (carrera con guardado).
+            // Solo loguear si no es NotFound para no ensuciar el log.
+            if std::fs::metadata(&sidecar_path).is_ok() {
+                log::warn!("recovery: no se pudo borrar {}", sidecar_path.display());
+            }
+        }
+        self.notify(
+            format!("Autosave recuperado desde {}", sidecar_path.display()),
+            grafito_ui::toast::ToastKind::Success,
+        );
+        true
+    }
+
+    /// Descarta la oferta y (si `delete_sidecar`) borra el sidecar en disco.
+    /// `delete_sidecar=false` = posponer (se mantiene el archivo para el próximo arranque).
+    /// Llamar FUERA del closure de `Ui::`. Retorna `true` si había algo que cerrar.
+    pub(crate) fn dismiss_recovery_offer(&mut self, delete_sidecar: bool) -> bool {
+        let mut had_anything = false;
+        if let Some(offer) = self.recovery_offer.take() {
+            had_anything = true;
+            self.recovery_checked_path = Some(offer.main_path.clone());
+            if delete_sidecar {
+                let _ = std::fs::remove_file(&offer.sidecar_path);
+            }
+        }
+        if let Some(corrupt) = self.recovery_corrupt.take() {
+            had_anything = true;
+            self.recovery_checked_path = Some(corrupt.main_path.clone());
+            if delete_sidecar {
+                let _ = std::fs::remove_file(&corrupt.sidecar_path);
+            }
+        }
+        if had_anything {
+            self.notify(
+                "Se sigue con el documento guardado",
+                grafito_ui::toast::ToastKind::Info,
+            );
+        }
+        had_anything
+    }
+
+    /// Modal "Se encontró un autosave más nuevo" — Piel pura, cero I/O en `Ui::`.
+    /// Lee `recovery_offer` / `recovery_corrupt` ya cargados; los clicks solo
+    /// setean flags locales y la acción (accept/dismiss/toggle) ocurre FUERA
+    /// del closure. Botones: [Recuperar autosave] [Seguir con guardado] [Ver diff].
+    pub(crate) fn draw_recovery_modal(&mut self, ctx: &egui::Context) {
+        // Caso corrupto: no hay nada recuperable, solo descartar o seguir.
+        if self.recovery_corrupt.is_some() {
+            self.draw_recovery_corrupt_modal(ctx);
+            return;
+        }
+        if self.recovery_offer.is_none() {
+            return;
+        }
+        let mut do_recover = false;
+        let mut do_keep = false;
+        let mut do_toggle_diff = false;
+        // Copia solo para display dentro del closure (evita borrow prolongado).
+        let (subtitle_text, diff_summary, show_diff) = {
+            let Some(offer) = self.recovery_offer.as_ref() else {
+                return;
+            };
+            let subtitle = format!(
+                "Hay cambios sin guardar más nuevos que {}",
+                offer.main_path.display()
+            );
+            let diff = self.recovery_diff_summary().unwrap_or_default();
+            (subtitle, diff, offer.show_diff)
+        };
+        let mut open = true;
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Se encontró un autosave más nuevo")
+            .id(egui::Id::new("autosave_recovery_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::SPACE_LG,
+                        grafito_ui::tokens::SPACE_MD,
+                    )),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(&subtitle_text)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_primary),
+                    );
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                if show_diff {
+                    ui.separator();
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.label(
+                        egui::RichText::new(&diff_summary)
+                            .size(grafito_ui::tokens::TYPE_XS)
+                            .color(theme.text_secondary),
+                    );
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                    ui.separator();
+                    ui.add_space(grafito_ui::tokens::SPACE_SM);
+                }
+                ui.horizontal(|ui| {
+                    let total_w = 3.0 * 124.0 + 2.0 * grafito_ui::tokens::SPACE_SM;
+                    let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                    ui.add_space(pad);
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    let recover = egui::Button::new(
+                        egui::RichText::new("Recuperar autosave")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.accent)
+                    .stroke(egui::Stroke::NONE);
+                    if ui.add_sized(egui::vec2(124.0, 32.0), recover).clicked() {
+                        do_recover = true;
+                    }
+                    let keep = egui::Button::new(
+                        egui::RichText::new("Seguir con guardado")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), keep).clicked() {
+                        do_keep = true;
+                    }
+                    let diff_label = if show_diff {
+                        "Ocultar diff"
+                    } else {
+                        "Ver diff"
+                    };
+                    let diff_btn = egui::Button::new(
+                        egui::RichText::new(diff_label)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), diff_btn).clicked() {
+                        do_toggle_diff = true;
+                    }
+                    ui.add_space(pad);
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+            });
+        // ── Acciones FUERA del closure de Ui (aquí sí se permite I/O breve) ──
+        if do_toggle_diff {
+            if let Some(offer) = self.recovery_offer.as_mut() {
+                offer.show_diff = !offer.show_diff;
+            }
+            return;
+        }
+        if do_recover {
+            self.accept_recovery_offer();
+        } else if do_keep {
+            // Seguir con guardado = descartar sidecar, quedarse con el main.
+            self.dismiss_recovery_offer(true);
+        } else if !open {
+            // X = posponer esta sesión (se mantiene el archivo para el próximo arranque).
+            self.dismiss_recovery_offer(false);
+        }
+    }
+
+    /// Modal de sidecar corrupto — Piel pura, cero I/O en `Ui::`.
+    /// Ofrece [Descartar sidecar] (borra) o [Seguir con guardado] (pospone sin borrar).
+    fn draw_recovery_corrupt_modal(&mut self, ctx: &egui::Context) {
+        let mut do_discard = false;
+        let mut do_keep = false;
+        let mut open = true;
+        let message = {
+            let Some(corrupt) = self.recovery_corrupt.as_ref() else {
+                return;
+            };
+            format!(
+                "El autosave de {} está corrupto y no se pudo recuperar: {}",
+                corrupt.main_path.display(),
+                corrupt.error
+            )
+        };
+        let theme = grafito_ui::theme::current_theme(ctx);
+        egui::Window::new("Autosave corrupto")
+            .id(egui::Id::new("autosave_recovery_corrupt_modal"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .open(&mut open)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator))
+                    .rounding(grafito_ui::tokens::RADIUS_LG)
+                    .inner_margin(egui::Margin::symmetric(
+                        grafito_ui::tokens::SPACE_LG,
+                        grafito_ui::tokens::SPACE_MD,
+                    )),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(420.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(&message)
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_primary),
+                    );
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_LG);
+                ui.horizontal(|ui| {
+                    let total_w = 2.0 * 124.0 + grafito_ui::tokens::SPACE_SM;
+                    let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                    ui.add_space(pad);
+                    ui.spacing_mut().item_spacing.x = grafito_ui::tokens::SPACE_SM;
+                    let discard = egui::Button::new(
+                        egui::RichText::new("Descartar sidecar")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.accent)
+                    .stroke(egui::Stroke::NONE);
+                    if ui.add_sized(egui::vec2(124.0, 32.0), discard).clicked() {
+                        do_discard = true;
+                    }
+                    let keep = egui::Button::new(
+                        egui::RichText::new("Seguir con guardado")
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_secondary),
+                    )
+                    .rounding(grafito_ui::tokens::RADIUS_MD)
+                    .fill(theme.panel_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator));
+                    if ui.add_sized(egui::vec2(124.0, 32.0), keep).clicked() {
+                        do_keep = true;
+                    }
+                    ui.add_space(pad);
+                });
+                ui.add_space(grafito_ui::tokens::SPACE_XS);
+            });
+        if do_discard {
+            self.dismiss_recovery_offer(true);
+        } else if do_keep || !open {
+            // `!open` (X) = posponer esta sesión: se mantiene el archivo.
+            self.dismiss_recovery_offer(false);
         }
     }
 
@@ -4365,6 +5060,10 @@ impl eframe::App for GrafitoApp {
         self.classroom.set_opt_in(self.advanced_red_opt_in);
         // Autosave tick (nunca en Ui::): escribe sidecar en background si debounce vencido
         self.tick_autosave(ctx);
+        // A8 recovery (nunca I/O en Ui::): chequeo sidecar en background + poll.
+        // Si hay sidecar más nuevo, `draw_recovery_modal` (junto a onboarding) lo ofrece.
+        self.maybe_start_recovery_check(ctx);
+        self.poll_recovery_job();
 
         // Unified repaint scheduler: gather warmup/animating/busy flags.
         let mut needs_repaint = false;
@@ -5291,6 +5990,9 @@ impl eframe::App for GrafitoApp {
         if self.show_onboarding {
             self.draw_onboarding_window(ctx);
         }
+        // A8 recovery al arranque: modal si el sidecar es más nuevo que el main.
+        // Piel pura (cero I/O en Ui::, el job ya cargó todo en background).
+        self.draw_recovery_modal(ctx);
         // Configuración — ventana única (legado show_mascot_config delega a assistant.settings_open)
         if self.show_mascot_config {
             self.assistant.settings_open = true;
@@ -6846,6 +7548,11 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         repaint_budget: RepaintBudget::default(),
         autosave: AutosaveDebouncer::new(),
         autosave_last_version: 0,
+        // A8 recovery (test helper): sin oferta pendiente al crear dummy.
+        pending_recovery_job: None,
+        recovery_offer: None,
+        recovery_corrupt: None,
+        recovery_checked_path: None,
         advanced_red_opt_in: false,
         locale: AppLocale::Es,
         classroom: crate::classroom::ClassroomPanel::new(),
