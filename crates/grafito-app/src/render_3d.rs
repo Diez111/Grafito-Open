@@ -1,4 +1,4 @@
-use egui::{Color32, Rect, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use glam::{DVec3, Vec3};
 use grafito_core::{
     ChangeSet, Cone3DObj, Cube3DObj, Cylinder3DObj, Document, GeoObject, Line3DObj,
@@ -536,6 +536,26 @@ pub(crate) fn fallback_object_bounds_with_typed_four_d_phase(
             Point3D::new(field.x_min, field.y_min, field.z_min),
             Point3D::new(field.x_max, field.y_max, field.z_max),
         ),
+        GeoObject::Prism3D(prism) => {
+            let base = grafito_render::prism_base_vertices(prism);
+            let top = grafito_render::prism_top_vertices(prism);
+            Aabb3D::from_points(base.iter().copied().chain(top))
+        }
+        GeoObject::Quadric3D(quadric) => {
+            // Elipsoide derivado de la cuádrica (paso intermedio honesto).
+            let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
+                .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
+            let center = ellipsoid.center.to_dvec3();
+            let radii = DVec3::new(
+                ellipsoid.radii.x as f64,
+                ellipsoid.radii.y as f64,
+                ellipsoid.radii.z as f64,
+            );
+            Aabb3D::new(
+                Point3D::from_dvec3(center - radii),
+                Point3D::from_dvec3(center + radii),
+            )
+        }
         _ => None,
     }
 }
@@ -862,6 +882,34 @@ pub(crate) fn projected_tetrahedron_faces(
         .collect::<Vec<_>>();
     faces.sort_by(|left, right| right.0.total_cmp(&left.0));
     faces
+}
+
+/// Normal de una cara triangular (producto cruz), o `None` si es degenerada.
+fn face_normal(a: Point3D, b: Point3D, c: Point3D) -> Option<Vec3> {
+    let normal = (b.to_vec3() - a.to_vec3())
+        .cross(c.to_vec3() - a.to_vec3())
+        .normalize_or_zero();
+    (normal.is_finite() && normal.length_squared() > 1.0e-12).then_some(normal)
+}
+
+/// Proyecta una cara 3D a puntos de pantalla; `None` si algún vértice queda
+/// fuera del frustum (la cara no debe dibujarse parcialmente).
+fn projected_face_points(
+    camera: &Camera3D,
+    points: &[Point3D],
+    screen_w: f32,
+    screen_h: f32,
+    origin: Pos2,
+) -> Option<Vec<Pos2>> {
+    let projected: Vec<Pos2> = points
+        .iter()
+        .filter_map(|point| {
+            camera
+                .project(point, screen_w, screen_h)
+                .map(|(x, y)| origin + Vec2::new(x, y))
+        })
+        .collect();
+    (projected.len() == points.len()).then_some(projected)
 }
 
 pub(crate) fn projected_point_position(
@@ -1696,6 +1744,17 @@ impl GrafitoApp {
                     (v.y_min + v.y_max) as f32 * 0.5,
                     (v.z_min + v.z_max) as f32 * 0.5,
                 ),
+                GeoObject::Prism3D(prism) => {
+                    let base = grafito_render::prism_base_vertices(prism);
+                    let base_center = base
+                        .iter()
+                        .fold(Vec3::ZERO, |sum, point| sum + point.to_vec3())
+                        / base.len().max(1) as f32;
+                    base_center + prism.direction.to_vec3() * 0.5
+                }
+                GeoObject::Quadric3D(quadric) => grafito_render::quadric_ellipsoid_params(quadric)
+                    .map(|ellipsoid| ellipsoid.center.to_vec3())
+                    .unwrap_or(Vec3::ZERO),
                 _ => continue, // Skip non-3D objects
             };
 
@@ -3121,6 +3180,165 @@ impl GrafitoApp {
                         }
                     }
                 }
+                GeoObject::Prism3D(prism) => {
+                    let base = grafito_render::prism_base_vertices(prism);
+                    if base.len() >= 3 {
+                        let top = grafito_render::prism_top_vertices(prism);
+                        let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
+
+                        // Caras translúcidas (base, tapa y laterales).
+                        if !overlay_only {
+                            if let Some(fill) = prism.fill_color {
+                                let fill32 = to_color32(fill);
+                                // Base y tapa: abanico desde el primer vértice
+                                // (válido para bases convexas; las no convexas
+                                // se aproximan, igual que el path GPU).
+                                for index in 1..base.len().saturating_sub(1) {
+                                    for face in [
+                                        [base[0], base[index], base[index + 1]],
+                                        [top[0], top[index], top[index + 1]],
+                                    ] {
+                                        if let Some(points) =
+                                            projected_face_points(&self.camera, &face, w, h, origin)
+                                        {
+                                            painter.add(egui::Shape::convex_polygon(
+                                                points,
+                                                fill32,
+                                                Stroke::NONE,
+                                            ));
+                                        }
+                                    }
+                                }
+                                // Laterales: cada cara es un paralelogramo.
+                                for index in 0..base.len() {
+                                    let next = (index + 1) % base.len();
+                                    if let Some(points) = projected_face_points(
+                                        &self.camera,
+                                        &[base[index], base[next], top[next], top[index]],
+                                        w,
+                                        h,
+                                        origin,
+                                    ) {
+                                        painter.add(egui::Shape::convex_polygon(
+                                            points,
+                                            fill32,
+                                            Stroke::NONE,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Aristas con iluminación por cara.
+                        let base_normal = face_normal(base[0], base[1], base[2]).unwrap_or(Vec3::Y);
+                        let top_normal = face_normal(top[0], top[1], top[2]).unwrap_or(Vec3::Y);
+                        let vertical_normal = (base_normal + top_normal).normalize_or_zero();
+                        for index in 0..base.len() {
+                            let next = (index + 1) % base.len();
+                            for (a, b, normal) in [
+                                (base[index], base[next], base_normal),
+                                (top[index], top[next], top_normal),
+                                (base[index], top[index], vertical_normal),
+                            ] {
+                                if let (Some(pa), Some(pb)) =
+                                    (self.camera.project(&a, w, h), self.camera.project(&b, w, h))
+                                {
+                                    let lit = grafito_render::calculate_lighting(
+                                        prism.color,
+                                        normal,
+                                        light_dir,
+                                    );
+                                    let stroke = Stroke::new(prism.width, to_color32(lit));
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(pa.0, pa.1),
+                                                origin + Vec2::new(pb.0, pb.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        if !prism.label.is_empty() {
+                            let top_center = top
+                                .iter()
+                                .fold(Vec3::ZERO, |sum, point| sum + point.to_vec3())
+                                / top.len().max(1) as f32;
+                            if let Some(pt) =
+                                self.camera.project(&Point3D::from_vec3(top_center), w, h)
+                            {
+                                painter.text(
+                                    origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                    egui::Align2::CENTER_BOTTOM,
+                                    &prism.label,
+                                    egui::FontId::proportional(12.0),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
+                }
+                GeoObject::Quadric3D(quadric) => {
+                    // Paso intermedio honesto: elipsoide wireframe paramétrico.
+                    // TODO(full-quadric): clasificación general y términos cruzados.
+                    let ellipsoid = grafito_render::quadric_ellipsoid_params(quadric)
+                        .unwrap_or_else(grafito_render::QuadricEllipsoid::placeholder);
+                    let center = ellipsoid.center.to_vec3();
+                    let radii = ellipsoid.radii;
+                    let light_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
+                    for (u, v) in [(Vec3::X, Vec3::Y), (Vec3::X, Vec3::Z), (Vec3::Y, Vec3::Z)] {
+                        let normal = u.cross(v).normalize_or_zero();
+                        let mut prev: Option<(f32, f32)> = None;
+                        for index in 0..=32 {
+                            let angle = std::f32::consts::TAU * index as f32 / 32.0;
+                            let direction = u * angle.cos() + v * angle.sin();
+                            let point = Point3D::from_vec3(
+                                center
+                                    + Vec3::new(
+                                        direction.x * radii.x,
+                                        direction.y * radii.y,
+                                        direction.z * radii.z,
+                                    ),
+                            );
+                            if let Some(projected) = self.camera.project(&point, w, h) {
+                                if let Some(prev) = prev {
+                                    let lit = grafito_render::calculate_lighting(
+                                        quadric.color,
+                                        normal,
+                                        light_dir,
+                                    );
+                                    let stroke = Stroke::new(quadric.width, to_color32(lit));
+                                    if !overlay_only {
+                                        painter.line_segment(
+                                            [
+                                                origin + Vec2::new(prev.0, prev.1),
+                                                origin + Vec2::new(projected.0, projected.1),
+                                            ],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                                prev = Some(projected);
+                            } else {
+                                prev = None;
+                            }
+                        }
+                    }
+                    if !quadric.label.is_empty() {
+                        if let Some(pt) = self.camera.project(&ellipsoid.center, w, h) {
+                            painter.text(
+                                origin + Vec2::new(pt.0, pt.1 - 8.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                &quadric.label,
+                                egui::FontId::proportional(12.0),
+                                label_color,
+                            );
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -3168,5 +3386,119 @@ mod gpu_overlay_tests {
         assert_eq!(motion_preview_sample_stride(512, true), 1);
         assert_eq!(motion_preview_sample_stride(4_096, true), 4);
         assert_eq!(motion_preview_sample_stride(4_096, false), 1);
+    }
+
+    fn test_camera() -> Camera3D {
+        let mut camera = Camera3D::new(4.0 / 3.0);
+        camera.theta = 0.0;
+        camera.phi = 0.0;
+        camera.distance = 10.0;
+        camera.target = glam::Vec3::ZERO;
+        camera
+    }
+
+    #[test]
+    fn prism_fallback_bounds_cover_base_and_top() {
+        use grafito_core::{GeoObject, Prism3DObj};
+        use grafito_geometry::Point3D;
+
+        let prism = GeoObject::Prism3D(Prism3DObj::new(
+            vec![
+                Point3D::new(-1.0, -1.0, 0.0),
+                Point3D::new(1.0, -1.0, 0.0),
+                Point3D::new(1.0, 1.0, 0.0),
+                Point3D::new(-1.0, 1.0, 0.0),
+            ],
+            Point3D::new(0.0, 0.0, 2.0),
+        ));
+        let bounds = fallback_object_bounds(&prism, &std::collections::HashMap::new())
+            .expect("prism fallback bounds");
+
+        assert!(bounds.min.x <= -1.0 && bounds.max.x >= 1.0);
+        assert!(bounds.min.y <= -1.0 && bounds.max.y >= 1.0);
+        assert!(bounds.min.z <= 0.0 && bounds.max.z >= 2.0);
+    }
+
+    #[test]
+    fn quadric_ellipsoid_bounds_match_radii() {
+        use grafito_core::{GeoObject, Quadric3DObj};
+
+        // x²/4 + y²/9 + z²/16 = 1 → radios (2, 3, 4).
+        let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            0.25,
+            1.0 / 9.0,
+            1.0 / 16.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0,
+        ]));
+        let bounds = fallback_object_bounds(&quadric, &std::collections::HashMap::new())
+            .expect("quadric fallback bounds");
+
+        assert!((bounds.min.x + 2.0).abs() < 1.0e-6 && (bounds.max.x - 2.0).abs() < 1.0e-6);
+        assert!((bounds.min.y + 3.0).abs() < 1.0e-6 && (bounds.max.y - 3.0).abs() < 1.0e-6);
+        assert!((bounds.min.z + 4.0).abs() < 1.0e-6 && (bounds.max.z - 4.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn picker_hits_prism_and_quadric_via_fallback_bounds() {
+        use grafito_core::{GeoObject, Prism3DObj, Quadric3DObj};
+        use grafito_geometry::Point3D;
+
+        let camera = test_camera();
+        let pointer = egui::vec2(400.0, 300.0);
+        let canvas_size = egui::vec2(800.0, 600.0);
+
+        let mut prism_doc = grafito_core::Document::new();
+        let prism_id = prism_doc
+            .try_add_object(GeoObject::Prism3D(Prism3DObj::new(
+                vec![
+                    Point3D::new(-1.0, -1.0, 0.0),
+                    Point3D::new(1.0, -1.0, 0.0),
+                    Point3D::new(1.0, 1.0, 0.0),
+                    Point3D::new(-1.0, 1.0, 0.0),
+                ],
+                Point3D::new(0.0, 0.0, 2.0),
+            )))
+            .expect("prism fixture");
+        assert_eq!(
+            pick_3d_object(&prism_doc, &camera, pointer, canvas_size),
+            Some(prism_id),
+            "prism must be pickable through its fallback AABB"
+        );
+
+        let mut quadric_doc = grafito_core::Document::new();
+        let quadric_id = quadric_doc
+            .try_add_object(GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+                1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+            ])))
+            .expect("quadric fixture");
+        assert_eq!(
+            pick_3d_object(&quadric_doc, &camera, pointer, canvas_size),
+            Some(quadric_id),
+            "quadric must be pickable through its ellipsoid AABB"
+        );
+    }
+
+    #[test]
+    fn quadric_ellipsoid_params_rejects_non_ellipsoid() {
+        use grafito_core::Quadric3DObj;
+
+        // Hiperboloide x² + y² - z² = 1: c < 0 → no es elipsoide real.
+        let hyperbolic =
+            Quadric3DObj::from_coeffs([1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
+        assert!(grafito_render::quadric_ellipsoid_params(&hyperbolic).is_none());
+
+        // Elipsoide desplazado: (x-1)²/4 + y² + z² = 1 → centro (1, 0, 0).
+        let shifted =
+            Quadric3DObj::from_coeffs([0.25, 1.0, 1.0, 0.0, 0.0, 0.0, -0.5, 0.0, 0.0, -0.75]);
+        let ellipsoid =
+            grafito_render::quadric_ellipsoid_params(&shifted).expect("shifted ellipsoid");
+        assert!((ellipsoid.center.x - 1.0).abs() < 1.0e-9);
+        assert!((ellipsoid.radii.x - 2.0).abs() < 1.0e-6);
     }
 }

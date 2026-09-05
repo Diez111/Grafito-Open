@@ -5,24 +5,28 @@
 
 pub(crate) const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 
+#[cfg(test)]
+use grafito_anim::protocol::CANONICAL_TEMPLATES;
 use grafito_anim::protocol::{
     scene_param_clamped, SCENE_PARAM_A, SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS,
     SCENE_PARAM_X0,
 };
+use std::path::{Path, PathBuf};
 
-// ── Registro canónico nativo v3 (11 plantillas) ──────────────────────────
-// DIVERGENCIA HONESTA (sync 7↔12↔11↔6, BUILD v3):
+// ── Registro canónico nativo v4 (11 plantillas) ──────────────────────────
+// SYNC MECÁNICO 11↔11↔11 (ANIM-REVIVE):
+// - `grafito-anim/src/protocol.rs::CANONICAL_TEMPLATES`: fuente única (11).
+// - Este `NATIVE_TEMPLATES`: idéntico orden y contenido (test pineado).
+// - `anim_ui.rs::PLANTILLAS_COMBO`: mismo conjunto (test pineado, orden libre).
+// - `sanitize_template` usa `CANONICAL_TEMPLATES` (sin match duplicado).
+// DIVERGENCIA HONESTA residual (fuera de este scope):
 // - `grafito-agent/src/tools.rs::KNOWN_TEMPLATES`: 7 (sin logistic/gradient/
 //   mobius/universal; NO editable desde este scope).
-// - `grafito-anim/src/protocol.rs::sanitize_template`: 11 canónicas + alias
-//   pythagoras (v3: ya no degrada logistic/gradient/mobius/universal).
-// - Este dispatcher: 11 canónicas + aliases pedagógicos F5.
-// - `anim_ui.rs` ComboBox: 11 (v3: antes solo 6, faltaba pitagoras).
 // - Worker python `ALLOW_TEMPLATE`: 6 (sin euler/fourier/logistic/gradient/
 //   mobius; NO editable desde este scope → el worker mapea por concepto).
 // - `limit-epsilon` / `ode-*` NO existen en ningún registro: caen al fallback
-//   universal (genérico). El test `limit_y_ode_caen_a_fallback_universal`
-//   pinnea ese estado hasta que alguien les dé renderer propio (TODO).
+//   genérico — ver `native_dispatch_for` + test `dispatch_honesto_*` que
+//   pinnea `FallbackUniversal` hasta que alguien les dé renderer propio.
 //
 /// Plantillas canónicas con renderer nativo propio (+ `universal` youtube-style).
 pub const NATIVE_TEMPLATES: &[&str] = &[
@@ -43,6 +47,249 @@ pub const NATIVE_TEMPLATES: &[&str] = &[
 pub fn is_known_native_template(template: &str) -> bool {
     let t = template.trim().to_lowercase();
     NATIVE_TEMPLATES.contains(&t.as_str()) || t == "pythagoras"
+}
+
+// ── Export GIF real en hilo aparte (ANIM-REVIVE) ──────────────────────────
+// El botón Exportar era no-op: ahora los 48 frames nativos se codifican a GIF
+// animado con el crate `gif` 0.13 (ya dependencia del crate; el decoder se usa
+// en `assistant.rs::load_gif_frames`). `encode_frames_to_gif_bytes` es puro
+// (sin E/S); `export_frames_to_gif_file` bloquea escribiendo y `spawn_gif_export`
+// lo corre en un hilo aparte para no congelar la UI. El lead lo llama desde el
+// handler de `AnimPanelEvent::ExportRequested` (ver `anim_ui.rs`).
+// Presupuestos: `GIF_EXPORT_MAX_FRAMES = 64` (igual que el loader) y lado
+// ≤4096 (igual que `Resolution`); los 48 nativos siempre pasan.
+
+/// Retardo por frame en centésimas de segundo (8 ≈ 12 fps, igual que `PLAYBACK_FPS` en `anim_ui.rs`).
+pub const GIF_EXPORT_DELAY_CS: u16 = 8;
+/// Velocidad del cuantizador NeuQuant 1..=30 (10 = compromiso; ver docs de `gif`).
+pub const GIF_EXPORT_SPEED: i32 = 10;
+/// Tope de frames por GIF (igual que `MAX_GIF_FRAMES` del loader).
+pub const GIF_EXPORT_MAX_FRAMES: usize = 64;
+/// Lado máximo por frame (igual que `Resolution::try_new` 64..=4096).
+pub const GIF_EXPORT_MAX_DIM: usize = 4096;
+
+/// Error tipado de la exportación a GIF (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GifExportError {
+    EmptyFrames,
+    TooManyFrames {
+        got: usize,
+    },
+    InconsistentSize {
+        index: usize,
+        expected: [usize; 2],
+        got: [usize; 2],
+    },
+    PixelCountMismatch {
+        index: usize,
+        expected: usize,
+        got: usize,
+    },
+    DimensionOutOfRange {
+        width: usize,
+        height: usize,
+    },
+    Encode(String),
+    Io(String),
+}
+
+impl std::fmt::Display for GifExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyFrames => write!(f, "sin fotogramas para exportar"),
+            Self::TooManyFrames { got } => {
+                write!(f, "demasiados fotogramas: {got} > {GIF_EXPORT_MAX_FRAMES}")
+            }
+            Self::InconsistentSize {
+                index,
+                expected,
+                got,
+            } => write!(f, "frame {index} con tamaño {got:?}, esperaba {expected:?}"),
+            Self::PixelCountMismatch {
+                index,
+                expected,
+                got,
+            } => write!(f, "frame {index} con {got} píxeles, esperaba {expected}"),
+            Self::DimensionOutOfRange { width, height } => write!(
+                f,
+                "dimensión {width}x{height} fuera de 1..={GIF_EXPORT_MAX_DIM}"
+            ),
+            Self::Encode(detail) => write!(f, "falló codificar el GIF: {detail}"),
+            Self::Io(detail) => write!(f, "falló escribir el GIF: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for GifExportError {}
+
+fn gif_dim(value: usize) -> Result<u16, GifExportError> {
+    // u16 cubre 4096 de sobra; el rango real se valida antes (lado ≤4096).
+    u16::try_from(value).map_err(|_| GifExportError::DimensionOutOfRange {
+        width: value,
+        height: value,
+    })
+}
+
+/// Codifica frames a GIF animado en memoria (puro, sin E/S).
+///
+/// Todos los frames deben compartir tamaño, con lado 1..=4096 y como máximo
+/// 64 frames. `delay_cs` en centésimas de segundo (8 ≈ 12 fps).
+/// Invariante para `gif::Frame::from_rgba_speed` (que exige
+/// `w*h*4 == buf.len()` y `speed` 1..=30): el buffer se construye con exactly
+/// `pixels.len()*4` bytes tras verificar `pixels.len() == w*h`, y
+/// `GIF_EXPORT_SPEED = 10` es const válida — ningún panic posible.
+pub fn encode_frames_to_gif_bytes(
+    frames: &[egui::ColorImage],
+    delay_cs: u16,
+) -> Result<Vec<u8>, GifExportError> {
+    if frames.is_empty() {
+        return Err(GifExportError::EmptyFrames);
+    }
+    if frames.len() > GIF_EXPORT_MAX_FRAMES {
+        return Err(GifExportError::TooManyFrames { got: frames.len() });
+    }
+    let size = frames[0].size;
+    let (w, h) = (size[0], size[1]);
+    if w == 0 || h == 0 || w > GIF_EXPORT_MAX_DIM || h > GIF_EXPORT_MAX_DIM {
+        return Err(GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        });
+    }
+    let w16 = gif_dim(w).map_err(|_| GifExportError::DimensionOutOfRange {
+        width: w,
+        height: h,
+    })?;
+    let h16 = gif_dim(h).map_err(|_| GifExportError::DimensionOutOfRange {
+        width: w,
+        height: h,
+    })?;
+    let pixel_count = w
+        .checked_mul(h)
+        .ok_or(GifExportError::DimensionOutOfRange {
+            width: w,
+            height: h,
+        })?;
+    let mut out = Vec::new();
+    {
+        let mut encoder = gif::Encoder::new(&mut out, w16, h16, &[])
+            .map_err(|e| GifExportError::Encode(e.to_string()))?;
+        encoder
+            .set_repeat(gif::Repeat::Infinite)
+            .map_err(|e| GifExportError::Encode(e.to_string()))?;
+        for (index, frame) in frames.iter().enumerate() {
+            if frame.size != size {
+                return Err(GifExportError::InconsistentSize {
+                    index,
+                    expected: size,
+                    got: frame.size,
+                });
+            }
+            if frame.pixels.len() != pixel_count {
+                return Err(GifExportError::PixelCountMismatch {
+                    index,
+                    expected: pixel_count,
+                    got: frame.pixels.len(),
+                });
+            }
+            let byte_len =
+                pixel_count
+                    .checked_mul(4)
+                    .ok_or(GifExportError::PixelCountMismatch {
+                        index,
+                        expected: pixel_count.saturating_mul(4),
+                        got: frame.pixels.len().saturating_mul(4),
+                    })?;
+            let mut rgba = Vec::new();
+            rgba.try_reserve_exact(byte_len).map_err(|_| {
+                GifExportError::Encode(format!("sin memoria para el frame {index}"))
+            })?;
+            for px in &frame.pixels {
+                rgba.extend_from_slice(&[px.r(), px.g(), px.b(), px.a()]);
+            }
+            let mut gif_frame =
+                gif::Frame::from_rgba_speed(w16, h16, rgba.as_mut_slice(), GIF_EXPORT_SPEED);
+            gif_frame.delay = delay_cs;
+            encoder
+                .write_frame(&gif_frame)
+                .map_err(|e| GifExportError::Encode(e.to_string()))?;
+        }
+    }
+    Ok(out)
+}
+
+/// Escribe los frames como GIF animado en `path` (bloquea: llamar en hilo).
+pub fn export_frames_to_gif_file(
+    frames: &[egui::ColorImage],
+    path: &Path,
+    delay_cs: u16,
+) -> Result<PathBuf, GifExportError> {
+    let bytes = encode_frames_to_gif_bytes(frames, delay_cs)?;
+    std::fs::write(path, &bytes)
+        .map_err(|e| GifExportError::Io(format!("no se pudo escribir {}: {e}", path.display())))?;
+    Ok(path.to_path_buf())
+}
+
+/// Exporta en un hilo aparte (no bloquea la UI).
+///
+/// El lead lo dispara con los frames del estado + destino elegido por el
+/// usuario y al hacer `join` actualiza `media_path` / `status`.
+pub fn spawn_gif_export(
+    frames: Vec<egui::ColorImage>,
+    path: PathBuf,
+    delay_cs: u16,
+) -> std::thread::JoinHandle<Result<PathBuf, GifExportError>> {
+    std::thread::spawn(move || export_frames_to_gif_file(&frames, &path, delay_cs))
+}
+
+// ── Dispatch honesto nativo (sync mecánico, ANIM-REVIVE) ───────────────────
+// Expone CÓMO se resolvió una plantilla: `Direct` (renderer dedicado) o
+// `FallbackUniversal` (`limit-epsilon` / `ode-*` / typos: sin renderer propio,
+// frames válidos vía detección por concepto). El test lo pinnea.
+
+/// Cómo resolvió el dispatcher nativo una plantilla pedida.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeDispatch {
+    /// Tiene renderer dedicado; `canonical` alimenta `render_anim_with_progress`.
+    Direct { canonical: &'static str },
+    /// Sin renderer propio: se resolvió por concepto; `resolved` es la usada.
+    FallbackUniversal {
+        requested: String,
+        resolved: &'static str,
+    },
+}
+
+/// Aliases pedagógicos F5 (mapeo a nativos existentes, ver `resolve_native_template`).
+const NATIVE_ALIASES: &[&str] = &[
+    "pythagoras",
+    "fraccion-visual",
+    "vector-anim",
+    "matriz-anim",
+    "prob-anim",
+    "serie-anim",
+    "ecuacion-anim",
+    "trig-anim",
+    "conica-anim",
+];
+
+/// Resuelve una plantilla al dispatcher y declara si fue directa o fallback.
+pub fn native_dispatch_for(template: &str, concept: &str) -> NativeDispatch {
+    let t = template.trim().to_lowercase();
+    let resolved = resolve_native_template(template, concept);
+    let known = NATIVE_TEMPLATES.contains(&t.as_str())
+        || NATIVE_ALIASES.contains(&t.as_str())
+        || t.is_empty()
+        || t == "auto";
+    if known {
+        NativeDispatch::Direct {
+            canonical: resolved,
+        }
+    } else {
+        NativeDispatch::FallbackUniversal {
+            requested: template.trim().to_string(),
+            resolved,
+        }
+    }
 }
 
 // ── Paleta nativa centralizada (única fuente de verdad en anim_native.rs) ───
@@ -727,6 +974,15 @@ pub fn render_derivative_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
+    render_derivative_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+fn render_derivative_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let center = scene_param_clamped(params, SCENE_PARAM_X0, 0.0, -3.0, 3.0);
     let span = scene_param_clamped(params, SCENE_PARAM_SPAN, 1.5, 0.25, 3.0);
     let ((w, h), _) = resolve_native_size(width, height);
@@ -792,11 +1048,20 @@ pub fn render_derivative_frames_with_params(
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
 
 pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_pitagoras_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_pitagoras_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
@@ -840,6 +1105,7 @@ pub(crate) fn render_pitagoras_frames(width: u32, height: u32) -> Vec<egui::Colo
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -855,6 +1121,15 @@ pub fn render_integral_frames_with_params(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_integral_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+fn render_integral_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let lo = scene_param_clamped(params, SCENE_PARAM_A, 0.0, -3.0, 3.0);
     let hi = scene_param_clamped(params, SCENE_PARAM_B, 2.0, -3.0, 3.0);
@@ -920,11 +1195,20 @@ pub fn render_integral_frames_with_params(
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
 
 pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_taylor_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_taylor_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let f = |x: f64| x.sin();
     let taylor = |x: f64| x - x.powi(3) / 6.0;
@@ -983,11 +1267,20 @@ pub(crate) fn render_taylor_frames(width: u32, height: u32) -> Vec<egui::ColorIm
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
 
 pub(crate) fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_conformal_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_conformal_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
@@ -1050,6 +1343,7 @@ pub(crate) fn render_conformal_frames(width: u32, height: u32) -> Vec<egui::Colo
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1060,6 +1354,15 @@ pub fn render_universal_youtube_frames(
     concept: &str,
     width: u32,
     height: u32,
+) -> Vec<egui::ColorImage> {
+    render_universal_youtube_frames_impl(concept, width, height, &mut |_, _| {})
+}
+
+fn render_universal_youtube_frames_impl(
+    concept: &str,
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let concept_norm = normalize_concept(concept);
@@ -1175,6 +1478,7 @@ pub fn render_universal_youtube_frames(
         let truncated: String = visible.chars().take(32).collect();
         draw_text_block(&mut buf, w, h, 10, 10, &truncated, TEXT_COLOR, 1);
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1241,12 +1545,63 @@ pub fn render_anim_for_concept_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
+    render_anim_with_progress(template, concept, width, height, params, &mut |_, _| {})
+}
+
+/// Entrada canónica con PROGRESO REAL por frame (ANIM-REVIVE).
+///
+/// Idéntica a `render_anim_for_concept_with_params`, pero `on_frame(done, total)`
+/// se invoca tras pushear CADA frame (`done` 1..=48, `total` = 48) desde dentro
+/// del loop nativo — nunca valores inventados. El hilo del lead la usa para
+/// mover `AnimPreviewState.progress` y `request_repaint`; el render es
+/// determinista: el callback no altera los píxeles (ver test).
+/// Presupuesto intacto: siempre 48 frames (`NATIVE_ANIM_FRAME_COUNT`).
+pub fn render_anim_with_progress(
+    template: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     match resolve_native_template(template, concept) {
-        "integral-area" => render_integral_frames_with_params(width, height, params),
-        "derivative-slope" => render_derivative_frames_with_params(width, height, params),
-        "euler" => render_euler_frames_with_params(width, height, params),
-        "fourier" => render_fourier_frames_with_params(width, height, params),
-        tmpl => render_anim_for_concept_legacy(tmpl, concept, width, height),
+        "integral-area" => render_integral_frames_with_params_impl(width, height, params, on_frame),
+        "derivative-slope" => {
+            render_derivative_frames_with_params_impl(width, height, params, on_frame)
+        }
+        "euler" => render_euler_frames_with_params_impl(width, height, params, on_frame),
+        "fourier" => render_fourier_frames_with_params_impl(width, height, params, on_frame),
+        tmpl => render_anim_for_concept_legacy_with_progress(
+            tmpl, concept, width, height, params, on_frame,
+        ),
+    }
+}
+
+/// Rama legacy con progreso (mismo match que `render_anim_for_concept_legacy`,
+/// pero sobre los `*_impl` para emitir por frame).
+fn render_anim_for_concept_legacy_with_progress(
+    tmpl: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    match tmpl {
+        "integral-area" => render_integral_frames_with_params_impl(width, height, params, on_frame),
+        "taylor-series" => render_taylor_frames_impl(width, height, on_frame),
+        "conformal-map" => render_conformal_frames_impl(width, height, on_frame),
+        "pitagoras" => render_pitagoras_frames_impl(width, height, on_frame),
+        "derivative-slope" => {
+            render_derivative_frames_with_params_impl(width, height, params, on_frame)
+        }
+        "euler" => render_euler_frames_with_params_impl(width, height, params, on_frame),
+        "fourier" => render_fourier_frames_with_params_impl(width, height, params, on_frame),
+        "logistic-bifurcation" => render_logistic_bifurcation_frames_impl(width, height, on_frame),
+        "gradient-field" => render_gradient_field_frames_impl(width, height, on_frame),
+        "mobius-transform" => render_mobius_frames_impl(width, height, on_frame),
+        "universal" => render_universal_youtube_frames_impl(concept, width, height, on_frame),
+        _ => render_universal_youtube_frames_impl(concept, width, height, on_frame),
     }
 }
 
@@ -1287,6 +1642,15 @@ pub fn render_euler_frames_with_params(
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
 ) -> Vec<egui::ColorImage> {
+    render_euler_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+fn render_euler_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let max_terms = scene_param_clamped(params, SCENE_PARAM_TERMS, 7.0, 1.0, 7.0) as usize;
     let ((w, h), _) = resolve_native_size(width, height);
     // Partial sums of exp: S_n(x) = sum_{k=0..n} x^k/k!
@@ -1314,6 +1678,7 @@ pub fn render_euler_frames_with_params(
             });
             while frames.len() < NATIVE_ANIM_FRAME_COUNT {
                 frames.push(last.clone());
+                on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
             }
             break;
         }
@@ -1383,6 +1748,7 @@ pub fn render_euler_frames_with_params(
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1399,6 +1765,15 @@ pub fn render_fourier_frames_with_params(
     width: u32,
     height: u32,
     params: &std::collections::BTreeMap<String, f64>,
+) -> Vec<egui::ColorImage> {
+    render_fourier_frames_with_params_impl(width, height, params, &mut |_, _| {})
+}
+
+fn render_fourier_frames_with_params_impl(
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
 ) -> Vec<egui::ColorImage> {
     let max_harm = scene_param_clamped(params, SCENE_PARAM_TERMS, 6.0, 1.0, 6.0) as usize;
     let ((w, h), _) = resolve_native_size(width, height);
@@ -1425,6 +1800,7 @@ pub fn render_fourier_frames_with_params(
             });
             while frames.len() < NATIVE_ANIM_FRAME_COUNT {
                 frames.push(last.clone());
+                on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
             }
             break;
         }
@@ -1485,6 +1861,7 @@ pub fn render_fourier_frames_with_params(
             1,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1493,6 +1870,14 @@ pub fn render_fourier_frames_with_params(
 /// Fondo + diagrama tenue estático + columna highlight que barre con t.
 /// Determinista, <2s (muestreo cada 2px, 120 iters/col).
 pub fn render_logistic_bifurcation_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_logistic_bifurcation_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_logistic_bifurcation_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
@@ -1517,6 +1902,7 @@ pub fn render_logistic_bifurcation_frames(width: u32, height: u32) -> Vec<egui::
             });
             while frames.len() < NATIVE_ANIM_FRAME_COUNT {
                 frames.push(last.clone());
+                on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
             }
             break;
         }
@@ -1597,6 +1983,7 @@ pub fn render_logistic_bifurcation_frames(width: u32, height: u32) -> Vec<egui::
         }
         draw_text_block(&mut buf, w, h, w / 14, h / 12, "bifurcacion r", PAL_FG, 1);
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1604,6 +1991,14 @@ pub fn render_logistic_bifurcation_frames(width: u32, height: u32) -> Vec<egui::
 /// Campo de gradiente: f(x,y)=sin(x)·cos(y), grad=(cos·cos, −sin·sin).
 /// 25 flechas + 6 partículas orbitando moduladas por |grad|. <2s.
 pub fn render_gradient_field_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_gradient_field_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_gradient_field_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
@@ -1628,6 +2023,7 @@ pub fn render_gradient_field_frames(width: u32, height: u32) -> Vec<egui::ColorI
             });
             while frames.len() < NATIVE_ANIM_FRAME_COUNT {
                 frames.push(last.clone());
+                on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
             }
             break;
         }
@@ -1691,6 +2087,7 @@ pub fn render_gradient_field_frames(width: u32, height: u32) -> Vec<egui::ColorI
         }
         draw_text_block(&mut buf, w, h, w / 14, h / 12, "gradiente f", PAL_FG, 1);
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -1699,6 +2096,14 @@ pub fn render_gradient_field_frames(width: u32, height: u32) -> Vec<egui::ColorI
 /// Rejilla tenue original + rejilla transformada brillante + círculo unidad.
 /// <2s (25 puntos + 60 segmentos/frame).
 pub fn render_mobius_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
+    render_mobius_frames_impl(width, height, &mut |_, _| {})
+}
+
+fn render_mobius_frames_impl(
+    width: u32,
+    height: u32,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let start = std::time::Instant::now();
     let max_ms: u128 = 1800;
@@ -1723,6 +2128,7 @@ pub fn render_mobius_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
             });
             while frames.len() < NATIVE_ANIM_FRAME_COUNT {
                 frames.push(last.clone());
+                on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
             }
             break;
         }
@@ -1815,6 +2221,7 @@ pub fn render_mobius_frames(width: u32, height: u32) -> Vec<egui::ColorImage> {
             TRACK,
         );
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
+        on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
@@ -2328,5 +2735,242 @@ mod tests {
             let g = render_anim_for_concept(tmpl, "límite epsilon delta", 64, 64);
             assert_frames_valid(&g, 64, 64, tmpl);
         }
+    }
+
+    // ── v4 sync mecánico + dispatch honesto (ANIM-REVIVE) ────────────────
+    #[test]
+    fn registros_nativo_protocolo_sync_once() {
+        // Fuente única: protocolo == nativo, mismo orden y contenido.
+        assert_eq!(NATIVE_TEMPLATES.len(), 11);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
+        assert_eq!(NATIVE_TEMPLATES, CANONICAL_TEMPLATES);
+    }
+
+    #[test]
+    fn dispatch_honesto_direct_y_fallback() {
+        // Las 11 canónicas van directo al renderer (el resto se cubre abajo).
+        for tmpl in NATIVE_TEMPLATES {
+            match native_dispatch_for(tmpl, "concepto libre") {
+                NativeDispatch::Direct { canonical } => {
+                    assert!(is_known_native_template(canonical), "{tmpl} → {canonical}")
+                }
+                other => panic!("{tmpl} debería ser Direct, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            native_dispatch_for("pythagoras", "triángulo"),
+            NativeDispatch::Direct { .. }
+        ));
+        assert!(matches!(
+            native_dispatch_for("fraccion-visual", "fracciones"),
+            NativeDispatch::Direct { .. }
+        ));
+        assert!(matches!(
+            native_dispatch_for("", "derivada"),
+            NativeDispatch::Direct { .. }
+        ));
+        assert!(matches!(
+            native_dispatch_for("auto", "derivada"),
+            NativeDispatch::Direct { .. }
+        ));
+        // Sin renderer propio: fallback declarado, no silencioso.
+        for tmpl in ["limit-epsilon", "ode-system", "ode", "typo-total"] {
+            match native_dispatch_for(tmpl, "límite epsilon delta") {
+                NativeDispatch::FallbackUniversal {
+                    requested,
+                    resolved,
+                } => {
+                    assert_eq!(requested, tmpl);
+                    assert!(is_known_native_template(resolved), "{tmpl} → {resolved}");
+                    // El fallback produce frames válidos de verdad.
+                    let f = render_anim_with_progress(
+                        tmpl,
+                        "límite epsilon delta",
+                        64,
+                        64,
+                        &params_map(&[]),
+                        &mut |_, _| {},
+                    );
+                    assert_frames_valid(&f, 64, 64, tmpl);
+                }
+                other => panic!("{tmpl} debería ser FallbackUniversal, got {other:?}"),
+            }
+        }
+    }
+
+    // ── v4 progreso real por frame (ANIM-REVIVE) ──────────────────────────
+    #[test]
+    fn progress_emite_48_monotono_todas_las_plantillas() {
+        let empty = params_map(&[]);
+        for tmpl in NATIVE_TEMPLATES {
+            let mut calls: Vec<(usize, usize)> = Vec::new();
+            let frames = render_anim_with_progress(
+                tmpl,
+                "concepto libre",
+                64,
+                64,
+                &empty,
+                &mut |done, total| {
+                    calls.push((done, total));
+                },
+            );
+            assert_frames_valid(&frames, 64, 64, tmpl);
+            // Exactamente 48 emisiones, 1..=48, total siempre 48.
+            assert_eq!(calls.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: emisiones");
+            for (i, (done, total)) in calls.iter().enumerate() {
+                assert_eq!(*done, i + 1, "{tmpl}: done secuencial");
+                assert_eq!(*total, NATIVE_ANIM_FRAME_COUNT, "{tmpl}: total");
+            }
+            // Determinista: el callback no altera píxeles (dos corridas iguales
+            // y además iguales al dispatcher sin progreso).
+            let mut calls2 = Vec::new();
+            let again = render_anim_with_progress(
+                tmpl,
+                "concepto libre",
+                64,
+                64,
+                &empty,
+                &mut |done, total| {
+                    calls2.push((done, total));
+                },
+            );
+            assert_eq!(calls, calls2, "{tmpl}: progreso determinista");
+            for (i, (a, b)) in frames.iter().zip(again.iter()).enumerate() {
+                assert_eq!(a.pixels, b.pixels, "{tmpl} rerun frame {i}: idéntico");
+            }
+            let plain = render_anim_for_concept_with_params(tmpl, "concepto libre", 64, 64, &empty);
+            assert_eq!(frames.len(), plain.len(), "{tmpl}: len con/sin progreso");
+            for (i, (a, b)) in frames.iter().zip(plain.iter()).enumerate() {
+                assert_eq!(a.pixels, b.pixels, "{tmpl} frame {i}: idéntico");
+            }
+        }
+    }
+
+    #[test]
+    fn progress_con_params_vivos_tambien_emite_48() {
+        let params = params_map(&[("x0", 2.0), ("terms", 3.0)]);
+        let mut calls = 0usize;
+        let frames = render_anim_with_progress(
+            "derivative-slope",
+            "derivada",
+            64,
+            64,
+            &params,
+            &mut |done, total| {
+                assert_eq!(total, NATIVE_ANIM_FRAME_COUNT);
+                assert!((1..=NATIVE_ANIM_FRAME_COUNT).contains(&done));
+                calls += 1;
+            },
+        );
+        assert_eq!(calls, NATIVE_ANIM_FRAME_COUNT);
+        assert_frames_valid(&frames, 64, 64, "derivative-progress-params");
+        // Fracción lista para la UI: done/total sin inventar.
+        assert!((calls as f32 / NATIVE_ANIM_FRAME_COUNT as f32 - 1.0).abs() < f32::EPSILON);
+    }
+
+    // ── v4 export GIF real (ANIM-REVIVE) ──────────────────────────────────
+    fn synthetic_frames(n: usize) -> Vec<egui::ColorImage> {
+        (0..n)
+            .map(|k| {
+                let c = egui::Color32::from_rgb(
+                    (k * 37 % 256) as u8,
+                    (k * 91 % 256) as u8,
+                    (k * 53 % 256) as u8,
+                );
+                egui::ColorImage::new([8, 8], c)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gif_export_codifica_frames_sinteticos_con_cabecera() {
+        let frames = synthetic_frames(3);
+        let bytes = encode_frames_to_gif_bytes(&frames, GIF_EXPORT_DELAY_CS).unwrap();
+        assert!(bytes.len() > 13, "GIF mínimo con 3 frames");
+        assert_eq!(&bytes[0..6], b"GIF89a", "cabecera GIF real");
+    }
+
+    #[test]
+    fn gif_export_roundtrip_48_frames_reales() {
+        let frames = render_derivative_frames_with_params(64, 64, &params_map(&[]));
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        let bytes = encode_frames_to_gif_bytes(&frames, GIF_EXPORT_DELAY_CS).unwrap();
+        assert_eq!(&bytes[0..6], b"GIF89a");
+        // Decode de vuelta: los 48 frames viajan de verdad.
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(bytes.as_slice()).unwrap();
+        let mut count = 0usize;
+        while decoder.read_next_frame().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, NATIVE_ANIM_FRAME_COUNT);
+    }
+
+    #[test]
+    fn gif_export_rechaza_vacio_inconsistente_y_exceso() {
+        assert_eq!(
+            encode_frames_to_gif_bytes(&[], GIF_EXPORT_DELAY_CS).unwrap_err(),
+            GifExportError::EmptyFrames
+        );
+        // Tamaños mezclados.
+        let mut mixed = synthetic_frames(2);
+        mixed.push(egui::ColorImage::new([4, 4], egui::Color32::BLACK));
+        assert!(matches!(
+            encode_frames_to_gif_bytes(&mixed, GIF_EXPORT_DELAY_CS).unwrap_err(),
+            GifExportError::InconsistentSize { index: 2, .. }
+        ));
+        // Exceso sobre el tope 64.
+        let many = synthetic_frames(GIF_EXPORT_MAX_FRAMES + 1);
+        assert_eq!(
+            encode_frames_to_gif_bytes(&many, GIF_EXPORT_DELAY_CS).unwrap_err(),
+            GifExportError::TooManyFrames {
+                got: GIF_EXPORT_MAX_FRAMES + 1
+            }
+        );
+        // Mensajes en español, sin inglés crudo.
+        for e in [
+            GifExportError::EmptyFrames,
+            GifExportError::DimensionOutOfRange {
+                width: 0,
+                height: 0,
+            },
+            GifExportError::Encode("x".into()),
+            GifExportError::Io("y".into()),
+        ] {
+            let msg = format!("{e}");
+            assert!(!msg.is_empty());
+            assert!(
+                !msg.to_lowercase().contains("error encoding")
+                    && !msg.to_lowercase().contains("failed"),
+                "sin inglés crudo: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn gif_export_en_hilo_escribe_archivo_real() {
+        let frames = synthetic_frames(4);
+        let dir = std::env::temp_dir().join(format!("grafito_gif_export_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("anim.gif");
+        let handle = spawn_gif_export(frames, path.clone(), GIF_EXPORT_DELAY_CS);
+        let out = handle.join().unwrap().unwrap();
+        assert_eq!(out, path);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..6], b"GIF89a");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gif_export_presupuestos_pineados() {
+        // 12 fps ≈ delay 8cs; tope 64 = loader; lado 4096 = Resolution.
+        assert_eq!(GIF_EXPORT_DELAY_CS, 8);
+        assert_eq!(100 / u32::from(GIF_EXPORT_DELAY_CS), 12);
+        assert_eq!(GIF_EXPORT_MAX_FRAMES, 64);
+        assert_eq!(GIF_EXPORT_MAX_DIM, 4096);
+        assert!((1..=30).contains(&GIF_EXPORT_SPEED));
+        // 48 nativos ≤ tope 64, pineado en tiempo de compilación:
+        const { assert!(NATIVE_ANIM_FRAME_COUNT <= GIF_EXPORT_MAX_FRAMES) };
     }
 }

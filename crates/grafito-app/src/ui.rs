@@ -156,6 +156,10 @@ fn draw_file_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             app.handle_file_command(FileCommand::SaveAs);
             ui.close_menu();
         }
+        if ui.button("Importar GeoGebra (.ggb)…").clicked() {
+            app.choose_and_import_ggb(ui.ctx());
+            ui.close_menu();
+        }
         ui.menu_button("Exportar", |ui| {
             for (label, format) in [
                 ("SVG...", crate::export::ExportFormat::Svg),
@@ -364,6 +368,13 @@ fn draw_help_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         {
             app.show_about = true;
             ui.close_menu();
+        }
+        ui.separator();
+        // O2 i18n: selector ES/EN con persistencia (Piel pura: el selector
+        // solo setea el flag local; `set_locale` escribe fuera del closure).
+        let mut loc = app.config_locale();
+        if grafito_ui::toolbar::locale_selector(ui, &mut loc).changed() {
+            app.set_locale(loc);
         }
     });
 }

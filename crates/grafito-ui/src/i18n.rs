@@ -75,11 +75,11 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 147;
+pub const MSG_COUNT: usize = 153;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (17) + `toolbar.tool` (70) + `palette` (17) +
-/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 147.
+/// `toolbar.group` (17) + `toolbar.tool` (76) + `palette` (17) +
+/// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (12) = 153.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (17) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -170,6 +170,12 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.complex_grid", es: "Complex Grid", en: "Complex Grid" },
     Msg { key: "toolbar.tool.slider", es: "Deslizador", en: "Slider" },
     Msg { key: "toolbar.tool.attractor3d", es: "Atractor 3D", en: "3D attractor" },
+    Msg { key: "toolbar.tool.parallel", es: "Paralela", en: "Parallel" },
+    Msg { key: "toolbar.tool.arc", es: "Arco 3 puntos", en: "3-point arc" },
+    Msg { key: "toolbar.tool.sector", es: "Sector circular", en: "Circular sector" },
+    Msg { key: "toolbar.tool.button", es: "Botón", en: "Button" },
+    Msg { key: "toolbar.tool.image", es: "Imagen", en: "Image" },
+    Msg { key: "toolbar.tool.trig_animation", es: "Animación trigonométrica", en: "Trigonometric animation" },
     // ── palette (17): 14 acciones UI + título + vacío + pie ──
     // ES idéntico a `UI_ACTIONS` en command_palette.rs; EN = clave estable de despacho.
     Msg { key: "palette.action.point", es: "Herramienta Punto", en: "Point Tool" },
@@ -314,8 +320,11 @@ pub fn tool_label(slug: &str, locale: Locale) -> &'static str {
         "ray" => t("toolbar.tool.ray", locale),
         "vector" => t("toolbar.tool.vector", locale),
         "perpendicular" => t("toolbar.tool.perpendicular", locale),
+        "parallel" => t("toolbar.tool.parallel", locale),
         "circle" => t("toolbar.tool.circle", locale),
         "tangent" => t("toolbar.tool.tangent", locale),
+        "arc" => t("toolbar.tool.arc", locale),
+        "sector" => t("toolbar.tool.sector", locale),
         "polygon" => t("toolbar.tool.polygon", locale),
         "regular_polygon" => t("toolbar.tool.regular_polygon", locale),
         "pencil" => t("toolbar.tool.pencil", locale),
@@ -375,7 +384,10 @@ pub fn tool_label(slug: &str, locale: Locale) -> &'static str {
         "heatmap" => t("toolbar.tool.heatmap", locale),
         "complex_grid" => t("toolbar.tool.complex_grid", locale),
         "slider" => t("toolbar.tool.slider", locale),
+        "button" => t("toolbar.tool.button", locale),
+        "image" => t("toolbar.tool.image", locale),
         "attractor3d" => t("toolbar.tool.attractor3d", locale),
+        "trig_animation" => t("toolbar.tool.trig_animation", locale),
         _ => "",
     }
 }
@@ -586,7 +598,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 147);
+        assert_eq!(MSG_COUNT, 153);
     }
 
     #[test]
@@ -625,6 +637,15 @@ mod tests {
         let es = Locale::Es;
         assert_eq!(super::t("toolbar.group.move", es), "Seleccionar");
         assert_eq!(super::t("toolbar.tool.circle", es), "Circulo centro-punto");
+        assert_eq!(super::t("toolbar.tool.parallel", es), "Paralela");
+        assert_eq!(super::t("toolbar.tool.arc", es), "Arco 3 puntos");
+        assert_eq!(super::t("toolbar.tool.sector", es), "Sector circular");
+        assert_eq!(super::t("toolbar.tool.button", es), "Botón");
+        assert_eq!(super::t("toolbar.tool.image", es), "Imagen");
+        assert_eq!(
+            super::t("toolbar.tool.trig_animation", es),
+            "Animación trigonométrica"
+        );
         assert_eq!(super::t("toolbar.tool.pencil", es), "Lapiz");
         assert_eq!(super::t("palette.action.point", es), "Herramienta Punto");
         assert_eq!(super::t("palette.empty", es), "No se encontraron comandos");

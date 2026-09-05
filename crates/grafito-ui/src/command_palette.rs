@@ -7,6 +7,7 @@
 //! `keywords` guarda alias en inglés + español y el filtro también revisa
 //! `syntax_hint` con [`fuzzy_match`] (subsecuencia en orden, sin tildes).
 
+use crate::i18n::{palette_action, palette_footer, t, Locale};
 use grafito_command::command_registry;
 
 pub use command_registry::CommandSpec;
@@ -24,6 +25,9 @@ pub struct PaletteCommand {
     pub selection_key: &'static str,
     /// Alias bilingües (inglés + español) sólo para la búsqueda.
     pub keywords: &'static str,
+    /// Slug del catálogo i18n (`palette_action`) para las 14 acciones UI;
+    /// `None` en comandos del registry (conservan su etiqueta).
+    locale_slug: Option<&'static str>,
     insertion: Option<&'static str>,
     command_id: Option<&'static str>,
 }
@@ -37,6 +41,7 @@ impl PaletteCommand {
             help: spec.help,
             selection_key: spec.palette_label,
             keywords: spec.id,
+            locale_slug: None,
             insertion: Some(spec.insertion),
             command_id: Some(spec.id),
         }
@@ -53,6 +58,30 @@ impl PaletteCommand {
     pub fn registered_spec(&self) -> Option<&'static CommandSpec> {
         self.command_id.and_then(command_registry::by_id)
     }
+
+    /// Nombre visible en el idioma pedido. Las 14 acciones UI resuelven vía
+    /// catálogo i18n (ES idéntico a `name`); el registry conserva su etiqueta.
+    fn localized_name(&self, locale: Locale) -> &'static str {
+        match self.locale_slug {
+            Some(slug) => {
+                let label = palette_action(slug, locale);
+                if label.is_empty() {
+                    self.name
+                } else {
+                    label
+                }
+            }
+            None => self.name,
+        }
+    }
+
+    /// Copia con el nombre visible localizado (clave de despacho intacta).
+    fn with_locale(&self, locale: Locale) -> Self {
+        Self {
+            name: self.localized_name(locale),
+            ..*self
+        }
+    }
 }
 
 const UI_ACTIONS: &[PaletteCommand] = &[
@@ -62,6 +91,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Clic en el lienzo | (x, y)",
         help: "Activa la herramienta para crear puntos.",
         selection_key: "Point Tool",
+        locale_slug: Some("point"),
         keywords: "point tool punto",
         insertion: None,
         command_id: None,
@@ -72,6 +102,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Clic en dos puntos | A = (x1, y1), B = (x2, y2)",
         help: "Activa la herramienta para crear rectas.",
         selection_key: "Line Tool",
+        locale_slug: Some("line"),
         keywords: "line tool recta linea",
         insertion: None,
         command_id: None,
@@ -82,6 +113,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Clic en el centro y en el borde",
         help: "Activa la herramienta para crear circunferencias.",
         selection_key: "Circle Tool",
+        locale_slug: Some("circle"),
         keywords: "circle tool circunferencia circulo",
         insertion: None,
         command_id: None,
@@ -92,6 +124,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Clic en los vértices",
         help: "Activa la herramienta para crear polígonos.",
         selection_key: "Polygon Tool",
+        locale_slug: Some("polygon"),
         keywords: "polygon tool poligono",
         insertion: None,
         command_id: None,
@@ -102,6 +135,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "f(x) = expresión",
         help: "Activa la herramienta para crear funciones.",
         selection_key: "Function Tool",
+        locale_slug: Some("function"),
         keywords: "function tool funcion",
         insertion: None,
         command_id: None,
@@ -112,6 +146,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Mantené el clic y arrastrá para dibujar a mano alzada",
         help: "Activa el lápiz de dibujo libre.",
         selection_key: "Pencil",
+        locale_slug: Some("pencil"),
         keywords: "pencil lapiz dibujo mano alzada",
         insertion: None,
         command_id: None,
@@ -122,6 +157,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Clic o arrastrá para borrar objetos",
         help: "Activa el borrador.",
         selection_key: "Eraser",
+        locale_slug: Some("eraser"),
         keywords: "eraser borrador goma borrar",
         insertion: None,
         command_id: None,
@@ -132,6 +168,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Guarda el documento actual",
         help: "Abre el diálogo para guardar el documento.",
         selection_key: "Save",
+        locale_slug: Some("save"),
         keywords: "save guardar documento",
         insertion: None,
         command_id: None,
@@ -142,6 +179,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Exporta gráficos vectoriales",
         help: "Exporta el documento como SVG.",
         selection_key: "Export SVG",
+        locale_slug: Some("export_svg"),
         keywords: "export svg exportar vectorial",
         insertion: None,
         command_id: None,
@@ -152,6 +190,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Exporta una imagen raster",
         help: "Exporta el documento como PNG.",
         selection_key: "Export PNG",
+        locale_slug: Some("export_png"),
         keywords: "export png exportar imagen raster",
         insertion: None,
         command_id: None,
@@ -162,6 +201,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Exporta código LaTeX TikZ",
         help: "Exporta el documento como TikZ.",
         selection_key: "Export TikZ",
+        locale_slug: Some("export_tikz"),
         keywords: "export tikz exportar latex",
         insertion: None,
         command_id: None,
@@ -172,6 +212,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Ajusta todos los objetos a la vista",
         help: "Ajusta el encuadre al contenido del documento.",
         selection_key: "Zoom to Fit",
+        locale_slug: Some("zoom_fit"),
         keywords: "zoom fit encuadrar ajustar vista",
         insertion: None,
         command_id: None,
@@ -182,6 +223,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Muestra u oculta la cuadrícula",
         help: "Alterna la cuadrícula del lienzo.",
         selection_key: "Toggle Grid",
+        locale_slug: Some("toggle_grid"),
         keywords: "toggle grid cuadricula grilla",
         insertion: None,
         command_id: None,
@@ -192,6 +234,7 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         syntax_hint: "Cambia entre tema claro y oscuro",
         help: "Alterna el tema de la aplicación.",
         selection_key: "Toggle Dark Mode",
+        locale_slug: Some("toggle_dark"),
         keywords: "toggle dark mode tema oscuro claro noche",
         insertion: None,
         command_id: None,
@@ -256,6 +299,17 @@ pub fn all_commands() -> Vec<PaletteCommand> {
     commands
 }
 
+/// Todos los comandos con el nombre visible en el idioma pedido (mismo orden
+/// que [`all_commands`]; claves de despacho intactas). ES idéntico al actual.
+pub fn all_commands_localized(locale: Locale) -> Vec<PaletteCommand> {
+    let mut commands: Vec<PaletteCommand> = UI_ACTIONS
+        .iter()
+        .map(|action| action.with_locale(locale))
+        .collect();
+    commands.extend(command_registry::palette_commands().map(PaletteCommand::registered));
+    commands
+}
+
 #[derive(Default)]
 pub struct CommandPaletteState {
     pub open: bool,
@@ -273,12 +327,25 @@ impl CommandPaletteState {
     /// `syntax_hint`, ayuda y alias. Cada palabra del query debe coincidir
     /// (subcadena o difusa en orden) en al menos un campo.
     pub fn filtered_commands(&self) -> Vec<PaletteCommand> {
-        let all = all_commands();
-        let query = self.search.trim().to_lowercase();
+        Self::filter_in(&all_commands(), &self.search)
+    }
+
+    /// Filtro bilingüe con nombres visibles en el idioma pedido (ver
+    /// [`CommandPaletteState::filtered_commands`]). ES idéntico al actual.
+    pub fn filtered_commands_localized(&self, locale: Locale) -> Vec<PaletteCommand> {
+        Self::filter_in(&all_commands_localized(locale), &self.search)
+    }
+
+    /// Núcleo del filtro bilingüe (español + inglés) sobre nombre, categoría,
+    /// `syntax_hint`, ayuda y alias. Cada palabra del query debe coincidir
+    /// (subcadena o difusa en orden) en al menos un campo.
+    fn filter_in(all: &[PaletteCommand], search: &str) -> Vec<PaletteCommand> {
+        let query = search.trim().to_lowercase();
         if query.is_empty() {
-            return all;
+            return all.to_vec();
         }
-        all.into_iter()
+        all.iter()
+            .copied()
             .filter(|cmd| {
                 query.split_whitespace().all(|token| {
                     [
@@ -297,6 +364,15 @@ impl CommandPaletteState {
 
     pub fn clamp_selected_index(&mut self) {
         let len = self.filtered_commands().len();
+        self.clamp_to(len);
+    }
+
+    fn clamp_selected_index_localized(&mut self, locale: Locale) {
+        let len = self.filtered_commands_localized(locale).len();
+        self.clamp_to(len);
+    }
+
+    fn clamp_to(&mut self, len: usize) {
         if len == 0 {
             self.selected_index = 0;
         } else {
@@ -305,6 +381,13 @@ impl CommandPaletteState {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Option<String> {
+        self.show_localized(ctx, Locale::Es)
+    }
+
+    /// Paleta con textos en el idioma pedido (título, vacío y pie vía catálogo
+    /// i18n; nombres de acciones vía [`all_commands_localized`]). ES idéntico
+    /// a [`CommandPaletteState::show`]; las claves de despacho no cambian.
+    pub fn show_localized(&mut self, ctx: &egui::Context, locale: Locale) -> Option<String> {
         if !self.open {
             return None;
         }
@@ -313,7 +396,7 @@ impl CommandPaletteState {
         let screen_rect = ctx.screen_rect();
         let mut open = self.open;
         let mut dismissed = false;
-        egui::Window::new("Paleta de Comandos")
+        egui::Window::new(t("palette.title", locale))
             .collapsible(false)
             .resizable(false)
             .default_pos([8.0, 48.0])
@@ -335,7 +418,7 @@ impl CommandPaletteState {
                     }
                     let response = ui.text_edit_singleline(&mut self.search);
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let filtered = self.filtered_commands();
+                        let filtered = self.filtered_commands_localized(locale);
                         if let Some(cmd) = filtered.get(self.selected_index) {
                             selected_command = Some(cmd.selection_key.to_string());
                         }
@@ -345,10 +428,10 @@ impl CommandPaletteState {
 
                 ui.separator();
 
-                let filtered = self.filtered_commands();
-                self.clamp_selected_index();
+                let filtered = self.filtered_commands_localized(locale);
+                self.clamp_selected_index_localized(locale);
                 if filtered.is_empty() {
-                    ui.label("No se encontraron comandos");
+                    ui.label(t("palette.empty", locale));
                 } else {
                     egui::ScrollArea::vertical()
                         .max_height((screen_rect.height() - 170.0).max(120.0))
@@ -379,7 +462,7 @@ impl CommandPaletteState {
                 }
 
                 if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                    let filtered = self.filtered_commands();
+                    let filtered = self.filtered_commands_localized(locale);
                     if self.selected_index < filtered.len().saturating_sub(1) {
                         self.selected_index += 1;
                     }
@@ -393,10 +476,10 @@ impl CommandPaletteState {
 
                 ui.separator();
                 ui.label(
-                    egui::RichText::new(format!(
-                        "{} de {} · ↑↓ navegar · Enter abrir · Esc cerrar",
+                    egui::RichText::new(palette_footer(
                         filtered.len(),
-                        all_commands().len()
+                        all_commands_localized(locale).len(),
+                        locale,
                     ))
                     .small()
                     .weak(),
@@ -510,6 +593,91 @@ mod tests {
         assert!(
             keys.contains(&"Point Tool"),
             "buscar 'lienzo' (sólo en syntax_hint) debería encontrar punto, encontró {keys:?}"
+        );
+    }
+
+    #[test]
+    fn comandos_localizados_en_espanol_coinciden_con_la_ui_actual() {
+        use super::UI_ACTIONS;
+        use crate::i18n::{palette_action, Locale};
+        assert_eq!(UI_ACTIONS.len(), 14);
+        let current = all_commands();
+        let localized = super::all_commands_localized(Locale::Es);
+        assert_eq!(current.len(), localized.len());
+        for (a, b) in current.iter().zip(localized.iter()) {
+            // Migración neutra: mismo orden, mismo nombre, misma clave.
+            assert_eq!(a.name, b.name, "ES cambió para {:?}", a.selection_key);
+            assert_eq!(a.selection_key, b.selection_key);
+            assert_eq!(a.category, b.category);
+        }
+        // Cada acción UI resuelve su slug en ambas lenguas.
+        for action in UI_ACTIONS {
+            let slug = action.locale_slug.unwrap_or("");
+            assert!(!slug.is_empty(), "sin slug para {:?}", action.selection_key);
+            assert_eq!(palette_action(slug, Locale::Es), action.name);
+            assert!(!palette_action(slug, Locale::En).is_empty());
+        }
+    }
+
+    #[test]
+    fn paleta_en_ingles_conmuta_nombres_y_conserva_despacho() {
+        use crate::i18n::Locale;
+        let localized = super::all_commands_localized(Locale::En);
+        let ui_actions: Vec<_> = localized
+            .iter()
+            .filter(|cmd| !cmd.is_registered())
+            .collect();
+        assert_eq!(ui_actions.len(), 14);
+        for expected in [
+            "Point Tool",
+            "Line Tool",
+            "Circle Tool",
+            "Polygon Tool",
+            "Function Tool",
+            "Pencil",
+            "Eraser",
+            "Save",
+            "Export SVG",
+            "Export PNG",
+            "Export TikZ",
+            "Zoom to Fit",
+            "Toggle Grid",
+            "Toggle Dark Mode",
+        ] {
+            assert!(
+                ui_actions.iter().any(|cmd| cmd.name == expected),
+                "falta el nombre EN {expected:?}"
+            );
+            // La clave de despacho sigue siendo la histórica en inglés.
+            assert!(
+                ui_actions.iter().any(|cmd| cmd.selection_key == expected),
+                "falta la clave estable {expected:?}"
+            );
+        }
+        // El filtro en EN encuentra por nombre inglés y por alias español.
+        for (query, expected_key) in [("pencil", "Pencil"), ("cuadricula", "Toggle Grid")] {
+            let state = CommandPaletteState {
+                search: query.to_string(),
+                ..Default::default()
+            };
+            let keys: Vec<&str> = state
+                .filtered_commands_localized(Locale::En)
+                .iter()
+                .map(|cmd| cmd.selection_key)
+                .collect();
+            assert!(
+                keys.contains(&expected_key),
+                "query {query:?} en EN debería encontrar {expected_key:?}, encontró {keys:?}"
+            );
+        }
+        // Pie localizado en ambas lenguas (formato idéntico al actual en ES).
+        assert_eq!(
+            crate::i18n::palette_footer(3, 207, Locale::Es),
+            "3 de 207 · ↑↓ navegar · Enter abrir · Esc cerrar"
+        );
+        assert_eq!(
+            crate::i18n::palette_footer(3, 207, Locale::En),
+            "3 of 207 · ↑↓ navigate · Enter open · Esc close"
         );
     }
 

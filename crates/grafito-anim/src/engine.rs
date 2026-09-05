@@ -765,6 +765,23 @@ impl Drop for AnimEngine {
 ///   (fracción `percent/100.0` vía [`JobEvent::fraction`], sin inventar %).
 /// - Errores tipados: `code + mensaje(≤500)` localizados al español.
 /// - Cancelación cooperativa con kill <200 ms; timeout con kill rápido.
+///
+/// Cancelación con `CancellationToken` (ANIM-REVIVE): la firma YA lo soporta —
+/// `cancel: Option<&dyn Fn() -> bool>` acepta cualquier señal, incluido el
+/// `CancellationToken` de `grafito-assistant` (`is_cancelled()`), sin añadir
+/// dependencia a este crate. Patrón para el lead en `grafito-app`:
+/// ```ignore
+/// let token = grafito_assistant::CancellationToken::default();
+/// let cancel = || token.is_cancelled(); // vive lo que dure `run_job`
+/// grafito_anim::run_job(&config, &request, Some(&cancel), on_event)?;
+/// // El botón Cancelar del panel (`AnimPanelEvent::CancelRequested`) debe
+/// // llamar a `token.cancel()`; el loop de aquí lo observa cada ≤200 ms.
+/// ```
+/// HUECO EXACTO pineado: `grafito-app/src/assistant.rs` hoy llama a `run_job`
+/// con `None` (ver `Some(&|| true)` en el test `run_job_honors_cancel_closure`
+/// como prueba de que el cableado funciona cuando se pasa). Cambiar ese `None`
+/// por el closure de arriba es todo lo que falta (scope del lead, `app.rs` /
+/// `assistant.rs` fuera de este módulo).
 pub fn run_job(
     config: &EngineConfig,
     request: &AnimRequest,
@@ -1665,5 +1682,45 @@ print("sandbox path-traversal OK")
             "sin cola FIFO: segundo submit rechazado, got: {err}"
         );
         let _ = engine.shutdown();
+    }
+
+    // ── v4: cancel cableado hasta run_job (ANIM-REVIVE) ───────────────────
+    #[test]
+    fn run_job_honors_cancel_closure_like_cancellation_token() {
+        if !python_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        // La firma YA soporta tokens: cualquier `&dyn Fn() -> bool` (p. ej.
+        // `|| token.is_cancelled()` de `grafito-assistant::CancellationToken`)
+        // cancela el loop con kill <200 ms y error en español.
+        let (_guard, config) = stub_engine();
+        let started = Instant::now();
+        let error = run_job(
+            &config,
+            &derivada_request("derivada"),
+            Some(&|| true),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cancelado"),
+            "cancel localizado esperado, got: {error}"
+        );
+        assert!(
+            started.elapsed() < config.job_timeout,
+            "cancel debe atajar antes del timeout de 90 s"
+        );
+        // Sin señal (None) el stub completa: el hueco está en el caller que
+        // pasa None, no en esta firma.
+        let (_guard2, config2) = stub_engine();
+        let mut saw_progress = false;
+        let ok = run_job(&config2, &derivada_request("derivada"), None, |ev| {
+            if matches!(ev, JobEvent::Progress(_)) {
+                saw_progress = true;
+            }
+        });
+        assert!(ok.is_ok(), "sin cancel el job completa");
+        assert!(saw_progress, "el stub emite progress real");
     }
 }

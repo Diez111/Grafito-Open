@@ -449,22 +449,23 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("Plantilla:");
-        let actual = if state.template.is_empty() {
+        // Vía reductor puro: el ComboBox escribe un temporal y solo el cambio
+        // real viaja como `SelectTemplate` (mismo resultado que antes).
+        let mut elegido = if state.template.is_empty() {
             "derivative-slope".to_string()
         } else {
             state.template.clone()
         };
         egui::ComboBox::from_id_salt("anim_template")
-            .selected_text(nombre_plantilla(&actual))
+            .selected_text(nombre_plantilla(&elegido))
             .show_ui(ui, |ui| {
                 for id in PLANTILLAS_COMBO {
-                    ui.selectable_value(
-                        &mut state.template,
-                        (*id).to_string(),
-                        nombre_plantilla(id),
-                    );
+                    ui.selectable_value(&mut elegido, (*id).to_string(), nombre_plantilla(id));
                 }
             });
+        if elegido != state.template {
+            let _ = apply_anim_panel_action(state, AnimPanelAction::SelectTemplate(elegido));
+        }
     });
     ui.horizontal(|ui| {
         ui.label("Concepto:");
@@ -552,6 +553,15 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
                 .size(tokens::TYPE_SM)
                 .color(Color32::GRAY),
             );
+            // Tras Generar/Regenerar el progreso real aún no llegó (lo mueve el
+            // hilo del lead): se muestra el estado solicitado, sin inventar %.
+            if !state.status.is_empty() {
+                ui.label(
+                    egui::RichText::new(&state.status)
+                        .size(tokens::TYPE_SM)
+                        .color(Color32::GRAY),
+                );
+            }
         }
         EstadoVista::Fallo => {
             ui.label(
@@ -580,12 +590,33 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
     ui.add_space(tokens::SPACE_SM);
 
     // ── Controles: siempre visibles, con motivo cuando no aplican ─────────
+    // Toda la lógica vive en el reductor puro (`apply_anim_panel_action`); la
+    // cáscara solo reenvía clicks. Los eventos con efecto (generar en hilo,
+    // copiar a disco) se descartan aquí con TODO: los cablea el lead en
+    // `app.rs` (hilo `render_anim_with_progress` + `spawn_gif_export`).
     let puede_reproducir = !state.frames.is_empty();
-    let puede_cancelar = state.is_active() || state.playing;
-    let puede_exportar = state.media_path.is_some();
+    let puede_cancelar = can_cancel(state);
+    let puede_exportar = can_export(state);
+    let puede_generar = can_generate(state);
     let puede_vaciar =
         !state.frames.is_empty() || state.media_path.is_some() || !state.status.is_empty();
     ui.horizontal_wrapped(|ui| {
+        let resp_gen = ui.add_enabled(puede_generar, egui::Button::new("▶ Generar"));
+        if resp_gen.clicked() {
+            // TODO(lead-app): enviar `GenerateRequested` al hilo de generación.
+            let _ = apply_anim_panel_action(state, AnimPanelAction::Generate);
+        }
+        if !puede_generar {
+            resp_gen.on_disabled_hover_text("Escribí un concepto (1..200 chars) para generar.");
+        }
+        let resp_regen = ui.add_enabled(puede_generar, egui::Button::new("↻ Regenerar"));
+        if resp_regen.clicked() {
+            // TODO(lead-app): enviar `RegenerateRequested` al hilo de generación.
+            let _ = apply_anim_panel_action(state, AnimPanelAction::Regenerate);
+        }
+        if !puede_generar {
+            resp_regen.on_disabled_hover_text("Escribí un concepto (1..200 chars) para regenerar.");
+        }
         let etiqueta = if state.playing {
             "⏸ Pausar"
         } else {
@@ -593,37 +624,37 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
         };
         let resp_repro = ui.add_enabled(puede_reproducir, egui::Button::new(etiqueta));
         if resp_repro.clicked() {
-            state.playing = !state.playing;
+            let _ = apply_anim_panel_action(state, AnimPanelAction::TogglePlay);
         }
         if !puede_reproducir {
             resp_repro.on_disabled_hover_text("Sin fotogramas: primero generá una animación.");
         }
         let resp_cancela = ui.add_enabled(puede_cancelar, egui::Button::new("✕ Cancelar"));
         if resp_cancela.clicked() {
-            state.playing = false;
-            if state.is_active() {
-                state.progress = 0.0;
-                state.status = "Generación cancelada por el usuario.".to_string();
-            } else {
-                state.status = "Reproducción detenida.".to_string();
-            }
+            // TODO(lead-app): si `CancelRequested { was_generating: true }`,
+            // propagar al token que observa `run_job` (ver `engine.rs`).
+            let _ = apply_anim_panel_action(state, AnimPanelAction::Cancel);
         }
         if !puede_cancelar {
             resp_cancela.on_disabled_hover_text("No hay generación ni reproducción en curso.");
         }
         let resp_exporta = ui.add_enabled(puede_exportar, egui::Button::new("⤓ Exportar"));
         if resp_exporta.clicked() {
-            // TODO: copiar media_path al destino elegido por el usuario (E/S en hilo aparte)
+            // TODO(lead-app): enviar `ExportRequested { media_path }` al hilo
+            // de E/S (`spawn_gif_export`) con destino elegido por el usuario.
             // TODO(v3-webm): formato webm + selector de fps solo si ffmpeg ya está
             // cableado (hoy el worker solo escribe gif/png/mp4; ver protocolo
             // `ExportFormat`). Sin ffmpeg, no prometer webm en la UI.
+            let _ = apply_anim_panel_action(state, AnimPanelAction::Export);
         }
         if !puede_exportar {
             resp_exporta.on_disabled_hover_text("Todavía no hay archivo listo para exportar.");
         }
         let resp_vacia = ui.add_enabled(puede_vaciar, egui::Button::new("🗑 Vaciar"));
         if resp_vacia.clicked() {
-            state.clear_with_ctx(ui.ctx());
+            // El reductor puro no tiene ctx: se olvidan texturas GPU primero.
+            state.olvida_texturas(ui.ctx());
+            let _ = apply_anim_panel_action(state, AnimPanelAction::Clear);
         }
         if !puede_vaciar {
             resp_vacia.on_disabled_hover_text("No hay nada para vaciar.");
@@ -657,9 +688,8 @@ pub fn draw_anim_panel(ui: &mut egui::Ui, state: &mut AnimPreviewState) {
                 .add(egui::Slider::new(&mut idx, 0..=max_idx).text(etiqueta))
                 .changed()
             {
-                state.frame_idx = idx;
-                state.playing = false; // mover el deslizador pausa
-                state.sync_phase_from_frame();
+                // Vía reductor puro: clampea, pausa y sincroniza el scrub.
+                let _ = apply_anim_panel_action(state, AnimPanelAction::SelectFrame(idx));
             } else {
                 state.frame_idx = idx;
                 if state.playing {
@@ -862,6 +892,183 @@ pub fn build_anim_params(state: &AnimPreviewState) -> Result<AnimParams, String>
     };
     anim_params.validate().map_err(|e| e.to_string())?;
     Ok(anim_params)
+}
+
+// ── Panel puro headless v4 (ANIM-REVIVE) ───────────────────────────────────
+// `draw_anim_panel` hoy no tiene llamador en `GrafitoApp` (dead code hasta que
+// el lead lo cablee en `app.rs`, fuera de este scope). Para que el panel sea
+// 100% funcional sin ese cableado, TODA la lógica vive aquí como reductor puro
+// testeable headless:
+//
+//   `apply_anim_panel_action(&mut state, action) -> Vec<AnimPanelEvent>`
+//
+// Sin `egui::Context`, sin E/S, sin `spawn`: dada una acción
+// (Generar/Regenerar/Cancelar/Exportar/…) muta el `state` y devuelve eventos.
+// `draw_anim_panel` es solo la cáscara egui que reenvía cada click al reductor
+// y descarta los eventos con efecto (hilo de generación, copia a disco): esos
+// los cablea el lead en `app.rs` (ver `AnimPanelEvent` y `can_*`). Generar
+// limpia (arranque fresco); Regenerar conserva los frames visibles hasta que
+// lleguen los nuevos. Ningún evento inventa progreso: el hilo de generación
+// (lead) es el único que mueve `progress` con datos reales del worker.
+
+/// Acción del usuario sobre el panel (pura, sin egui ni E/S).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimPanelAction {
+    /// Arranque fresco: valida params, limpia frames/media y pide generar.
+    Generate,
+    /// Nueva generación con los params vivos: conserva frames hasta el relevo.
+    Regenerate,
+    /// Cancela generación en curso o detiene reproducción.
+    Cancel,
+    /// Pide exportar el archivo ya listo (sin efecto aquí).
+    Export,
+    /// Alterna reproducción/pausa (no-op sin frames).
+    TogglePlay,
+    /// Vacía el estado (la cáscara egui olvida texturas GPU antes).
+    Clear,
+    /// Elige fotograma (clampea; pausa y sincroniza el scrub).
+    SelectFrame(usize),
+    /// Elige plantilla (ignora vacío o sin cambio).
+    SelectTemplate(String),
+}
+
+/// Evento emitido por el reductor (puro, sin efectos).
+///
+/// Los que requieren efecto (`GenerateRequested`, `RegenerateRequested`,
+/// `ExportRequested`, `CancelRequested` con generación en curso) los ejecuta
+/// el lead en `app.rs`: hilo de generación (`render_anim_with_progress` +
+/// `spawn_gif_export`) y `run_job(cancel)` para el worker externo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnimPanelEvent {
+    GenerateRequested { template: String, concept: String },
+    RegenerateRequested { template: String, concept: String },
+    CancelRequested { was_generating: bool },
+    ExportRequested { media_path: String },
+    PlaybackStarted,
+    PlaybackPaused,
+    Cleared,
+    FrameSelected(usize),
+    TemplateSelected(String),
+    ValidationFailed(String),
+}
+
+/// ¿Hay params válidos para generar? (concepto no vacío, ≤200 chars).
+pub fn can_generate(state: &AnimPreviewState) -> bool {
+    build_anim_params(state).is_ok()
+}
+
+/// ¿Hay algo que cancelar? (generación activa o reproduciendo).
+pub fn can_cancel(state: &AnimPreviewState) -> bool {
+    state.is_active() || state.playing
+}
+
+/// ¿Hay archivo listo para exportar?
+pub fn can_export(state: &AnimPreviewState) -> bool {
+    state.media_path.is_some()
+}
+
+/// Reductor puro del panel: aplica `action` sobre `state` y devuelve eventos.
+///
+/// Headless y total: cubre Generar/Regenerar/Cancelar/Exportar más los
+/// controles locales (play, vaciar, deslizador, plantilla). Los eventos con
+/// efecto se devuelven para que el lead los ejecute; aquí nunca hay E/S.
+pub fn apply_anim_panel_action(
+    state: &mut AnimPreviewState,
+    action: AnimPanelAction,
+) -> Vec<AnimPanelEvent> {
+    match action {
+        AnimPanelAction::Generate => match build_anim_params(state) {
+            Ok(params) => {
+                state.frames.clear();
+                state.media_path = None;
+                state.frame_idx = 0;
+                state.playing = false;
+                state.progress = 0.0;
+                state.status = "Generación solicitada: esperando al motor…".to_string();
+                state.mark_params_applied();
+                vec![AnimPanelEvent::GenerateRequested {
+                    template: params.template,
+                    concept: params.concept,
+                }]
+            }
+            Err(reason) => {
+                state.status = format!("Error: {reason}");
+                vec![AnimPanelEvent::ValidationFailed(reason)]
+            }
+        },
+        AnimPanelAction::Regenerate => match build_anim_params(state) {
+            Ok(params) => {
+                // A diferencia de Generate, conserva frames/media visibles.
+                state.frame_idx = 0;
+                state.playing = false;
+                state.progress = 0.0;
+                state.status = "Regenerando con los parámetros actuales…".to_string();
+                state.mark_params_applied();
+                vec![AnimPanelEvent::RegenerateRequested {
+                    template: params.template,
+                    concept: params.concept,
+                }]
+            }
+            Err(reason) => {
+                state.status = format!("Error: {reason}");
+                vec![AnimPanelEvent::ValidationFailed(reason)]
+            }
+        },
+        AnimPanelAction::Cancel => {
+            if !can_cancel(state) {
+                return Vec::new();
+            }
+            let was_generating = state.is_active();
+            state.playing = false;
+            if was_generating {
+                state.progress = 0.0;
+                state.status = "Generación cancelada por el usuario.".to_string();
+            } else {
+                state.status = "Reproducción detenida.".to_string();
+            }
+            vec![AnimPanelEvent::CancelRequested { was_generating }]
+        }
+        AnimPanelAction::Export => match state.media_path.clone() {
+            Some(media_path) => vec![AnimPanelEvent::ExportRequested { media_path }],
+            // Sin archivo: no-op (la cáscara deshabilita vía `can_export`).
+            None => Vec::new(),
+        },
+        AnimPanelAction::TogglePlay => {
+            if state.frames.is_empty() {
+                return Vec::new();
+            }
+            state.playing = !state.playing;
+            vec![if state.playing {
+                AnimPanelEvent::PlaybackStarted
+            } else {
+                AnimPanelEvent::PlaybackPaused
+            }]
+        }
+        AnimPanelAction::Clear => {
+            // Headless: `clear()` suelta los `TextureHandle` (su Drop libera).
+            // La cáscara egui olvida además por id antes de llamar aquí.
+            state.clear();
+            vec![AnimPanelEvent::Cleared]
+        }
+        AnimPanelAction::SelectFrame(idx) => {
+            if state.frames.is_empty() {
+                return Vec::new();
+            }
+            let clamped = idx.min(state.frames.len() - 1);
+            state.frame_idx = clamped;
+            state.playing = false;
+            state.sync_phase_from_frame();
+            vec![AnimPanelEvent::FrameSelected(clamped)]
+        }
+        AnimPanelAction::SelectTemplate(name) => {
+            let name = name.trim().to_string();
+            if name.is_empty() || name == state.template {
+                return Vec::new();
+            }
+            state.template = name.clone();
+            vec![AnimPanelEvent::TemplateSelected(name)]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1098,5 +1305,194 @@ mod tests {
         assert_eq!(PLAYBACK_FPS, 12);
         assert_eq!(REPRODUCCION_MS, 83);
         assert_eq!(REPRODUCCION_MS, 1000 / PLAYBACK_FPS as u64);
+    }
+
+    // ── v4: panel puro headless (ANIM-REVIVE) ────────────────────────────
+    fn estado_concepto(concept: &str) -> AnimPreviewState {
+        AnimPreviewState {
+            template: "derivative-slope".into(),
+            concept: concept.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn panel_puro_generate_valida_y_emite_evento() {
+        let mut s = estado_concepto("derivada");
+        s.set_live_param("x0", 2.5);
+        assert!(can_generate(&s));
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Generate);
+        assert_eq!(
+            evs,
+            vec![AnimPanelEvent::GenerateRequested {
+                template: "derivative-slope".into(),
+                concept: "derivada".into(),
+            }]
+        );
+        // Estado: arranque fresco, sin progreso inventado (el hilo lo moverá).
+        assert_eq!(s.progress, 0.0);
+        assert!(!s.is_active());
+        assert!(!s.playing);
+        assert_eq!(s.frame_idx, 0);
+        assert!(s.frames.is_empty());
+        assert!(s.media_path.is_none());
+        assert!(!s.params_dirty, "generar consume los params vivos");
+        assert!(s.status.contains("solicitada"));
+    }
+
+    #[test]
+    fn panel_puro_generate_con_concepto_vacio_falla() {
+        let mut s = AnimPreviewState::default();
+        assert!(!can_generate(&s));
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Generate);
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0], AnimPanelEvent::ValidationFailed(_)));
+        // El estado cae a Fallo visible (español), sin eventos con efecto.
+        assert_eq!(estado_vista(&s), EstadoVista::Fallo);
+        assert!(s.status.contains("Error"));
+    }
+
+    #[test]
+    fn panel_puro_regenerate_conserva_frames_y_generate_limpia() {
+        let frames = vec![egui::ColorImage::new([2, 2], Color32::BLACK); 3];
+        let mut regen = AnimPreviewState {
+            template: "derivative-slope".into(),
+            concept: "derivada".into(),
+            frames: frames.clone(),
+            media_path: Some("/tmp/a.gif".into()),
+            frame_idx: 2,
+            ..Default::default()
+        };
+        let evs = apply_anim_panel_action(&mut regen, AnimPanelAction::Regenerate);
+        assert!(matches!(evs[0], AnimPanelEvent::RegenerateRequested { .. }));
+        assert_eq!(regen.frames.len(), 3, "regenerar conserva hasta el relevo");
+        assert!(regen.media_path.is_some());
+        assert_eq!(regen.frame_idx, 0);
+
+        let mut gen = AnimPreviewState {
+            template: "derivative-slope".into(),
+            concept: "derivada".into(),
+            frames,
+            media_path: Some("/tmp/a.gif".into()),
+            ..Default::default()
+        };
+        let evs = apply_anim_panel_action(&mut gen, AnimPanelAction::Generate);
+        assert!(matches!(evs[0], AnimPanelEvent::GenerateRequested { .. }));
+        assert!(gen.frames.is_empty(), "generar arranca fresco");
+        assert!(gen.media_path.is_none());
+    }
+
+    #[test]
+    fn panel_puro_cancel_cancela_generacion_y_detiene_repro() {
+        // Generación en curso → resetea progreso + evento con flag.
+        let mut s = estado_concepto("derivada");
+        s.progress = 0.4;
+        s.playing = true;
+        assert!(can_cancel(&s));
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Cancel);
+        assert_eq!(
+            evs,
+            vec![AnimPanelEvent::CancelRequested {
+                was_generating: true
+            }]
+        );
+        assert_eq!(s.progress, 0.0);
+        assert!(!s.playing);
+        assert!(s.status.contains("cancelada"));
+        // Sin nada en curso → no-op (el botón va deshabilitado).
+        assert!(!can_cancel(&s));
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Cancel);
+        assert!(evs.is_empty());
+        // Solo reproduciendo → detiene sin tocar progreso.
+        let mut r = estado_concepto("derivada");
+        r.frames = vec![egui::ColorImage::new([2, 2], Color32::BLACK); 2];
+        r.playing = true;
+        let evs = apply_anim_panel_action(&mut r, AnimPanelAction::Cancel);
+        assert_eq!(
+            evs,
+            vec![AnimPanelEvent::CancelRequested {
+                was_generating: false
+            }]
+        );
+        assert!(!r.playing);
+        assert!(r.status.contains("detenida"));
+    }
+
+    #[test]
+    fn panel_puro_export_solo_con_archivo_listo() {
+        // Sin archivo: no-op pineado (antes era TODO silencioso en el click).
+        let mut s = estado_concepto("derivada");
+        assert!(!can_export(&s));
+        assert!(apply_anim_panel_action(&mut s, AnimPanelAction::Export).is_empty());
+        // Con archivo: evento con la ruta (la copia la hace el hilo del lead).
+        s.media_path = Some("/tmp/anim.gif".into());
+        assert!(can_export(&s));
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Export);
+        assert_eq!(
+            evs,
+            vec![AnimPanelEvent::ExportRequested {
+                media_path: "/tmp/anim.gif".into()
+            }]
+        );
+        // Exportar no muta el estado.
+        assert!(s.media_path.is_some());
+    }
+
+    #[test]
+    fn panel_puro_play_frame_y_template_locales() {
+        let mut s = estado_concepto("derivada");
+        // Sin frames: toggle no-op.
+        assert!(apply_anim_panel_action(&mut s, AnimPanelAction::TogglePlay).is_empty());
+        assert!(apply_anim_panel_action(&mut s, AnimPanelAction::SelectFrame(3)).is_empty());
+        s.frames = vec![egui::ColorImage::new([2, 2], Color32::BLACK); 5];
+        // Toggle alterna con evento.
+        assert_eq!(
+            apply_anim_panel_action(&mut s, AnimPanelAction::TogglePlay),
+            vec![AnimPanelEvent::PlaybackStarted]
+        );
+        assert!(s.playing);
+        assert_eq!(
+            apply_anim_panel_action(&mut s, AnimPanelAction::TogglePlay),
+            vec![AnimPanelEvent::PlaybackPaused]
+        );
+        // SelectFrame clampea, pausa y sincroniza.
+        s.playing = true;
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::SelectFrame(99));
+        assert_eq!(evs, vec![AnimPanelEvent::FrameSelected(4)]);
+        assert_eq!(s.frame_idx, 4);
+        assert!(!s.playing);
+        // Plantilla: cambio emite, vacío o igual es no-op.
+        let evs = apply_anim_panel_action(
+            &mut s,
+            AnimPanelAction::SelectTemplate("integral-area".into()),
+        );
+        assert_eq!(
+            evs,
+            vec![AnimPanelEvent::TemplateSelected("integral-area".into())]
+        );
+        assert!(
+            apply_anim_panel_action(&mut s, AnimPanelAction::SelectTemplate("".into())).is_empty()
+        );
+        assert!(apply_anim_panel_action(
+            &mut s,
+            AnimPanelAction::SelectTemplate("integral-area".into())
+        )
+        .is_empty());
+        // Clear vacía todo con evento.
+        let evs = apply_anim_panel_action(&mut s, AnimPanelAction::Clear);
+        assert_eq!(evs, vec![AnimPanelEvent::Cleared]);
+        assert_eq!(s.progress, 0.0);
+        assert!(s.frames.is_empty());
+    }
+
+    #[test]
+    fn combo_sincronizado_con_registro_nativo_once() {
+        // Sync mecánico 11↔11: ComboBox == NATIVE_TEMPLATES (orden libre).
+        let mut combo: Vec<&str> = PLANTILLAS_COMBO.to_vec();
+        let mut nativo: Vec<&str> = crate::anim_native::NATIVE_TEMPLATES.to_vec();
+        combo.sort_unstable();
+        nativo.sort_unstable();
+        assert_eq!(combo, nativo);
+        assert_eq!(PLANTILLAS_COMBO.len(), 11);
     }
 }

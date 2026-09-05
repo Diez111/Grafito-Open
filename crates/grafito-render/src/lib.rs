@@ -26,7 +26,7 @@
 use grafito_complex::algebraic_mappings::ConformalMap;
 use grafito_core::{
     ComplexGridObj, Document, GeoObject, HyperbolaObj, ObjectId, ParabolaObj, PhasePortraitObj,
-    RelationOperator, RenderQuality, TransformedObj, VectorField3DObj,
+    Prism3DObj, Quadric3DObj, RelationOperator, RenderQuality, TransformedObj, VectorField3DObj,
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform, AABB};
 use lyon::{
@@ -652,6 +652,112 @@ pub fn calculate_lighting(base_color: Color, normal: glam::Vec3, light_dir: glam
         (base_color.b * intensity).min(1.0),
         base_color.a,
     )
+}
+
+// ── Prism/Quadric 3D (paso intermedio) ──────────────────────────────────────
+
+/// Límite de vértices de base renderizados para un prisma.
+///
+/// La base puede declarar hasta `MAX_POLYGON_VERTICES` (8_192) vértices; el
+/// renderizado recorta a esta cota para respetar `MAX_WORLD_MESH_VERTICES`.
+pub const MAX_PRISM_BASE_VERTICES: usize = 64;
+
+/// Elipsoide derivado de una cuádrica (paso intermedio honesto).
+///
+/// TODO(full-quadric): clasificación general (hiperboloides, paraboloides,
+/// conos) y términos cruzados `d,e,f`. Hoy solo se aproximan elipsoides reales
+/// `a*x² + b*y² + c*z² + g*x + h*y + i*z + j = 0` completando el cuadrado.
+#[derive(Debug, Clone, Copy)]
+pub struct QuadricEllipsoid {
+    pub center: Point3D,
+    pub radii: glam::Vec3,
+}
+
+impl QuadricEllipsoid {
+    /// Elipsoide por defecto (esfera unitaria en el origen) para cuádricas no
+    /// clasificables como elipsoide real. Aproximación documentada: el render
+    /// completo de la cuádrica general queda como TODO(full-quadric).
+    pub fn placeholder() -> Self {
+        Self {
+            center: Point3D::new(0.0, 0.0, 0.0),
+            radii: glam::Vec3::ONE,
+        }
+    }
+}
+
+/// Deriva el elipsoide de una cuádrica sin términos cruzados.
+///
+/// Completa el cuadrado de `a*x² + b*y² + c*z² + g*x + h*y + i*z + j = 0`:
+/// `a(x + g/(2a))² + b(y + h/(2b))² + c(z + i/(2c))² = g²/(4a) + h²/(4b) + i²/(4c) - j`.
+/// Devuelve `None` cuando la cuádrica no es un elipsoide real (coeficientes
+/// diagonales no positivos o lado derecho no positivo).
+pub fn quadric_ellipsoid_params(quadric: &Quadric3DObj) -> Option<QuadricEllipsoid> {
+    let a = quadric.a;
+    let b = quadric.b;
+    let c = quadric.c;
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() || a <= 0.0 || b <= 0.0 || c <= 0.0 {
+        return None;
+    }
+    let center = Point3D::new(
+        -quadric.g / (2.0 * a),
+        -quadric.h / (2.0 * b),
+        -quadric.i / (2.0 * c),
+    );
+    if !center.is_finite() {
+        return None;
+    }
+    let rhs = quadric.g * quadric.g / (4.0 * a)
+        + quadric.h * quadric.h / (4.0 * b)
+        + quadric.i * quadric.i / (4.0 * c)
+        - quadric.j;
+    if !rhs.is_finite() || rhs <= 0.0 {
+        return None;
+    }
+    let rx = (rhs / a).sqrt();
+    let ry = (rhs / b).sqrt();
+    let rz = (rhs / c).sqrt();
+    if !rx.is_finite() || !ry.is_finite() || !rz.is_finite() || rx <= 0.0 || ry <= 0.0 || rz <= 0.0
+    {
+        return None;
+    }
+    Some(QuadricEllipsoid {
+        center,
+        radii: glam::Vec3::new(rx as f32, ry as f32, rz as f32),
+    })
+}
+
+/// Vértices de la base de un prisma recortados a la cota de renderizado.
+pub fn prism_base_vertices(prism: &Prism3DObj) -> &[Point3D] {
+    &prism.base_vertices[..prism.base_vertices.len().min(MAX_PRISM_BASE_VERTICES)]
+}
+
+/// Vértices de la tapa superior de un prisma recortados a la cota de renderizado.
+pub fn prism_top_vertices(prism: &Prism3DObj) -> Vec<Point3D> {
+    prism_base_vertices(prism)
+        .iter()
+        .map(|point| {
+            Point3D::new(
+                point.x + prism.direction.x,
+                point.y + prism.direction.y,
+                point.z + prism.direction.z,
+            )
+        })
+        .collect()
+}
+
+/// Número de triángulos sólidos de un prisma con `base_len` vértices de base.
+pub fn prism_solid_triangle_count(base_len: usize) -> usize {
+    base_len.saturating_mul(4).saturating_sub(4)
+}
+
+/// Número de segmentos wireframe de un prisma con `base_len` vértices de base.
+pub fn prism_wire_segment_count(base_len: usize) -> usize {
+    base_len.saturating_mul(3)
+}
+
+/// Unidades de trabajo CPU estimadas para un prisma (triángulos + segmentos).
+pub fn prism_work_units(base_len: usize) -> usize {
+    prism_solid_triangle_count(base_len).saturating_add(prism_wire_segment_count(base_len))
 }
 
 /// Un vértice simple con posición y color.

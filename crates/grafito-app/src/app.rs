@@ -10,7 +10,7 @@
 //! - GPU compute: `domain_coloring_compute` 500×500 = 250k cells en un único
 //!   dispatch wgpu (grafito-render). CPU submit << GPU time ⇒ GPU-bound.
 
-use crate::utils::{load_config, save_config, AppConfig, AutosaveDebouncer};
+use crate::utils::{load_config, save_config, AppConfig, AppLocale, AutosaveDebouncer};
 use crate::{Perspective, ViewMode};
 use egui::{Key, Pos2};
 use grafito_core::{
@@ -62,6 +62,109 @@ pub(crate) struct PendingOpenJob {
 pub(crate) struct PendingExportJob {
     pub receiver: Receiver<Result<PathBuf, String>>,
     pub format: crate::export::ExportFormat,
+}
+
+/// Presupuestos espejo de `grafito-ggb` (sin añadir dependencia para no tocar
+/// `Cargo.toml`): `MAX_GGB_BYTES` 64MiB, `MAX_GGB_XML_BYTES` 10MiB,
+/// `MAX_ELEMS` 5000, `MAX_ZIP_ENTRIES` 4096. Ver
+/// `crates/grafito-ggb/src/lib.rs:12-16`.
+pub(crate) const GGB_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const GGB_MAX_XML_BYTES: u64 = 10 * 1024 * 1024;
+pub(crate) const GGB_MAX_ELEMS: usize = 5000;
+pub(crate) const GGB_MAX_ZIP_ENTRIES: usize = 4096;
+pub(crate) const GGB_XML_NAME: &str = "geogebra.xml";
+/// Cota de expresión espejo de `grafito-ggb::MAX_EXPR_CHARS` (2000) y de
+/// `grafito-core::validation::MAX_EXPR_LENGTH` (2000).
+pub(crate) const GGB_MAX_EXPR_CHARS: usize = 2000;
+
+/// Comando Grafito mapeado desde `.ggb` — espejo de `grafito-ggb::MappedObject`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbMappedCommand {
+    pub kind: String,
+    pub command: String,
+}
+
+/// Elemento omitido con razón honesta — espejo de `grafito-ggb::OmittedObject`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbOmitted {
+    pub kind: String,
+    pub label: String,
+    pub reason: String,
+}
+
+/// Reporte de importación — espejo de `grafito-ggb::ImportReport` con
+/// `.commands()` y `.summary()`. Nunca fallo silencioso: `omitted` siempre
+/// explica cada salto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GgbImportReport {
+    pub mapped: Vec<GgbMappedCommand>,
+    pub omitted: Vec<GgbOmitted>,
+}
+
+impl GgbImportReport {
+    pub(crate) fn commands(&self) -> Vec<String> {
+        self.mapped.iter().map(|m| m.command.clone()).collect()
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for m in &self.mapped {
+            *counts.entry(m.kind.as_str()).or_insert(0) += 1;
+        }
+        let tipos = counts
+            .iter()
+            .map(|(tipo, n)| format!("{tipo} x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let detalle = if tipos.is_empty() {
+            "sin objetos"
+        } else {
+            &tipos
+        };
+        format!(
+            "ggb importado: {} objetos ({}) + {} omitidos",
+            self.mapped.len(),
+            detalle,
+            self.omitted.len()
+        )
+    }
+
+    /// Detalle honesto de omitidos para el toast (máx. 3 + contador resto).
+    pub(crate) fn omitted_detail(&self) -> String {
+        if self.omitted.is_empty() {
+            return "sin omitidos".to_string();
+        }
+        let primeros = self
+            .omitted
+            .iter()
+            .take(3)
+            .map(|o| {
+                if o.label.is_empty() {
+                    format!("{}: {}", o.kind, o.reason)
+                } else {
+                    format!("{} '{}': {}", o.kind, o.label, o.reason)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if self.omitted.len() > 3 {
+            format!(
+                "{} omitidos: {}… y {} más",
+                self.omitted.len(),
+                primeros,
+                self.omitted.len() - 3
+            )
+        } else {
+            format!("{} omitidos: {primeros}", self.omitted.len())
+        }
+    }
+}
+
+/// Job de importación `.ggb` en background — lectura + parse fuera del UI thread.
+/// Pattern `spawn_profile_save` con `sync_channel(1)` + `request_repaint`.
+pub(crate) struct PendingGgbImportJob {
+    pub receiver: Receiver<Result<GgbImportReport, String>>,
+    pub path: PathBuf,
 }
 
 /// Spawns document save in background — evita bloquear UI thread (60fps).
@@ -1218,6 +1321,9 @@ pub struct GrafitoApp {
     pub(crate) pending_save_job: Option<PendingSaveJob>,
     pub(crate) pending_open_job: Option<PendingOpenJob>,
     pub(crate) pending_export_job: Option<PendingExportJob>,
+    /// Job de importación `.ggb` en background (F1-1): lectura + parse fuera del
+    /// UI thread, resultado aplicado con undo único vía `process_input`.
+    pub(crate) pending_ggb_import_job: Option<PendingGgbImportJob>,
     pub attractor_cache: std::collections::HashMap<ObjectId, (u64, Vec<Point3D>)>,
     /// Caché de texturas de relleno para curvas implícitas. Usa `RwLock`
     /// para permitir mutación desde `draw_implicit_curve_fill` (que recibe
@@ -1319,6 +1425,9 @@ pub struct GrafitoApp {
     pub(crate) autosave_last_version: u64,
     /// Opt-in explícito para Aula/red avanzada (loopback sin red).
     pub advanced_red_opt_in: bool,
+    /// Idioma de la UI (ES/EN) — O2 i18n: persiste en `AppConfig.locale`,
+    /// se edita desde Ayuda con `locale_selector` (Piel pura, sin I/O en Ui).
+    pub(crate) locale: AppLocale,
     /// Panel de Aula (F0 sin red) — loopback con ShareCode + QR dibujado con líneas egui.
     pub classroom: crate::classroom::ClassroomPanel,
 }
@@ -1716,6 +1825,7 @@ impl GrafitoApp {
         let profile = crate::utils::load_profile();
         let avatar_draft = profile.avatar.clone();
         let advanced_red_opt_in = config.advanced_red_opt_in;
+        let locale = config.locale;
         let mut classroom = crate::classroom::ClassroomPanel::new();
         classroom.set_opt_in(advanced_red_opt_in);
         let autosave_last_version = document.version;
@@ -1785,6 +1895,7 @@ impl GrafitoApp {
             pending_save_job: None,
             pending_open_job: None,
             pending_export_job: None,
+            pending_ggb_import_job: None,
             attractor_cache: std::collections::HashMap::new(),
             fill_textures: std::sync::RwLock::new(
                 crate::render_2d::FillTextureCacheStore::default(),
@@ -1849,6 +1960,7 @@ impl GrafitoApp {
             autosave: AutosaveDebouncer::new(),
             autosave_last_version,
             advanced_red_opt_in,
+            locale,
             classroom,
         }
     }
@@ -1927,6 +2039,18 @@ impl GrafitoApp {
     }
 
     /// Persiste preferencias de interfaz; las claves del asistente viven sólo en el llavero.
+    /// Idioma actual de la UI para los helpers localizados (toolbar/paleta).
+    pub(crate) fn config_locale(&self) -> grafito_ui::i18n::Locale {
+        self.locale.as_ui_locale()
+    }
+
+    /// Cambia el idioma en vivo y lo persiste (Piel pura: el selector solo
+    /// setea el flag, la escritura ocurre aquí fuera del closure de Ui).
+    pub(crate) fn set_locale(&mut self, locale: grafito_ui::i18n::Locale) {
+        self.locale = AppLocale::from_ui_locale(locale);
+        self.save_app_config();
+    }
+
     pub(crate) fn save_app_config(&self) {
         // Se conservan los toggles de plugins ya persistidos; los cambios de
         // plugins se guardan en su propia ruta en assistant.rs.
@@ -1945,6 +2069,8 @@ impl GrafitoApp {
             enabled_plugins: existing.enabled_plugins,
             disabled_plugins: existing.disabled_plugins,
             advanced_red_opt_in: self.advanced_red_opt_in,
+            // O2 i18n: el idioma se edita en vivo y persiste aquí.
+            locale: self.locale,
         });
     }
 
@@ -2829,6 +2955,32 @@ impl GrafitoApp {
                 Err(TryRecvError::Disconnected) => {}
             }
         }
+        // Import .ggb (F1-1): Piel pura — I/O + parse ya ocurrieron en background.
+        if let Some(job) = self.pending_ggb_import_job.take() {
+            match job.receiver.try_recv() {
+                Ok(Ok(report)) => {
+                    let path = job.path.clone();
+                    self.apply_ggb_import_report(report, &path);
+                    ctx.request_repaint();
+                }
+                Ok(Err(err)) => {
+                    self.notify(
+                        format!("Error al importar .ggb desde {}: {err}", job.path.display()),
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                    ctx.request_repaint();
+                }
+                Err(TryRecvError::Empty) => {
+                    self.pending_ggb_import_job = Some(job);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.notify(
+                        "Importación .ggb cancelada",
+                        grafito_ui::toast::ToastKind::Error,
+                    );
+                }
+            }
+        }
     }
 
     fn choose_and_open_document(&mut self, ctx: &egui::Context) {
@@ -2874,6 +3026,96 @@ impl GrafitoApp {
                 );
             }
         }
+    }
+
+    /// F1-1: Archivo → "Importar GeoGebra (.ggb)…" con filtro `.ggb` (rfd).
+    /// Piel pura: el diálogo `rfd` vive en UI thread pero el `std::fs::read` +
+    /// parse ocurren en background thread `ggb-import` con `sync_channel(1)` +
+    /// `request_repaint`; el resultado se aplica en `poll_background_jobs`.
+    pub(crate) fn choose_and_import_ggb(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GeoGebra", &["ggb"])
+            .pick_file()
+        else {
+            return;
+        };
+        if self.pending_ggb_import_job.is_some() {
+            self.notify(
+                "Ya hay una importación .ggb en curso",
+                grafito_ui::toast::ToastKind::Info,
+            );
+            return;
+        }
+        let ctx_clone = ctx.clone();
+        let path_clone = path.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let _ = std::thread::Builder::new()
+            .name("ggb-import".into())
+            .spawn(move || {
+                let result = std::fs::read(&path_clone)
+                    .map_err(|e| format!("no se pudo leer {}: {e}", path_clone.display()))
+                    .and_then(|bytes| import_ggb_bytes_local(&bytes));
+                let _ = tx.send(result);
+                ctx_clone.request_repaint();
+            });
+        self.pending_ggb_import_job = Some(PendingGgbImportJob { receiver: rx, path });
+    }
+
+    /// Aplica un reporte `.ggb` comando-por-comando vía `process_input` con un
+    /// único undo (`save_snapshot(before)` sólo si hubo cambio semántico) y
+    /// toast honesto con `summary()` + `omitted_detail()` (nunca silencioso).
+    fn apply_ggb_import_report(&mut self, report: GgbImportReport, source: &Path) {
+        let file_name = source
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| source.display().to_string());
+        if report.mapped.is_empty() {
+            let msg = format!(
+                "{} desde {file_name}: {}",
+                report.summary(),
+                report.omitted_detail()
+            );
+            self.cas_result = msg.clone();
+            self.notify(msg, grafito_ui::toast::ToastKind::Error);
+            return;
+        }
+        let before = self.document.clone();
+        let mut applied: usize = 0;
+        let mut failures: Vec<String> = Vec::new();
+        for cmd in report.commands() {
+            let mut buf = cmd.clone();
+            match crate::commands::process_input(&mut self.document, &mut buf) {
+                grafito_command::commands::CommandOutcome::Ok
+                | grafito_command::commands::CommandOutcome::Message(_) => {
+                    applied = applied.saturating_add(1);
+                }
+                grafito_command::commands::CommandOutcome::Error(err) => {
+                    if failures.len() < 3 {
+                        failures.push(err);
+                    }
+                }
+            }
+        }
+        if documents_semantically_differ(&before, &self.document) {
+            self.save_snapshot(before);
+        }
+        let mut msg = format!(
+            "{} desde {file_name}: {applied} aplicados. {}",
+            report.summary(),
+            report.omitted_detail()
+        );
+        if !failures.is_empty() {
+            msg.push_str(&format!(" Fallos: {}", failures.join("; ")));
+        }
+        self.cas_result = msg.clone();
+        let kind = if applied == 0 {
+            grafito_ui::toast::ToastKind::Error
+        } else if failures.is_empty() && report.omitted.is_empty() {
+            grafito_ui::toast::ToastKind::Success
+        } else {
+            grafito_ui::toast::ToastKind::Info
+        };
+        self.notify(msg, kind);
     }
 
     fn remember_recent_file(&mut self, path: &Path) {
@@ -5033,7 +5275,10 @@ impl eframe::App for GrafitoApp {
         }
 
         // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
-        if let Some(name) = self.command_palette.show(ctx) {
+        if let Some(name) = self
+            .command_palette
+            .show_localized(ctx, self.config_locale())
+        {
             self.apply_palette_command(&name, ctx);
         }
 
@@ -5083,6 +5328,840 @@ impl eframe::App for GrafitoApp {
         // (orb, pulso, media, teaching, whiteboard). El mínimo del frame gana;
         // egui lo coalesce con el pedido del scheduler unificado de arriba.
         self.apply_repaint_budget(ctx);
+    }
+}
+
+// ── F1-1 Importador `.ggb` mínimo (std-only, espejo de `grafito-ggb`) ────────
+// Cablea el import existente sin añadir dependencia (no se toca `Cargo.toml`):
+// presupuestos espejo `GGB_MAX_BYTES` 64MiB / `GGB_MAX_XML_BYTES` 10MiB /
+// `GGB_MAX_ELEMS` 5000 / `GGB_MAX_ZIP_ENTRIES` 4096. Soporta ZIP `Stored`
+// (método 0, el usado por los dorados) y rechaza `Deflated` (método 8) con
+// error honesto que indica usar el crate completo — nunca fallo silencioso.
+// Mapea `point` → `Point[(x, y)]` y `expression type=function` →
+// `Function[...]`; el resto genera `GgbOmitted` con razón.
+
+/// Cota de atributo espejo de `grafito-ggb::MAX_ATTR_BYTES` (8192).
+const GGB_MAX_ATTR_BYTES: usize = 8192;
+
+/// Puerta de entrada pura del import `.ggb` — espejo de
+/// `grafito_ggb::import_ggb_bytes`. Sin I/O: recibe bytes ya leídos en
+/// background thread.
+pub(crate) fn import_ggb_bytes_local(bytes: &[u8]) -> Result<GgbImportReport, String> {
+    let xml = ggb_extract_xml(bytes)?;
+    ggb_parse_report(&xml)
+}
+
+fn ggb_read_u16_le(bytes: &[u8], offset: usize) -> Option<u16> {
+    let lo = *bytes.get(offset)?;
+    let hi = *bytes.get(offset.checked_add(1)?)?;
+    Some(u16::from_le_bytes([lo, hi]))
+}
+
+fn ggb_read_u32_le(bytes: &[u8], offset: usize) -> Option<u32> {
+    let b0 = *bytes.get(offset)?;
+    let b1 = *bytes.get(offset.checked_add(1)?)?;
+    let b2 = *bytes.get(offset.checked_add(2)?)?;
+    let b3 = *bytes.get(offset.checked_add(3)?)?;
+    Some(u32::from_le_bytes([b0, b1, b2, b3]))
+}
+
+fn ggb_contains(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+fn ggb_validate_entry_name(name: &str) -> Result<(), String> {
+    if name.starts_with('/') || name.starts_with('\\') {
+        return Err(format!("entrada peligrosa '{name}': ruta absoluta"));
+    }
+    let first = name.as_bytes().first().copied().unwrap_or(0);
+    let second = name.as_bytes().get(1).copied().unwrap_or(0);
+    if first.is_ascii_alphabetic() && second == b':' {
+        return Err(format!("entrada peligrosa '{name}': ruta con unidad"));
+    }
+    let normalized = name.replace('\\', "/");
+    let mut depth: usize = 0;
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    format!("entrada peligrosa '{name}': ruta fuera del archivo (..)")
+                })?;
+            }
+            _ => {
+                depth = depth.saturating_add(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extrae `geogebra.xml` de un contenedor ZIP `Stored` con presupuestos espejo.
+/// Rechaza `Deflated` con mensaje honesto (requiere crate completo).
+fn ggb_extract_xml(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Err("archivo .ggb vacío".to_string());
+    }
+    let total = bytes.len() as u64;
+    if total > GGB_MAX_BYTES {
+        return Err(format!(
+            "archivo .ggb demasiado grande: {total} B (límite {GGB_MAX_BYTES} B)"
+        ));
+    }
+    let mut offset: usize = 0;
+    let mut entries: usize = 0;
+    let mut found: Option<Vec<u8>> = None;
+    while let Some(header_end) = offset.checked_add(30) {
+        if header_end > bytes.len() {
+            break;
+        }
+        let Some(sig) = ggb_read_u32_le(bytes, offset) else {
+            break;
+        };
+        if sig == 0x0605_4b50 || sig == 0x0201_4b50 {
+            break;
+        }
+        if sig != 0x0403_4b50 {
+            if offset == 0 {
+                return Err("ZIP inválido: firma local no encontrada".to_string());
+            }
+            break;
+        }
+        let Some(flags_off) = offset.checked_add(6) else {
+            return Err("ZIP offset desbordado (flags)".to_string());
+        };
+        let Some(method_off) = offset.checked_add(8) else {
+            return Err("ZIP offset desbordado (método)".to_string());
+        };
+        let Some(comp_off) = offset.checked_add(18) else {
+            return Err("ZIP offset desbordado (tamaño)".to_string());
+        };
+        let Some(uncomp_off) = offset.checked_add(22) else {
+            return Err("ZIP offset desbordado (tamaño)".to_string());
+        };
+        let Some(name_len_off) = offset.checked_add(26) else {
+            return Err("ZIP offset desbordado (nombre)".to_string());
+        };
+        let Some(extra_len_off) = offset.checked_add(28) else {
+            return Err("ZIP offset desbordado (extra)".to_string());
+        };
+        let (
+            Some(flags),
+            Some(method),
+            Some(comp_size),
+            Some(uncomp_size),
+            Some(name_len),
+            Some(extra_len),
+        ) = (
+            ggb_read_u16_le(bytes, flags_off),
+            ggb_read_u16_le(bytes, method_off),
+            ggb_read_u32_le(bytes, comp_off),
+            ggb_read_u32_le(bytes, uncomp_off),
+            ggb_read_u16_le(bytes, name_len_off),
+            ggb_read_u16_le(bytes, extra_len_off),
+        )
+        else {
+            return Err("ZIP truncado en cabecera local".to_string());
+        };
+        let name_len_usize = usize::from(name_len);
+        let extra_len_usize = usize::from(extra_len);
+        let comp_usize =
+            usize::try_from(comp_size).map_err(|e| format!("tamaño comprimido inválido: {e}"))?;
+        let Some(name_start) = offset.checked_add(30) else {
+            return Err("ZIP offset desbordado (nombre)".to_string());
+        };
+        let Some(name_end) = name_start.checked_add(name_len_usize) else {
+            return Err("ZIP nombre desbordado".to_string());
+        };
+        let Some(extra_end) = name_end.checked_add(extra_len_usize) else {
+            return Err("ZIP extra desbordado".to_string());
+        };
+        let Some(data_end) = extra_end.checked_add(comp_usize) else {
+            return Err("ZIP datos desbordados".to_string());
+        };
+        if data_end > bytes.len() {
+            return Err("ZIP truncado: datos fuera de rango".to_string());
+        }
+        let Some(name_bytes) = bytes.get(name_start..name_end) else {
+            return Err("ZIP nombre fuera de rango".to_string());
+        };
+        let name =
+            std::str::from_utf8(name_bytes).map_err(|e| format!("ZIP nombre no UTF-8: {e}"))?;
+        ggb_validate_entry_name(name)?;
+        if flags & 0x0001 != 0 {
+            return Err(format!("entrada '{name}': cifrada no soportada"));
+        }
+        if flags & 0x0008 != 0 {
+            return Err(format!(
+                "entrada '{name}': descriptor de datos no soportado en import mínimo"
+            ));
+        }
+        if method != 0 && method != 8 {
+            return Err(format!(
+                "entrada '{name}': método {method} no soportado (solo Stored/Deflated)"
+            ));
+        }
+        if name == GGB_XML_NAME && found.is_none() {
+            if method == 8 {
+                return Err(
+                    "geogebra.xml con compresión deflate no soportada en import mínimo \
+                     (usa el crate grafito-ggb completo) — archivo no importado"
+                        .to_string(),
+                );
+            }
+            if u64::from(uncomp_size) > GGB_MAX_XML_BYTES {
+                return Err(format!(
+                    "geogebra.xml demasiado grande: {} B (límite {GGB_MAX_XML_BYTES} B)",
+                    uncomp_size
+                ));
+            }
+            let Some(data) = bytes.get(extra_end..data_end) else {
+                return Err("geogebra.xml fuera de rango".to_string());
+            };
+            if data.len() as u64 > GGB_MAX_XML_BYTES {
+                return Err(format!(
+                    "geogebra.xml demasiado grande: {} B (límite {GGB_MAX_XML_BYTES} B)",
+                    data.len()
+                ));
+            }
+            if ggb_contains(data, b"<!DOCTYPE") || ggb_contains(data, b"<!ENTITY") {
+                return Err("DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string());
+            }
+            found = Some(data.to_vec());
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| "contador de entradas desbordado".to_string())?;
+        if entries > GGB_MAX_ZIP_ENTRIES {
+            return Err(format!(
+                "demasiadas entradas ZIP: {entries} (límite {GGB_MAX_ZIP_ENTRIES})"
+            ));
+        }
+        offset = data_end;
+    }
+    found.ok_or_else(|| "geogebra.xml faltante en .ggb".to_string())
+}
+
+fn ggb_fmt_num(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() || s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn ggb_sanitize_label(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for ch in t.chars() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '\'' {
+            out.push(ch);
+        } else if ch == ' ' || ch == '-' {
+            out.push('_');
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+/// Extrae `nombre="valor"` (comillas `"` o `'`) de un tag XML sin dependencias.
+fn ggb_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let mut from: usize = 0;
+    while let Some(rest) = tag.get(from..) {
+        let Some(rel) = rest.find(&needle) else {
+            return None;
+        };
+        let Some(eq_end) = from.checked_add(rel)?.checked_add(needle.len()) else {
+            return None;
+        };
+        let Some(after_eq) = tag.get(eq_end..) else {
+            return None;
+        };
+        let trimmed = after_eq.trim_start();
+        let skipped = after_eq.len().saturating_sub(trimmed.len());
+        let Some(val_start) = eq_end.checked_add(skipped) else {
+            return None;
+        };
+        let Some(quote) = trimmed.chars().next() else {
+            return None;
+        };
+        if quote != '"' && quote != '\'' {
+            let Some(next_from) = val_start.checked_add(1) else {
+                return None;
+            };
+            if next_from >= tag.len() {
+                return None;
+            }
+            from = next_from;
+            continue;
+        }
+        let Some(after_quote) = trimmed.get(1..) else {
+            return None;
+        };
+        let Some(end) = after_quote.find(quote) else {
+            return None;
+        };
+        let Some(value) = after_quote.get(..end) else {
+            return None;
+        };
+        if value.len() > GGB_MAX_ATTR_BYTES {
+            return None;
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+
+/// Parsea `geogebra.xml` a comandos Grafito con presupuestos espejo.
+/// Mapea `point` y `expression type=function`; el resto → omitido honesto.
+fn ggb_parse_report(xml: &[u8]) -> Result<GgbImportReport, String> {
+    let text = std::str::from_utf8(xml).map_err(|e| format!("geogebra.xml no UTF-8: {e}"))?;
+    if text.contains("<!DOCTYPE") || text.contains("<!ENTITY") {
+        return Err("DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string());
+    }
+    let mut report = GgbImportReport {
+        mapped: Vec::new(),
+        omitted: Vec::new(),
+    };
+    let mut count: usize = 0;
+    let push_mapped =
+        |report: &mut GgbImportReport, kind: String, label: String, command: String| {
+            if command.len() > GGB_MAX_EXPR_CHARS {
+                report.omitted.push(GgbOmitted {
+                    kind,
+                    label,
+                    reason: format!("comando excede {GGB_MAX_EXPR_CHARS} caracteres"),
+                });
+                return;
+            }
+            if report.mapped.len() >= GGB_MAX_ELEMS {
+                report.omitted.push(GgbOmitted {
+                    kind,
+                    label,
+                    reason: format!("presupuesto MAX_ELEMS {GGB_MAX_ELEMS} excedido"),
+                });
+                return;
+            }
+            report.mapped.push(GgbMappedCommand { kind, command });
+        };
+
+    // ── <element …> ──────────────────────────────────────────────
+    let mut pos: usize = 0;
+    while let Some(after_pos) = text.get(pos..) {
+        let Some(rel) = after_pos.find("<element") else {
+            break;
+        };
+        let Some(start) = pos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <element>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("elemento <element> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <element>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <element>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("elemento fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let tipo_raw = ggb_attr(opening, "type").unwrap_or_default();
+        let label_raw = ggb_attr(opening, "label").unwrap_or_default();
+        let etiqueta = ggb_sanitize_label(&label_raw);
+        let is_self_closing = opening.trim_end().ends_with("/>");
+        let inner: &str = if is_self_closing {
+            ""
+        } else if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</element>") {
+                    if let Some(inner_end) = content_start.checked_add(close_rel) {
+                        text.get(content_start..inner_end).unwrap_or("")
+                    } else {
+                        return Err("offset desbordado en </element>".to_string());
+                    }
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            }
+        } else {
+            return Err("offset desbordado tras <element>".to_string());
+        };
+        let tipo_lc = tipo_raw.trim().to_ascii_lowercase();
+        if tipo_lc == "point" {
+            let mut mapped_done = false;
+            if let Some(coords_rel) = inner.find("<coords") {
+                if let Some(coords_rest) = inner.get(coords_rel..) {
+                    if let Some(coords_end_rel) = coords_rest.find('>') {
+                        if let Some(coords_tag) =
+                            coords_rest.get(..coords_end_rel.saturating_add(1))
+                        {
+                            let x_opt =
+                                ggb_attr(coords_tag, "x").and_then(|s| s.parse::<f64>().ok());
+                            let y_opt =
+                                ggb_attr(coords_tag, "y").and_then(|s| s.parse::<f64>().ok());
+                            if let (Some(x), Some(y)) = (x_opt, y_opt) {
+                                if x.is_finite() && y.is_finite() {
+                                    let cmd =
+                                        format!("Point[({}, {})]", ggb_fmt_num(x), ggb_fmt_num(y));
+                                    push_mapped(
+                                        &mut report,
+                                        "Point".to_string(),
+                                        etiqueta.clone(),
+                                        cmd,
+                                    );
+                                    mapped_done = true;
+                                } else {
+                                    report.omitted.push(GgbOmitted {
+                                        kind: tipo_raw.clone(),
+                                        label: etiqueta.clone(),
+                                        reason: "coordenadas no finitas".to_string(),
+                                    });
+                                    mapped_done = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !mapped_done {
+                let reason = if inner.find("<coords").is_none() {
+                    "point sin coords".to_string()
+                } else {
+                    "point con coords inválidas".to_string()
+                };
+                report.omitted.push(GgbOmitted {
+                    kind: tipo_raw.clone(),
+                    label: etiqueta.clone(),
+                    reason,
+                });
+            }
+        } else if tipo_lc.contains("3d")
+            || tipo_lc.contains("quadric")
+            || tipo_lc.contains("plane")
+            || tipo_lc.contains("sphere")
+        {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "3D/quadric omitido en núcleo aula F2".to_string(),
+            });
+        } else if tipo_lc == "conic" || tipo_lc == "conicpart" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "cónica no soportada en import mínimo \
+                         (usa crate grafito-ggb completo para F2)"
+                    .to_string(),
+            });
+        } else if tipo_lc == "line" || tipo_lc == "segment" || tipo_lc == "ray" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: format!(
+                    "{tipo_raw} elemento sin comando — omitido \
+                     (usar comando {tipo_raw} explícito)"
+                ),
+            });
+        } else if tipo_lc == "numeric" {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "numeric sin slider ni celda — pendiente mapeo variable".to_string(),
+            });
+        } else {
+            report.omitted.push(GgbOmitted {
+                kind: tipo_raw.clone(),
+                label: etiqueta.clone(),
+                reason: "tipo no soportado en F2 (omitido honesto)".to_string(),
+            });
+        }
+        if is_self_closing {
+            pos = opening_end;
+        } else if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</element>") {
+                    let close_len = "</element>".len();
+                    if let Some(close_end) = content_start
+                        .checked_add(close_rel)
+                        .and_then(|v| v.checked_add(close_len))
+                    {
+                        pos = close_end;
+                    } else {
+                        return Err("offset desbordado al cerrar </element>".to_string());
+                    }
+                } else {
+                    pos = content_start;
+                }
+            } else {
+                break;
+            }
+        } else {
+            return Err("offset desbordado al avanzar </element>".to_string());
+        }
+        if pos >= text.len() {
+            break;
+        }
+    }
+
+    // ── <command …> → omitido honesto (el import mínimo no resuelve refs) ──
+    let mut cpos: usize = 0;
+    while let Some(after_pos) = text.get(cpos..) {
+        let Some(rel) = after_pos.find("<command") else {
+            break;
+        };
+        let Some(start) = cpos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <command>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("comando <command> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <command>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <command>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("comando fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let nombre = ggb_attr(opening, "name").unwrap_or_default();
+        let kind = if nombre.trim().is_empty() {
+            "command".to_string()
+        } else {
+            nombre.clone()
+        };
+        report.omitted.push(GgbOmitted {
+            kind,
+            label: String::new(),
+            reason: "comando omitido en import mínimo \
+                     (usa crate grafito-ggb completo para F2)"
+                .to_string(),
+        });
+        if let Some(content_start) = tag_end.checked_add(1) {
+            if let Some(after) = text.get(content_start..) {
+                if let Some(close_rel) = after.find("</command>") {
+                    let close_len = "</command>".len();
+                    if let Some(close_end) = content_start
+                        .checked_add(close_rel)
+                        .and_then(|v| v.checked_add(close_len))
+                    {
+                        cpos = close_end;
+                    } else {
+                        return Err("offset desbordado al cerrar </command>".to_string());
+                    }
+                } else {
+                    cpos = opening_end;
+                }
+            } else {
+                break;
+            }
+        } else {
+            return Err("offset desbordado al avanzar </command>".to_string());
+        }
+        if cpos >= text.len() {
+            break;
+        }
+    }
+
+    // ── <expression …> → Function si es función, si no omitido honesto ──
+    let mut epos: usize = 0;
+    while let Some(after_pos) = text.get(epos..) {
+        let Some(rel) = after_pos.find("<expression") else {
+            break;
+        };
+        let Some(start) = epos.checked_add(rel) else {
+            return Err("offset desbordado al parsear <expression>".to_string());
+        };
+        let Some(rest) = text.get(start..) else {
+            break;
+        };
+        let Some(tag_end_rel) = rest.find('>') else {
+            return Err("expresión <expression> sin cierre '>'".to_string());
+        };
+        let Some(tag_end) = start.checked_add(tag_end_rel) else {
+            return Err("offset desbordado en <expression>".to_string());
+        };
+        let Some(opening_end) = tag_end.checked_add(1) else {
+            return Err("offset desbordado tras <expression>".to_string());
+        };
+        let Some(opening) = text.get(start..opening_end) else {
+            return Err("expresión fuera de rango".to_string());
+        };
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| "contador desbordado".to_string())?;
+        if count > GGB_MAX_ELEMS {
+            return Err(format!("límite MAX_ELEMS {GGB_MAX_ELEMS} excedido"));
+        }
+        let etiqueta = ggb_sanitize_label(&ggb_attr(opening, "label").unwrap_or_default());
+        let exp = ggb_attr(opening, "exp").unwrap_or_default();
+        let tipo = ggb_attr(opening, "type").unwrap_or_default();
+        let tipo_lc = tipo.trim().to_ascii_lowercase();
+        let es_funcion = tipo_lc == "function"
+            || tipo_lc == "functionnvar"
+            || exp.contains("->")
+            || exp.contains('(');
+        if es_funcion {
+            let exp_trim = exp.trim();
+            if exp_trim.is_empty() {
+                report.omitted.push(GgbOmitted {
+                    kind: "Function".to_string(),
+                    label: etiqueta.clone(),
+                    reason: "expresión vacía".to_string(),
+                });
+            } else if exp_trim.len() > GGB_MAX_EXPR_CHARS {
+                report.omitted.push(GgbOmitted {
+                    kind: "Function".to_string(),
+                    label: etiqueta.clone(),
+                    reason: format!("expresión excede {GGB_MAX_EXPR_CHARS} caracteres"),
+                });
+            } else {
+                let rhs = if exp_trim.contains('=') {
+                    exp_trim
+                        .splitn(2, '=')
+                        .nth(1)
+                        .unwrap_or(exp_trim)
+                        .trim()
+                        .to_string()
+                } else {
+                    exp_trim.to_string()
+                };
+                if rhs.is_empty() {
+                    report.omitted.push(GgbOmitted {
+                        kind: "Function".to_string(),
+                        label: etiqueta.clone(),
+                        reason: "expresión vacía".to_string(),
+                    });
+                } else {
+                    let cmd = format!("Function[{rhs}]");
+                    push_mapped(&mut report, "Function".to_string(), etiqueta.clone(), cmd);
+                }
+            }
+        } else if !exp.trim().is_empty() {
+            report.omitted.push(GgbOmitted {
+                kind: format!("expression:{}", tipo.clone()),
+                label: etiqueta.clone(),
+                reason: "tipo de expresión no mapeado en F0/F1 (omitido honesto)".to_string(),
+            });
+        }
+        epos = opening_end;
+        if epos >= text.len() {
+            break;
+        }
+    }
+
+    Ok(report)
+}
+
+#[cfg(test)]
+mod ggb_import_local_tests {
+    use super::{import_ggb_bytes_local, GGB_XML_NAME};
+    use crate::commands::process_input;
+
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                if crc & 1 == 1 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    fn zip_store(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<u32> = Vec::new();
+        let mut sizes: Vec<(u32, u32)> = Vec::new();
+        for (name, data) in files {
+            offsets.push(u32::try_from(out.len()).unwrap_or(0));
+            let crc = crc32_ieee(data);
+            let size = u32::try_from(data.len()).unwrap_or(0);
+            sizes.push((crc, size));
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&(u16::try_from(name_bytes.len()).unwrap_or(0)).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(data);
+        }
+        let cd_start = u32::try_from(out.len()).unwrap_or(0);
+        for (idx, (name, _)) in files.iter().enumerate() {
+            let (crc, size) = sizes[idx];
+            let offset = offsets[idx];
+            out.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&size.to_le_bytes());
+            let name_bytes = name.as_bytes();
+            out.extend_from_slice(&(u16::try_from(name_bytes.len()).unwrap_or(0)).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+        }
+        let cd_size = u32::try_from(out.len())
+            .unwrap_or(0)
+            .saturating_sub(cd_start);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&(u16::try_from(files.len()).unwrap_or(0)).to_le_bytes());
+        out.extend_from_slice(&(u16::try_from(files.len()).unwrap_or(0)).to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    fn ggb_with(xml: &str) -> Vec<u8> {
+        zip_store(&[(GGB_XML_NAME, xml.as_bytes())])
+    }
+
+    fn xml_header() -> String {
+        r#"<?xml version="1.0" encoding="utf-8"?><geogebra format="5.0"><construction>"#.to_string()
+    }
+
+    fn xml_footer() -> String {
+        "</construction></geogebra>".to_string()
+    }
+
+    #[test]
+    fn import_minimo_dos_puntos_mapea_y_reporta_honesto() {
+        let xml = format!(
+            "{}{odef}{}",
+            xml_header(),
+            xml_footer(),
+            odef = r#"<element type="point" label="A"><coords x="1" y="2" z="1" w="1"/></element><element type="point" label="B"><coords x="3" y="4" z="1" w="1"/></element>"#
+        );
+        let bytes = ggb_with(&xml);
+        let rep = import_ggb_bytes_local(&bytes).expect("dorado mínimo debe importar");
+        assert_eq!(rep.mapped.len(), 2);
+        assert!(rep.omitted.is_empty(), "omitidos {:?}", rep.omitted);
+        let cmds = rep.commands();
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            cmds.iter().all(|c| c.starts_with("Point[")),
+            "comandos {cmds:?}"
+        );
+        let summary = rep.summary();
+        assert!(summary.contains("2 objetos"), "resumen {summary}");
+        assert!(summary.contains("Point x2"), "resumen {summary}");
+        assert_eq!(rep.omitted_detail(), "sin omitidos");
+        let mut doc = grafito_core::Document::new();
+        for mut c in cmds {
+            let outcome = process_input(&mut doc, &mut c);
+            assert!(
+                !matches!(outcome, grafito_command::commands::CommandOutcome::Error(_)),
+                "comando debe aplicar"
+            );
+        }
+        assert_eq!(doc.object_count(), 2);
+    }
+
+    #[test]
+    fn tipo_no_soportado_genera_omitido_honesto_no_silencioso() {
+        let xml = format!(
+            "{}<element type=\"point\" label=\"A\"><coords x=\"0\" y=\"0\" z=\"1\" w=\"1\"/></element><element type=\"angle\" label=\"a\"><value val=\"45\"/></element>{}",
+            xml_header(),
+            xml_footer()
+        );
+        let bytes = ggb_with(&xml);
+        let rep = import_ggb_bytes_local(&bytes).expect("debe importar con omitido");
+        assert_eq!(rep.mapped.len(), 1);
+        assert!(!rep.omitted.is_empty(), "esperaba omitido honesto");
+        assert!(rep.omitted.iter().any(|o| o.kind == "angle"));
+        let detail = rep.omitted_detail();
+        assert!(detail.contains("omitidos"), "detalle {detail}");
+        assert!(
+            rep.summary().contains("1 objetos"),
+            "resumen {}",
+            rep.summary()
+        );
+    }
+
+    #[test]
+    fn bytes_vacios_y_sin_xml_fallan_honesto() {
+        let err_vacio = import_ggb_bytes_local(&[]).unwrap_err();
+        assert!(!err_vacio.is_empty(), "error vacío no debe ser silencioso");
+        let sin_xml = zip_store(&[("otro.txt", b"hola")]);
+        let err_faltante = import_ggb_bytes_local(&sin_xml).unwrap_err();
+        assert!(
+            err_faltante.contains("geogebra.xml"),
+            "error {err_faltante}"
+        );
+    }
+
+    #[test]
+    fn deflate_rechazado_honesto_no_silencioso() {
+        let xml = format!(
+            "{}<element type=\"point\" label=\"A\"><coords x=\"0\" y=\"0\" z=\"1\" w=\"1\"/></element>{}",
+            xml_header(),
+            xml_footer()
+        );
+        let mut bytes = ggb_with(&xml);
+        // Parchea método Stored(0) → Deflated(8) en la primera cabecera local (offset 8).
+        if let Some(slot) = bytes.get_mut(8..10) {
+            slot.copy_from_slice(&8u16.to_le_bytes());
+        }
+        let err = import_ggb_bytes_local(&bytes).unwrap_err();
+        assert!(err.contains("deflate"), "debe mencionar deflate, got {err}");
     }
 }
 
@@ -5230,6 +6309,11 @@ impl GrafitoApp {
                         egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION")))
                             .size(13.0)
                             .color(theme.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("Idioma: {}", self.locale.code()))
+                            .size(11.0)
+                            .color(theme.text_tertiary),
                     );
                     ui.add_space(12.0);
                     ui.label(
@@ -5700,6 +6784,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         pending_save_job: None,
         pending_open_job: None,
         pending_export_job: None,
+        pending_ggb_import_job: None,
         attractor_cache: std::collections::HashMap::new(),
         fill_textures: std::sync::RwLock::new(crate::render_2d::FillTextureCacheStore::default()),
         active_color_picker: None,
@@ -5762,6 +6847,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         autosave: AutosaveDebouncer::new(),
         autosave_last_version: 0,
         advanced_red_opt_in: false,
+        locale: AppLocale::Es,
         classroom: crate::classroom::ClassroomPanel::new(),
     }
 }

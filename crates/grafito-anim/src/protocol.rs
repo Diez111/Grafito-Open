@@ -890,26 +890,46 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     "derivative-slope"
 }
 
+/// Registro canónico de plantillas (sync 11↔11↔11, ANIM-REVIVE).
+///
+/// Única fuente del protocolo: las 11 canónicas con renderer nativo propio.
+/// `sanitize_template` la usa (sin `match` duplicado que diverja);
+/// `anim_native::NATIVE_TEMPLATES` y `anim_ui::PLANTILLAS_COMBO` (crate
+/// `grafito-app`) se pinean iguales por test, en el mismo orden.
+/// `limit-epsilon` / `ode-*` NO están aquí: no tienen renderer propio y caen
+/// al fallback por concepto (ver `native_dispatch_for` en `anim_native`).
+pub const CANONICAL_TEMPLATES: &[&str] = &[
+    "derivative-slope",
+    "integral-area",
+    "taylor-series",
+    "conformal-map",
+    "pitagoras",
+    "euler",
+    "fourier",
+    "logistic-bifurcation",
+    "gradient-field",
+    "mobius-transform",
+    "universal",
+];
+
 /// Sanitiza un template libre a uno conocido; si es desconocido, elige por concepto.
 pub fn sanitize_template(template: &str, concept: &str) -> String {
     let t = template.trim().to_lowercase();
-    match t.as_str() {
-        "derivative-slope" | "integral-area" | "taylor-series" | "conformal-map" | "pitagoras"
-        | "pythagoras" | "euler" | "fourier" => {
-            if t == "pythagoras" {
-                "pitagoras".to_string()
-            } else {
-                t
-            }
-        }
-        // Canónicas v3 con renderer nativo propio (sync con anim_native):
-        // pasan literales para que el dispatcher nativo las atienda en vez
-        // de degradarlas por concepto. "universal" también pasa literal: el
-        // nativo lo renderiza (youtube-style) y python lo mapea por concepto.
-        "logistic-bifurcation" | "gradient-field" | "mobius-transform" | "universal" => t,
-        "" | "auto" => template_for_concept(concept).to_string(),
-        _ => template_for_concept(concept).to_string(),
+    // Alias histórico: pasa a su canónica.
+    if t == "pythagoras" {
+        return "pitagoras".to_string();
     }
+    // Canónicas v3 con renderer nativo propio (sync con anim_native):
+    // pasan literales para que el dispatcher nativo las atienda en vez
+    // de degradarlas por concepto. "universal" también pasa literal: el
+    // nativo lo renderiza (youtube-style) y python lo mapea por concepto.
+    if CANONICAL_TEMPLATES.contains(&t.as_str()) {
+        return t;
+    }
+    if t.is_empty() || t == "auto" {
+        return template_for_concept(concept).to_string();
+    }
+    template_for_concept(concept).to_string()
 }
 
 /// Construye un AnimRequest universal a partir de cualquier texto libre.
@@ -968,6 +988,13 @@ mod universal_tests {
             "taylor-series",
             "conformal-map",
             "pitagoras",
+            "euler",
+            "fourier",
+            "logistic-bifurcation",
+            "gradient-field",
+            "mobius-transform",
+            // NOTA: "universal" nunca sale de `template_for_concept` (su
+            // fallback es derivative-slope); el nativo sí la detecta.
         ];
         for txt in [
             "random",
@@ -1169,5 +1196,30 @@ mod universal_tests {
         }
         let webm: Result<ExportFormat, _> = serde_json::from_str("\"webm\"");
         assert!(webm.is_err(), "webm aún no soportado (TODO v3-webm)");
+    }
+
+    #[test]
+    fn canonical_templates_once_y_sanitize_roundtrip() {
+        // Sync 11↔11↔11: este registro es la fuente; anim_native y anim_ui
+        // se pinean iguales por test en grafito-app (mismo orden).
+        assert_eq!(CANONICAL_TEMPLATES.len(), 11);
+        for t in CANONICAL_TEMPLATES {
+            assert_eq!(sanitize_template(t, "cualquier concepto"), *t, "{t}");
+        }
+        // Alias y auto intactos tras el refactor a `contains`.
+        assert_eq!(sanitize_template("pythagoras", "hola"), "pitagoras");
+        assert_eq!(sanitize_template("  EULER  ", "hola"), "euler");
+        assert_eq!(
+            sanitize_template("", "integral de riemann"),
+            "integral-area"
+        );
+        assert_eq!(
+            sanitize_template("auto", "integral de riemann"),
+            "integral-area"
+        );
+        assert_eq!(
+            sanitize_template("limit-epsilon", "derivada"),
+            "derivative-slope"
+        );
     }
 }

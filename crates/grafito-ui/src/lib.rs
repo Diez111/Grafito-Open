@@ -23,6 +23,7 @@ pub mod assistant;
 pub mod avatar;
 pub mod color_picker;
 pub mod command_palette;
+pub mod i18n;
 pub mod icons;
 pub mod pou;
 pub mod teaching;
