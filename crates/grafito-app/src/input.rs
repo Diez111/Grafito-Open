@@ -7,11 +7,12 @@ use crate::{tool_dispatcher::ToolState, GrafitoApp, PendingAction};
 use egui::{PointerButton, Rect, Sense, Vec2};
 use glam::Vec2 as GlamVec2;
 use grafito_core::{
-    CircleObj, FunctionObj, GeoObject, ImplicitCurveObj, LineObj, ParametricCurve2DObj, PencilObj,
-    Point3DObj, PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality,
+    CircleObj, Document, FunctionObj, GeoObject, ImplicitCurveObj, LineObj, ParametricCurve2DObj,
+    PencilObj, Point3DObj, PointObj, PolarCurveObj, PolygonObj, RelationOperator, RenderQuality,
     VectorField2DObj,
 };
 use grafito_geometry::{Point2, Point3D};
+use grafito_ui::tokens::{SPACE_SM, SPACE_XS, SPACE_XXL, TYPE_XS};
 use grafito_ui::Tool;
 use std::time::Instant;
 
@@ -634,6 +635,15 @@ impl GrafitoApp {
 
         const CLICK_THRESHOLD: f32 = 3.0;
 
+        // Sliders sobre el lienzo: prioridad sobre pan / arrastre / selección.
+        // Si el gesto cae sobre un slider, el resto del input se suprime.
+        if self.handle_canvas_sliders(ui, canvas_rect) {
+            if let Some(pos) = ui.input(|i| i.pointer.latest_pos().or(i.pointer.hover_pos())) {
+                self.last_mouse_pos = Some(pos);
+            }
+            return;
+        }
+
         let response = ui.interact(canvas_rect, ui.id().with("canvas"), Sense::click_and_drag());
 
         let space_pressed = ui.input(|i| i.key_down(egui::Key::Space));
@@ -952,9 +962,16 @@ impl GrafitoApp {
         }
 
         // ── Cursor feedback ──────────────────────────────────────────────────
+        // Flag de hover sobre slider (lo publica `handle_canvas_sliders` en
+        // memoria temporal egui para no añadir campos a `GrafitoApp`).
+        let slider_hovered = ui.ctx().memory(|mem| {
+            mem.data
+                .get_temp::<bool>(egui::Id::new(CANVAS_SLIDER_HOVER_KEY))
+                .unwrap_or(false)
+        });
         if panning {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        } else if space_pressed && pointer_in_canvas {
+        } else if (space_pressed && pointer_in_canvas) || slider_hovered {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         } else if self.current_tool == Tool::Select && response.hover_pos().is_some() {
             if let Some(world) = world_at_pointer {
@@ -1314,6 +1331,387 @@ impl GrafitoApp {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Sliders arrastrables sobre el lienzo (Piel pura)
+// ═══════════════════════════════════════════════════════════════
+//
+// El Cerebro expone cada slider como `VariableMeta { position, min, max,
+// step, visible, animating }` más su valor en `Document::variables`.
+// Este widget dibuja pista + relleno + thumb + etiqueta `nombre = valor`
+// (prefijo `▶` si anima) con el painter del overlay recortado al canvas,
+// y traduce el arrastre horizontal a `X → [min, max]` vía
+// `try_set_variable` (clamp + snap continuo por `step`).
+// Piel pura: sin I/O ni spawn; colores de `ui.visuals()` y tamaños de
+// `grafito_ui::tokens` (cero literales de tamaño/fuente).
+
+/// Ancho de la pista del slider (4 × SPACE_XXL = 160 px, sin literales).
+const CANVAS_SLIDER_TRACK_WIDTH: f32 = SPACE_XXL + SPACE_XXL + SPACE_XXL + SPACE_XXL;
+/// Clave temporal (memoria egui) con el flag de hover para el cursor Grab.
+const CANVAS_SLIDER_HOVER_KEY: &str = "canvas_slider_hover";
+/// Clave temporal (memoria egui) con el nombre del slider en arrastre.
+const CANVAS_SLIDER_ACTIVE_KEY: &str = "canvas_slider_active";
+/// Prefijo de clave temporal (memoria egui) para el snapshot de undo.
+const CANVAS_SLIDER_UNDO_KEY: &str = "canvas_slider_undo";
+/// Guarda de dominio para `sanitize_animation_speed` (no es tamaño UI).
+const CANVAS_SLIDER_MAX_ANIMATION_SPEED: f64 = 100.0;
+/// Velocidad de repuesto cuando la persistida no es finita.
+const CANVAS_SLIDER_DEFAULT_ANIMATION_SPEED: f64 = 1.0;
+
+/// Nombres internos que nunca se dibujan como slider (espejo de la regla
+/// privada de `algebra.rs`: el lienzo no duplica variables trigonométricas
+/// sintéticas; las de spreadsheet se filtran vía `is_spreadsheet_owned_variable`).
+fn canvas_slider_is_internal_name(name: &str) -> bool {
+    name == "TrigGraph" || name == "TrigValue" || name == "trig_angle" || name.starts_with("trig_")
+}
+
+/// Sanea una velocidad de animación persistida: no-finitos → 1.0 (defecto
+/// del Cerebro), resto con clamp a ±100 para evitar recorridos desbocados
+/// por dato corrupto. Pura, sin I/O.
+pub(crate) fn sanitize_animation_speed(raw: f64) -> f64 {
+    if !raw.is_finite() {
+        return CANVAS_SLIDER_DEFAULT_ANIMATION_SPEED;
+    }
+    raw.clamp(
+        -CANVAS_SLIDER_MAX_ANIMATION_SPEED,
+        CANVAS_SLIDER_MAX_ANIMATION_SPEED,
+    )
+}
+
+/// Traduce X del puntero a valor `[min, max]` con clamp + snap continuo por
+/// `step` (redondeo al múltiplo más cercano; `step` no-finito o ≤ 0 =
+/// continuo sin snap). Rango inválido → `min` (o 0.0 si ni `min` es finito).
+/// Pura, sin I/O: la mutación real la hace `try_set_variable`.
+pub(crate) fn canvas_slider_apply_drag(
+    pointer_x: f32,
+    track_min_x: f32,
+    track_max_x: f32,
+    min: f64,
+    max: f64,
+    step: f64,
+) -> f64 {
+    if !min.is_finite() {
+        return 0.0;
+    }
+    if !max.is_finite() || min >= max {
+        return min;
+    }
+    let span_px = f64::from(track_max_x - track_min_x);
+    if !span_px.is_finite() || span_px <= 0.0 {
+        return min;
+    }
+    let ratio = f64::from(pointer_x - track_min_x) / span_px;
+    let mut value = min + ratio.clamp(0.0, 1.0) * (max - min);
+    if step.is_finite() && step > 0.0 {
+        value = min + ((value - min) / step).round() * step;
+    }
+    if !value.is_finite() {
+        return min;
+    }
+    value.clamp(min, max)
+}
+
+/// Fracción 0..=1 del valor dentro de `[min, max]` para colocar el thumb.
+/// Rango o valor inválido → 0.0. Pura, sin I/O.
+pub(crate) fn canvas_slider_value_to_t(value: f64, min: f64, max: f64) -> f32 {
+    if !value.is_finite() || !min.is_finite() || !max.is_finite() || min >= max {
+        return 0.0;
+    }
+    let ratio = (value.clamp(min, max) - min) / (max - min);
+    ratio.clamp(0.0, 1.0) as f32
+}
+
+/// Hit-test del widget: pista expandida por `tolerance` o cercanía al thumb
+/// (`thumb_radius + tolerance`). El llamador pasa `SPACE_SM` (= 8 px).
+/// Pura, sin I/O.
+pub(crate) fn canvas_slider_hit(
+    pointer: egui::Pos2,
+    track: Rect,
+    thumb_center: egui::Pos2,
+    thumb_radius: f32,
+    tolerance: f32,
+) -> bool {
+    if track.expand(tolerance).contains(pointer) {
+        return true;
+    }
+    pointer.distance(thumb_center) <= thumb_radius + tolerance
+}
+
+/// Texto del valor con el formato del panel Álgebra (entero sin decimales).
+fn canvas_slider_value_text(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+/// Geometría en pantalla de un slider ya filtrado y con culling superado.
+struct CanvasSliderGeom {
+    name: String,
+    track: Rect,
+    thumb: egui::Pos2,
+    min: f64,
+    max: f64,
+    step: f64,
+}
+
+impl GrafitoApp {
+    /// Dibuja los sliders visibles sobre el lienzo y gestiona su gesto.
+    ///
+    /// Llamar al inicio de `handle_canvas_input`, antes de pan / arrastre /
+    /// selección. Retorna `true` cuando el puntero opera sobre un slider y el
+    /// resto del input (pan, creación, mover-punto, clics) debe suprimirse.
+    ///
+    /// - Dibuja pista + relleno + thumb + etiqueta `nombre = valor` (prefijo
+    ///   `▶` si anima) con painter recortado al canvas, colores de
+    ///   `ui.visuals()` y tokens `SPACE_*` / `TYPE_*`.
+    /// - Hit-test con pista expandida + thumb (`SPACE_SM` = 8 px de tolerancia).
+    /// - Drag horizontal `X → [min, max]` vía `try_set_variable`.
+    /// - Doble-clic alterna `animating` vía
+    ///   `try_replace_variable_meta_with_previous`.
+    /// - `visible = false` no se dibuja; nombres internos trig y variables
+    ///   spreadsheet se filtran; culling fuera de pantalla; orden por nombre.
+    /// - Undo: una entrada por gesto (snapshot pre-mutación en el primer
+    ///   frame con movimiento, en memoria temporal egui, sin campos nuevos).
+    pub(crate) fn handle_canvas_sliders(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) -> bool {
+        #[cfg(feature = "profile")]
+        puffin::profile_scope!("input_canvas_sliders");
+
+        // Snapshot determinista (orden por nombre) de sliders dibujables.
+        let mut entries: Vec<(String, f64, grafito_core::VariableMeta)> = self
+            .document
+            .variables()
+            .iter()
+            .filter_map(|(name, value)| {
+                if canvas_slider_is_internal_name(name)
+                    || self.document.is_spreadsheet_owned_variable(name)
+                {
+                    return None;
+                }
+                let meta = self.document.variable_meta(name)?.clone();
+                if !meta.visible
+                    || !meta.min.is_finite()
+                    || !meta.max.is_finite()
+                    || meta.min >= meta.max
+                    || !value.is_finite()
+                {
+                    return None;
+                }
+                Some((name.clone(), *value, meta))
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Colores vivos del tema (copias; no retienen préstamo de `ui`).
+        let track_color = ui.visuals().widgets.inactive.bg_fill;
+        let fill_color = ui.visuals().selection.bg_fill;
+        let thumb_fill = ui.visuals().selection.bg_fill;
+        let label_color = ui.visuals().text_color();
+        // El overlay se recorta al canvas para no invadir paneles.
+        let painter = ui.painter().with_clip_rect(canvas_rect);
+        let view = *self.document.view();
+
+        let mut geoms: Vec<CanvasSliderGeom> = Vec::new();
+        for (name, value, meta) in &entries {
+            let screen = view.world_to_screen(meta.position);
+            if !screen.x.is_finite() || !screen.y.is_finite() {
+                continue;
+            }
+            let anchor = canvas_rect.min + egui::Vec2::new(screen.x, screen.y);
+            let track_min = egui::pos2(anchor.x, anchor.y + TYPE_XS + SPACE_XS);
+            let track =
+                Rect::from_min_size(track_min, egui::vec2(CANVAS_SLIDER_TRACK_WIDTH, SPACE_XS));
+            // Culling: etiqueta + pista expandidos por el thumb.
+            if !Rect::from_min_max(anchor, track.max)
+                .expand(SPACE_SM)
+                .intersects(canvas_rect)
+            {
+                continue;
+            }
+            let ratio = canvas_slider_value_to_t(*value, meta.min, meta.max);
+            let thumb = egui::pos2(
+                track.min.x + ratio * CANVAS_SLIDER_TRACK_WIDTH,
+                track.center().y,
+            );
+            let mut label = format!("{name} = {}", canvas_slider_value_text(*value));
+            if meta.animating {
+                label = format!("▶ {label}");
+            }
+            painter.rect_filled(track, SPACE_XS, track_color);
+            let fill = Rect::from_min_max(track.min, egui::pos2(thumb.x, track.max.y));
+            if fill.width() > 0.0 {
+                painter.rect_filled(fill, SPACE_XS, fill_color);
+            }
+            painter.circle_filled(thumb, SPACE_SM, thumb_fill);
+            painter.circle_stroke(thumb, SPACE_SM, ui.visuals().widgets.active.fg_stroke);
+            painter.text(
+                anchor,
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::proportional(TYPE_XS),
+                label_color,
+            );
+            geoms.push(CanvasSliderGeom {
+                name: name.clone(),
+                track,
+                thumb,
+                min: meta.min,
+                max: meta.max,
+                step: meta.step,
+            });
+        }
+
+        let pointer_pos = ui.input(|i| i.pointer.latest_pos().or(i.pointer.hover_pos()));
+        let primary_down = ui.input(|i| i.pointer.button_down(PointerButton::Primary));
+        let primary_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Primary));
+        let double_clicked = ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary));
+
+        let hovered: Option<String> = pointer_pos.and_then(|pos| {
+            geoms
+                .iter()
+                .find(|geom| canvas_slider_hit(pos, geom.track, geom.thumb, SPACE_SM, SPACE_SM))
+                .map(|geom| geom.name.clone())
+        });
+        ui.ctx().memory_mut(|mem| {
+            mem.data
+                .insert_temp(egui::Id::new(CANVAS_SLIDER_HOVER_KEY), hovered.is_some());
+        });
+        if hovered.is_some() && !primary_down {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+
+        let active_id = egui::Id::new(CANVAS_SLIDER_ACTIVE_KEY);
+        let active: Option<String> = ui.ctx().memory(|mem| mem.data.get_temp(active_id));
+
+        // Doble-clic sobre el widget: alterna `animating` (cierra antes un
+        // drag en curso y reclama el gesto para que no cree objetos).
+        if double_clicked {
+            if let Some(pos) = pointer_pos {
+                if let Some(hit) = geoms
+                    .iter()
+                    .find(|geom| canvas_slider_hit(pos, geom.track, geom.thumb, SPACE_SM, SPACE_SM))
+                {
+                    self.finish_canvas_slider_gesture(ui, &hit.name);
+                    if let Some(meta) = self.document.variable_meta(&hit.name).cloned() {
+                        let mut candidate = meta;
+                        candidate.animating = !candidate.animating;
+                        candidate.animation_speed =
+                            sanitize_animation_speed(candidate.animation_speed);
+                        match self
+                            .document
+                            .try_replace_variable_meta_with_previous(&hit.name, candidate)
+                        {
+                            Ok(Some(previous)) => {
+                                self.save_snapshot(previous);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let time = ui.ctx().input(|input| input.time);
+                                self.handle_command_outcome(
+                                    grafito_command::commands::CommandOutcome::Error(error),
+                                    time,
+                                    "Slider",
+                                );
+                            }
+                        }
+                    }
+                    // Reclama también el release: evita un clic fantasma.
+                    ui.ctx()
+                        .memory_mut(|mem| mem.data.insert_temp(active_id, hit.name.clone()));
+                    return true;
+                }
+            }
+        }
+
+        // Gesto en curso: arrastre (con mutación) o release (confirma undo).
+        if let Some(active_name) = active {
+            if primary_down {
+                if let Some(geom) = geoms.iter().find(|geom| geom.name == active_name) {
+                    if let Some(pos) = pointer_pos {
+                        let next = canvas_slider_apply_drag(
+                            pos.x,
+                            geom.track.min.x,
+                            geom.track.max.x,
+                            geom.min,
+                            geom.max,
+                            geom.step,
+                        );
+                        let current = self.document.get_variable(&active_name).unwrap_or(next);
+                        // Comparación exacta por bits: ambos valores son
+                        // finitos y el snap es determinista; evita lint float.
+                        if next.to_bits() != current.to_bits() {
+                            // Snapshot pre-mutación solo en el primer frame
+                            // con movimiento: una entrada de undo por gesto.
+                            let undo_id =
+                                egui::Id::new((CANVAS_SLIDER_UNDO_KEY, active_name.clone()));
+                            let has_snapshot: bool = ui
+                                .ctx()
+                                .memory(|mem| mem.data.get_temp::<Document>(undo_id).is_some());
+                            if !has_snapshot {
+                                let snapshot = self.document.clone();
+                                ui.ctx()
+                                    .memory_mut(|mem| mem.data.insert_temp(undo_id, snapshot));
+                            }
+                            let version_before = self.document.version;
+                            if self
+                                .document
+                                .try_set_variable(active_name.clone(), next)
+                                .is_ok()
+                            {
+                                crate::app::refresh_direct_document_change(
+                                    &mut self.document,
+                                    version_before,
+                                );
+                                self.is_view_changing = true;
+                                self.last_interaction_time = Instant::now();
+                            }
+                        }
+                    }
+                }
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                return true;
+            }
+            // Release: confirma el undo si hubo movimiento y consume el frame
+            // para que el canvas no lo lea como clic de creación.
+            self.finish_canvas_slider_gesture(ui, &active_name);
+            return true;
+        }
+
+        // Inicio de gesto: el press debe nacer sobre el widget (no se roban
+        // arrastres ajenos) y dentro del lienzo.
+        if primary_pressed {
+            if let Some(pos) = pointer_pos {
+                if canvas_rect.contains(pos) {
+                    if let Some(name) = hovered {
+                        ui.ctx()
+                            .memory_mut(|mem| mem.data.insert_temp(active_id, name));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Confirma el gesto de un slider: si el snapshot temporal muestra un
+    /// valor distinto al actual (hubo movimiento), guarda una única entrada
+    /// de undo; siempre limpia el estado temporal egui.
+    fn finish_canvas_slider_gesture(&mut self, ui: &mut egui::Ui, name: &str) {
+        let undo_id = egui::Id::new((CANVAS_SLIDER_UNDO_KEY, name.to_owned()));
+        let snapshot: Option<Document> = ui.ctx().memory_mut(|mem| mem.data.remove_temp(undo_id));
+        ui.ctx().memory_mut(|mem| {
+            mem.data
+                .remove_temp::<String>(egui::Id::new(CANVAS_SLIDER_ACTIVE_KEY))
+        });
+        if let Some(before) = snapshot {
+            if before.get_variable(name) != self.document.get_variable(name) {
+                self.save_snapshot(before);
+            }
+        }
+    }
+}
+
 /// Comando para la herramienta Perpendicular dados dos picks del lienzo.
 ///
 /// `r` = `Some((etiqueta, es_punto, es_recta))` si el clic cayó sobre un
@@ -1588,5 +1986,132 @@ mod perpendicular_command_tests {
         );
         assert!(perpendicular_command(p("A"), p("B"), p1, p2).starts_with("PerpendicularBisector"));
         assert!(perpendicular_command(None, p("A"), p1, p2).starts_with("PerpendicularBisector"));
+    }
+}
+
+#[cfg(test)]
+mod canvas_slider_widget_tests {
+    use super::{
+        canvas_slider_apply_drag, canvas_slider_hit, canvas_slider_is_internal_name,
+        canvas_slider_value_to_t, sanitize_animation_speed,
+    };
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn drag_maps_track_edges_and_center_without_step() {
+        // Sin paso (step <= 0): continuo puro.
+        assert!(approx_eq(
+            canvas_slider_apply_drag(0.0, 0.0, 160.0, -5.0, 5.0, 0.0),
+            -5.0
+        ));
+        assert!(approx_eq(
+            canvas_slider_apply_drag(160.0, 0.0, 160.0, -5.0, 5.0, 0.0),
+            5.0
+        ));
+        assert!(approx_eq(
+            canvas_slider_apply_drag(80.0, 0.0, 160.0, -5.0, 5.0, 0.0),
+            0.0
+        ));
+    }
+
+    #[test]
+    fn drag_clamps_outside_and_snaps_to_step() {
+        // Fuera de pista: clamp a extremos.
+        assert!(approx_eq(
+            canvas_slider_apply_drag(-40.0, 0.0, 100.0, 0.0, 10.0, 0.0),
+            0.0
+        ));
+        assert!(approx_eq(
+            canvas_slider_apply_drag(400.0, 0.0, 100.0, 0.0, 10.0, 0.0),
+            10.0
+        ));
+        // 33 % de [0, 10] = 3.3 → snap a múltiplo de 2 = 4.0.
+        assert!(approx_eq(
+            canvas_slider_apply_drag(33.0, 0.0, 100.0, 0.0, 10.0, 2.0),
+            4.0
+        ));
+        // Paso no-finito o <= 0 = continuo sin snap.
+        assert!(approx_eq(
+            canvas_slider_apply_drag(33.0, 0.0, 100.0, 0.0, 10.0, f64::NAN),
+            3.3
+        ));
+    }
+
+    #[test]
+    fn drag_rejects_degenerate_ranges_without_panic() {
+        assert!(approx_eq(
+            canvas_slider_apply_drag(50.0, 0.0, 100.0, 5.0, 5.0, 0.1),
+            5.0
+        ));
+        assert!(approx_eq(
+            canvas_slider_apply_drag(50.0, 0.0, 100.0, 7.0, -7.0, 0.1),
+            7.0
+        ));
+        assert!(approx_eq(
+            canvas_slider_apply_drag(50.0, 0.0, 100.0, f64::NAN, 5.0, 0.1),
+            0.0
+        ));
+        // Pista de ancho cero: no hay mapeo, conserva el mínimo.
+        assert!(approx_eq(
+            canvas_slider_apply_drag(50.0, 80.0, 80.0, -5.0, 5.0, 0.1),
+            -5.0
+        ));
+    }
+
+    #[test]
+    fn sanitize_speed_keeps_finite_and_repairs_the_rest() {
+        assert!(approx_eq(sanitize_animation_speed(2.5), 2.5));
+        assert!(approx_eq(sanitize_animation_speed(0.0), 0.0));
+        assert!(approx_eq(sanitize_animation_speed(-3.0), -3.0));
+        assert!(approx_eq(sanitize_animation_speed(250.0), 100.0));
+        assert!(approx_eq(sanitize_animation_speed(-250.0), -100.0));
+        assert!(approx_eq(sanitize_animation_speed(f64::NAN), 1.0));
+        assert!(approx_eq(sanitize_animation_speed(f64::INFINITY), 1.0));
+    }
+
+    #[test]
+    fn value_to_t_covers_range_and_clamps() {
+        assert!((canvas_slider_value_to_t(0.0, -5.0, 5.0) - 0.5).abs() < 1e-6);
+        assert!((canvas_slider_value_to_t(5.0, -5.0, 5.0) - 1.0).abs() < 1e-6);
+        assert!((canvas_slider_value_to_t(-5.0, -5.0, 5.0) - 0.0).abs() < 1e-6);
+        assert!((canvas_slider_value_to_t(99.0, -5.0, 5.0) - 1.0).abs() < 1e-6);
+        assert!((canvas_slider_value_to_t(f64::NAN, -5.0, 5.0) - 0.0).abs() < 1e-6);
+        assert!((canvas_slider_value_to_t(1.0, 5.0, 5.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hit_covers_expanded_track_and_thumb_with_8px_tolerance() {
+        use egui::{pos2, Rect, Vec2};
+        let track = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(160.0, 4.0));
+        let thumb = pos2(80.0, 2.0);
+        // Sobre pista y thumb.
+        assert!(canvas_slider_hit(pos2(80.0, 2.0), track, thumb, 8.0, 8.0));
+        // Borde expandido: 5 px más allá del final sigue dentro (160 + 8).
+        assert!(canvas_slider_hit(pos2(165.0, 2.0), track, thumb, 8.0, 8.0));
+        // 15 px bajo el thumb: fuera de pista expandida pero dentro del
+        // radio del thumb (8 + 8 = 16).
+        assert!(canvas_slider_hit(pos2(80.0, 17.0), track, thumb, 8.0, 8.0));
+        // Lejos de ambos: sin hit.
+        assert!(!canvas_slider_hit(
+            pos2(200.0, 60.0),
+            track,
+            thumb,
+            8.0,
+            8.0
+        ));
+    }
+
+    #[test]
+    fn internal_trig_names_are_filtered_but_user_names_pass() {
+        assert!(canvas_slider_is_internal_name("trig_angle"));
+        assert!(canvas_slider_is_internal_name("trig_aux_1"));
+        assert!(canvas_slider_is_internal_name("TrigGraph"));
+        assert!(canvas_slider_is_internal_name("TrigValue"));
+        assert!(!canvas_slider_is_internal_name("alpha"));
+        assert!(!canvas_slider_is_internal_name("v0"));
+        assert!(!canvas_slider_is_internal_name("trigger"));
     }
 }

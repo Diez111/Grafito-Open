@@ -6423,10 +6423,7 @@ mod trace_tests {
         let (mut doc, id) = point_doc("A", 0.0, 0.0);
         assert!(!doc.set_trace(ObjectId::new(), true));
         assert!(!doc.push_trail_sample(id, Point2::new(0.0, 0.0)));
-        assert!(!doc.push_trail_sample(
-            id,
-            Point2::new(f64::NAN, f64::INFINITY)
-        ));
+        assert!(!doc.push_trail_sample(id, Point2::new(f64::NAN, f64::INFINITY)));
         assert!(doc.trail_points(id).is_empty());
     }
 

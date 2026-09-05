@@ -2,13 +2,15 @@
 
 use crate::{assistant_credentials, GrafitoApp};
 use grafito_assistant::{
-    harness, request_remote_models_with_api_key_on_worker, request_remote_with_api_key_on_worker,
-    validate_attachment, CancellationToken, ProviderSettings, RemoteCompletion,
+    harness, request_remote_models_with_api_key_on_worker,
+    request_remote_streaming_with_api_key_on_worker, validate_attachment, CancellationToken,
+    ProviderSettings, RemoteCompletion, SocraticGuardContext,
 };
 use grafito_assistant_types::{
     AssistantFocus, AssistantRepairFailure, AssistantRepairFailureKind, AssistantRepairFeedback,
-    AssistantRequest, AssistantResponse, AttachmentLimits, ImmutableDocumentContext,
-    LocalAssistantStatus, ProposedPlan, ProviderCapabilities, ProviderProfile,
+    AssistantRequest, AssistantResponse, AttachmentLimits, ConversationRole, ConversationTurn,
+    ImmutableDocumentContext, LocalAssistantStatus, ProposedPlan, ProviderCapabilities,
+    ProviderProfile, MAX_CONVERSATION_TURNS, MAX_CONVERSATION_TURN_CHARS,
     REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
     REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
     REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
@@ -18,8 +20,9 @@ use grafito_command::assistant_proposals::{
     AssistantCommandInvocation, AssistantParameterAssignment, AssistantProposal,
     AssistantProposalRejection, AssistantProposalRejectionKind,
 };
+use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm, Turn};
 use grafito_ui::assistant::{
-    AssistantCorrectionContext, AssistantUiAction, VerifiedAssistantProposal,
+    AssistantCorrectionContext, AssistantPanelState, AssistantUiAction, VerifiedAssistantProposal,
 };
 use grafito_ui::toast::ToastKind;
 use std::collections::VecDeque;
@@ -235,7 +238,65 @@ impl AssistantRuntime {
             focus: job.focus,
             cancelled: job.cancellation.is_cancelled(),
             result,
+            stream_preview_active: job.preview_active,
         })
+    }
+
+    /// Drena los deltas de streaming a la burbuja provisional del chat.
+    ///
+    /// Lee todo lo disponible del canal acotado (128, best-effort) y crea o
+    /// actualiza UN turno asistente provisional al final de `conversation`
+    /// (se renderiza como burbuja porque el dibujado recorre toda la
+    /// conversación también con `is_pending`). El texto visible se capa a
+    /// `MAX_CONVERSATION_TURN_CHARS`; el resultado final llega por el canal
+    /// de completado con su propio presupuesto. Si la conversación ya está en
+    /// `MAX_CONVERSATION_TURNS`, se omite el preview sin perder el final.
+    /// Puro UI-state, sin I/O: se llama cada frame desde `poll_assistant_jobs`.
+    pub(crate) fn drain_remote_stream_preview(
+        &mut self,
+        panel: &mut AssistantPanelState,
+        ctx: &egui::Context,
+    ) -> bool {
+        let deltas: Vec<String> = {
+            let Some(job) = self.remote_job.as_ref() else {
+                return false;
+            };
+            let Some(stream) = job.stream_rx.as_ref() else {
+                return false;
+            };
+            stream.try_iter().collect()
+        };
+        if deltas.is_empty() {
+            return false;
+        }
+        let Some(job) = self.remote_job.as_mut() else {
+            return false;
+        };
+        for delta in deltas {
+            job.stream_text.push_str(&delta);
+        }
+        let display: String = job
+            .stream_text
+            .chars()
+            .take(MAX_CONVERSATION_TURN_CHARS)
+            .collect();
+        if !job.preview_active {
+            if panel.conversation.len() >= MAX_CONVERSATION_TURNS {
+                return false;
+            }
+            panel
+                .conversation
+                .push(ConversationTurn::assistant(display));
+            job.preview_active = true;
+        } else if let Some(last) = panel.conversation.last_mut() {
+            // Invariante: con el slot remoto ocupado nada más empuja turnos,
+            // así que el último sigue siendo nuestro provisional.
+            if last.role == ConversationRole::Assistant {
+                last.content = display;
+            }
+        }
+        ctx.request_repaint();
+        true
     }
 
     fn take_finished_proposal_job(&mut self) -> Option<FinishedProposalJob> {
@@ -348,6 +409,83 @@ impl AssistantRuntime {
     }
 }
 
+/// Limpia la burbuja provisional del streaming (cancelación o resultado).
+///
+/// Sólo retira el último turno si es del asistente: con el slot remoto
+/// ocupado nada más empuja turnos, así que ese es el provisional creado por
+/// `drain_remote_stream_preview`. Si nunca hubo preview, no toca nada y la
+/// conversación queda como en el path no-streaming.
+fn pop_provisional_stream_turn(panel: &mut AssistantPanelState) {
+    if panel
+        .conversation
+        .last()
+        .is_some_and(|turn| turn.role == ConversationRole::Assistant)
+    {
+        panel.conversation.pop();
+    }
+}
+
+/// ¿El error remoto es una reparación socrática forzada por el guard?
+///
+/// El worker retorna el `repair_prompt` tal cual cuando
+/// `guard_remote_completion` detecta telling con `attempts<2`; el poll debe
+/// mostrar esa re-pregunta en vez de la solución (y nunca el fallback de
+/// modelo ni el cartel de error).
+fn is_socratic_repair_error(error: &str) -> bool {
+    error.starts_with("GUARD TELLING")
+}
+
+/// Construye el guard socrático de sesión para un lanzamiento remoto.
+///
+/// - `attempts`: turnos de usuario previos en la conversación (la pregunta
+///   actual ya está empujada por `begin_request`, así que se resta 1). Cada
+///   mensaje del estudiante es un intento; las reparaciones del tutor no
+///   inflan el contador. Saturante a `u8`.
+/// - `topic`: concepto de `WorkingMemory` (`last_concept`/`current_topic`) o,
+///   sin tema, la pregunta actual truncada a 120 chars.
+/// - `level`: `PedagogicalLevel::from_level_value` del nivel del perfil.
+/// - `history`: últimos 4 turnos como `Turn` pedagógicos (contenido capado a
+///   200 chars; el engine vuelve a acotar al segmentar).
+///   Puro y determinista: misma sesión → mismo guard.
+fn socratic_guard_context(
+    level_value: u32,
+    working_topic: Option<&str>,
+    question: &str,
+    conversation: &[ConversationTurn],
+) -> SocraticGuardContext {
+    let prior_user_turns = conversation
+        .iter()
+        .filter(|turn| turn.role == ConversationRole::User)
+        .count();
+    let mut fsm = SocraticFsm::new(
+        working_topic
+            .map(str::trim)
+            .filter(|topic| !topic.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| question.chars().take(120).collect()),
+    );
+    fsm.attempts = prior_user_turns.saturating_sub(1).min(255) as u8;
+    let history: Vec<Turn> = conversation
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .map(|turn| Turn {
+            role: match turn.role {
+                ConversationRole::User => "user".into(),
+                ConversationRole::Assistant => "assistant".into(),
+            },
+            content: turn.content.chars().take(200).collect(),
+        })
+        .collect();
+    let scaffold = ScaffoldEngine.scaffold(
+        &fsm.topic.clone(),
+        PedagogicalLevel::from_level_value(level_value),
+        &history,
+    );
+    SocraticGuardContext { fsm, scaffold }
+}
+
 struct AssistantRemoteJob {
     id: u64,
     /// Identidad seleccionada por el usuario, usada para descartar resultados obsoletos.
@@ -363,6 +501,14 @@ struct AssistantRemoteJob {
     focus: Option<AssistantFocus>,
     cancellation: CancellationToken,
     receiver: Receiver<Result<RemoteCompletion, String>>,
+    /// Deltas de streaming SSE (sólo protocolo Responses; el resto lo deja
+    /// desconectado y nunca hay preview). Acotado a 128 (best-effort).
+    stream_rx: Option<Receiver<String>>,
+    /// Texto acumulado del stream para la burbuja provisional.
+    stream_text: String,
+    /// Hay un turno provisional al final de `conversation` que debe limpiarse
+    /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
+    preview_active: bool,
 }
 
 struct AssistantProposalJob {
@@ -396,6 +542,9 @@ struct AssistantRemoteLaunch {
     focus: Option<AssistantFocus>,
     correction_attempt: u8,
     repair_target_turn: Option<usize>,
+    /// Guard socrático de sesión: el worker lo aplica sobre el completado
+    /// final (streaming y no-streaming). `None` lo desactiva.
+    socratic_guard: Option<SocraticGuardContext>,
 }
 
 struct AssistantRepairRequest {
@@ -462,6 +611,9 @@ struct FinishedRemoteJob {
     focus: Option<AssistantFocus>,
     cancelled: bool,
     result: Result<RemoteCompletion, String>,
+    /// El job dejó una burbuja provisional que el poll debe limpiar antes de
+    /// procesar el resultado (éxito, error o cancelación).
+    stream_preview_active: bool,
 }
 
 struct FinishedProposalJob {
@@ -1591,13 +1743,24 @@ impl GrafitoApp {
             focus,
             correction_attempt,
             repair_target_turn,
+            socratic_guard,
         } = launch;
         self.assistant_runtime.next_request_id =
             self.assistant_runtime.next_request_id.wrapping_add(1);
         let id = self.assistant_runtime.next_request_id;
         let cancellation = CancellationToken::default();
-        let worker =
-            request_remote_with_api_key_on_worker(settings, request, api_key, cancellation.clone());
+        // Canal acotado de deltas SSE (128, best-effort): el worker de
+        // streaming lo alimenta y `poll_assistant_jobs` lo drena a la burbuja
+        // provisional. Protocolos no-streaming lo dejan desconectado.
+        let (delta_tx, stream_rx) = sync_channel::<String>(128);
+        let worker = request_remote_streaming_with_api_key_on_worker(
+            settings,
+            request,
+            api_key,
+            cancellation.clone(),
+            delta_tx,
+            socratic_guard,
+        );
         let (sender, receiver) = sync_channel(1);
         let repaint = ctx.clone();
         let cancellation_for_thread = cancellation.clone();
@@ -1632,6 +1795,9 @@ impl GrafitoApp {
             focus,
             cancellation,
             receiver,
+            stream_rx: Some(stream_rx),
+            stream_text: String::new(),
+            preview_active: false,
         });
     }
 
@@ -2086,6 +2252,7 @@ impl GrafitoApp {
             focus,
             correction_attempt: correction_attempt + 1,
             repair_target_turn: Some(target_turn),
+            socratic_guard: self.session_socratic_guard(question),
         })
     }
 
@@ -2169,6 +2336,26 @@ impl GrafitoApp {
         };
         self.assistant.begin_authorized_remote_request();
         self.start_remote_assistant_for(ctx, question, None);
+    }
+
+    /// Guard socrático de la sesión actual para un lanzamiento remoto.
+    ///
+    /// Fuente: nivel del perfil + tema de `WorkingMemory` + conversación.
+    /// Siempre `Some` en consultas remotas (el worker lo aplica en el path
+    /// streaming y en el no-streaming); el modo agente lo ignora porque ya
+    /// orquesta sus propias tools socráticas.
+    fn session_socratic_guard(&self, question: &str) -> Option<SocraticGuardContext> {
+        let topic = self.profile.working_memory.last_concept.as_deref().or(self
+            .profile
+            .working_memory
+            .current_topic
+            .as_deref());
+        Some(socratic_guard_context(
+            self.profile.level,
+            topic,
+            question,
+            &self.assistant.conversation,
+        ))
     }
 
     /// Lanza la consulta remota con la pregunta dada, sin depender del cartel.
@@ -2271,6 +2458,7 @@ impl GrafitoApp {
             focus,
             correction_attempt: 0,
             repair_target_turn: None,
+            socratic_guard: self.session_socratic_guard(&question),
         };
         if self.assistant.agent_mode {
             self.start_agent_assistant_job(ctx, launch);
@@ -2555,6 +2743,10 @@ impl GrafitoApp {
 
     fn poll_assistant_jobs(&mut self, ctx: &egui::Context) {
         self.poll_assistant_agent(ctx);
+        // Drena deltas SSE a la burbuja provisional antes de cosechar el
+        // resultado final (el preview se limpia en cada rama terminal).
+        self.assistant_runtime
+            .drain_remote_stream_preview(&mut self.assistant, ctx);
         if let Some(completion) = self.assistant_runtime.take_finished_remote_job() {
             let FinishedRemoteJob {
                 id,
@@ -2570,8 +2762,12 @@ impl GrafitoApp {
                 focus,
                 cancelled,
                 result,
+                stream_preview_active,
                 ..
             } = completion;
+            if stream_preview_active {
+                pop_provisional_stream_turn(&mut self.assistant);
+            }
             if cancelled
                 || !accepts_remote_result(
                     self.assistant.provider,
@@ -2636,11 +2832,21 @@ impl GrafitoApp {
                             );
                         }
                         Err(error) => {
-                            // Compatibilidad total SÓLO-SESIÓN: si muse-spark falla con 500 o timeout
-                            // en OpenCodeGo, se reintenta con deepseek SIN tocar la preferencia
-                            // guardada. El próximo pedido reintenta spark (auto-recupera si vuelve).
-                            // Si B1 aún no terminó, este fallback sigue funcionando igual.
-                            if should_fallback_remote_spark_to_deepseek(
+                            // Reparación socrática: el guard detectó telling
+                            // con attempts<2 en el worker (streaming o no).
+                            // Se fuerza la re-pregunta como respuesta en vez
+                            // de mostrar la solución; no hay fallback de
+                            // modelo ni cartel de error para este caso.
+                            if is_socratic_repair_error(&error) {
+                                if correction_attempt > 0 {
+                                    self.assistant.restore_proposal_correction();
+                                }
+                                self.assistant.complete_request(error);
+                                self.notify(
+                                    "El tutor repregunta antes de mostrar la solución directa.",
+                                    ToastKind::Info,
+                                );
+                            } else if should_fallback_remote_spark_to_deepseek(
                                 &error,
                                 self.assistant.provider,
                                 &self.assistant.model,
@@ -2658,8 +2864,7 @@ impl GrafitoApp {
                                     Some("deepseek-v4-flash"),
                                 );
                                 return;
-                            }
-                            if correction_attempt > 0 {
+                            } else if correction_attempt > 0 {
                                 self.fail_assistant_repair_request(error);
                             } else {
                                 self.fail_assistant_request(error);
@@ -4284,22 +4489,23 @@ mod tests {
         can_offer_assistant_proposal_correction, classify_local_assistant_response,
         commit_assistant_graph_preflight, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        is_agent_spark_responses_unsupported_error, preflight_assistant_flower_scene,
+        is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
+        pop_provisional_stream_turn, preflight_assistant_flower_scene,
         preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
         preflight_assistant_parameter, preflight_assistant_scene, read_bounded_attachment,
         remote_error_message, should_fallback_agent_spark_to_deepseek,
-        should_fallback_remote_spark_to_deepseek, stage_assistant_parameter,
-        validate_assistant_command, verified_remote_proposals, AgentChannelMsg, AssistantAgentJob,
-        AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
-        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
+        AgentChannelMsg, AssistantAgentJob, AssistantAnimJob, AssistantCommandInvocation,
+        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, LocalAssistantDisposition,
         RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
         AssistantFocus, AssistantOperation, AssistantRepairFailure, AssistantRepairFailureKind,
-        AssistantRepairFeedback, AssistantRequest, ImmutableDocumentContext, ProposedPlan,
-        ProviderProfile,
+        AssistantRepairFeedback, AssistantRequest, ConversationRole, ConversationTurn,
+        ImmutableDocumentContext, ProposedPlan, ProviderProfile,
     };
     use grafito_command::commands::CommandOutcome;
     use grafito_core::{Document, GeoObject};
@@ -4877,6 +5083,9 @@ mod tests {
             focus: None,
             cancellation: remote_cancel.clone(),
             receiver: remote_rx,
+            stream_rx: None,
+            stream_text: String::new(),
+            preview_active: false,
         });
         let proposal_cancel = CancellationToken::default();
         let (proposal_tx, proposal_rx) =
@@ -4977,6 +5186,9 @@ mod tests {
             focus: None,
             cancellation: cancellation.clone(),
             receiver,
+            stream_rx: None,
+            stream_text: String::new(),
+            preview_active: false,
         });
 
         assert!(runtime.cancel_stale_remote_job(ProviderProfile::DeepSeek, "deepseek-chat"));
@@ -4992,6 +5204,128 @@ mod tests {
         assert_eq!(finished.document_digest, "fnv1a64:request");
         assert!(finished.focus.is_none());
         assert!(runtime.remote_request_slot_is_free());
+    }
+
+    #[test]
+    fn stream_preview_drains_to_provisional_bubble_and_pops_on_finish() {
+        let mut runtime = AssistantRuntime::default();
+        let (result_tx, result_rx) = sync_channel::<Result<RemoteCompletion, String>>(1);
+        let (delta_tx, delta_rx) = sync_channel::<String>(128);
+        let cancel = CancellationToken::default();
+        runtime.remote_job = Some(AssistantRemoteJob {
+            id: 1,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "muse-spark-1.3-contributor".into(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "derivá x^2".into(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: 1,
+            document_digest: "d".into(),
+            focus: None,
+            cancellation: cancel.clone(),
+            receiver: result_rx,
+            stream_rx: Some(delta_rx),
+            stream_text: String::new(),
+            preview_active: false,
+        });
+        let mut panel = AssistantPanelState::default();
+        panel
+            .conversation
+            .push(ConversationTurn::user("derivá x^2"));
+        let ctx = egui::Context::default();
+
+        // Sin deltas no hay burbuja provisional.
+        assert!(!runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 1);
+
+        delta_tx.send("Hola ".into()).unwrap();
+        delta_tx.send("mundo".into()).unwrap();
+        assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 2);
+        let provisional = panel.conversation.last().unwrap();
+        assert_eq!(provisional.role, ConversationRole::Assistant);
+        assert_eq!(provisional.content, "Hola mundo");
+
+        // Más deltas actualizan el mismo turno (no duplican burbujas).
+        delta_tx.send("!".into()).unwrap();
+        assert!(runtime.drain_remote_stream_preview(&mut panel, &ctx));
+        assert_eq!(panel.conversation.len(), 2);
+        assert_eq!(panel.conversation.last().unwrap().content, "Hola mundo!");
+
+        // Al terminar (cancelado), el poll retira el provisional y queda el
+        // turno de usuario, igual que en el path no-streaming.
+        cancel.cancel();
+        result_tx
+            .send(Err("remote assistant request was cancelled".into()))
+            .unwrap();
+        let finished = runtime.take_finished_remote_job().unwrap();
+        assert!(finished.cancelled);
+        assert!(finished.stream_preview_active);
+        pop_provisional_stream_turn(&mut panel);
+        assert_eq!(panel.conversation.len(), 1);
+        assert_eq!(
+            panel.conversation.last().unwrap().role,
+            ConversationRole::User
+        );
+    }
+
+    #[test]
+    fn pop_provisional_stream_turn_never_touches_real_history() {
+        let mut panel = AssistantPanelState::default();
+        // Sin turnos o con último turno de usuario: no-op.
+        pop_provisional_stream_turn(&mut panel);
+        assert!(panel.conversation.is_empty());
+        panel.conversation.push(ConversationTurn::user("hola"));
+        pop_provisional_stream_turn(&mut panel);
+        assert_eq!(panel.conversation.len(), 1);
+    }
+
+    #[test]
+    fn socratic_guard_context_seeds_attempts_from_prior_user_turns() {
+        // Fresca: sólo la pregunta actual → attempts=0 (telling bloqueado).
+        let fresh = vec![ConversationTurn::user("derivá x^2")];
+        let guard = socratic_guard_context(8, None, "derivá x^2", &fresh);
+        assert_eq!(guard.fsm.attempts, 0);
+        assert_eq!(guard.fsm.topic, "derivá x^2");
+        assert!(guard.scaffold.question.contains("derivá x^2"));
+
+        // Un intercambio + seguimiento → attempts=1 (sigue bloqueado).
+        let one_exchange = vec![
+            ConversationTurn::user("primera"),
+            ConversationTurn::assistant("re-pregunta"),
+            ConversationTurn::user("segunda"),
+        ];
+        let guard = socratic_guard_context(8, Some("derivada"), "segunda", &one_exchange);
+        assert_eq!(guard.fsm.attempts, 1);
+        assert_eq!(guard.fsm.topic, "derivada");
+
+        // Dos intercambios + seguimiento → attempts=2 (reveal permitido).
+        let two_exchanges = vec![
+            ConversationTurn::user("una"),
+            ConversationTurn::assistant("pista"),
+            ConversationTurn::user("dos"),
+            ConversationTurn::assistant("otra pista"),
+            ConversationTurn::user("tres"),
+        ];
+        let guard = socratic_guard_context(8, Some("  "), "tres", &two_exchanges);
+        assert_eq!(guard.fsm.attempts, 2);
+        // Tema en blanco cae a la pregunta actual.
+        assert_eq!(guard.fsm.topic, "tres");
+    }
+
+    #[test]
+    fn socratic_repair_error_is_detected_by_prefix() {
+        assert!(is_socratic_repair_error(
+            "GUARD TELLING — REPARACIÓN SOCRÁTICA OBLIGATORIA (attempts=0 <2, ...)"
+        ));
+        assert!(!is_socratic_repair_error(
+            "remote assistant returned HTTP 500: boom"
+        ));
+        assert!(!is_socratic_repair_error(
+            "remote assistant request was cancelled"
+        ));
     }
 
     #[test]

@@ -30,6 +30,7 @@ use std::io::{Cursor, Read};
 use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::SyncSender,
     Arc,
 };
 use std::thread::JoinHandle;
@@ -1187,46 +1188,42 @@ fn parse_http_date_to_system_time(value: &str) -> Option<std::time::SystemTime> 
     None
 }
 
-// ADR-001 — Streaming SSE para Responses API (`response.stream=true`).
+// ADR-001 — Streaming SSE para Responses API (`stream:true`).
 //
-// Estado actual (2026-09-04): transporte NO-streaming (`stream` ausente en el
-// payload, `max_output_tokens` con piso 2048). Verificado contra el endpoint
-// real: 200 en ~2s para "ok". Se mantiene así en este turno para no romper el
-// wire format ni la cancelación cooperativa (el worker sólo chequea
-// `CancellationToken` antes/después de `send()`).
+// Estado (2026-09-05): CABLEADO end-to-end (antes: sólo parsers puros).
+//  - Transporte: `request_responses_completion_streaming` (abajo): clona el
+//    payload no-streaming con `"stream": true` + `Accept: text/event-stream`,
+//    lee chunks de 4 KiB con deadline absoluta (`effective_remote_timeout`,
+//    nunca más que el `timeout_ms` del `RequestBudget`) y poll de cancelación
+//    entre chunks (precedente: `grafito-anim` engine poll 200ms). Reensamblado
+//    por `\n` (corte char-safe: 0x0A nunca parte un scalar UTF-8), deltas
+//    `response.output_text.delta` acumulados y reportados por `progress` con
+//    el texto acumulado, cap `RESPONSES_MAX_BODY_BYTES` 64 KiB.
+//  - Fallback: cero eventos SSE al EOF → UN único reintento no-streaming con
+//    el mismo presupuesto y el timeout remanente (>=1s; si no queda tiempo no
+//    se reintenta). Transporte/cancelación/presupuesto/`response.failed` NO
+//    reintentan: se propagan igual que en el path no-streaming.
+//  - Forwarder: `request_remote_streaming_with_api_key_on_worker` rutea
+//    Responses→streaming (sufijos nuevos por `sync_channel(128)` best-effort
+//    con `try_send`) y el resto de protocolos→`request_remote`; aplica
+//    `guard_remote_completion` en AMBOS paths cuando recibe guard de sesión.
+//  - UI (`grafito-app/src/assistant.rs`): `poll_assistant_jobs` drena deltas
+//    a burbuja provisional y la limpia al terminar/cancelar.
+// Verificado contra stub TCP local (deltas fragmentados en varios `write_all`
+// + `flush`, fallback ante JSON no-SSE, guard en ambos protocolos); el wire
+// no-streaming previo sigue intacto (verificado 2026-09-04: 200 en ~2s).
 //
-// Diseño futuro (no cableado; helpers puros abajo como primer paso):
-//  1. Payload: `{"model","instructions","input","max_output_tokens","stream":true}`
-//     + header `Accept: text/event-stream`.
-//  2. Lectura: `reqwest::blocking::Response::chunk()` en bucle con deadline
-//     absoluta (`effective_remote_timeout`) y poll de cancelación cada ~200ms
-//     (precedente: `grafito-anim` engine poll 200ms). Cada chunk se acumula en
-//     un buffer con cap (p.ej. `RESPONSES_MAX_BODY_BYTES`); líneas parciales se
-//     reensamblan por `\n` antes de parsear.
-//  3. Parser: líneas `event: <tipo>` + `data: <json>`; tipos relevantes
-//     `response.output_text.delta` (acumula `delta`), `response.completed`
-//     (cierra con `truncated:false`), `response.incomplete` (cierra con
-//     `truncated:true`), `response.failed` (error acotado 200 chars).
-//     `data: [DONE]` termina el stream. Ver `responses_sse_delta_text` y
-//     `collect_responses_sse_text`.
-//  4. Progreso opcional: `Option<&mut dyn FnMut(&str)>` invocada sólo con el
-//     texto acumulado acotado (`max_output_chars`); nunca bloquea ni duerme:
-//     si el callback pisa cancelación, el loop aborta en el próximo poll.
-//  5. Fallback: cualquier error de stream (content-type inesperado, JSON
-//     inválido, timeout) cae a un único error `schema`/`transport` sin eco de
-//     secretos, idéntico al path no-streaming. No se reintenta en el worker.
-//  6. Puerta de activación: feature o parámetro `stream: bool` en
-//     `RequestBudget`/payload builder, con el default actual `false` hasta que
-//     la UI necesite render progresivo. Cuando se active, el test stub debe
-//     servir `Content-Type: text/event-stream` con deltas fragmentados en
-//     varios `write_all` + `flush` para probar reensamblado y cancelación.
-//
-// Decisión de este turno: NO se cambia el wire (sin `stream:true`, sin
-// `progress` en el path de red). Sólo se agregan los parsers puros + tests
-// unitarios para dejar el diseño verificado sin riesgo.
-/// Callback de progreso para futuro streaming SSE (ADR-001, aún no cableado
-/// al transporte: el wire sigue siendo no-streaming para no romper el formato
-/// verificado). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
+// Parser: líneas `event: <tipo>` + `data: <json>`; tipos relevantes
+// `response.output_text.delta` (acumula `delta`), `response.completed`
+// (cierra con `truncated:false`), `response.incomplete` (cierra con
+// `truncated:true`), `response.failed` (error acotado 200 chars).
+// `data: [DONE]` termina el stream. Ver `responses_sse_delta_text` y
+// `collect_responses_sse_text` (helpers puros) + `ingest_sse_line` (lector).
+// Progreso: `Option<&mut dyn FnMut(&str)>` invocada sólo con el texto
+// acumulado acotado (`RESPONSES_MAX_BODY_BYTES`); nunca bloquea ni duerme:
+// si el callback pisa cancelación, el loop aborta en el próximo poll.
+/// Callback de progreso del streaming SSE (ADR-001, cableado al transporte
+/// Responses). Recibe el texto acumulado acotado; nunca duerme ni bloquea.
 pub type ResponsesProgressCallback<'a> = dyn FnMut(&str) + Send + 'a;
 
 /// Extrae el delta de texto de un evento SSE de Responses.
@@ -1278,6 +1275,266 @@ pub fn collect_responses_sse_text(sse_body: &str) -> (String, bool) {
         }
     }
     (text, truncated)
+}
+
+/// Resultado interno del lector SSE de la Responses API.
+enum SseStreamOutcome {
+    /// El servidor habló SSE: texto acumulado de deltas + flag de truncado.
+    Done { text: String, truncated: bool },
+    /// El servidor no emitió ningún evento SSE (JSON plano, cuerpo vacío o
+    /// forma desconocida): el llamante reintenta UNA vez sin `stream`.
+    FallbackToNonStreaming,
+}
+
+/// POST a la Responses API con `stream:true` y drenado progresivo de deltas.
+///
+/// Clona `base_payload` (el de `build_responses_payload`, sin `stream`) con
+/// `"stream": true` y `Accept: text/event-stream`. Cada delta válido se
+/// acumula y se reporta por `progress` con el texto acumulado acotado.
+///
+/// Garantías (presupuesto `RequestBudget` intacto):
+/// - El texto final pasa por `completion_from_text` con el mismo
+///   `max_output_chars`; el cuerpo SSE está acotado por
+///   `RESPONSES_MAX_BODY_BYTES` (64 KiB, igual que el path no-streaming).
+/// - Cancelación cooperativa: se chequea antes del `send()` y entre chunks
+///   de 4 KiB. Un stall del servidor sigue acotado por el `timeout` total de
+///   reqwest (cubre también la lectura del cuerpo en el cliente bloqueante).
+/// - Fallback: sólo si el servidor nunca emite eventos SSE, UN único
+///   reintento no-streaming con el mismo presupuesto y el timeout remanente
+///   (>=1s; sin tiempo remanente se devuelve error `schema` sin reintentar).
+///   Transporte, cancelación, presupuesto y `response.failed` NO reintentan.
+pub fn request_responses_completion_streaming(
+    endpoint: Url,
+    base_payload: Value,
+    api_key: Option<&str>,
+    cancellation: &CancellationToken,
+    timeout: Duration,
+    max_output_chars: usize,
+    progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<RemoteCompletion, String> {
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    let started = Instant::now();
+    let mut streaming_payload = base_payload.clone();
+    streaming_payload["stream"] = json!(true);
+    let client = shared_http_client()?;
+    let mut call = client
+        .post(endpoint.clone())
+        .header("Accept", "text/event-stream")
+        .json(&streaming_payload)
+        .timeout(timeout);
+    if let Some(key) = api_key {
+        call = call.bearer_auth(sanitize_api_key(key)?);
+    }
+    let response = call
+        .send()
+        .map_err(|error| transport_error("remote assistant stream", &error, Some(timeout)))?;
+    if cancellation.is_cancelled() {
+        return Err("remote assistant request was cancelled".into());
+    }
+    if !response.status().is_success() {
+        // Idéntico al path no-streaming: 429 con Retry-After, cuerpo acotado
+        // sin secretos.
+        let status = response.status().as_u16();
+        let retry_after = if status == 429 {
+            retry_after_secs_from_headers(response.headers())
+        } else {
+            None
+        };
+        let body = response.text().unwrap_or_else(|_| "<no body>".to_string());
+        return Err(http_status_error(status, &body, retry_after));
+    }
+    match read_responses_sse_stream(response, timeout, cancellation, progress)? {
+        SseStreamOutcome::Done { text, truncated } => {
+            completion_from_text(&text, max_output_chars, truncated)
+        }
+        SseStreamOutcome::FallbackToNonStreaming => {
+            // El servidor no habló SSE: UN reintento no-streaming con el
+            // MISMO presupuesto. El total nunca supera `effective_remote_timeout`.
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .filter(|remaining| *remaining >= Duration::from_secs(1));
+            let Some(remaining) = remaining else {
+                return Err(response_schema_error(
+                    "response did not stream any displayable events",
+                ));
+            };
+            request_responses_completion(
+                endpoint,
+                base_payload,
+                api_key,
+                cancellation,
+                remaining,
+                max_output_chars,
+            )
+        }
+    }
+}
+
+/// Lee un cuerpo `text/event-stream` con deadline absoluta y cancelación.
+///
+/// Drena por chunks (sin `chunk()`: el cliente bloqueante expone `Read`),
+/// reensambla líneas por `\n` e ingiere cada `data:` con `ingest_sse_line`.
+/// EOF abrupto tras deltas válidos conserva el parcial marcado `truncated`;
+/// EOF sin ningún evento → `FallbackToNonStreaming` (el servidor no habla
+/// SSE y el llamante reintenta sin `stream`).
+fn read_responses_sse_stream(
+    response: reqwest::blocking::Response,
+    timeout: Duration,
+    cancellation: &CancellationToken,
+    mut progress: Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<SseStreamOutcome, String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    let maximum = RESPONSES_MAX_BODY_BYTES
+        .checked_add(1)
+        .ok_or_else(|| "remote assistant response limit is invalid".to_string())?;
+    let mut reader = response.take(maximum as u64);
+    let mut total_bytes = 0_usize;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut text = String::new();
+    let mut truncated = false;
+    let mut events_seen = 0_u32;
+    let mut done = false;
+    let mut chunk = [0_u8; 4096];
+    while !done {
+        if cancellation.is_cancelled() {
+            return Err("remote assistant request was cancelled".into());
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "remote assistant stream timed out after {}s",
+                timeout.as_secs().max(1)
+            ));
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(consumed) => {
+                total_bytes = total_bytes.saturating_add(consumed);
+                if total_bytes > RESPONSES_MAX_BODY_BYTES {
+                    return Err(
+                        "remote assistant response exceeds the configured body budget".into(),
+                    );
+                }
+                pending.extend_from_slice(&chunk[..consumed]);
+                if let Some(split) = pending.iter().rposition(|byte| *byte == b'\n') {
+                    let complete: Vec<u8> = pending.drain(..=split).collect();
+                    // Cortar en `\n` (0x0A) nunca parte un scalar UTF-8: los
+                    // bytes multibyte son siempre >= 0x80.
+                    let block = String::from_utf8_lossy(&complete);
+                    for line in block.lines() {
+                        if ingest_sse_line(
+                            line,
+                            &mut text,
+                            &mut truncated,
+                            &mut events_seen,
+                            &mut progress,
+                        )? {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                return Err("remote assistant response body could not be read".to_string());
+            }
+        }
+    }
+    if !done && !pending.is_empty() {
+        // Cola final sin `\n` de cierre (el servidor cerró la conexión):
+        // es una línea completa válida.
+        let tail = String::from_utf8_lossy(&pending);
+        for line in tail.lines() {
+            if ingest_sse_line(
+                line,
+                &mut text,
+                &mut truncated,
+                &mut events_seen,
+                &mut progress,
+            )? {
+                done = true;
+                break;
+            }
+        }
+    }
+    if events_seen == 0 {
+        return Ok(SseStreamOutcome::FallbackToNonStreaming);
+    }
+    if !done {
+        truncated = true;
+    }
+    Ok(SseStreamOutcome::Done { text, truncated })
+}
+
+/// Ingiere una línea de un bloque SSE. Retorna `true` al alcanzar el estado
+/// terminal (`[DONE]`, `response.completed`, `response.incomplete`).
+///
+/// Indulgente con líneas sueltas (se ignoran `event:`/`:ping`/JSON ilegible):
+/// sólo cuentan los eventos parseables. `response.failed` es error directo
+/// del proveedor (NO dispara fallback: reintentar sin `stream` no lo arregla).
+fn ingest_sse_line(
+    line: &str,
+    text: &mut String,
+    truncated: &mut bool,
+    events_seen: &mut u32,
+    progress: &mut Option<&mut ResponsesProgressCallback<'_>>,
+) -> Result<bool, String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return Ok(false);
+    }
+    let Some(data) = line.strip_prefix("data:") else {
+        // `event:`, `id:`, `retry:` se ignoran: el tipo viaja en el JSON.
+        return Ok(false);
+    };
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(false);
+    }
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return Ok(false);
+    };
+    let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "response.output_text.delta" | "response.text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                *events_seen = events_seen.saturating_add(1);
+                text.push_str(delta);
+                if let Some(callback) = progress.as_mut() {
+                    (*callback)(text);
+                }
+            }
+            Ok(false)
+        }
+        "response.completed" => {
+            *events_seen = events_seen.saturating_add(1);
+            Ok(true)
+        }
+        "response.incomplete" => {
+            *events_seen = events_seen.saturating_add(1);
+            *truncated = true;
+            Ok(true)
+        }
+        "response.failed" => {
+            let detail: String = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown provider error")
+                .chars()
+                .take(200)
+                .collect();
+            Err(response_schema_error(&format!(
+                "responses stream reported a failure: {detail}"
+            )))
+        }
+        _ => Ok(false),
+    }
 }
 
 fn endpoint_with_path(settings: &ProviderSettings, suffix: &str) -> Result<Url, String> {
@@ -1989,6 +2246,113 @@ pub fn request_remote_with_api_key_on_worker(
     cancellation: CancellationToken,
 ) -> JoinHandle<Result<RemoteCompletion, String>> {
     std::thread::spawn(move || request_remote(settings, request, api_key, cancellation))
+}
+
+/// Contexto socrático de sesión para el guard remoto (intentos + scaffold).
+///
+/// Lo construye la app desde la sesión (turnos previos + `WorkingMemory`) y el
+/// worker lo aplica sobre el `RemoteCompletion` final —tanto en el path
+/// streaming (Responses/Spark) como en el no-streaming (resto de protocolos)—
+/// vía `guard_remote_completion`. `None` desactiva el guard.
+#[derive(Debug, Clone)]
+pub struct SocraticGuardContext {
+    /// FSM con `attempts` sembrados desde los intentos previos del estudiante.
+    pub fsm: SocraticFsm,
+    /// Scaffold actual (pregunta BKT + pista) para la reparación forzada.
+    pub scaffold: Scaffold,
+}
+
+/// Adapta el callback de progreso (texto acumulado) a envíos de sufijos.
+///
+/// Retorna un `FnMut(&str)` que envía por `delta_tx` sólo el sufijo aún no
+/// confirmado, con `try_send` best-effort: si el canal está lleno no bloquea
+/// al worker; el próximo progreso reintenta desde el punto no confirmado (la
+/// UI reemplaza el preview por el último acumulado, así que nada se pierde).
+pub fn stream_progress_sender(delta_tx: SyncSender<String>) -> impl FnMut(&str) + Send {
+    let mut last_sent = 0_usize;
+    move |accumulated: &str| {
+        if accumulated.len() > last_sent
+            && delta_tx
+                .try_send(accumulated[last_sent..].to_owned())
+                .is_ok()
+        {
+            last_sent = accumulated.len();
+        }
+    }
+}
+
+/// Inicia un POST remoto con streaming SSE cuando el protocolo lo soporta.
+///
+/// - `OpenAiResponses` (Muse Spark): `request_responses_completion_streaming`
+///   con `progress` adaptado por `stream_progress_sender` hacia `delta_tx`
+///   (`sync_channel(128)` best-effort: si la UI no drena, se descarta preview
+///   pero el resultado final sigue intacto).
+/// - Resto de protocolos: `request_remote` clásico (no-streaming, con su
+///   propio log; este wrapper sólo loguea el brazo streaming+guard).
+///   Tras el transporte (cualquiera de los dos paths) se aplica el guard
+///   socrático si `guard` es `Some`: telling con `attempts<2` retorna
+///   `Err(repair)` para forzar re-pregunta en vez de mostrar la solución.
+///
+/// La clave viaja sólo en el worker, igual que
+/// `request_remote_with_api_key_on_worker`: nunca se serializa ni se informa
+/// en errores.
+pub fn request_remote_streaming_with_api_key_on_worker(
+    settings: ProviderSettings,
+    request: AssistantRequest,
+    api_key: Option<String>,
+    cancellation: CancellationToken,
+    delta_tx: SyncSender<String>,
+    guard: Option<SocraticGuardContext>,
+) -> JoinHandle<Result<RemoteCompletion, String>> {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let protocol = remote_protocol(&settings);
+        let timeout = effective_remote_timeout(request.budget.timeout_ms);
+        let max_output_chars = request.budget.max_output_chars;
+        match protocol {
+            RemoteProtocol::OpenAiResponses => {
+                let model = settings.model.clone();
+                let prepared = responses_endpoint(&settings).and_then(|endpoint| {
+                    build_responses_payload(&settings, &request).map(|payload| (endpoint, payload))
+                });
+                let result = match prepared {
+                    Ok((endpoint, payload)) => {
+                        let mut on_progress = stream_progress_sender(delta_tx);
+                        request_responses_completion_streaming(
+                            endpoint,
+                            payload,
+                            api_key.as_deref(),
+                            &cancellation,
+                            timeout,
+                            max_output_chars,
+                            Some(&mut on_progress),
+                        )
+                    }
+                    Err(error) => Err(error),
+                };
+                // Guard socrático también en el path streaming.
+                let guarded = match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                };
+                log_remote_completion_event(&model, protocol, started.elapsed(), &guarded);
+                guarded
+            }
+            // El path no-streaming loguea dentro de `request_remote`; acá
+            // sólo se agrega el guard sobre su resultado.
+            _ => {
+                let result = request_remote(settings, request, api_key, cancellation);
+                match (result, guard) {
+                    (Ok(completion), Some(context)) => {
+                        guard_remote_completion(&context.fsm, completion, &context.scaffold)
+                    }
+                    (result, _) => result,
+                }
+            }
+        }
+    })
 }
 
 /// Consulta los identificadores de modelos disponibles en un proveedor remoto.
@@ -3803,5 +4167,267 @@ mod tests {
         assert!(prompt.contains("integrales"));
         assert!(prompt.contains("Pista concreta") || prompt.contains("Pista scaffold"));
         assert!(prompt.contains("Historial"));
+    }
+
+    /// Sirve `replies` conexiones TCP secuenciales con cuerpos prefijados.
+    ///
+    /// Cada reply es `(cuerpo, content-type, fragmentar)`: con `fragmentar` el
+    /// cuerpo se envía en dos `write_all` + `flush` con 50ms en medio para
+    /// forzar reensamblado en el lector SSE. Retorna la dirección y las
+    /// peticiones crudas en orden para aserciones en el hilo del test.
+    fn serve_stub_replies(
+        replies: Vec<(Vec<u8>, &'static str, bool)>,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let count = replies.len();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(count);
+            for (body, content_type, fragment) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = vec![0u8; 32_768];
+                let bytes = stream.read(&mut buffer).unwrap_or(0);
+                requests.push(String::from_utf8_lossy(&buffer[..bytes]).into_owned());
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                if fragment && body.len() > 1 {
+                    let mid = body.len() / 2;
+                    stream.write_all(&body[..mid]).unwrap();
+                    stream.flush().unwrap();
+                    thread::sleep(Duration::from_millis(50));
+                    stream.write_all(&body[mid..]).unwrap();
+                } else {
+                    stream.write_all(&body).unwrap();
+                }
+                stream.flush().unwrap();
+            }
+            requests
+        });
+        (address, server)
+    }
+
+    fn telling_guard_context() -> SocraticGuardContext {
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        SocraticGuardContext {
+            fsm: SocraticFsm::new("derivada"),
+            scaffold: Scaffold {
+                question: "¿Cómo definirías derivada con límites?".into(),
+                hint: Some("Recordá f'(x)=lim".into()),
+                explanation: "formal".into(),
+            },
+        }
+    }
+
+    fn remote_wire_request(problem: &str) -> AssistantRequest {
+        AssistantRequest::remote(problem, ImmutableDocumentContext::empty(0))
+    }
+
+    #[test]
+    fn streaming_responses_reassembles_fragmented_deltas_with_progress() {
+        let body = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hola\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" mundo\"}\n\ndata: {\"type\":\"response.completed\"}\ndata: [DONE]\n"
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(completion.text, "Hola mundo");
+        assert!(!completion.truncated);
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /responses HTTP/1.1"));
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(lowered.contains("accept: text/event-stream"), "{lowered}");
+        assert!(lowered.contains("authorization: bearer test-key"));
+        assert!(!snapshots.is_empty());
+        assert_eq!(snapshots.last().map(String::as_str), Some("Hola mundo"));
+        for pair in snapshots.windows(2) {
+            assert!(pair[1].starts_with(&pair[0]), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn streaming_falls_back_to_non_streaming_when_server_never_speaks_sse() {
+        let json_body =
+            br#"{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"listo"}]}]}"#
+                .to_vec();
+        let (address, server) = serve_stub_replies(vec![
+            (json_body.clone(), "application/json", false),
+            (json_body, "application/json", false),
+        ]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            64,
+            None,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+
+        assert_eq!(completion.text, "listo");
+        assert!(!completion.truncated);
+        assert_eq!(requests.len(), 2, "un reintento no-streaming");
+        assert!(requests[0].contains("\"stream\":true"), "{}", requests[0]);
+        assert!(
+            !requests[1].contains("\"stream\":true"),
+            "el fallback reenvía el payload base sin stream: {}",
+            requests[1]
+        );
+    }
+
+    #[test]
+    fn stream_progress_sender_forwards_only_unsent_suffixes_without_blocking() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1);
+        let mut send = stream_progress_sender(tx);
+        send("Hola");
+        // Canal lleno (cap 1): este progreso se descarta sin bloquear.
+        send("Hola mundo");
+        assert_eq!(rx.try_recv().unwrap(), "Hola");
+        // Reintenta desde lo no confirmado (" mundo!").
+        send("Hola mundo!");
+        assert_eq!(rx.try_recv().unwrap(), " mundo!");
+        // Sin crecimiento no hay envío.
+        send("Hola mundo!");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn streaming_completion_flows_into_telling_guard() {
+        // El worker aplica `guard_remote_completion` sobre el resultado del
+        // transporte streaming; acá se verifica la misma composición
+        // (transporte SSE stub → guard) que ejecuta el brazo Responses del
+        // worker. El worker con settings Spark no puede apuntar al stub: la
+        // allowlist de OpenCodeGo lo prohíbe por diseño (ver
+        // `validate_named_endpoint`); el ruteo Spark→Responses ya lo cubre
+        // `spark_models_route_to_responses_api` y el guard en worker el test
+        // de chat de abajo.
+        use grafito_pedagogy::{Scaffold, SocraticFsm};
+        let delta_a =
+            json!({"type": "response.output_text.delta", "delta": "La solución es "}).to_string();
+        let delta_b = json!({"type": "response.output_text.delta", "delta": "x = 4"}).to_string();
+        let done = json!({"type": "response.completed"}).to_string();
+        let sse_body =
+            format!("data: {delta_a}\ndata: {delta_b}\ndata: {done}\ndata: [DONE]\n").into_bytes();
+        let (address, server) = serve_stub_replies(vec![(sse_body, "text/event-stream", true)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+
+        let mut snapshots = Vec::new();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(5),
+            256,
+            Some(&mut |accumulated: &str| {
+                snapshots.push(accumulated.to_owned());
+            }),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(completion.text, "La solución es x = 4");
+        assert_eq!(
+            snapshots.last().map(String::as_str),
+            Some("La solución es x = 4")
+        );
+
+        let scaffold = Scaffold {
+            question: "¿Cómo definirías derivada con límites?".into(),
+            hint: Some("Recordá f'(x)=lim".into()),
+            explanation: "formal".into(),
+        };
+        // attempts=0: el guard bloquea el telling del stream.
+        let fresh = SocraticFsm::new("derivada");
+        let blocked = guard_remote_completion(&fresh, completion.clone(), &scaffold);
+        assert!(
+            matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
+            "{blocked:?}"
+        );
+        // attempts>=2: el mismo completado pasa.
+        let mut seasoned = SocraticFsm::new("derivada");
+        seasoned.record_attempt(None);
+        seasoned.record_attempt(None);
+        let allowed = guard_remote_completion(&seasoned, completion, &scaffold).unwrap();
+        assert_eq!(allowed.text, "La solución es x = 4");
+    }
+
+    #[test]
+    fn guarded_chat_worker_blocks_telling_on_the_non_streaming_path() {
+        let chat_body = br#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"La respuesta es x = 2"}}]}"#
+            .to_vec();
+        let (address, server) = serve_stub_replies(vec![
+            (chat_body.clone(), "application/json", false),
+            (chat_body, "application/json", false),
+        ]);
+        let settings = ProviderSettings::for_profile(ProviderProfile::OllamaLocal, "test-model")
+            .with_endpoint(format!("http://{address}/v1"))
+            .unwrap();
+
+        // Path no-streaming (chat): sin deltas, pero el guard bloquea igual.
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let blocked = request_remote_streaming_with_api_key_on_worker(
+            settings.clone(),
+            remote_wire_request("resolvé 2*x = 4"),
+            None,
+            CancellationToken::default(),
+            delta_tx,
+            Some(telling_guard_context()),
+        )
+        .join()
+        .unwrap();
+        assert!(
+            matches!(blocked, Err(ref error) if error.starts_with("GUARD TELLING")),
+            "{blocked:?}"
+        );
+        assert!(
+            delta_rx.try_recv().is_err(),
+            "el path no-streaming no emite deltas de preview"
+        );
+
+        // Sin guard, el mismo completado pasa (el guard es lo que bloquea).
+        let (delta_tx, _delta_rx) = std::sync::mpsc::sync_channel::<String>(128);
+        let unguarded = request_remote_streaming_with_api_key_on_worker(
+            settings,
+            remote_wire_request("resolvé 2*x = 4"),
+            None,
+            CancellationToken::default(),
+            delta_tx,
+            None,
+        )
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(unguarded.text, "La respuesta es x = 2");
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].starts_with("POST /v1/chat/completions HTTP/1.1"),
+            "{}",
+            requests[0]
+        );
+        let lowered = requests[0].to_ascii_lowercase();
+        assert!(!lowered.contains("text/event-stream"), "{lowered}");
+        assert!(!requests[0].contains("\"stream\":true"), "{}", requests[0]);
     }
 }
