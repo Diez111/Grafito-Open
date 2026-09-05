@@ -45,3 +45,9 @@
 - [x] F6.3 app.rs: Ctrl+T tema (:4259-4267) + Ctrl+P/E (:4268-4278) + F8/F9 (:4135-4144) — cero fantasmas; onboarding gating `!onboarding_completed` (:1763, :4922-5033, utils.rs:46-48), botón [No mostrar]
 - [x] F6.4 Responsive: rail 60px Medium/Wide (ui.rs:549-552), drawer clamp 292..440 (tokens.rs:207-210, panels.rs:2125-2132), panel izq 180+45% (panels.rs:1201-1206); paleta footer "N de M" es (command_palette.rs:394-403)
 - [x] F6.5 README.md/README.en.md Controles corregidos (Shift+L/K/J = X/Y/ambos, F8/F9, Ctrl+T/P/E); tabla doc→código §13 en architecture.md
+
+## F9 — 20 agentes 2026-09-05 — DONE (rama f9-completion)
+- [x] F9.1 W1 perf + W2 correctness + W3 paridad + W4 interop/i18n/calidad (20 agentes, ownership disjunto)
+- [x] F9.2 Cierres lead: Perpendicular/input+dispatcher, Rastro (registry+dispatch+docs), Parallel/Arc/Sector + polygon_n, trace stack Document+render+tests
+- [x] F9.3 Docs sync real: 232 comandos únicos, 193 visibles + 14 UI = 207 paleta, 76 Tools, 18 crates
+- [x] F9.4 Gates: fmt/clippy -D warnings 0, suites lib+tests verdes (skip 1 Vulkan lavapipe pre-existente)

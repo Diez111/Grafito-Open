@@ -93,3 +93,11 @@ Auditoría TOTAL de inicio a fin + mejoras + nuevas funciones, con foco en gener
 - **Fantasmas eliminados**: Ctrl+P/E y F8/F9 tenían etiqueta (toolbar) sin handler → handlers nuevos en `app.rs:4135-4144` + `:4268-4278`; Ctrl+T tema nuevo (`:4259-4267` + menú `ui.rs:209`). Verificación completa en architecture.md §13.
 - **Responsive**: rail 60px sólo Medium/Wide ≥1360 (colapsado <780 incluido); Inspector con max 440 (`panels.rs:2125-2132`, clamp `tokens.rs:207-210`); CAS muerto alineado a tokens; paleta footer "N de M" en español + test `paleta_expone_registro_mas_acciones_ui`.
 - Gates pendientes de corrida: fmt + clippy `-p grafito-app -p grafito-ui --all-targets --locked -- -D warnings` + tests lib ambos (ver §13).
+
+## F9 2026-09-05 — 20 agentes + cierres lead (rama f9-completion)
+- **W1 perf**: caché geometría por objeto, staging incremental variables, álgebra virtualizada, culling rstar, scheduler reactivo.
+- **W2 correctness**: geom_eps(scale), Asymptotic Decider, Prism/Quadric 3D visibles, Delaunay spade, validación relativa.
+- **W3 paridad MVP**: sliders canvas (widget), trace flag+trail, Si/&&/||/!, lienzo completo, transformaciones universales.
+- **W4 interop/i18n/calidad**: ggb F0-F3 (~85% aula), CSV/drag-drop/SVG-clipboard, i18n 122 claves, telling+banco, trails render.
+- **Cierres lead**: Perpendicular honesta (punto+recta>mediatriz), Rastro end-to-end (232 cmds/193 visibles/207 paleta), Parallel/Arc/Sector (76 tools), polygon_n paramétrico, merge-conflicts resueltos, docs sync 232/193/207/76/18 crates.
+- **Lección**: reset --hard externo en loop borra trabajo sin commitear → commitear por oleada en rama f9-completion. Auditoría claims-vs-código obligatoria antes de cada oleada.
