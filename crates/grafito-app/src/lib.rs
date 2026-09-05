@@ -20,6 +20,7 @@ pub(crate) mod app;
 pub(crate) mod assistant;
 pub(crate) mod assistant_credentials;
 pub(crate) mod canvas;
+pub(crate) mod classroom;
 pub(crate) mod commands;
 pub mod controllers;
 pub(crate) mod export;
