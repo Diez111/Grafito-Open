@@ -236,6 +236,22 @@ fn append_canonical_integral_prose(conversation: &mut [ConversationTurn]) {
         .push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
 }
 
+/// Reset T1 por turno (Bug B: integral pegada).
+///
+/// Sin mención de animación en EL MENSAJE ACTUAL (`NoAnimacion`) → jamás
+/// media: limpia el slot para que el turno no-animación no re-muestre la
+/// animación del turno anterior. El resto de decisiones no se toca (Render*
+/// ya limpia antes de spawnear; la guía nunca tuvo media). Sin I/O ni spawn.
+pub(crate) fn limpiar_media_si_no_animacion(
+    panel: &mut grafito_ui::assistant::AssistantPanelState,
+    decision: &DecisionAnimacion,
+    ctx: &egui::Context,
+) {
+    if matches!(decision, DecisionAnimacion::NoAnimacion) {
+        panel.set_media(None, ctx);
+    }
+}
+
 enum LocalAssistantDisposition {
     Solved {
         answer: String,
@@ -1393,7 +1409,11 @@ impl GrafitoApp {
                         // Ya retornado arriba; inalcanzable.
                         return;
                     }
-                    DecisionAnimacion::NoAnimacion => {}
+                    DecisionAnimacion::NoAnimacion => {
+                        // Reset T1 (Bug B): sin animación en este mensaje la
+                        // media anterior no se re-muestra en este turno.
+                        limpiar_media_si_no_animacion(&mut self.assistant, &decision, ctx);
+                    }
                 }
                 // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
                 // una respuesta de chat. Acá ya no hay animación (Render* retornó).
@@ -4286,6 +4306,12 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
     } else if error.contains("body cap") {
         "La respuesta superó el tope de 256 KiB: pedila por partes (ej: «dame 3 ejemplos»)."
             .to_string()
+    } else if error.contains("not displayable") {
+        // No es tema de modelo ni de clave: la respuesta llegó con un formato
+        // que no se puede mostrar. Se reintenta o se reformula, sin mandar a
+        // Configuración.
+        "La respuesta llegó con un formato que no se puede mostrar. Reintentá o reformulá el pedido (ej: pedilo por partes)."
+            .to_string()
     } else {
         // Corte por chars, nunca por bytes (el mensaje puede traer multibyte).
         let truncated: String = error.chars().take(120).collect();
@@ -5534,10 +5560,11 @@ mod tests {
         commit_assistant_graph_preflight, decide_animacion, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
         is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
-        plantilla_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
-        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
-        read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
+        limpiar_media_si_no_animacion, plantilla_para_pedido, pop_provisional_stream_turn,
+        preflight_assistant_flower_scene, preflight_assistant_graph_command,
+        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
+        preflight_assistant_scene, prosa_integral_explicita, read_bounded_attachment,
+        remote_error_message, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context,
         stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
         wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
@@ -7914,5 +7941,111 @@ mod tests {
         let bytes = read_bounded_attachment(Cursor::new(vec![7; 5]), 4);
 
         assert!(bytes.is_err());
+    }
+
+    #[test]
+    fn secuencia_tres_turnos_sin_media_rancia_ni_controles() {
+        // Secuencia del reporte: T1 integral (anda) → T2 otra animación
+        // (sin control-chars) → T3 no-animación (sin media pegada).
+        // Replica el orden de Submit (`decide_animacion` + reset T1).
+        fn controles(texto: &str) -> Vec<char> {
+            texto
+                .chars()
+                .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                .collect()
+        }
+        fn sin_controles(etiqueta: &str, texto: &str) {
+            let malos = controles(texto);
+            for malo in &malos {
+                eprintln!("control en {etiqueta}: U+{:04X}", *malo as u32);
+            }
+            assert!(malos.is_empty(), "{etiqueta} trae controles");
+        }
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        // T1: integral canónica → media SÍ + prosa que la declara.
+        let pedido1 = "haceme una animacion de una integral (nativa)";
+        let d1 = decide_animacion(pedido1);
+        assert!(
+            matches!(d1, DecisionAnimacion::RenderCanonico { .. }),
+            "{d1:?}"
+        );
+        panel.begin_request(pedido1.to_string());
+        let prosa1 = format!(
+            "{}\n\n{}",
+            crate::anim_ui::animation_reference_sentence(),
+            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+        );
+        sin_controles("prosa1", &prosa1);
+        let humano1 = grafito_ui::assistant::humanize_prose_text(&prosa1);
+        sin_controles("humano1", &humano1);
+        panel.complete_local_request(humano1);
+        panel.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "Integral — área bajo la curva (nativa)".to_string(),
+                frames: Vec::new(),
+            }),
+            &ctx,
+        );
+        assert!(panel.media.is_some(), "T1 instala la integral");
+        // T2: OTRA animación explícita → local-only, prosa limpia.
+        let pedido2 = "explica la derivada con animación";
+        let d2 = decide_animacion(pedido2);
+        assert!(
+            matches!(d2, DecisionAnimacion::RenderGenerico { .. }),
+            "{d2:?}"
+        );
+        panel.begin_request(pedido2.to_string());
+        let prosa2 = crate::anim_ui::animation_reference_sentence().to_string();
+        sin_controles("prosa2", &prosa2);
+        let humano2 = grafito_ui::assistant::humanize_prose_text(&prosa2);
+        sin_controles("humano2", &humano2);
+        panel.complete_local_request(humano2);
+        for turno in &panel.conversation {
+            sin_controles("historial", &turno.content);
+        }
+        // Sin gatillo en el mensaje actual no hay animación (va a remoto,
+        // jamás inventa media): límite honesto del punto único T1.
+        for implicito in ["y ahora la derivada", "otra", "haceme otra"] {
+            assert!(
+                matches!(decide_animacion(implicito), DecisionAnimacion::NoAnimacion),
+                "{implicito:?} sin gatillo no anima"
+            );
+        }
+        // T3: no-animación → reset T1 limpia la integral pegada.
+        let pedido3 = "¿qué es una derivada?";
+        let d3 = decide_animacion(pedido3);
+        assert!(matches!(d3, DecisionAnimacion::NoAnimacion), "{d3:?}");
+        panel.begin_request(pedido3.to_string());
+        panel.complete_local_request("La derivada es la pendiente.".to_string());
+        limpiar_media_si_no_animacion(&mut panel, &d3, &ctx);
+        assert!(panel.media.is_none(), "T3 no re-muestra la integral");
+        // El reset no toca turnos de animación (Submit ya limpió al spawnear).
+        panel.set_media(
+            Some(grafito_ui::assistant::AssistantMedia {
+                title: "Derivada como pendiente (nativa)".to_string(),
+                frames: Vec::new(),
+            }),
+            &ctx,
+        );
+        limpiar_media_si_no_animacion(&mut panel, &d2, &ctx);
+        assert!(panel.media.is_some(), "el reset solo actúa en NoAnimacion");
+    }
+
+    #[test]
+    fn error_not_displayable_pide_reintento_sin_configuracion() {
+        // Bug A: no es tema de modelo ni de clave → reintentá/reformulá.
+        let mensaje = remote_error_message(
+            "remote assistant response content is not displayable: expected a non-empty text message without control characters",
+            "muse-spark-1.3-contributor",
+        );
+        assert!(
+            !mensaje.contains("Configuración"),
+            "no manda a Configuración: {mensaje}"
+        );
+        assert!(
+            mensaje.contains("Reintentá") || mensaje.contains("reformulá"),
+            "pide reintentar: {mensaje}"
+        );
     }
 }

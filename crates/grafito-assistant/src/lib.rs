@@ -3343,20 +3343,24 @@ fn completion_from_text(
     max_output_chars: usize,
     truncated: bool,
 ) -> Result<RemoteCompletion, String> {
-    if text.trim().is_empty()
-        || text
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-    {
+    // Higiene Bug A (2do turno post-animación): el proveedor a veces devuelve
+    // controles sueltos (NUL/BEL/ESC/DEL/C1) que antes volteaban todo el turno
+    // con "not displayable". Se filtran (se conservan `\n` `\r` `\t`); si no
+    // queda nada visible, error honesto igual que antes. Puro, sin `unwrap`.
+    let limpio: String = text
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+        .collect();
+    if limpio.trim().is_empty() {
         return Err(response_content_error(
             "expected a non-empty text message without control characters",
         ));
     }
-    if text.chars().count() > max_output_chars {
+    if limpio.chars().count() > max_output_chars {
         return Err("remote assistant completion exceeds the configured output budget".into());
     }
     Ok(RemoteCompletion {
-        text: text.into(),
+        text: limpio,
         truncated,
     })
 }
@@ -5173,9 +5177,34 @@ mod tests {
         let ok = completion_from_text(partial, 10_000, true).unwrap();
         assert_eq!(ok.text, partial);
         assert!(ok.truncated);
-        // Vacío o con controles (salvo \n\r\t) se rechaza sin panic.
+        // Vacío se rechaza sin panic; los controles sueltos del proveedor
+        // (Bug A, 2do turno) se filtran y el turno igual se muestra.
         assert!(completion_from_text("   ", 64, false).is_err());
-        assert!(completion_from_text("hola\x07mundo", 64, false).is_err());
+        let sanitizado = completion_from_text("hola\x07mundo", 64, false).unwrap();
+        assert_eq!(sanitizado.text, "holamundo");
+    }
+
+    #[test]
+    fn completion_from_text_sanitiza_controles_y_reporta_codepoints() {
+        // Bug A: la respuesta del 2do turno puede traer controles del
+        // proveedor (NUL/BEL/ESC/DEL/C1). Se filtran; solo se loguean los
+        // codepoints, jamás el contenido.
+        let sucio = "derivada\x00 explicada\x07 con\x1b escape\x7f y\u{80}c1\u{9f}\n\t\rñ";
+        let ok = completion_from_text(sucio, 10_000, false).unwrap();
+        assert_eq!(ok.text, "derivada explicada con escape yc1\n\t\rñ");
+        assert!(!ok.truncated);
+        for quitado in sucio
+            .chars()
+            .filter(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            eprintln!("control filtrado: U+{:04X}", quitado as u32);
+        }
+        // Solo-controles o solo-blancos siguen siendo error honesto.
+        assert!(completion_from_text("\x07\x1b\x7f", 64, false).is_err());
+        assert!(completion_from_text("  \n\t ", 64, false).is_err());
+        // `\n` `\r` `\t` legítimos se conservan tal cual.
+        let prosa = "línea uno\nlínea dos\r\ncon\ttab";
+        assert_eq!(completion_from_text(prosa, 64, false).unwrap().text, prosa);
     }
 
     #[test]
