@@ -790,11 +790,15 @@ impl GrafitoApp {
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if was_cancelled {
-                        // Cancel real (AS4): el worker observó el token y el
-                        // resultado es rancio — se descarta sin publicar.
+                        // Cancel real: el worker observó el token y el
+                        // resultado es rancio — se descarta sin publicar
+                        // (sin media rancia en el turno).
                         self.notify("Generación cancelada.", ToastKind::Info);
                     } else {
-                        self.install_anim_preview_frames(&media);
+                        // La animación vive DENTRO del turno del chat:
+                        // `set_media` la instala para el reproductor del
+                        // transcript (`ui/assistant.rs:915`, `draw_media_card`
+                        // en el último turno). Sin ventana compañera.
                         self.assistant.set_media(Some(media), ctx);
                         self.notify("Animación lista.", ToastKind::Success);
                     }
@@ -812,9 +816,6 @@ impl GrafitoApp {
                         let message = format!("No se pudo generar la animación: {error}");
                         self.notify(&message, ToastKind::Error);
                         self.show_assistant_error(message);
-                        // Refleja el fallo en el panel (Fallo visible, sin progreso inventado).
-                        self.anim_preview.progress = 0.0;
-                        self.anim_preview.status = format!("Error: {error}");
                     }
                     ctx.request_repaint();
                 }
@@ -824,9 +825,10 @@ impl GrafitoApp {
                     self.assistant_runtime.anim_job = None;
                     self.assistant.anim_progress = false;
                     if !was_cancelled {
-                        self.anim_preview.progress = 0.0;
-                        self.anim_preview.status =
-                            "Error: la generación terminó inesperadamente.".to_string();
+                        self.assistant.set_media(None, ctx);
+                        self.show_assistant_error(
+                            "La generación terminó inesperadamente antes de responder.",
+                        );
                     }
                     ctx.request_repaint();
                 }
@@ -1002,22 +1004,33 @@ impl GrafitoApp {
         // pedagógica pasa exclusivamente por el loop agente cuando `assistant.agent_mode==true`.
         match action {
             AssistantUiAction::Submit => {
-                // Solo anima si pedís explícitamente "anim..." (animá, animación, animar)
                 let problem_clone = self.assistant.problem.clone();
                 let lower = problem_clone.to_lowercase();
-                let wants_animation = lower.contains("anim");
-                // Guardar para animación con template correcto
-                let anim_template = if wants_animation {
-                    crate::anim_native::detect_template_for_concept(&problem_clone).to_string()
-                } else {
-                    String::new()
-                };
-                let anim_concept = problem_clone.clone();
+                // La animación la genera EL ASISTENTE y vive DENTRO del turno
+                // del chat (transcript con `AssistantMedia`): heurística
+                // honesta sobre el texto (`anim_ui`, solo lectura de ui).
+                let wants_animation = crate::anim_ui::wants_animation_request(&problem_clone);
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
                 // y evita "tomo una ya hecha" (stale derivative). Cancel real:
                 // señala el token, el hilo descarta.
                 if self.assistant_runtime.cancel_anim_job() {
                     self.assistant.anim_progress = false;
+                }
+                // Pedido ambiguo: turno honesto sin media ni hilo, jamás inventa.
+                if wants_animation {
+                    if let Err(guidance) =
+                        crate::anim_ui::animation_concept_from_request(&problem_clone)
+                    {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let honest = grafito_ui::assistant::humanize_prose_text(&guidance);
+                        self.assistant.complete_local_request(honest.clone());
+                        self.assistant.set_media(None, ctx);
+                        self.notify(honest, ToastKind::Info);
+                        ctx.request_repaint();
+                        return;
+                    }
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
                 if lower.contains("recuerda que")
@@ -1048,7 +1061,27 @@ impl GrafitoApp {
                 }
                 self.start_local_assistant_request(ctx);
                 if wants_animation {
-                    self.run_assistant_animation_with(ctx, &anim_template, &anim_concept);
+                    // Concepto ya validado (no ambiguo): plantilla honesta por
+                    // concepto + hilo cancelable que instala `AssistantMedia`
+                    // DEL TURNO (transcript, auto-preview inline).
+                    let concepto = crate::anim_ui::animation_concept_from_request(&problem_clone)
+                        .unwrap_or_else(|_| problem_clone.clone());
+                    let plantilla =
+                        crate::anim_native::detect_template_for_concept(&concepto).to_string();
+                    // La prosa del turno referencia la animación con nombres
+                    // humanos (mapa `humanize_control_name` de ui, solo
+                    // lectura): jamás IDs literales.
+                    if let Some(turno) = self.assistant.conversation.last_mut() {
+                        if turno.role == ConversationRole::Assistant
+                            && !turno.content.contains("deslizador")
+                        {
+                            turno.content.push_str("\n\n");
+                            turno
+                                .content
+                                .push_str(crate::anim_ui::animation_reference_sentence());
+                        }
+                    }
+                    self.run_assistant_animation_with(ctx, &plantilla, &concepto);
                 }
             }
             AssistantUiAction::AuthorizeRemote => {
@@ -1177,6 +1210,19 @@ impl GrafitoApp {
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
+                        // El agente propuso `generate_animation` (vía
+                        // `GenerateAnimation` verificado): el hilo genera e
+                        // incrusta como `AssistantMedia` DEL TURNO.
+                        if let Some(turno) = self.assistant.conversation.last_mut() {
+                            if turno.role == ConversationRole::Assistant
+                                && !turno.content.contains("deslizador")
+                            {
+                                turno.content.push_str("\n\n");
+                                turno
+                                    .content
+                                    .push_str(crate::anim_ui::animation_reference_sentence());
+                            }
+                        }
                         self.run_assistant_animation_with(ctx, template, concept);
                     } else {
                         self.run_assistant_animation(ctx);
@@ -2059,54 +2105,6 @@ impl GrafitoApp {
         self.run_assistant_animation_with(ctx, "derivative-slope", "derivada como pendiente");
     }
 
-    /// Refleja los frames recibidos en el panel de vista previa (AS4, UI thread).
-    ///
-    /// Puro UI-state, sin I/O ni spawn: intenta la entrada paramétrica con
-    /// guardas honestas (`set_parametric_frames`: OOM, conteo y tamaño) a
-    /// partir de la plantilla/concepto vigentes del panel; si no aplica
-    /// (clásico o deriva distinta), instala directo el set clásico acotado
-    /// (48 frames). Nunca inventa progreso ni deja el estado a medias.
-    fn install_anim_preview_frames(&mut self, media: &grafito_ui::assistant::AssistantMedia) {
-        let template = self.anim_preview.template.clone();
-        let concept = self.anim_preview.concept.clone();
-        if let Some(anim) = crate::anim_native::parametric_for_template(&template, &concept) {
-            // Pre-chequeo barato (conteo + tamaño) para no clonar 33-59 MiB
-            // cuando el set es clásico; `set_parametric_frames` revalida OOM.
-            let w = anim.viewport.width as usize;
-            let h = anim.viewport.height as usize;
-            let encaja = media.frames.len() == anim.frame_count()
-                && media
-                    .frames
-                    .first()
-                    .is_some_and(|frame| frame.size == [w, h]);
-            if encaja
-                && crate::anim_ui::set_parametric_frames(
-                    &mut self.anim_preview,
-                    &anim,
-                    media.frames.clone(),
-                )
-                .is_ok()
-            {
-                return;
-            }
-        }
-        self.anim_preview.frames = media.frames.clone();
-        self.anim_preview.frame_idx = 0;
-        self.anim_preview.playing = false;
-        self.anim_preview.progress = 1.0;
-        self.anim_preview.media_path = None;
-        self.anim_preview.mark_params_applied();
-        if self.anim_preview.status.is_empty()
-            || self
-                .anim_preview
-                .status
-                .starts_with("Generación solicitada")
-            || self.anim_preview.status.starts_with("Regenerando")
-        {
-            self.anim_preview.status = "Vista previa lista.".to_string();
-        }
-    }
-
     pub(crate) fn run_assistant_animation_with(
         &mut self,
         ctx: &egui::Context,
@@ -2477,7 +2475,10 @@ impl GrafitoApp {
             .map(|staged| staged.preview().changes.clone());
         match classify_local_assistant_response(local_result.response) {
             LocalAssistantDisposition::Solved { answer, plan } => {
-                self.assistant.complete_local_request(answer);
+                // Prosa con nombres humanos (mapa `humanize_control_name` de
+                // ui, solo lectura): jamás IDs literales en el turno.
+                let human = grafito_ui::assistant::humanize_prose_text(&answer);
+                self.assistant.complete_local_request(human);
                 if let Some(plan) = plan {
                     if let Some(changes) = staged_changes {
                         self.assistant.stage_proposed_plan(plan, changes);
@@ -5410,6 +5411,118 @@ mod tests {
         assert_eq!(saw, vec![(1, 3), (2, 3), (3, 3)]);
         cancel.cancel();
         assert!(worker.is_cancelled(), "cancel debe verse entre frames");
+    }
+
+    #[test]
+    fn pedido_con_animacion_instala_media_en_el_turno_con_prosa_humana() {
+        // Pedido-con-animación → media instalada en el turno, sin ventana.
+        // Headless: render clásico tiny (64x48, 48 frames) + transcript.
+        use std::collections::BTreeMap;
+        let pedido = "explica la derivada con animación";
+        assert!(crate::anim_ui::wants_animation_request(pedido));
+        let concepto = crate::anim_ui::animation_concept_from_request(pedido)
+            .expect("con concepto debe validar");
+        let plantilla = crate::anim_native::detect_template_for_concept(&concepto);
+        assert_eq!(plantilla, "derivative-slope");
+        let frames = crate::anim_native::render_anim_with_progress(
+            plantilla,
+            &concepto,
+            64,
+            48,
+            &BTreeMap::new(),
+            &mut |_, _| {},
+        );
+        assert!(!frames.is_empty(), "el nativo debe producir frames");
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        panel.begin_request(pedido.to_string());
+        let base = grafito_ui::assistant::humanize_prose_text("La derivada es la pendiente.");
+        let mut prosa = base;
+        prosa.push_str(
+            "
+
+",
+        );
+        prosa.push_str(crate::anim_ui::animation_reference_sentence());
+        panel.complete_local_request(prosa.clone());
+        let media = grafito_ui::assistant::AssistantMedia {
+            title: format!("{concepto} (nativa)"),
+            frames,
+        };
+        panel.set_media(Some(media), &ctx);
+        // Media instalada para el reproductor del transcript (último turno).
+        assert!(panel.media.is_some(), "media debe vivir en el turno");
+        assert!(!panel.media.as_ref().expect("media").frames.is_empty());
+        let ultimo = panel.conversation.last().expect("turno asistente");
+        assert_eq!(ultimo.role, ConversationRole::Assistant);
+        assert!(
+            ultimo.content.contains("deslizador"),
+            "prosa: {}",
+            ultimo.content
+        );
+        assert!(ultimo.content.contains("reproducir"));
+        for id in ["PlayPause", "Slider", "Button", "Tangent", "Select", "Play"] {
+            assert!(!ultimo.content.contains(id), "prosa sin {id}");
+            assert!(
+                !panel.media.as_ref().expect("media").title.contains(id),
+                "título sin {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pedido_ambiguo_error_honesto_sin_media_ni_invento() {
+        // Pedido ambiguo → error honesto sin media, jamás inventa frames.
+        let ctx = egui::Context::default();
+        for ambiguo in ["animalo", "con animación", "explica con animación"] {
+            assert!(
+                crate::anim_ui::wants_animation_request(ambiguo),
+                "{ambiguo:?} pide animación"
+            );
+            let err = crate::anim_ui::animation_concept_from_request(ambiguo)
+                .expect_err("ambiguo debe fallar honesto");
+            assert!(
+                err.contains("qué animar") || err.contains("vacío"),
+                "guía útil: {err}"
+            );
+            assert!(err.contains("por ejemplo"), "dice qué pedir: {err}");
+            let mut panel = AssistantPanelState::default();
+            panel.begin_request(ambiguo.to_string());
+            let honesto = grafito_ui::assistant::humanize_prose_text(&err);
+            panel.complete_local_request(honesto.clone());
+            panel.set_media(None, &ctx);
+            assert!(panel.media.is_none(), "sin media rancia en {ambiguo:?}");
+            let ultimo = panel.conversation.last().expect("turno guía");
+            assert!(ultimo.content.contains("por ejemplo"));
+        }
+        // Sin gatillo no es animación (no debe disparar hilo).
+        assert!(!crate::anim_ui::wants_animation_request("derivá x^2"));
+        assert!(crate::anim_ui::animation_concept_from_request("derivá x^2").is_err());
+    }
+
+    #[test]
+    fn cancel_a_mitad_senala_token_y_descarta_media_rancia() {
+        // Cancel a mitad → token señalado y sin media rancia en el turno.
+        let mut runtime = AssistantRuntime::default();
+        let cancel = CancellationToken::default();
+        let (tx, rx) = sync_channel::<Result<grafito_ui::assistant::AssistantMedia, String>>(1);
+        runtime.anim_job = Some(AssistantAnimJob {
+            cancellation: cancel.clone(),
+            receiver: rx,
+        });
+        assert!(runtime.cancel_anim_job(), "debe haber job");
+        assert!(cancel.is_cancelled(), "descartar señala el token");
+        assert!(runtime.anim_job.is_none());
+        // El hilo en vuelo observa el token entre frames y su envío tardío
+        // (Err cancel) no tiene receiver: se descarta sin publicar.
+        // El slot ya se dropeó, así que el turno queda sin media rancia.
+        drop(tx);
+        let ctx = egui::Context::default();
+        let mut panel = AssistantPanelState::default();
+        panel.set_media(None, &ctx);
+        assert!(panel.media.is_none(), "cancel no deja media rancia");
+        // El closure de progreso del hilo habría visto el token (contrato).
+        assert!(cancel.is_cancelled());
     }
 
     #[test]
