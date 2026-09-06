@@ -72,10 +72,13 @@ fn uses_responses_api(model: &str) -> bool {
 const RESPONSES_MIN_OUTPUT_TOKENS: usize = 16;
 /// Cap del cuerpo en la Responses API: los items `reasoning` traen
 /// `encrypted_content` opaco (se descarta) que supera el presupuesto de
-/// texto del usuario. 64 KiB transitorios por request (precedente: line_cap
-/// 64 KiB del motor de animaciones); el texto útil sigue acotado por
-/// `max_output_chars` en `completion_from_text`.
-const RESPONSES_MAX_BODY_BYTES: usize = 64 * 1024;
+/// texto del usuario. 256 KiB transitorios por request (precedente: line_cap
+/// 64 KiB del motor de animaciones; el Vec vive sólo durante el request y
+/// `read_bounded_response_body` pre-aloca como máximo 64 KiB, así que sigue
+/// OOM-safe); el texto útil sigue acotado por `max_output_chars` en
+/// `completion_from_text`. NO es configurable en Configuración → Modelo:
+/// los mensajes de error por este tope nunca deben mandar ahí.
+const RESPONSES_MAX_BODY_BYTES: usize = 256 * 1024;
 const FUSION_AUDIT_MODEL: &str = "deepseek-v4-pro";
 const FUSION_MAX_DRAFT_BYTES: usize = 2_048;
 /// Truncado del cuerpo de error HTTP en mensajes: 500 chars sin secretos.
@@ -972,7 +975,7 @@ pub fn messages_endpoint(settings: &ProviderSettings) -> Result<Url, String> {
 ///
 /// | Fallo | chat (`send_openai_request`) | responses (`request_responses_completion`) | anthropic (`request_anthropic_completion`) | fusion (`request_fusion_completion_with_endpoints`) |
 /// |---|---|---|---|---|
-/// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 64 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
+/// | HTTP 500 (u otro no-2xx) | `remote assistant returned HTTP {status}: {body:500}` | mismo formato, cap `RESPONSES_MAX_BODY_BYTES` 256 KiB antes de parsear | mismo formato | draft falla → `Fusion could not create a draft: {error}`; audit falla → `Fusion could not complete the audit; its draft was discarded.` (nunca se muestra el borrador) |
 /// | HTTP 429 | mismo formato + ` (reintentá en {N}s)` con `Retry-After` parseado (entero o fecha HTTP, clamp 1..120s) | ídem | ídem | ídem por fase (draft/audit); el mensaje final conserva el prefijo Fusion |
 /// | timeout/transporte | `transport_error`: `timed out after {N}s` / `could not connect` / `request failed`, sin URL ni clave | ídem | ídem (requiere clave, si falta: `API key is unavailable`) | draft usa mitad del timeout, audit el resto (`checked_sub`, nunca 0); timeout total conserva `effective_remote_timeout` |
 /// | cuerpo largo | truncado a `MAX_ERROR_BODY_CHARS` 500 chars, sin eco de secretos | ídem | ídem | ídem |
@@ -1217,7 +1220,7 @@ fn parse_http_date_to_system_time(value: &str) -> Option<std::time::SystemTime> 
 //    entre chunks (precedente: `grafito-anim` engine poll 200ms). Reensamblado
 //    por `\n` (corte char-safe: 0x0A nunca parte un scalar UTF-8), deltas
 //    `response.output_text.delta` acumulados y reportados por `progress` con
-//    el texto acumulado, cap `RESPONSES_MAX_BODY_BYTES` 64 KiB.
+//    el texto acumulado, cap `RESPONSES_MAX_BODY_BYTES` 256 KiB.
 //  - Fallback: cero eventos SSE al EOF → UN único reintento no-streaming con
 //    el mismo presupuesto y el timeout remanente (>=1s; si no queda tiempo no
 //    se reintenta). Transporte/cancelación/presupuesto/`response.failed` NO
@@ -1314,7 +1317,7 @@ enum SseStreamOutcome {
 /// Garantías (presupuesto `RequestBudget` intacto):
 /// - El texto final pasa por `completion_from_text` con el mismo
 ///   `max_output_chars`; el cuerpo SSE está acotado por
-///   `RESPONSES_MAX_BODY_BYTES` (64 KiB, igual que el path no-streaming).
+///   `RESPONSES_MAX_BODY_BYTES` (256 KiB, igual que el path no-streaming).
 /// - Cancelación cooperativa: se chequea antes del `send()` y entre chunks
 ///   de 4 KiB. Un stall del servidor sigue acotado por el `timeout` total de
 ///   reqwest (cubre también la lectura del cuerpo en el cliente bloqueante).
@@ -1451,9 +1454,18 @@ fn read_responses_sse_stream(
             Ok(consumed) => {
                 total_bytes = total_bytes.saturating_add(consumed);
                 if total_bytes > RESPONSES_MAX_BODY_BYTES {
-                    return Err(
-                        "remote assistant response exceeds the configured body budget".into(),
-                    );
+                    if events_seen == 0 {
+                        return Err(response_body_budget_error(RESPONSES_MAX_BODY_BYTES));
+                    }
+                    // Tope superado con deltas válidos ya acumulados: no se
+                    // descarta lo útil. Se cierra como parcial truncado (la UI
+                    // avisa "alcanzó el límite... pedí que continúe" ante
+                    // `truncated:true`, verificado en app `assistant.rs`).
+                    // `text`/`pending` nunca superan el tope + un chunk: OOM-safe.
+                    return Ok(SseStreamOutcome::Done {
+                        text,
+                        truncated: true,
+                    });
                 }
                 pending.extend_from_slice(&chunk[..consumed]);
                 if let Some(split) = pending.iter().rposition(|byte| *byte == b'\n') {
@@ -3094,6 +3106,21 @@ fn response_body_limit(max_output_chars: usize) -> usize {
         .saturating_add(MAX_RESPONSE_ENVELOPE_BYTES)
 }
 
+/// Error honesto cuando el cuerpo supera el tope interno de transporte.
+///
+/// El tope NO es configurable en Configuración → Modelo (verificado: ni
+/// `max_output_chars` ni ningún budget de cuerpo aparece en el panel de
+/// Configuración de `grafito-app`), así que el mensaje nunca manda ahí:
+/// nombra el tope en KiB y pide la respuesta por partes. ASCII a propósito
+/// (la UI recorta el error por bytes y un corte multibyte rompería).
+#[cfg(feature = "assistant-net")]
+fn response_body_budget_error(max_bytes: usize) -> String {
+    let kib = max_bytes / 1024;
+    format!(
+        "remote assistant response exceeded the {kib} KiB body cap with no usable text yet; ask for it in smaller parts"
+    )
+}
+
 #[cfg(feature = "assistant-net")]
 fn read_bounded_response_body(
     response: reqwest::blocking::Response,
@@ -3108,7 +3135,7 @@ fn read_bounded_response_body(
         .read_to_end(&mut body)
         .map_err(|_| "remote assistant response body could not be read".to_string())?;
     if body.len() > max_bytes {
-        return Err("remote assistant response exceeds the configured body budget".into());
+        return Err(response_body_budget_error(max_bytes));
     }
     Ok(body)
 }
@@ -4412,6 +4439,102 @@ mod tests {
             "el fallback reenvía el payload base sin stream: {}",
             requests[1]
         );
+    }
+
+    #[test]
+    fn responses_body_cap_is_256_kib_oom_bounded() {
+        // 256 KiB transitorios por request: dan margen a los
+        // `reasoning.encrypted_content` de Spark y siguen OOM-safe (el Vec
+        // vive sólo durante el request; pre-alocación inicial ≤ 64 KiB).
+        assert_eq!(RESPONSES_MAX_BODY_BYTES, 256 * 1024);
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_with_prior_deltas_returns_truncated_partial() {
+        // Bug del screenshot: el stream cortaba con Err duro aunque ya había
+        // deltas válidos en pantalla. Ahora devuelve el parcial con
+        // `truncated:true` (la UI lo avisa y ofrece continuar).
+        let delta = "x".repeat(3000);
+        let event =
+            format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{delta}\"}}\n");
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 16 * 1024 {
+            body.extend_from_slice(event.as_bytes());
+        }
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let completion = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            1_000_000,
+            None,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(completion.truncated);
+        assert!(!completion.text.is_empty());
+        assert!(completion.text.chars().all(|character| character == 'x'));
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn streaming_over_cap_without_events_keeps_honest_error() {
+        // Sin ningún evento válido no hay parcial que rescatar: se mantiene
+        // el Err, pero honesto (nombra el tope, no manda a Configuración).
+        let mut body = Vec::new();
+        while body.len() <= RESPONSES_MAX_BODY_BYTES + 8 * 1024 {
+            body.extend_from_slice(b":ping\n");
+        }
+        let (address, server) = serve_stub_replies(vec![(body, "text/event-stream", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let error = request_responses_completion_streaming(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            1_000_000,
+            None,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("256 KiB"), "{error}");
+        assert!(error.contains("smaller parts"), "{error}");
+        assert!(!error.contains("Configuraci"), "{error}");
+    }
+
+    #[cfg(feature = "assistant-net")]
+    #[test]
+    fn non_streaming_body_over_cap_fails_honest_without_config_pointer() {
+        // El path no-streaming comparte el tope de 256 KiB: cuerpo mayor →
+        // Err honesto con el mismo texto (límite OOM, no error de modelo).
+        let big_text = "y".repeat(RESPONSES_MAX_BODY_BYTES + 1024);
+        let body = format!(
+            "{{\"status\":\"completed\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{big_text}\"}}]}}]}}"
+        )
+        .into_bytes();
+        let (address, server) = serve_stub_replies(vec![(body, "application/json", false)]);
+        let endpoint = Url::parse(&format!("http://{address}/responses")).unwrap();
+        let error = request_responses_completion(
+            endpoint,
+            json!({"model": "muse-spark-1.3-contributor"}),
+            Some("test-key"),
+            &CancellationToken::default(),
+            Duration::from_secs(10),
+            2_000_000,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+
+        assert!(error.contains("256 KiB"), "{error}");
+        assert!(error.contains("smaller parts"), "{error}");
+        assert!(!error.contains("Configuraci"), "{error}");
     }
 
     #[test]

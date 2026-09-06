@@ -1061,9 +1061,9 @@ fn parse_agent_completion(body: &Value) -> Result<AgentChatResponse, String> {
 
 /// Cap del cuerpo en Responses API: los items `reasoning` traen
 /// `encrypted_content` opaco que supera el presupuesto de texto útil.
-/// 64 KiB transitorios por request (duplica `RESPONSES_MAX_BODY_BYTES` de
+/// 256 KiB transitorios por request (duplica `RESPONSES_MAX_BODY_BYTES` de
 /// `crate::` que es privado; el texto útil sigue acotado por el budget).
-const MAX_RESPONSES_BODY_BYTES: usize = 64 * 1024;
+const MAX_RESPONSES_BODY_BYTES: usize = 256 * 1024;
 
 /// Tope de argumentos serializados por `function_call`.
 /// Duplica `MAX_TOOL_RESULT_CHARS` (2048) de `grafito-agent::schema`.

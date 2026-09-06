@@ -1378,7 +1378,8 @@ fn autocomplete_hides_only_unavailable_features_and_offers_dynamic_locus() {
 
     // G-D: Button es comando real (brazo + ida/vuelta en grafito-command),
     // solo Image sigue oculta. El click visual del Tool::Button sigue P2.
-    for unavailable in ["Image"] {
+    {
+        let unavailable = "Image";
         let suggestions = crate::ui::compute_autocomplete_suggestions(unavailable, &document);
         assert!(
             suggestions.iter().all(|item| item.text != unavailable),

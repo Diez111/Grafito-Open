@@ -3245,6 +3245,9 @@ fn remote_error_message(error: &str, current_model: &str) -> String {
         }
     } else if error.contains("DNS") || error.contains("connect") || error.contains("network") {
         format!("Error de red: {error}. Revisá tu conexión.")
+    } else if error.contains("body cap") {
+        "La respuesta superó el tope de 256 KiB: pedila por partes (ej: «dame 3 ejemplos»)."
+            .to_string()
     } else {
         let truncated = if error.len() > 120 {
             format!("{}…", &error[..120])
