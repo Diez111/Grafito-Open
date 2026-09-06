@@ -808,8 +808,26 @@ pub fn normalize_concept(concept: &str) -> String {
     s
 }
 
+/// ¿El texto (ya en minúsculas) trae `palabra` como token exacto?
+///
+/// Los `contains` pelados mienten ("tarea" contiene "area", "ecosistema"
+/// contiene "sistema"): para claves cortas se exige palabra separada por
+/// no-alfabéticos. Espejo de `parametric::pedido_menciona_area` (T1).
+/// Puro, sin I/O, sin `unwrap`.
+pub fn contiene_palabra(minusculas: &str, palabra: &str) -> bool {
+    if palabra.is_empty() {
+        return false;
+    }
+    minusculas
+        .split(|ch: char| !ch.is_alphabetic())
+        .any(|tok| tok == palabra)
+}
+
 /// Elige la mejor plantilla para cualquier texto (ES+EN), como un canal profesional.
 /// Garantiza siempre una plantilla valida conocida.
+/// El fallback es `universal` (placeholder neutro honesto, sin curva falsa):
+/// jamás se devuelve una plantilla con renderer matemático para un pedido
+/// que no la menciona.
 pub fn template_for_concept(concept: &str) -> &'static str {
     let c = concept.to_lowercase();
     if c.contains("pit\u{00e1}goras")
@@ -819,12 +837,7 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     {
         return "pitagoras";
     }
-    if c.contains("integral")
-        || c.contains("\u{00e1}rea")
-        || (c.contains("area")
-            && (c.contains("bajo") || c.contains("curva") || c.contains("riemann")))
-        || c.contains("\u{00e1}rea bajo")
-    {
+    if c.contains("integral") || contiene_palabra(&c, "area") || contiene_palabra(&c, "área") {
         return "integral-area";
     }
     if c.contains("taylor")
@@ -851,7 +864,8 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     {
         return "derivative-slope";
     }
-    // Pedagógicas v3 (sync con `anim_native::detect_template_for_concept`):
+    // Pedagógicas v3 (base compartida con `anim_native::detect_template_for_concept`,
+    // que delega acá tras sus extras F5 — wrapper explícito T2):
     // antes caían al fallback derivative-slope aunque el nativo sí las cubre.
     if c.contains("logist") || c.contains("bifurc") {
         return "logistic-bifurcation";
@@ -887,7 +901,10 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
         return "taylor-series";
     }
-    "derivative-slope"
+    // Fallback honesto T2: pedido desconocido → `universal` (placeholder
+    // neutro rotulado, jamás curva falsa). Antes era `derivative-slope`,
+    // que dibujaba parábola+tangente fingiendo respuesta.
+    "universal"
 }
 
 /// Registro canónico de plantillas (sync 11↔11↔11, ANIM-REVIVE).
@@ -922,7 +939,8 @@ pub fn sanitize_template(template: &str, concept: &str) -> String {
     // Canónicas v3 con renderer nativo propio (sync con anim_native):
     // pasan literales para que el dispatcher nativo las atienda en vez
     // de degradarlas por concepto. "universal" también pasa literal: el
-    // nativo lo renderiza (youtube-style) y python lo mapea por concepto.
+    // nativo lo renderiza (placeholder neutro honesto) y python lo mapea
+    // por concepto.
     if CANONICAL_TEMPLATES.contains(&t.as_str()) {
         return t;
     }
@@ -968,9 +986,9 @@ mod universal_tests {
             ("serie de taylor seno", "taylor-series"),
             ("mapeo conforme complejo", "conformal-map"),
             ("derivada pendiente tangente", "derivative-slope"),
-            ("hola mundo sin matem\u{00e1}tica", "derivative-slope"),
-            ("", "derivative-slope"),
-            ("   ", "derivative-slope"),
+            ("hola mundo sin matemática", "universal"),
+            ("", "universal"),
+            ("   ", "universal"),
             ("probabilidad binomial", "integral-area"),
             ("fractal mandelbrot", "conformal-map"),
         ];
@@ -993,8 +1011,9 @@ mod universal_tests {
             "logistic-bifurcation",
             "gradient-field",
             "mobius-transform",
-            // NOTA: "universal" nunca sale de `template_for_concept` (su
-            // fallback es derivative-slope); el nativo sí la detecta.
+            // T2: el fallback honesto SÍ es `universal` (placeholder neutro);
+            // nunca una plantilla con renderer matemático para texto libre.
+            "universal",
         ];
         for txt in [
             "random",
@@ -1031,6 +1050,16 @@ mod universal_tests {
             start.elapsed().as_millis() < 1800,
             "universal mapping debe ser <1.8s para 200 conceptos"
         );
+    }
+    #[test]
+    fn area_token_no_matchea_tarea() {
+        // T2: "tarea" contiene "area" como substring pero no es área.
+        assert!(!contiene_palabra("tarea de matemática", "area"));
+        assert_eq!(template_for_concept("tarea de matemática"), "universal");
+        assert_eq!(template_for_concept("área bajo curva"), "integral-area");
+        assert_eq!(template_for_concept("area bajo curva"), "integral-area");
+        assert_eq!(template_for_concept("integral de riemann"), "integral-area");
+        assert!(!contiene_palabra("cualquier texto", ""));
     }
     #[test]
     fn sanitize_template_fallback() {
@@ -1176,7 +1205,7 @@ mod universal_tests {
             "mobius-transform"
         );
         // Comportamiento histórico intacto para el resto.
-        assert_eq!(template_for_concept("hola mundo"), "derivative-slope");
+        assert_eq!(template_for_concept("hola mundo"), "universal");
         assert_eq!(
             sanitize_template("auto", "integral de riemann"),
             "integral-area"

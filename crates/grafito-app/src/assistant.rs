@@ -114,6 +114,110 @@ pub(crate) fn clasifica_pedido_integral(pedido: &str, template: &str) -> Integra
     }
 }
 
+/// Plantilla honesta para un pedido de animación (punto único de resolución).
+///
+/// Si el pedido menciona integral/área (con typos acotados vía
+/// `pedido_menciona_area`: "integrela"→"integral"), la plantilla es
+/// `integral-area` aunque `detect_template_for_concept` diga `universal`
+/// por el typo. El resto delega al detector clásico. Puro, sin I/O.
+pub(crate) fn plantilla_para_pedido(pedido: &str) -> &'static str {
+    if grafito_anim::parametric::pedido_menciona_area(pedido) {
+        return "integral-area";
+    }
+    crate::anim_native::detect_template_for_concept(pedido)
+}
+
+/// Decisión honesta única para animación: media sí/no + prosa coherente.
+///
+/// - `NoAnimacion`: no pide animación → flujo chat normal (puede ir remoto).
+/// - `PreguntarSinMedia`: falta concepto o función inválida → turno guía
+///   local, SIN hilo ni media ni remoto. Nunca pregunta Y muestra.
+/// - `RenderCanonico`: integral sin función → hilo + prosa que declara la
+///   canónica (`INTEGRAL_CANONICAL_PROSA`). Nunca huérfana.
+/// - `RenderExplicito`: con función válida → hilo + prosa que la nombra.
+/// - `RenderGenerico`: otra animación válida → hilo + referencia.
+///
+/// Render* siempre es local-only (sin remoto): así la prosa y la media
+/// nunca divergen (el bug era Spark preguntando mientras el hilo mostraba).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DecisionAnimacion {
+    NoAnimacion,
+    PreguntarSinMedia(String),
+    RenderCanonico {
+        plantilla: String,
+        concepto: String,
+    },
+    RenderExplicito {
+        plantilla: String,
+        concepto: String,
+        expr: String,
+    },
+    RenderGenerico {
+        plantilla: String,
+        concepto: String,
+    },
+}
+
+/// Punto único de decisión para animación (puro, sin I/O ni spawn).
+///
+/// Orden: gatillo → concepto → integral (canónica/explícita/inválida) →
+/// genérico. Sin `unwrap`: los `Err` se vuelven `PreguntarSinMedia`.
+pub(crate) fn decide_animacion(pedido: &str) -> DecisionAnimacion {
+    if !crate::anim_ui::wants_animation_request(pedido) {
+        return DecisionAnimacion::NoAnimacion;
+    }
+    let concepto = match crate::anim_ui::animation_concept_from_request(pedido) {
+        Ok(concepto) => concepto,
+        Err(guia) => return DecisionAnimacion::PreguntarSinMedia(guia),
+    };
+    let plantilla = plantilla_para_pedido(pedido).to_string();
+    match clasifica_pedido_integral(pedido, &plantilla) {
+        IntegralPedido::FuncionInvalida(detalle) => DecisionAnimacion::PreguntarSinMedia(detalle),
+        IntegralPedido::Canonica => DecisionAnimacion::RenderCanonico {
+            plantilla,
+            concepto,
+        },
+        IntegralPedido::Explicita => {
+            let expr = match grafito_anim::parametric::infer_area_anim(pedido) {
+                Ok(resuelto) => resuelto.anim().expr_a.clone(),
+                Err(error) => return DecisionAnimacion::PreguntarSinMedia(error.to_string()),
+            };
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto,
+                expr,
+            }
+        }
+        IntegralPedido::NoAplica => DecisionAnimacion::RenderGenerico {
+            plantilla,
+            concepto,
+        },
+    }
+}
+
+/// Prosa rioplatense para integral explícita: nombra la función y el rango.
+///
+/// La usa el turno local-only para que la media nunca quede huérfana.
+/// Sin "pedime otra" (ese marcador es solo de la canónica). Pura, sin I/O.
+fn prosa_integral_explicita(expr: &str, pedido: &str) -> String {
+    let (_, p0, p1) = grafito_anim::parametric::infer_area_anim(pedido)
+        .map(|resuelto| {
+            let anim = resuelto.anim();
+            (anim.expr_a.clone(), anim.p0, anim.p1)
+        })
+        .unwrap_or_else(|_| {
+            (
+                expr.to_string(),
+                grafito_anim::parametric::INTEGRAL_CANONICAL_P0,
+                grafito_anim::parametric::INTEGRAL_CANONICAL_P1,
+            )
+        });
+    format!(
+        "te muestro con f(x)={expr} en [{p0},{p1}].\n\n{}",
+        crate::anim_ui::animation_reference_sentence()
+    )
+}
+
 /// Agrega la declaración de la canónica al último turno del asistente.
 ///
 /// Idempotente por contenido ("pedime otra" ya presente → no duplica).
@@ -1182,49 +1286,29 @@ impl GrafitoApp {
             AssistantUiAction::Submit => {
                 let problem_clone = self.assistant.problem.clone();
                 let lower = problem_clone.to_lowercase();
-                // La animación la genera EL ASISTENTE y vive DENTRO del turno
-                // del chat (transcript con `AssistantMedia`): heurística
-                // honesta sobre el texto (`anim_ui`, solo lectura de ui).
-                let wants_animation = crate::anim_ui::wants_animation_request(&problem_clone);
+                // Punto único de decisión honesto (`decide_animacion`): media
+                // sí/no + prosa coherente en un solo lugar. Antes había doble
+                // carril (hilo local + remoto Spark preguntón) que mostraba Y
+                // preguntaba a la vez. Ahora Render* es local-only sin remoto.
+                let decision = decide_animacion(&problem_clone);
                 // Cancela animación previa si existe — evita crash al pedir otra cosa tras animación
                 // y evita "tomo una ya hecha" (stale derivative). Cancel real:
                 // señala el token, el hilo descarta.
                 if self.assistant_runtime.cancel_anim_job() {
                     self.assistant.anim_progress = false;
                 }
-                // Pedido ambiguo: turno honesto sin media ni hilo, jamás inventa.
-                if wants_animation {
-                    if let Err(guidance) =
-                        crate::anim_ui::animation_concept_from_request(&problem_clone)
-                    {
-                        let question = problem_clone.clone();
-                        self.assistant.begin_request(question);
-                        self.assistant.problem.clear();
-                        let honest = grafito_ui::assistant::humanize_prose_text(&guidance);
-                        self.assistant.complete_local_request(honest.clone());
-                        self.assistant.set_media(None, ctx);
-                        self.notify(honest, ToastKind::Info);
-                        ctx.request_repaint();
-                        return;
-                    }
-                    // N1: integral con función inválida → freno honesto ANTES
-                    // del hilo: turno guía sin media ni frames (misma forma
-                    // que el ambiguo).
-                    let plantilla_previa =
-                        crate::anim_native::detect_template_for_concept(&problem_clone);
-                    if let IntegralPedido::FuncionInvalida(detalle) =
-                        clasifica_pedido_integral(&problem_clone, plantilla_previa)
-                    {
-                        let question = problem_clone.clone();
-                        self.assistant.begin_request(question);
-                        self.assistant.problem.clear();
-                        let honesto = grafito_ui::assistant::humanize_prose_text(&detalle);
-                        self.assistant.complete_local_request(honesto.clone());
-                        self.assistant.set_media(None, ctx);
-                        self.notify(honesto, ToastKind::Info);
-                        ctx.request_repaint();
-                        return;
-                    }
+                // Pedido ambiguo o función inválida: turno guía local sin
+                // media ni hilo ni remoto, jamás inventa.
+                if let DecisionAnimacion::PreguntarSinMedia(guia) = &decision {
+                    let question = problem_clone.clone();
+                    self.assistant.begin_request(question);
+                    self.assistant.problem.clear();
+                    let honesto = grafito_ui::assistant::humanize_prose_text(guia);
+                    self.assistant.complete_local_request(honesto.clone());
+                    self.assistant.set_media(None, ctx);
+                    self.notify(honesto, ToastKind::Info);
+                    ctx.request_repaint();
+                    return;
                 }
                 // Heurística de memoria: si el usuario pide recordar o expresa preferencia, guardarlo
                 if lower.contains("recuerda que")
@@ -1253,48 +1337,73 @@ impl GrafitoApp {
                         spawn_profile_save(self.profile.clone(), crate::utils::profile_path());
                     }
                 }
+                // Render* es local-only: turno propio que declara lo que la
+                // media muestra, SIN pasar por `start_local` (que estadía
+                // autorización remota y el Spark preguntón contradecía).
+                match &decision {
+                    DecisionAnimacion::RenderCanonico {
+                        plantilla,
+                        concepto,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let mut prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        prosa.push_str("\n\n");
+                        prosa.push_str(grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA);
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::RenderExplicito {
+                        plantilla,
+                        concepto,
+                        expr,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let prosa = prosa_integral_explicita(expr, &problem_clone);
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::RenderGenerico {
+                        plantilla,
+                        concepto,
+                    } => {
+                        let question = problem_clone.clone();
+                        self.assistant.begin_request(question);
+                        self.assistant.problem.clear();
+                        let prosa = crate::anim_ui::animation_reference_sentence().to_string();
+                        let humano = grafito_ui::assistant::humanize_prose_text(&prosa);
+                        self.assistant.complete_local_request(humano);
+                        self.assistant.set_media(None, ctx);
+                        self.run_assistant_animation_with(ctx, plantilla, concepto);
+                        ctx.request_repaint();
+                        return;
+                    }
+                    DecisionAnimacion::PreguntarSinMedia(_) => {
+                        // Ya retornado arriba; inalcanzable.
+                        return;
+                    }
+                    DecisionAnimacion::NoAnimacion => {}
+                }
                 // B7 — Pedido de ejercicio en texto: genera la tarjeta en vez de
-                // una respuesta de chat. La animación tiene prioridad si el
-                // texto también la pide.
-                if !wants_animation && wants_exercise_request(&problem_clone) {
+                // una respuesta de chat. Acá ya no hay animación (Render* retornó).
+                if wants_exercise_request(&problem_clone) {
                     self.iniciar_ejercicio(ctx, &problem_clone);
                     self.assistant.problem.clear();
                     ctx.request_repaint();
                     return;
                 }
                 self.start_local_assistant_request(ctx);
-                if wants_animation {
-                    // Concepto ya validado (no ambiguo): plantilla honesta por
-                    // concepto + hilo cancelable que instala `AssistantMedia`
-                    // DEL TURNO (transcript, auto-preview inline).
-                    let concepto = crate::anim_ui::animation_concept_from_request(&problem_clone)
-                        .unwrap_or_else(|_| problem_clone.clone());
-                    let plantilla =
-                        crate::anim_native::detect_template_for_concept(&concepto).to_string();
-                    // La prosa del turno referencia la animación con nombres
-                    // humanos (mapa `humanize_control_name` de ui, solo
-                    // lectura): jamás IDs literales.
-                    if let Some(turno) = self.assistant.conversation.last_mut() {
-                        if turno.role == ConversationRole::Assistant
-                            && !turno.content.contains("deslizador")
-                        {
-                            turno.content.push_str("\n\n");
-                            turno
-                                .content
-                                .push_str(crate::anim_ui::animation_reference_sentence());
-                        }
-                    }
-                    self.run_assistant_animation_with(ctx, &plantilla, &concepto);
-                    // N1: integral sin función → la canónica se renderiza Y se
-                    // declara en la prosa del turno; jamás preguntar y mostrar
-                    // a la vez.
-                    if matches!(
-                        clasifica_pedido_integral(&problem_clone, &plantilla),
-                        IntegralPedido::Canonica
-                    ) {
-                        append_canonical_integral_prose(&mut self.assistant.conversation);
-                    }
-                }
             }
             AssistantUiAction::AuthorizeRemote => {
                 self.start_authorized_remote_assistant_request(ctx)
@@ -1413,7 +1522,7 @@ impl GrafitoApp {
                 }
                 if is_generate_animation && committed {
                     if let Some((template_opt, concept_opt)) = generate_args {
-                        let template = template_opt
+                        let template_crudo = template_opt
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .filter(|s| !s.is_empty())
@@ -1422,8 +1531,18 @@ impl GrafitoApp {
                             .as_deref()
                             .map(|s| s.trim().trim_matches(|c| c == '"' || c == '\'').trim())
                             .unwrap_or("");
+                        // Plantilla honesta: si el concepto menciona integral
+                        // (con typos), se coerciona a `integral-area` aunque el
+                        // LLM haya propuesto `universal` (mismo punto único
+                        // que Submit vía `plantilla_para_pedido`).
+                        let plantilla_efectiva: &str =
+                            if grafito_anim::parametric::pedido_menciona_area(concept) {
+                                "integral-area"
+                            } else {
+                                template_crudo
+                            };
                         // N1: misma política que Submit (inferencia + agente).
-                        match clasifica_pedido_integral(concept, template) {
+                        match clasifica_pedido_integral(concept, plantilla_efectiva) {
                             IntegralPedido::FuncionInvalida(detalle) => {
                                 // Compromiso verificado pero función inválida:
                                 // prosa honesta sin hilo de render (sin frames).
@@ -1436,6 +1555,26 @@ impl GrafitoApp {
                                     }
                                 }
                                 self.notify(detalle, ToastKind::Info);
+                            }
+                            IntegralPedido::Explicita => {
+                                // Explícita: la prosa nombra la función (nunca huérfana).
+                                if let Some(turno) = self.assistant.conversation.last_mut() {
+                                    if turno.role == ConversationRole::Assistant
+                                        && !turno.content.contains("deslizador")
+                                    {
+                                        let expr =
+                                            grafito_anim::parametric::infer_area_anim(concept)
+                                                .map(|r| r.anim().expr_a.clone())
+                                                .unwrap_or_default();
+                                        turno.content.push_str("\n\n");
+                                        turno.content.push_str(
+                                            &grafito_ui::assistant::humanize_prose_text(
+                                                &prosa_integral_explicita(&expr, concept),
+                                            ),
+                                        );
+                                    }
+                                }
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
                             }
                             pedido_integral => {
                                 // El agente propuso `generate_animation` (vía
@@ -1451,7 +1590,7 @@ impl GrafitoApp {
                                         );
                                     }
                                 }
-                                self.run_assistant_animation_with(ctx, template, concept);
+                                self.run_assistant_animation_with(ctx, plantilla_efectiva, concept);
                                 // N1: canónica renderizada Y declarada.
                                 if matches!(pedido_integral, IntegralPedido::Canonica) {
                                     append_canonical_integral_prose(
@@ -5392,19 +5531,20 @@ mod tests {
         append_canonical_integral_prose, apply_local_assistant_plan, assistant_graph_perspective,
         attachment_error_message, can_offer_assistant_proposal_correction,
         clasifica_pedido_integral, classify_local_assistant_response,
-        commit_assistant_graph_preflight, inspect_remote_action_proposals,
+        commit_assistant_graph_preflight, decide_animacion, inspect_remote_action_proposals,
         inspect_remote_proposals, inspect_remote_proposals_cancellable,
         is_agent_spark_responses_unsupported_error, is_socratic_repair_error,
-        pop_provisional_stream_turn, preflight_assistant_flower_scene,
+        plantilla_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
         preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, read_bounded_attachment,
-        remote_error_message, should_fallback_agent_spark_to_deepseek,
+        preflight_assistant_parameter, preflight_assistant_scene, prosa_integral_explicita,
+        read_bounded_attachment, remote_error_message, should_fallback_agent_spark_to_deepseek,
         should_fallback_remote_spark_to_deepseek, socratic_guard_context,
         stage_assistant_parameter, validate_assistant_command, verified_remote_proposals,
         wants_exercise_request, AgentChannelMsg, AssistantAgentJob, AssistantAnimJob,
         AssistantCommandInvocation, AssistantModelJob, AssistantParameterAssignment,
         AssistantProposalJob, AssistantRemoteJob, AssistantRemoteRoute, AssistantRuntime,
-        GifExportJob, IntegralPedido, LocalAssistantDisposition, RemoteProposalVerification,
+        DecisionAnimacion, GifExportJob, IntegralPedido, LocalAssistantDisposition,
+        RemoteProposalVerification,
     };
     use grafito_assistant::{solve_local, CancellationToken, RemoteCompletion};
     use grafito_assistant_types::{
@@ -6331,6 +6471,160 @@ mod tests {
         let mut vacia: Vec<ConversationTurn> = Vec::new();
         append_canonical_integral_prose(&mut vacia);
         assert!(vacia.is_empty());
+    }
+
+    #[test]
+    fn screenshot_typo_integrela_es_canonica_con_prosa_que_declara() {
+        // Input EXACTO del screenshot (typos "animacion"/"integrela"): antes
+        // era `universal` + prosa preguntaba Y media mostraba (contradicción).
+        // Ahora es canónica declarada, sin pregunta.
+        let pedido = "hace una animacion de una integrela (nativa)";
+        assert!(
+            crate::anim_ui::wants_animation_request(pedido),
+            "el gatillo 'animacion' debe disparar"
+        );
+        assert!(
+            crate::anim_ui::animation_concept_from_request(pedido).is_ok(),
+            "con 'integrela (nativa)' hay concepto, no es ambiguo"
+        );
+        assert!(
+            grafito_anim::parametric::pedido_menciona_area(pedido),
+            "'integrela' matchea 'integral' por fuzzy"
+        );
+        assert_eq!(plantilla_para_pedido(pedido), "integral-area");
+        assert_eq!(
+            clasifica_pedido_integral(pedido, "integral-area"),
+            IntegralPedido::Canonica
+        );
+        match decide_animacion(pedido) {
+            DecisionAnimacion::RenderCanonico {
+                plantilla,
+                concepto,
+            } => {
+                assert_eq!(plantilla, "integral-area");
+                assert!(concepto.contains("integrela"), "{concepto}");
+            }
+            otra => panic!("el typo debe ser RenderCanonico, fue {otra:?}"),
+        }
+        // La prosa del turno declara la canónica Y referencia la media:
+        // jamás pregunta y muestra a la vez.
+        let prosa = format!(
+            "{}\n\n{}",
+            crate::anim_ui::animation_reference_sentence(),
+            grafito_anim::parametric::INTEGRAL_CANONICAL_PROSA
+        );
+        assert!(prosa.contains("deslizador"), "{prosa}");
+        assert!(prosa.contains("x²"), "{prosa}");
+        assert!(prosa.contains("pedime otra"), "{prosa}");
+        assert!(
+            !prosa.contains("¿Qué función")
+                && !prosa.contains("qué función")
+                && !prosa.contains("Qué función"),
+            "la canónica declara, no pregunta: {prosa}"
+        );
+    }
+
+    #[test]
+    fn typos_animacion_integrela_derivadaa_normalizan_y_matchean() {
+        // Normalización sin tildes.
+        assert_eq!(
+            grafito_anim::parametric::normaliza_para_match("animación"),
+            "animacion"
+        );
+        assert_eq!(
+            grafito_anim::parametric::normaliza_para_match("ÁREA"),
+            "area"
+        );
+        // Fuzzy acotado por token.
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "integrela",
+            "integral"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "derivadaa",
+            "derivada"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "animacion",
+            "animacion"
+        ));
+        assert!(grafito_anim::parametric::token_matchea_clave(
+            "integrar", "integral"
+        ));
+        // Cortas no hacen fuzzy ("arena" no es área).
+        assert!(!grafito_anim::parametric::token_matchea_clave(
+            "arena", "area"
+        ));
+        assert!(!grafito_anim::parametric::pedido_menciona_area(
+            "tarea de matemática"
+        ));
+    }
+
+    #[test]
+    fn decision_matriz_explicita_canonica_invalida_media_y_prosa() {
+        // a) Explícita → media SÍ + prosa que nombra la función.
+        let explicita = "animacion de la integral de f(x)=x^3 de 0 a 2 con animación";
+        match decide_animacion(explicita) {
+            DecisionAnimacion::RenderExplicito {
+                plantilla,
+                concepto: _,
+                expr,
+            } => {
+                assert_eq!(plantilla, "integral-area");
+                assert_eq!(expr, "x^3");
+                let prosa = prosa_integral_explicita(&expr, explicita);
+                assert!(prosa.contains("x^3"), "{prosa}");
+                assert!(prosa.contains("deslizador"), "{prosa}");
+                assert!(
+                    !prosa.contains("pedime otra"),
+                    "el marcador es solo canónico: {prosa}"
+                );
+            }
+            otra => panic!("explícita debe renderizar, fue {otra:?}"),
+        }
+        // b) Sin función (incluido typo) → media SÍ + prosa canónica declarada.
+        for sin_funcion in [
+            "haceme una animacion de una integral (nativa)",
+            "hace una animacion de una integrela (nativa)",
+        ] {
+            match decide_animacion(sin_funcion) {
+                DecisionAnimacion::RenderCanonico { plantilla, .. } => {
+                    assert_eq!(plantilla, "integral-area", "{sin_funcion}");
+                }
+                otra => panic!("{sin_funcion:?} debe ser canónica, fue {otra:?}"),
+            }
+        }
+        // c) Inválida → SIN media, solo pregunta/guía.
+        let invalida = "animacion de la integral de f(x)=foo(x) con p en [0,1] con animación";
+        match decide_animacion(invalida) {
+            DecisionAnimacion::PreguntarSinMedia(guia) => {
+                assert!(guia.contains("foo(x)"), "{guia}");
+                assert!(guia.contains("x^2"), "da ejemplo: {guia}");
+            }
+            otra => panic!("inválida no renderiza, fue {otra:?}"),
+        }
+        // Ambiguo local → SIN media.
+        match decide_animacion("explica con animación") {
+            DecisionAnimacion::PreguntarSinMedia(_) => {}
+            otra => panic!("ambiguo no renderiza, fue {otra:?}"),
+        }
+        // No-animación → flujo chat normal.
+        assert_eq!(
+            decide_animacion("derivá x^2"),
+            DecisionAnimacion::NoAnimacion
+        );
+    }
+
+    #[test]
+    fn plantilla_typo_no_cae_a_universal() {
+        // El detector clásico dice `universal` para el typo; el punto único
+        // lo corrige a `integral-area` (evita fallback huérfano).
+        let pedido = "hace una animacion de una integrela (nativa)";
+        assert_eq!(
+            crate::anim_native::detect_template_for_concept(pedido),
+            "universal"
+        );
+        assert_eq!(plantilla_para_pedido(pedido), "integral-area");
     }
 
     #[test]

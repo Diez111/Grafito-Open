@@ -1,15 +1,16 @@
-//! Animacion didactica nativa (sin motor externo): generador universal estilo canal de matematica.
-//! Soporta cualquier texto como un canal profesional de YouTube (3Blue1Brown): elige
-//! automaticamente la mejor plantilla segun el concepto y garantiza un fallback elegante
-//! en <2s incluso si Manim no esta disponible. Todas las plantillas son deterministas.
+//! Animacion didactica nativa (sin motor externo).
+//! Cada plantilla con renderer propio dibuja su objeto matemático; el
+//! fallback `universal` es un placeholder neutro rotulado ("vista previa
+//! no disponible"): grilla + texto, jamás una curva que parezca respuesta.
+//! Todas las plantillas son deterministas.
 
 pub(crate) const NATIVE_ANIM_FRAME_COUNT: usize = 48;
 
 #[cfg(test)]
 use grafito_anim::protocol::CANONICAL_TEMPLATES;
 use grafito_anim::protocol::{
-    scene_param_clamped, SCENE_PARAM_A, SCENE_PARAM_B, SCENE_PARAM_SPAN, SCENE_PARAM_TERMS,
-    SCENE_PARAM_X0,
+    contiene_palabra, scene_param_clamped, template_for_concept, SCENE_PARAM_A, SCENE_PARAM_B,
+    SCENE_PARAM_SPAN, SCENE_PARAM_TERMS, SCENE_PARAM_X0,
 };
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,8 @@ use std::path::{Path, PathBuf};
 //   genérico — ver `native_dispatch_for` + test `dispatch_honesto_*` que
 //   pinnea `FallbackUniversal` hasta que alguien les dé renderer propio.
 //
-/// Plantillas canónicas con renderer nativo propio (+ `universal` youtube-style).
+/// Plantillas canónicas con renderer nativo propio (+ `universal`: placeholder
+/// neutro honesto para pedidos sin plantilla, sin curva matemática falsa).
 pub const NATIVE_TEMPLATES: &[&str] = &[
     "derivative-slope",
     "integral-area",
@@ -409,12 +411,9 @@ const MINT_FAINT: [u8; 4] = [126, 214, 160, 120];
 const LINE_SOFT_BLUE: [u8; 4] = [91, 155, 255, 140];
 const FAINT_WHITE: [u8; 4] = [255, 255, 255, 35];
 const GIBBS_RED: [u8; 4] = [255, 77, 77, 200];
-const CENTER_WHITE: [u8; 4] = [255, 255, 255, 200];
 const SCRIM: [u8; 4] = [0, 0, 0, 110];
 const TRACK: [u8; 4] = [255, 255, 255, 22];
 const TEXT_CUTOUT: [u8; 4] = [14, 14, 20, 180];
-const TRAIL_FAINT_ALPHA: u8 = 28;
-const CURVE_UNIVERSAL_ALPHA: u8 = 210;
 
 const fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
     [c[0], c[1], c[2], a]
@@ -619,64 +618,21 @@ fn normalize_concept(concept: &str) -> String {
     s
 }
 
-/// Detecta la mejor plantilla para un concepto libre (ES + EN). Estilo YouTube:
-/// cubre derivadas, integrales, Taylor, conforme, Pitagoras, vectores, probabilidad...
+/// Detecta la mejor plantilla para un concepto libre (ES + EN).
+///
+/// Wrapper explícito T2 sobre `grafito_anim::protocol::template_for_concept`
+/// (una sola tabla de verdad para la base: pitágoras, integral, taylor,
+/// conforme, derivada, logística, gradiente, möbius, vector, euler, fourier,
+/// proba, seno/coseno + fallback `universal` honesto). Acá solo quedan los
+/// extras F5/pedagógicos que el protocolo aún no cubre; el resto delega.
+/// Sin `contains` tramposos: "sistema" exige palabra exacta
+/// (`contiene_palabra`: "ecosistema" ya no dispara), y "func" pelado se
+/// endureció a "funcion/función/f(x)" ("funciona" no finge). El "tarea"→"área"
+/// se fija en el protocolo (`contiene_palabra`), espejo de T1.
 pub fn detect_template_for_concept(concept: &str) -> &'static str {
     let c = concept.to_lowercase();
-    // Pitagoras / triangulo rectangulo
-    if c.contains("pit\u{00e1}goras")
-        || c.contains("pitagoras")
-        || c.contains("pythag")
-        || (c.contains("triang") && (c.contains("rect") || c.contains("hipoten")))
-    {
-        return "pitagoras";
-    }
-    if c.contains("integral")
-        || c.contains("\u{00e1}rea")
-        || (c.contains("area")
-            && (c.contains("bajo") || c.contains("curva") || c.contains("riemann")))
-        || c.contains("\u{00e1}rea bajo")
-    {
-        return "integral-area";
-    }
-    if c.contains("taylor")
-        || c.contains("maclaurin")
-        || (c.contains("serie") && (c.contains("potencia") || c.contains("aprox")))
-        || c.contains("aproxima")
-    {
-        return "taylor-series";
-    }
-    if c.contains("conformal")
-        || c.contains("conforme")
-        || c.contains("complej")
-        || c.contains("complex")
-        || c.contains("fractal")
-        || c.contains("mandelb")
-    {
-        return "conformal-map";
-    }
-    if c.contains("deriv")
-        || c.contains("pendiente")
-        || c.contains("tangente")
-        || c.contains("slope")
-        || c.contains("l\u{00ed}mite") && c.contains("cociente")
-    {
-        return "derivative-slope";
-    }
-    // genericos con mapping elegante — F5: fracciones, vectores, matrices, proba inline
-    if c.contains("vector") || c.contains("campo") && c.contains("vectorial") {
-        return "conformal-map";
-    }
-    if c.contains("probab")
-        || c.contains("binom")
-        || c.contains("distrib")
-        || c.contains("estad")
-        || c.contains("bayes")
-        || c.contains("muestreo")
-        || c.contains("histograma")
-    {
-        return "integral-area";
-    }
+    // Extras F5: fracciones, matrices, series genéricas, ecuaciones, trigo,
+    // cónicas, límites y funciones (orden preservado del clásico).
     if c.contains("fracc")
         || c.contains("rectángulo dividido")
         || c.contains("rectangulo dividido")
@@ -692,9 +648,11 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
     {
         return "universal";
     }
+    // Genéricas a Taylor. OJO: "fourier" pelado NO se reclama acá: lo
+    // resuelve el protocolo hacia su renderer dedicado (degradarlo a
+    // taylor era regresión silenciosa).
     if c.contains("serie")
         || c.contains("sucesi")
-        || c.contains("fourier")
         || c.contains("geométrica")
         || c.contains("geometrica")
     {
@@ -705,7 +663,8 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
         || c.contains("cuadratica")
         || c.contains("parábola")
         || c.contains("parabola")
-        || c.contains("sistema")
+        || contiene_palabra(&c, "sistema")
+        || contiene_palabra(&c, "sistemas")
     {
         return "derivative-slope";
     }
@@ -728,27 +687,15 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
     if c.contains("límite") || c.contains("limite") || c.contains("hueco en a") {
         return "derivative-slope";
     }
-    // Nuevos pedagógicos (BUILD: logística / gradiente / Möbius).
-    if c.contains("logist") || c.contains("bifurc") {
-        return "logistic-bifurcation";
-    }
-    if c.contains("gradiente") || c.contains("gradient") {
-        return "gradient-field";
-    }
-    if c.contains("mobius") || c.contains("m\u{00f6}bius") || c.contains("moebius") {
-        return "mobius-transform";
-    }
-    if c.contains("func") {
+    if c.contains("funcion") || c.contains("función") || c.contains("f(x)") {
         return "universal";
     }
-    if c.contains("sin(") || c.contains("cos(") || c.contains("seno") || c.contains("coseno") {
-        return "taylor-series";
-    }
-    // fallback universal profesional
-    "universal"
+    // Base compartida + fallback honesto en el protocolo.
+    template_for_concept(concept)
 }
 
-/// Dispatcher con 10 plantillas mas fallback universal.
+/// Dispatcher: elige plantilla automáticamente a partir del concepto si hace falta.
+/// El fallback `universal` es placeholder neutro honesto (sin curva falsa).
 /// Garantiza menos de 2s incluso en debug.
 ///
 /// Convierte punto matematico (x,y en [-3,3]^2) a pixel del buffer.
@@ -1548,8 +1495,16 @@ fn render_conformal_frames_impl(
     frames
 }
 
-/// Animacion universal estilo YouTube: funciona con cualquier texto, siempre se ve profesional.
-/// Fondo con gradiente + grid, orbita de particulas, onda morfologica y titulo con maquina de escribir.
+/// Etiqueta honesta del placeholder neutro: lo único que afirma.
+pub const UNIVERSAL_PLACEHOLDER_LABEL: &str = "vista previa no disponible";
+
+/// Placeholder neutro honesto para pedidos sin plantilla (T2).
+///
+/// Grilla + rótulo + eco del pedido + barra de progreso real. Jamás dibuja
+/// curva, partículas, ejes ni puntos: un pedido desconocido no finge
+/// contenido matemático (forense: la parábola→seno por hash + 6 partículas
+/// orbitales + punto central + barras de acento eran decoración que parecía
+/// respuesta y se eliminaron). Lo único que anima es la barra de progreso.
 pub fn render_universal_youtube_frames(
     concept: &str,
     width: u32,
@@ -1566,125 +1521,61 @@ fn render_universal_youtube_frames_impl(
 ) -> Vec<egui::ColorImage> {
     let ((w, h), _) = resolve_native_size(width, height);
     let concept_norm = normalize_concept(concept);
-    let accent = accent_for_concept(&concept_norm);
-    let hash = hash_concept(&concept_norm);
-    // color secundario derivado
-    let accent2 = ACCENTS[((hash >> 16) as usize) % ACCENTS.len()];
     let mut frames = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
-    // preparar curva morph base: parabola -> seno morphing
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
         let t_raw = if NATIVE_ANIM_FRAME_COUNT <= 1 {
             0.0
         } else {
             frame as f64 / (NATIVE_ANIM_FRAME_COUNT - 1) as f64
         };
+        // Progreso suavizado pero monótono (honesto: 0 → 1 con el frame).
         let t = ease_in_out(t_raw);
         let byte_len =
             checked_frame_byte_len(w, h).unwrap_or(NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4);
         let mut buf = vec![0u8; byte_len];
-        fill_background(&mut buf, w, h, &concept_norm, t * 0.12);
-        draw_subtle_grid(&mut buf, w, h, t * 0.6);
-        // ejes sutiles
-        draw_line(
+        // Fondo y grilla ESTÁTICOS con tinte fijo: el pedido no modula nada
+        // para no fingir contenido (antes el hash del texto elegía color,
+        // fase de la curva y órbitas de partículas).
+        fill_background(&mut buf, w, h, "universal", 0.0);
+        draw_subtle_grid(&mut buf, w, h, 0.0);
+        // Rótulo honesto + eco del pedido (estáticos en todos los frames).
+        let echo: String = concept_norm.chars().take(32).collect();
+        let title_h = 30;
+        draw_filled_rect(&mut buf, w, h, 6, 6, w.saturating_sub(12), title_h, SCRIM);
+        draw_text_block(
             &mut buf,
             w,
             h,
-            to_pixel(w, h, -3.0, 0.0),
-            to_pixel(w, h, 3.0, 0.0),
-            AXIS_COLOR,
+            10,
+            10,
+            UNIVERSAL_PLACEHOLDER_LABEL,
+            TEXT_COLOR,
+            1,
         );
-        draw_line(
-            &mut buf,
-            w,
-            h,
-            to_pixel(w, h, 0.0, -3.0),
-            to_pixel(w, h, 0.0, 3.0),
-            AXIS_COLOR,
-        );
-        // onda central morfologica: mezcla de parabola y seno desplazada por hash
-        let phase = (hash as f64 % std::f64::consts::TAU) * 0.1;
-        for i in -60..60 {
-            let x0 = i as f64 / 20.0;
-            let x1 = (i + 1) as f64 / 20.0;
-            let y0_par = x0 * x0 * 0.18;
-            let y0_sin = (x0 * 1.2 + phase).sin() * 0.8;
-            let y1_par = x1 * x1 * 0.18;
-            let y1_sin = (x1 * 1.2 + phase).sin() * 0.8;
-            let y0 = y0_par * (1.0 - t) + y0_sin * t;
-            let y1 = y1_par * (1.0 - t) + y1_sin * t;
-            let a = to_pixel(w, h, x0, y0);
-            let b = to_pixel(w, h, x1, y1);
-            // color interpolado entre dos acentos
-            let col = [
-                (accent[0] as f64 * (1.0 - t) + accent2[0] as f64 * t) as u8,
-                (accent[1] as f64 * (1.0 - t) + accent2[1] as f64 * t) as u8,
-                (accent[2] as f64 * (1.0 - t) + accent2[2] as f64 * t) as u8,
-                CURVE_UNIVERSAL_ALPHA,
-            ];
-            draw_line(&mut buf, w, h, a, b, col);
-        }
-        // particulas orbitando (hash controla velocidad)
-        let n_particles = 6;
-        for i in 0..n_particles {
-            let angle = 2.0
-                * std::f64::consts::PI
-                * (i as f64 / n_particles as f64 + t * 0.6 + (hash % 7) as f64 * 0.04);
-            let radius = 0.9 + 0.25 * (t * std::f64::consts::TAU + i as f64).sin();
-            let x = radius * angle.cos();
-            let y = radius * angle.sin() * 0.7;
-            let p = to_pixel(w, h, x, y);
-            let sz = if i == 0 { 4 } else { 3 };
-            // pulso
-            let pulse = (frame as f64 * 0.35 + i as f64 * 1.1).sin() * 0.5 + 0.5;
-            let col = [
-                accent[0],
-                accent[1],
-                accent[2],
-                (120.0 + 110.0 * pulse) as u8,
-            ];
-            draw_filled_circle(&mut buf, w, h, p.0, p.1, sz, col);
-            // estela sutil: linea al centro
-            let center = to_pixel(w, h, 0.0, 0.0);
-            let trail_col = with_alpha(accent, TRAIL_FAINT_ALPHA);
-            draw_line(&mut buf, w, h, center, p, trail_col);
-        }
-        // punto central que late
-        let c = to_pixel(w, h, 0.0, 0.0);
-        let r = (2.0 + 1.5 * (t * 12.56).sin().abs()) as usize;
-        draw_filled_circle(&mut buf, w, h, c.0, c.1, r, CENTER_WHITE);
-        draw_filled_circle(&mut buf, w, h, c.0, c.1, (r / 2).max(1), accent);
-        // barra de progreso inferior (estilo YouTube)
+        draw_text_block(&mut buf, w, h, 10, 20, &echo, TEXT_COLOR, 1);
+        // Barra de progreso inferior: posición real del frame (cromo honesto).
         let bar_y = h.saturating_sub(6);
-        let bar_w = (w as f64 * t_raw) as usize;
-        draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 4, accent);
-        draw_filled_rect(&mut buf, w, h, bar_w, bar_y, w - bar_w, 4, TRACK);
-        // titulo con efecto maquina de escribir: muestra concept truncado progresivo
-        let reveal = ((t_raw * concept_norm.len() as f64).ceil() as usize).min(concept_norm.len());
-        let visible: String = concept_norm.chars().take(reveal).collect();
-        // fondo semitransparente para legibilidad
-        let title_h = 21; // 7px char + padding calculated
-        draw_filled_rect(&mut buf, w, h, 6, 6, w - 12, title_h, SCRIM);
-        // acento superior
+        let bar_w = (w as f64 * t) as usize;
+        draw_filled_rect(&mut buf, w, h, 0, bar_y, bar_w, 4, PAL_ACCENT);
         draw_filled_rect(
             &mut buf,
             w,
             h,
-            6,
-            6,
-            ((w - 12) as f64 * (t_raw * 0.9 + 0.1)) as usize,
-            2,
-            accent,
+            bar_w,
+            bar_y,
+            w.saturating_sub(bar_w),
+            4,
+            TRACK,
         );
-        let truncated: String = visible.chars().take(32).collect();
-        draw_text_block(&mut buf, w, h, 10, 10, &truncated, TEXT_COLOR, 1);
         frames.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &buf));
         on_frame(frames.len(), NATIVE_ANIM_FRAME_COUNT);
     }
     frames
 }
 
-/// Dispatcher universal: elige plantilla automaticamente a partir del concepto si hace falta.
-/// Garantiza que cualquier combinacion produce frames validos en <2s.
+/// Dispatcher honesto: elige plantilla automáticamente a partir del concepto si hace falta.
+/// Garantiza que cualquier combinación produce frames válidos en <2s; lo
+/// desconocido va al placeholder neutro, jamás a una curva que finja respuesta.
 pub fn render_anim_for_concept(
     template: &str,
     concept: &str,
@@ -2427,7 +2318,8 @@ fn render_mobius_frames_impl(
 }
 
 pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<egui::ColorImage> {
-    // Compat: si se llama solo con template, usar universal como fallback elegante
+    // Compat: si se llama solo con template, el fallback es el placeholder
+    // neutro honesto (antes "elegante" con curva falsa).
     match template {
         "integral-area" | "fraccion-visual" | "prob-anim" => render_integral_frames(width, height),
         "taylor-series" | "serie-anim" | "trig-anim" => render_taylor_frames(width, height),
@@ -2447,7 +2339,8 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
         }
         "mobius-transform" | "mobius" | "moebius" => render_mobius_frames(width, height),
         _ => {
-            // template desconocido -> universal con ese texto como concepto para no quedar vacio
+            // Template desconocido -> placeholder neutro con ese texto como
+            // concepto (eco, no respuesta) para no quedar vacío.
             if template.trim().is_empty() {
                 render_native_animation_frames(width, height)
             } else {
@@ -3202,9 +3095,9 @@ mod tests {
         assert_ne!(PAL_BG, PAL_ACCENT, "BG != ACCENT");
         assert_eq!(ACCENTS.len(), 6);
         // Roles derivan de la paleta (sin literales sueltos en renders).
+        // T2: TRAIL_FAINT_ALPHA/CURVE_UNIVERSAL_ALPHA se eliminaron con la
+        // curva falsa del universal (decoración que fingía respuesta).
         assert_eq!(CURVE_MAIN[3], 235);
-        assert_eq!(TRAIL_FAINT_ALPHA, 28);
-        assert_eq!(CURVE_UNIVERSAL_ALPHA, 210);
         assert_eq!(with_alpha(PAL_BLUE, 28), [66, 133, 244, 28]);
         // Un frame real contiene BG y no-BG (usa la paleta).
         let f = render_gradient_field_frames(64, 64);
@@ -3236,6 +3129,90 @@ mod tests {
             detect_template_for_concept("texto aleatorio sin matematica"),
             "universal"
         );
+    }
+    #[test]
+    fn detect_conocidos_no_caen_a_fallback() {
+        // Regresión T2: cada concepto conocido resuelve a su plantilla con
+        // renderer propio; ninguno cae a `universal`.
+        for (concepto, esperado) in [
+            ("teorema de pitágoras", "pitagoras"),
+            ("integral área bajo curva", "integral-area"),
+            ("probabilidad binomial n=10", "integral-area"),
+            ("serie de Taylor de sin(x)", "taylor-series"),
+            ("mapeo conforme complejo", "conformal-map"),
+            ("derivada pendiente tangente", "derivative-slope"),
+            ("número e exponencial", "euler"),
+            ("análisis de Fourier con armónicos", "fourier"),
+            ("bifurcación logística r=3.5", "logistic-bifurcation"),
+            ("campo de gradiente de f(x,y)", "gradient-field"),
+            ("transformación de Möbius", "mobius-transform"),
+            ("fracción con común denominador", "integral-area"),
+            ("ecuación cuadrática", "derivative-slope"),
+            ("círculo unitario", "taylor-series"),
+            ("elipse cónica", "conformal-map"),
+            ("vector campo F(x,y)=(-y,x)", "conformal-map"),
+        ] {
+            assert_eq!(
+                detect_template_for_concept(concepto),
+                esperado,
+                "{concepto}"
+            );
+        }
+    }
+    #[test]
+    fn detect_sin_contains_tramposos() {
+        // T2: substrings que antes fingían plantilla hoy van al neutro.
+        for pedido in [
+            "tarea de matemática",
+            "el ecosistema funciona",
+            "funciona el aparato",
+        ] {
+            assert_eq!(detect_template_for_concept(pedido), "universal", "{pedido}");
+        }
+        // ...pero la palabra exacta sí resuelve.
+        assert_eq!(
+            detect_template_for_concept("área del círculo"),
+            "integral-area"
+        );
+        assert_eq!(
+            detect_template_for_concept("sistema de ecuaciones"),
+            "derivative-slope"
+        );
+    }
+    #[test]
+    fn fallback_universal_es_neutro_sin_curva_falsa() {
+        // T2: el placeholder no anima contenido matemático: la banda media
+        // es idéntica entre el primer y el último frame (sin curva ni
+        // partículas que se muevan); solo la barra de progreso avanza.
+        let w = 96u32;
+        let h = 72u32;
+        let frames = render_universal_youtube_frames("texto libre cualquiera", w, h);
+        assert_eq!(frames.len(), NATIVE_ANIM_FRAME_COUNT);
+        let primero = &frames[0];
+        let ultimo = &frames[NATIVE_ANIM_FRAME_COUNT - 1];
+        assert_eq!(primero.size, [w as usize, h as usize]);
+        let idx = |x: usize, y: usize| y * (w as usize) + x;
+        // Banda media (lejos del título y de la barra): estática.
+        for y in 40..((h as usize) - 8) {
+            for x in (0..(w as usize)).step_by(7) {
+                assert_eq!(
+                    primero.pixels[idx(x, y)],
+                    ultimo.pixels[idx(x, y)],
+                    "banda media estática en ({x},{y})"
+                );
+            }
+        }
+        // La barra de progreso sí avanza y el rótulo está pineado.
+        assert_ne!(primero.pixels, ultimo.pixels, "el progreso avanza");
+        assert_eq!(UNIVERSAL_PLACEHOLDER_LABEL, "vista previa no disponible");
+        // Determinista: mismo pedido, mismos píxeles.
+        let otra = render_universal_youtube_frames("texto libre cualquiera", w, h);
+        for (i, (a, b)) in frames.iter().zip(otra.iter()).enumerate() {
+            assert_eq!(a.pixels, b.pixels, "frame {i} determinista");
+        }
+        // No sólido: hay grilla + texto + barra.
+        let px0 = primero.pixels[0];
+        assert!(primero.pixels.iter().any(|p| *p != px0), "frame no sólido");
     }
     #[test]
     fn normalize_handles_edge_cases() {

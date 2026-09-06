@@ -3290,6 +3290,28 @@ mod tests {
     }
 
     #[test]
+    fn generate_animation_pedido_typo_screenshot_es_canonica() {
+        // Input EXACTO del screenshot (vía agente): el typo "integrela" va a
+        // canónica declarada, igual que Submit y la inferencia. Sin doble
+        // carril: el agente no pregunta lo que la vista muestra.
+        let call = ToolCall {
+            id: "n1-typo".into(),
+            name: "generate_animation".into(),
+            arguments: json!({"pedido": "hace una animacion de una integrela (nativa)"}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["kind"], "area");
+        assert_eq!(value["expr_a"], "x^2");
+        assert_eq!(value["canonical"], true);
+        let hint = value["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("pedime otra"), "{hint}");
+        assert!(hint.contains("x²"), "{hint}");
+        assert!(hint.contains("deslizador"), "{hint}");
+    }
+
+    #[test]
     fn pedagogy_schemas_are_valid_openai_tools() {
         for schema in pedagogy_tool_schemas() {
             assert!(schema.validate().is_ok(), "schema {} invalid", schema.name);

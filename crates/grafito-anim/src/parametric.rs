@@ -1384,12 +1384,144 @@ pub const INTEGRAL_CANONICAL_PARAM: &str = "p";
 pub const INTEGRAL_CANONICAL_PROSA: &str =
     "te muestro con f(x)=x² en [0,2]; pedime otra y la cambio";
 
+/// Normaliza para matching honesto: minúsculas + sin tildes.
+///
+/// "animación" y "animacion", "área" y "area", "derivada" y "deriváda"
+/// matchean igual. Puro, sin I/O, sin `unwrap`.
+pub fn normaliza_para_match(texto: &str) -> String {
+    let mut salida = String::with_capacity(texto.len());
+    for c in texto.chars().flat_map(char::to_lowercase) {
+        let base = match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            otro => otro,
+        };
+        salida.push(base);
+    }
+    salida
+}
+
+/// Distancia de edición (Levenshtein) acotada por `tope`.
+///
+/// Devuelve `Some(d)` si `d <= tope`, `None` si excede o si algún lado
+/// supera 64 caracteres (cota anti-OOM). Sin `unwrap`, sin pánico.
+fn distancia_acotada(a: &str, b: &str) -> Option<usize> {
+    distancia_acotada_con_tope(a, b, 2)
+}
+
+fn distancia_acotada_con_tope(a: &str, b: &str, tope: usize) -> Option<usize> {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    if a_chars.len() > 64 || b_chars.len() > 64 {
+        return None;
+    }
+    let diff = a_chars.len().abs_diff(b_chars.len());
+    if diff > tope {
+        return None;
+    }
+    if a_chars.is_empty() {
+        return if b_chars.len() <= tope {
+            Some(b_chars.len())
+        } else {
+            None
+        };
+    }
+    if b_chars.is_empty() {
+        return if a_chars.len() <= tope {
+            Some(a_chars.len())
+        } else {
+            None
+        };
+    }
+    let mut previa: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut actual: Vec<usize> = vec![0; b_chars.len() + 1];
+    for (i, ca) in a_chars.iter().enumerate() {
+        actual[0] = i + 1;
+        let mut fila_min = actual[0];
+        for (j, cb) in b_chars.iter().enumerate() {
+            let costo = if ca == cb { 0 } else { 1 };
+            let borrado = previa[j + 1].saturating_add(1);
+            let insercion = actual[j].saturating_add(1);
+            let sustitucion = previa[j].saturating_add(costo);
+            let mejor = borrado.min(insercion).min(sustitucion);
+            actual[j + 1] = mejor;
+            if mejor < fila_min {
+                fila_min = mejor;
+            }
+        }
+        if fila_min > tope {
+            return None;
+        }
+        std::mem::swap(&mut previa, &mut actual);
+    }
+    let d = previa[b_chars.len()];
+    if d <= tope {
+        Some(d)
+    } else {
+        None
+    }
+}
+
+/// ¿El token normalizado matchea la clave por exacto o typo acotado?
+///
+/// - Token que contiene a la clave ("integrales", "derivadas") vale.
+/// - Claves cortas (`"area"`, ≤4): solo exacto (evita "arena"→área).
+/// - Claves largas (`"integral"`, `"derivada"`, `"animacion"`, ≥7):
+///   distancia ≤2 (cubre "integrela", "derivadaa", "integrar").
+///
+/// Puro, sin I/O, sin `unwrap`.
+pub fn token_matchea_clave(token_norm: &str, clave: &str) -> bool {
+    if token_norm.is_empty() || clave.is_empty() {
+        return false;
+    }
+    if token_norm.contains(clave) {
+        return true;
+    }
+    if clave.len() <= 4 || token_norm.len() > 32 {
+        return false;
+    }
+    distancia_acotada(token_norm, clave).is_some()
+}
+
+/// ¿El pedido menciona integral (con typos acotados)?
+///
+/// Cubre "integral", "integrales", "integrar" y typos como "integrela"
+/// (distancia ≤2). Puro, sin I/O.
+pub fn pedido_menciona_integral_fuzzy(pedido: &str) -> bool {
+    let norm = normaliza_para_match(pedido);
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token_matchea_clave(token, "integral") {
+            return true;
+        }
+    }
+    false
+}
+
 /// ¿El pedido menciona integral o área? A propósito más amplio que
 /// `detect_kind` (que exige "móvil" para el área): un "haceme una animación
 /// de una integral" sin más ya pide la canónica, no un error.
+///
+/// Normaliza sin tildes + fuzzy acotado: "integrela" matchea "integral"
+/// (distancia 2), "animacion" matchea "animación". "area" sigue exacta
+/// por token (evita "tarea"→área del `contains` anterior).
 pub fn pedido_menciona_area(pedido: &str) -> bool {
-    let lower = pedido.to_lowercase();
-    lower.contains("integral") || lower.contains("área") || lower.contains("area")
+    let norm = normaliza_para_match(pedido);
+    for token in norm.split(|c: char| !c.is_alphabetic()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token == "area" || token_matchea_clave(token, "integral") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Pedido de integral/área ya resuelto: canónico o explícito.
@@ -1763,5 +1895,37 @@ mod tests {
             extract_single_expr("integral de f(x)=x^2 [0,2]").as_deref(),
             Some("x^2")
         );
+    }
+
+    #[test]
+    fn typo_screenshot_integrela_es_canonica() {
+        // Input EXACTO del screenshot: "hace una animacion de una integrela
+        // (nativa)". Antes `pedido_menciona_area` era falso (substring exacto)
+        // y el Submit caía a `universal` + pregunta remota (contradicción).
+        let pedido = "hace una animacion de una integrela (nativa)";
+        assert!(pedido_menciona_area(pedido), "el typo debe mencionar área");
+        assert!(pedido_menciona_integral_fuzzy(pedido));
+        let res = infer_area_anim(pedido).unwrap();
+        assert!(res.es_canonica(), "sin función va a canónica");
+        assert_eq!(res.anim().expr_a, INTEGRAL_CANONICAL_EXPR);
+        assert_eq!((res.anim().p0, res.anim().p1), (0.0, 2.0));
+    }
+
+    #[test]
+    fn normalizacion_y_fuzzy_acotado_cubren_typos() {
+        assert_eq!(normaliza_para_match("animación"), "animacion");
+        assert_eq!(normaliza_para_match("ÁREA"), "area");
+        assert_eq!(normaliza_para_match("DERIVÁDA"), "derivada");
+        assert!(token_matchea_clave("integrela", "integral"));
+        assert!(token_matchea_clave("derivadaa", "derivada"));
+        assert!(token_matchea_clave("animacion", "animacion"));
+        assert!(token_matchea_clave("integrar", "integral"));
+        assert!(token_matchea_clave("integrales", "integral"));
+        // Cota: cortas no hacen fuzzy y basura larga no matchea.
+        assert!(!token_matchea_clave("arena", "area"));
+        assert!(!token_matchea_clave("xyz", "integral"));
+        assert!(!pedido_menciona_area("tarea de matemática"));
+        assert!(distancia_acotada("integrela", "integral").is_some());
+        assert!(distancia_acotada("zzz", "integral").is_none());
     }
 }
