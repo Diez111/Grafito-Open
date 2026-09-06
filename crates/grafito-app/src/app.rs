@@ -1864,6 +1864,26 @@ impl GrafitoApp {
         renderer_is_ready(self.gpu_renderer.as_ref())
     }
 
+    /// Fase honesta del splash (G-E perf, S): 3 gates reales, sin % falso de
+    /// tiempo. El progreso es `done/3`: GPU lista, escena 2D resuelta
+    /// (`Pending` = pendiente; `GpuReady`/`CpuOnly` = resuelta), plugins
+    /// cargados (`plugins_loaded` se setea en el primer poll del update, dentro
+    /// de la ventana del splash). Un documento vacío es válido y no bloquea
+    /// ningún gate; el conteo de objetos solo se muestra, no es gate.
+    fn startup_splash_phase(&self) -> (u32, &'static str) {
+        const TOTAL: u32 = 3;
+        if !self.gpu_renderer_ready() {
+            return (0, "Iniciando GPU…");
+        }
+        if self.gpu_scene_2d_readiness() == crate::canvas::Scene2DReadiness::Pending {
+            return (1, "Preparando escena…");
+        }
+        if !self.plugins_loaded {
+            return (2, "Cargando extensiones…");
+        }
+        (TOTAL, "Listo")
+    }
+
     /// Mantiene la proyección ligada al rectángulo real del canvas sin
     /// invalidar el índice espacial ni preparar GPU cuando el tamaño no cambió.
     fn sync_canvas_screen_size(&mut self, canvas_size: egui::Vec2) -> bool {
@@ -6059,21 +6079,30 @@ impl eframe::App for GrafitoApp {
                                     .size(13.0)
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
                             );
-                            // F10-D splash progreso real (S): fase derivada del
-                            // estado (objetos cargados + elapsed), sin % falso.
+                            // G-E splash progreso real por fases (S): gates reales
+                            // vía `startup_splash_phase` (GPU → escena → plugins),
+                            // barra done/3 honesta, sin % falso de tiempo.
+                            let (done, stage) = self.startup_splash_phase();
                             let phase = if self.document.object_count() > 0 {
                                 format!(
-                                    "Documento · {} objetos · {}ms",
+                                    "{stage} · {} de 3 · Documento · {} objetos · {}ms",
+                                    done,
                                     self.document.object_count(),
                                     elapsed_ms
                                 )
                             } else {
-                                format!("Iniciando… {}ms", elapsed_ms)
+                                format!("{stage} · {done} de 3 · {elapsed_ms}ms")
                             };
                             ui.label(
                                 egui::RichText::new(phase)
                                     .size(13.0)
                                     .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
+                            );
+                            ui.add_space(grafito_ui::tokens::SPACE_XS);
+                            ui.add(
+                                egui::ProgressBar::new(done as f32 / 3.0)
+                                    .desired_width(220.0)
+                                    .show_percentage(),
                             );
                         });
                     });

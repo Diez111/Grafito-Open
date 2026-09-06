@@ -152,8 +152,8 @@ pub(crate) fn cmd_err(msg: impl Into<String>) -> CommandOutcome {
 const MAX_COMMAND_INPUT_BYTES: usize = 65_536;
 const MAX_COMMAND_NESTING: usize = 32;
 const MAX_COMMAND_ARGS: usize = 64;
-const MAX_SCRIPT_COMMANDS: usize = 100;
-const MAX_SCRIPT_DEPTH: usize = 5;
+pub(crate) const MAX_SCRIPT_COMMANDS: usize = 100;
+pub(crate) const MAX_SCRIPT_DEPTH: usize = 5;
 const MAX_DISCRETE_COUNT: u32 = 10_000;
 const MAX_TAYLOR_ORDER: usize = 64;
 const REGULAR_POLYCHORON_4D_ROTATION_ANGLE_COUNT: usize = 6;
@@ -193,9 +193,12 @@ fn bounded_ode_plot_indices(point_count: usize) -> Vec<usize> {
 }
 
 #[derive(Default)]
-struct ScriptBudget {
-    depth: usize,
-    executed_commands: usize,
+pub(crate) struct ScriptBudget {
+    pub(crate) depth: usize,
+    pub(crate) executed_commands: usize,
+    /// Pasos G-D ejecutados (If/Repeat/button/herramienta), cota propia en
+    /// `crate::ggbscript::MAX_GGBSCRIPT_STEPS`. Compartido en todo anidado.
+    pub(crate) ggb_steps: usize,
 }
 
 fn validate_command_input(input: &str) -> Result<(), String> {
@@ -208,8 +211,18 @@ fn validate_command_input(input: &str) -> Result<(), String> {
     let mut delimiters = Vec::with_capacity(MAX_COMMAND_NESTING);
     let mut found_outer_arguments = false;
     let mut outer_argument_count = 1;
+    // Las comillas dobles protegen literales de texto (rótulos, guiones):
+    // los delimitadores dentro de `"..."` no cuentan para balance ni aridad.
+    let mut in_string = false;
 
     for ch in input.chars() {
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
         match ch {
             '(' | '[' | '{' => {
                 if delimiters.len() >= MAX_COMMAND_NESTING {
@@ -254,12 +267,21 @@ fn validate_command_input(input: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn split_script_commands(script: &str) -> Result<Vec<String>, String> {
+pub(crate) fn split_script_commands(script: &str) -> Result<Vec<String>, String> {
     let mut commands = Vec::new();
     let mut delimiters = Vec::new();
     let mut start = 0;
+    // `"` protege `;` dentro de literales (ramas If entrecomilladas, etc.).
+    let mut in_string = false;
 
     for (index, ch) in script.char_indices() {
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
         match ch {
             '(' | '[' | '{' => delimiters.push(ch),
             ')' | ']' | '}' => {
@@ -1904,6 +1926,7 @@ fn validate_command_label_ambiguity(document: &Document, command: &CasCmd) -> Re
             &[0, 1, 2]
         }
         "ConicByFivePoints" => &[0, 1, 2, 3, 4],
+        "Show" | "Hide" => &[0, 1, 2, 3],
         "Dilate" => &[0, 2],
         "Rotate" if command.args.len() == 3 => &[0, 1],
         "Rotate" => &[0],
@@ -3500,6 +3523,15 @@ fn dispatch_cas_command(
         return outcome;
     }
     if let Some(outcome) = handle_area_center_commands(document, cmd, input_text) {
+        return outcome;
+    }
+    if let Some(outcome) = crate::ggbscript::handle_ggb_command(
+        document,
+        &cmd.command,
+        &cmd.args,
+        input_text,
+        script_budget,
+    ) {
         return outcome;
     }
     handle_remaining_cas_commands(document, cmd, input_text, script_budget)
@@ -11003,7 +11035,7 @@ fn handle_expression_input(
     ))
 }
 
-fn process_input_in_place_with_budget(
+pub(crate) fn process_input_in_place_with_budget(
     document: &mut Document,
     input_text: &mut String,
     script_budget: &mut ScriptBudget,
@@ -11040,6 +11072,20 @@ fn process_input_in_place_with_budget(
         return dispatch_cas_command(document, &cmd, input_text, script_budget);
     }
     handle_expression_input(document, &text, &raw_text, input_text)
+}
+
+/// Ejecuta un fragmento ya validado (un paso de guion G-D) y lo traduce a
+/// `Result` para los runners acotados (`If`/`Repeat`/botones). Los errores del
+/// dispatcher se propagan como texto; `Ok`/`Message` son éxito.
+pub(crate) fn execute_snippet_sequence(
+    document: &mut Document,
+    snippet: &mut String,
+    script_budget: &mut ScriptBudget,
+) -> Result<(), String> {
+    match process_input_in_place_with_budget(document, snippet, script_budget) {
+        CommandOutcome::Ok | CommandOutcome::Message(_) => Ok(()),
+        CommandOutcome::Error(message) => Err(message),
+    }
 }
 
 fn complex_mapping_target_is_supported(target: &GeoObject) -> bool {
@@ -13438,7 +13484,7 @@ fn subscript_label(n: usize) -> String {
         .collect()
 }
 
-fn unique_object_label(document: &Document, base: &str) -> String {
+pub(crate) fn unique_object_label(document: &Document, base: &str) -> String {
     let candidate = bounded_label_candidate(base, "");
     if document.object_ids_by_label(&candidate).is_empty() {
         return candidate;

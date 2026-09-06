@@ -1540,6 +1540,234 @@ pub fn steps_for_taylor(
 }
 
 // ---------------------------------------------------------------------------
+// Frente G-A: trazas acotadas del motor CAS (Gruntz, Risch, EDO, residuo,
+// Buchberger). Reusan `CasStep` + `RewriteRule::Generic` (sin romper la
+// API exhaustiva) y truncan a `MAX_CAS_STEPS` 32.
+// ---------------------------------------------------------------------------
+
+fn push_ga_step(steps: &mut Vec<CasStep>, before: &str, after: &str, description: &str) {
+    if steps.len() >= MAX_CAS_STEPS {
+        return;
+    }
+    let idx = steps.len();
+    steps.push(CasStep {
+        index: idx,
+        rule: RewriteRule::Generic,
+        before: truncate_bytes(before, MAX_STEP_BYTES),
+        after: truncate_bytes(after, MAX_STEP_BYTES),
+        description: truncate_bytes(description, MAX_STEP_BYTES),
+    });
+}
+
+/// Traza Gruntz: clasifica la forma y muestra L'Hôpital o jerarquía.
+pub fn steps_for_gruntz(expr: &str, var: &str, at: f64) -> Result<Vec<CasStep>, String> {
+    validate_identifier(var)?;
+    validate_input_bytes(expr)?;
+    if !at.is_finite() {
+        return Err("at no es finito".to_string());
+    }
+    let pp = expr.replace(' ', "");
+    let ast = parse_ast(&pp).map_err(|e| format!("parse error: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &format!("lim({var}→{at}) {expr}"),
+        &format!("forma {}", gruntz_form_label(&ast, var, at)),
+        "Gruntz: clasificar 0/0, ∞/∞ o directa",
+    );
+    // L'Hôpital visible hasta 8 iteraciones (cota del motor).
+    if let Expr::Div(num, den) = &ast {
+        let mut cur_n = num.as_ref().clone();
+        let mut cur_d = den.as_ref().clone();
+        for i in 1..=crate::cas::MAX_GRUNTZ_STEPS {
+            let (nv, dv) = (cur_n.eval_at(var, at), cur_d.eval_at(var, at));
+            let indeterminate = (nv == 0.0 && dv == 0.0) || (nv.is_infinite() && dv.is_infinite());
+            if !indeterminate {
+                break;
+            }
+            let next_n = simplify_expr(&cur_n.diff(var));
+            let next_d = simplify_expr(&cur_d.diff(var));
+            push_ga_step(
+                &mut steps,
+                &format!("({})/({})", cur_n.to_expr_string(), cur_d.to_expr_string()),
+                &format!(
+                    "({})/({})",
+                    next_n.to_expr_string(),
+                    next_d.to_expr_string()
+                ),
+                &format!("L'Hôpital iteración {i}: derivar numerador y denominador"),
+            );
+            cur_n = next_n;
+            cur_d = next_d;
+            if steps.len() >= MAX_CAS_STEPS {
+                break;
+            }
+        }
+    }
+    let outcome = crate::cas::gruntz_limit(expr, var, at)
+        .map_err(|e| format!("Gruntz no resolvió '{expr}': {e}"))?;
+    push_ga_step(
+        &mut steps,
+        &format!("lim({var}→{at}) {expr}"),
+        &format!("{:.8}", outcome.value),
+        &format!("Gruntz {:?} → {:.8}", outcome.method, outcome.value),
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+fn gruntz_form_label(ast: &Expr, var: &str, at: f64) -> &'static str {
+    if let Expr::Div(num, den) = ast {
+        let (n, d) = (num.eval_at(var, at), den.eval_at(var, at));
+        if n == 0.0 && d == 0.0 {
+            return "0/0";
+        }
+        if n.is_infinite() && d.is_infinite() {
+            return "∞/∞";
+        }
+    }
+    if ast.eval_at(var, at).is_finite() {
+        return "directa";
+    }
+    "otra"
+}
+
+/// Traza Risch-Norman: primitiva del subconjunto S/M.
+pub fn steps_for_risch(expr: &str, var: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(var)?;
+    validate_input_bytes(expr)?;
+    let prim = crate::integral::risch_norman_integrate(expr, var)
+        .map_err(|e| format!("Risch-Norman no cubre '{expr}': {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &format!("∫ {expr} d{var}"),
+        &prim,
+        "Risch-Norman: potencias/exponenciales/logaritmos + linealidad",
+    );
+    push_ga_step(
+        &mut steps,
+        &prim,
+        &format!("d/d{var}({prim}) = {expr}"),
+        "verificación: derivar la primitiva recupera el integrando",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza EDO lineal `y' + p·y = q` por factor integrante.
+pub fn steps_for_ode_linear(p: &str, q: &str, x: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    validate_input_bytes(p)?;
+    validate_input_bytes(q)?;
+    let sol = crate::ode::solve_linear_first_order(p, q, x)
+        .map_err(|e| format!("EDO lineal no resuelta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &format!("y' + ({p})·y = {q}"),
+        &format!("μ = exp(∫-({p}) dx)"),
+        "factor integrante μ = exp(∫−p dx)",
+    );
+    push_ga_step(
+        &mut steps,
+        &format!("(μ·y)' = μ·({q})"),
+        &sol,
+        "integrar y despejar: y = (H + C)/μ",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza EDO separable `y' = g(x)·h(y)`.
+pub fn steps_for_ode_separable(g: &str, h: &str, x: &str, y: &str) -> Result<Vec<CasStep>, String> {
+    validate_identifier(x)?;
+    validate_identifier(y)?;
+    validate_input_bytes(g)?;
+    validate_input_bytes(h)?;
+    let sol = crate::ode::solve_separable(g, h, x, y)
+        .map_err(|e| format!("EDO separable no resuelta: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &format!("y' = ({g})·({h})"),
+        &format!("dy/({h}) = ({g}) dx"),
+        "separar variables",
+    );
+    push_ga_step(
+        &mut steps,
+        &format!("∫dy/({h}) = ∫({g}) dx"),
+        &sol,
+        "integrar ambos lados + C",
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza residuo: orden del polo + fórmula aplicada.
+pub fn steps_for_residue(
+    expr: &str,
+    var: &str,
+    at: f64,
+    max_order: usize,
+) -> Result<Vec<CasStep>, String> {
+    validate_identifier(var)?;
+    validate_input_bytes(expr)?;
+    if !at.is_finite() {
+        return Err("at no es finito".to_string());
+    }
+    let outcome = crate::cas::laurent_residue(expr, var, at, max_order)
+        .map_err(|e| format!("residuo no calculado para '{expr}': {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &format!("{expr} en {var}={at}"),
+        &format!("orden {}", outcome.pole_order),
+        "detectar orden del polo (sondeo bilateral acotado)",
+    );
+    push_ga_step(
+        &mut steps,
+        &format!("orden {}", outcome.pole_order),
+        &format!("residuo = {:.8}", outcome.residue),
+        &format!(
+            "{:?}: (x−at)^m·f derivada m−1 veces /(m−1)!",
+            outcome.method
+        ),
+    );
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+/// Traza Buchberger: base triangular acotada por S-polinomios.
+pub fn steps_for_groebner(polys: &[String], vars: &[String]) -> Result<Vec<CasStep>, String> {
+    if polys.len() > crate::cas::MAX_GROEBNER_POLYS || vars.len() > crate::cas::MAX_GROEBNER_VARS {
+        return Err("sistema excede las cotas de Buchberger; usa Eliminate".to_string());
+    }
+    let outcome = crate::cas::buchberger_basis(polys, vars)
+        .map_err(|e| format!("Buchberger no convergió: {e}"))?;
+    let mut steps = Vec::new();
+    push_ga_step(
+        &mut steps,
+        &polys.join(", "),
+        &format!("{} S-polinomios", outcome.s_polys_used),
+        "Buchberger lexicográfico acotado (criterio de pares primos relativos)",
+    );
+    for (i, poly) in outcome.basis.iter().enumerate() {
+        if steps.len() >= MAX_CAS_STEPS {
+            break;
+        }
+        push_ga_step(
+            &mut steps,
+            &format!("base[{i}]"),
+            poly,
+            &format!("polinomio triangular {i}"),
+        );
+    }
+    steps.truncate(MAX_CAS_STEPS);
+    Ok(steps)
+}
+
+// ---------------------------------------------------------------------------
 // Tests genéricos
 // ---------------------------------------------------------------------------
 
@@ -1843,5 +2071,70 @@ mod tests {
         // convertirse en test de integración real y eliminar este marcador.
         let todo_marker = "TODO: cablear CasStepper en grafito-app UI";
         assert!(!todo_marker.is_empty());
+    }
+
+    // --- Frente G-A: trazas del motor CAS ---
+
+    #[test]
+    fn ga_gruntz_trace_shows_lhopital() {
+        let steps = steps_for_gruntz("sin(x)/x", "x", 0.0).expect("traza Gruntz");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(steps.iter().any(|s| s.description.contains("L'Hôpital")));
+        let last = steps.last().expect("último paso");
+        assert!(last.after.contains('1'), "got {}", last.after);
+    }
+
+    #[test]
+    fn ga_risch_trace_gives_primitive() {
+        let steps = steps_for_risch("x^2", "x").expect("traza Risch");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(steps[0].after.contains('x'), "got {}", steps[0].after);
+    }
+
+    #[test]
+    fn ga_risch_trace_honest_err() {
+        assert!(steps_for_risch("exp(x^2)", "x").is_err());
+    }
+
+    #[test]
+    fn ga_ode_linear_trace() {
+        let steps = steps_for_ode_linear("2", "3", "x").expect("traza EDO lineal");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(steps.iter().any(|s| s.description.contains("integrante")));
+    }
+
+    #[test]
+    fn ga_ode_separable_trace() {
+        let steps = steps_for_ode_separable("x", "y", "x", "y").expect("traza separable");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+    }
+
+    #[test]
+    fn ga_residue_trace() {
+        let steps = steps_for_residue("1/x", "x", 0.0, 8).expect("traza residuo");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+        assert!(steps.iter().any(|s| s.after.contains("orden 1")));
+    }
+
+    #[test]
+    fn ga_groebner_trace() {
+        let steps = steps_for_groebner(
+            &["x + y - 3".to_string(), "x - y - 1".to_string()],
+            &["x".to_string(), "y".to_string()],
+        )
+        .expect("traza Buchberger");
+        assert!(!steps.is_empty());
+        assert!(steps.len() <= MAX_CAS_STEPS);
+    }
+
+    #[test]
+    fn ga_groebner_trace_rejects_over_budget() {
+        let polys: Vec<String> = (0..20).map(|i| format!("x + {i}")).collect();
+        assert!(steps_for_groebner(&polys, &["x".to_string()]).is_err());
     }
 }

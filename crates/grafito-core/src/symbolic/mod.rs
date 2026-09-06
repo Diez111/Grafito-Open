@@ -1,13 +1,21 @@
-//! Paridad GeoGebra honesta del cerebro (frente F10-C).
+//! Paridad GeoGebra honesta del cerebro (frentes F10-C y G-A).
 //!
 //! Reúne los S/M cerrados sin pisar geometría exacta, A11Y ni perf:
 //! CSV RFC 4180 ([`csv`]), volumen/área 3D y vistas ortográficas
-//! ([`solids`]), capas/tabla viva/SVG/PDF/stubs ([`exchange`]) y la
-//! compuerta honesta de Groebner (exacta 2×2 lineal, error >2×2).
+//! ([`solids`]), capas/tabla viva/SVG/PDF/stubs ([`exchange`]), puerta
+//! CAS G-A ([`cas_motor`]: Gruntz, Risch-Norman, EDO 1er orden,
+//! Laurent/residuos) y Buchberger acotado para Groebner.
 
+pub mod cas_motor;
 pub mod csv;
 pub mod exchange;
 pub mod solids;
+
+pub use cas_motor::{
+    cas_definite_risch, cas_groebner, cas_integrate_risch, cas_limit_gruntz,
+    cas_limit_gruntz_infinite, cas_principal_part, cas_residue, cas_solve_ode,
+    cas_solve_ode_linear, cas_solve_ode_separable,
+};
 
 pub use csv::{escape_field, parse_csv, to_csv, CsvError, MAX_CSV_BYTES, MAX_CSV_ROWS};
 pub use exchange::{
@@ -21,22 +29,25 @@ pub use solids::{
     tetrahedron_volume, torus_area, torus_volume, OrthoView, SolidError,
 };
 
-/// Límite honesto de Groebner: el motor (`grafito_geometry::symbolic`)
-/// resuelve exacto 2 polinomios lineales en 2 variables; más allá se
-/// devuelve error explicativo que deriva a `Eliminate`.
+/// Puerta Groebner por Buchberger acotado (`grafito_geometry::cas`).
 ///
-/// El diseño completo (Buchberger) es L en Tasks.md F10.W5.
+/// Resuelve sistemas polinómicos de hasta `MAX_GROEBNER_POLYS` 8
+/// polinomios en `MAX_GROEBNER_VARS` 4 variables con un máximo de
+/// `MAX_GROEBNER_S_POLY` 128 S-polinomios (criterio de pares primos
+/// relativos incluido). Más allá, o ante entrada no polinómica, devuelve
+/// error honesto que deriva a `Eliminate[...]`.
+///
+/// El Buchberger general sin cotas sigue siendo L en Tasks.md F10.W5.
 pub fn groebner_gate(polys: &[String], vars: &[String]) -> Result<String, String> {
-    if polys.len() > 2 || vars.len() > 2 {
-        return Err(format!(
-            "Groebner limitado a 2 polinomios lineales en 2 variables (recibidos {}x{}); usa Eliminate[...] o reduce el sistema. Buchberger completo en Tasks.md F10.W5",
-            polys.len(),
-            vars.len()
-        ));
-    }
-    match grafito_geometry::symbolic::groebner_basis_typed(polys, vars) {
-        grafito_geometry::MathResult::Exact(base) => Ok(base),
-        other => Err(format!("Groebner no convergió: {other:?}")),
+    match grafito_geometry::cas::buchberger_basis(polys, vars) {
+        Ok(outcome) => Ok(format!("{{{}}}", outcome.basis.join(", "))),
+        Err(grafito_geometry::cas::CasError::Unsupported { hint, .. }) => Err(format!(
+            "{hint}; usa Eliminate[...] o reduce el sistema. Buchberger general en Tasks.md F10.W5"
+        )),
+        Err(grafito_geometry::cas::CasError::ResourceLimit { detail }) => Err(detail),
+        Err(other) => Err(format!(
+            "Groebner no convergió ({other}); usa Eliminate[...]"
+        )),
     }
 }
 
@@ -45,15 +56,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groebner_gate_rejects_bigger_than_2x2() {
-        let polys = vec![
-            "x+y+z".to_string(),
-            "x-y+z".to_string(),
-            "2*x+y-z".to_string(),
-        ];
-        let vars = vec!["x".to_string(), "y".to_string(), "z".to_string()];
-        let err = groebner_gate(&polys, &vars).expect_err("3x3 debe fallar honesto");
-        assert!(err.contains("2 polinomios lineales"));
+    fn groebner_gate_rejects_over_budget_honestly() {
+        let polys: Vec<String> = (0..20).map(|i| format!("x + {i}")).collect();
+        let vars = vec!["x".to_string()];
+        let err = groebner_gate(&polys, &vars).expect_err(">cota debe fallar honesto");
         assert!(err.contains("Eliminate"));
     }
 
@@ -63,5 +69,26 @@ mod tests {
         let vars = vec!["x".to_string(), "y".to_string()];
         let base = groebner_gate(&polys, &vars).expect("2x2 lineal");
         assert!(!base.contains("no implementado"));
+    }
+
+    #[test]
+    fn groebner_gate_solves_linear_3x3_bounded() {
+        let polys = vec![
+            "x+y+z-6".to_string(),
+            "x-y+z-2".to_string(),
+            "2*x+y-z-1".to_string(),
+        ];
+        let vars = vec!["x".to_string(), "y".to_string(), "z".to_string()];
+        let base = groebner_gate(&polys, &vars).expect("3x3 lineal acotado");
+        assert!(!base.contains("no implementado"));
+        assert!(base.contains('x'));
+    }
+
+    #[test]
+    fn groebner_gate_rejects_nonpolynomial_honestly() {
+        let polys = vec!["sin(x)+y".to_string(), "x-y".to_string()];
+        let vars = vec!["x".to_string(), "y".to_string()];
+        let err = groebner_gate(&polys, &vars).expect_err("no polinomio");
+        assert!(err.contains("Eliminate"));
     }
 }

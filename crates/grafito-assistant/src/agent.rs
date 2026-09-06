@@ -1942,6 +1942,305 @@ pub fn ocr_local_stub() -> Result<String, String> {
     Err("ocr-local no implementado: diseño F10.W5 (visión on-device acotada a 1MiP); hoy transcripción editable o visión remota explícita".to_string())
 }
 
+// ── G-G Vibecoder: error de compilador → negocio + 2-3 botones (S) ─────────
+//
+// `/vibecoder-guide`: cada error técnico se explica en lenguaje de negocio y
+// se ofrece un menú de 2-3 acciones (nunca un muro de texto ni un solo
+// "reintentar"). Cerebro puro: sin I/O, sin red, todo acotado. La Piel
+// renderiza `options` como botones; el agente nunca ejecuta la acción solo.
+
+/// Mínimo/máximo de botones por error (la Piel muestra 2-3, nunca 1 ni 4+).
+pub const MIN_VIBE_OPTIONS: usize = 2;
+/// Máximo de botones.
+pub const MAX_VIBE_OPTIONS: usize = 3;
+/// Tope del título de negocio (una línea).
+pub const MAX_VIBE_TITLE_CHARS: usize = 80;
+/// Tope de la explicación de negocio (dos líneas).
+pub const MAX_VIBE_EXPLANATION_CHARS: usize = 500;
+/// Tope por etiqueta de botón.
+pub const MAX_VIBE_LABEL_CHARS: usize = 32;
+/// Tope por hint de botón.
+pub const MAX_VIBE_HINT_CHARS: usize = 200;
+
+/// Clase del error técnico (para elegir explicación y botones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VibecoderKind {
+    /// Tipos que no coinciden (`mismatched types`, `expected X found Y`).
+    TypeMismatch,
+    /// Símbolo mal puesto (`syntax`, `parse`, `unexpected`, paréntesis).
+    Syntax,
+    /// Sin resultado en el dominio (`non-finite`, `NaN`, división por cero).
+    Domain,
+    /// Tardó demasiado (`timed out`, `deadline`, presupuesto excedido).
+    Timeout,
+    /// Sin red (`NoNetwork`, `assistant-net`, `connection`).
+    Network,
+    /// Resto (mensaje crudo truncado como contexto, sin PII).
+    Unknown,
+}
+
+/// Clasifica un mensaje técnico en `VibecoderKind` (case-insensitive, puro).
+#[must_use]
+pub fn vibecoder_classify(compiler_message: &str) -> VibecoderKind {
+    let lower = compiler_message.to_lowercase();
+    if lower.contains("mismatched")
+        || lower.contains("mismatch")
+        || (lower.contains("expected") && lower.contains("found"))
+        || lower.contains("tipo")
+        || lower.contains("type")
+            && (lower.contains("bool") || lower.contains("string") || lower.contains("number"))
+    {
+        VibecoderKind::TypeMismatch
+    } else if lower.contains("syntax")
+        || lower.contains("parse")
+        || lower.contains("unexpected")
+        || lower.contains("parenthes")
+        || lower.contains("paréntesis")
+        || lower.contains("sintaxis")
+    {
+        VibecoderKind::Syntax
+    } else if lower.contains("non-finite")
+        || lower.contains("non finite")
+        || lower.contains("nan")
+        || lower.contains("infinite")
+        || lower.contains("infinito")
+        || lower.contains("division")
+        || lower.contains("división")
+        || lower.contains("dominio")
+        || lower.contains("domain")
+    {
+        VibecoderKind::Domain
+    } else if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline")
+        || lower.contains("exceeded")
+        || lower.contains("tardó")
+        || lower.contains("presupuesto")
+    {
+        VibecoderKind::Timeout
+    } else if lower.contains("nonetwork")
+        || lower.contains("no_network")
+        || lower.contains("assistant-net")
+        || lower.contains("connection")
+        || lower.contains("conexión")
+        || lower.contains("sin red")
+    {
+        VibecoderKind::Network
+    } else {
+        VibecoderKind::Unknown
+    }
+}
+
+/// Un botón del menú de reparación (etiqueta + hint, ambos acotados).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VibecoderOption {
+    /// Texto del botón (`1..=32` chars).
+    pub label: String,
+    /// Qué hace el botón (`1..=200` chars, sin ejecutar nada).
+    pub hint: String,
+}
+
+impl VibecoderOption {
+    /// Valida y construye. `Err` si etiqueta/hint vacíos o largos.
+    pub fn try_new(label: &str, hint: &str) -> Result<Self, String> {
+        let clean_label = label.trim();
+        if clean_label.is_empty() {
+            return Err("botón sin etiqueta".to_string());
+        }
+        if clean_label.chars().count() > MAX_VIBE_LABEL_CHARS {
+            return Err(format!("etiqueta excede {MAX_VIBE_LABEL_CHARS} chars"));
+        }
+        let clean_hint = hint.trim();
+        if clean_hint.is_empty() {
+            return Err("botón sin hint".to_string());
+        }
+        if clean_hint.chars().count() > MAX_VIBE_HINT_CHARS {
+            return Err(format!("hint excede {MAX_VIBE_HINT_CHARS} chars"));
+        }
+        Ok(Self {
+            label: clean_label.to_string(),
+            hint: clean_hint.to_string(),
+        })
+    }
+}
+
+/// Error explicado en negocio + menú de 2-3 botones (la Piel lo renderiza).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VibecoderError {
+    /// Clase técnica (para telemetría, sin PII).
+    pub kind: VibecoderKind,
+    /// Título de negocio (`1..=80` chars, ej. "Tipos que no coinciden").
+    pub title: String,
+    /// Explicación en negocio (`1..=500` chars, sin jerga de compilador).
+    pub explanation: String,
+    /// Menú de reparación (siempre 2-3 botones, nunca mudos).
+    pub options: Vec<VibecoderOption>,
+}
+
+impl VibecoderError {
+    /// Valida y construye (`Err` si título/explicación vacíos o botones ≠2-3).
+    pub fn try_new(
+        kind: VibecoderKind,
+        title: &str,
+        explanation: &str,
+        options: Vec<VibecoderOption>,
+    ) -> Result<Self, String> {
+        let clean_title = title.trim();
+        if clean_title.is_empty() {
+            return Err("título vacío".to_string());
+        }
+        if clean_title.chars().count() > MAX_VIBE_TITLE_CHARS {
+            return Err(format!("título excede {MAX_VIBE_TITLE_CHARS} chars"));
+        }
+        let clean_explanation = explanation.trim();
+        if clean_explanation.is_empty() {
+            return Err("explicación vacía".to_string());
+        }
+        if clean_explanation.chars().count() > MAX_VIBE_EXPLANATION_CHARS {
+            return Err(format!(
+                "explicación excede {MAX_VIBE_EXPLANATION_CHARS} chars"
+            ));
+        }
+        if !(MIN_VIBE_OPTIONS..=MAX_VIBE_OPTIONS).contains(&options.len()) {
+            return Err(format!(
+                "se requieren {}-{} botones, fueron {}",
+                MIN_VIBE_OPTIONS,
+                MAX_VIBE_OPTIONS,
+                options.len()
+            ));
+        }
+        Ok(Self {
+            kind,
+            title: clean_title.to_string(),
+            explanation: clean_explanation.to_string(),
+            options,
+        })
+    }
+
+    /// Etiquetas de los botones (para la Piel, en orden).
+    #[must_use]
+    pub fn option_labels(&self) -> Vec<String> {
+        self.options.iter().map(|o| o.label.clone()).collect()
+    }
+}
+
+/// Explica un error técnico en negocio + 2-3 botones (siempre `Ok`, sin `Err`).
+///
+/// Pura y acotada: el mensaje crudo solo se usa para clasificar y, en
+/// `Unknown`, como contexto truncado a 200 chars (sin PII: sin prompts ni
+/// respuestas, solo el error del compilador). Español rioplatense, conciso.
+#[must_use]
+pub fn vibecoder_explain(compiler_message: &str, context: &str) -> VibecoderError {
+    let kind = vibecoder_classify(compiler_message);
+    let trimmed_context = context.trim();
+    let context_suffix = if trimmed_context.is_empty() {
+        String::new()
+    } else {
+        let clipped: String = trimmed_context.chars().take(80).collect();
+        format!(" Estabas en: {clipped}.")
+    };
+    let (title, explanation, buttons): (&str, String, Vec<(&str, &str)>) = match kind {
+        VibecoderKind::TypeMismatch => (
+            "Tipos que no coinciden",
+            format!(
+                "La cuenta mezcla cosas distintas (texto donde va un número o al revés). Revisá qué pusiste en cada casillero.{context_suffix}"
+            ),
+            vec![
+                ("Ver ejemplo", "Muestra un ejemplo con los tipos correctos."),
+                ("Probar otro valor", "Probá con un número simple para aislar el casillero."),
+                ("Pedir pista", "Te pregunto qué quisiste poner en cada lugar."),
+            ],
+        ),
+        VibecoderKind::Syntax => (
+            "Falta o sobra un símbolo",
+            format!(
+                "Hay un paréntesis o signo mal puesto y no se entiende la cuenta. Revisá el principio y el final.{context_suffix}"
+            ),
+            vec![
+                ("Ver dónde", "Te marco el símbolo que confunde al lector."),
+                ("Probar simple", "Probá con la cuenta más corta que falle."),
+            ],
+        ),
+        VibecoderKind::Domain => (
+            "Acá no tiene resultado",
+            format!(
+                "Con esos valores la cuenta no da (división por cero o fuera del dominio). Cambiá el valor problemático.{context_suffix}"
+            ),
+            vec![
+                ("Probar otro valor", "Probá con un valor dentro del dominio."),
+                ("Ver dominio", "Te muestro qué valores sí valen."),
+                ("Pedir pista", "Te pregunto qué esperabas que diera."),
+            ],
+        ),
+        VibecoderKind::Timeout => (
+            "Tardó demasiado",
+            format!(
+                "El cálculo superó el tiempo (presupuesto 60s / 8 pasos). Partilo en pasos más chicos.{context_suffix}"
+            ),
+            vec![
+                ("Partir en pasos", "Dividimos la cuenta en dos partes."),
+                ("Simplificar", "Probamos con números más chicos primero."),
+            ],
+        ),
+        VibecoderKind::Network => (
+            "Sin conexión al modelo",
+            format!(
+                "No hay red para el modelo remoto (PII igual queda local). Podés seguir con lo local o reintentar.{context_suffix}"
+            ),
+            vec![
+                ("Seguir local", "Usamos evaluación y ejercicios locales."),
+                ("Reintentar", "Probamos de nuevo la conexión."),
+            ],
+        ),
+        VibecoderKind::Unknown => {
+            let clipped: String = compiler_message
+                .trim()
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+                .take(200)
+                .collect();
+            let detail = if clipped.is_empty() {
+                "Revisemos juntos qué pasó.".to_string()
+            } else {
+                format!("Detalle: {clipped}.")
+            };
+            (
+                "Algo no salió",
+                format!("No pude completar ese paso. {detail}{context_suffix}"),
+                vec![
+                    ("Reintentar simple", "Probamos con un caso mínimo."),
+                    ("Pedir pista", "Te hago una pregunta para ubicarnos."),
+                    ("Ver ejemplo", "Te muestro un ejemplo parecido resuelto."),
+                ],
+            )
+        }
+    };
+    let options: Vec<VibecoderOption> = buttons
+        .into_iter()
+        .filter_map(|(label, hint)| VibecoderOption::try_new(label, hint).ok())
+        .collect();
+    // `try_new` debajo siempre tiene 2-3 (los literales de arriba cumplen);
+    // si algo fallara, el fallback garantiza 2 botones válidos sin pánico.
+    VibecoderError::try_new(kind, title, &explanation, options).unwrap_or_else(|_| {
+        let fallback_options = vec![
+            VibecoderOption {
+                label: "Reintentar".to_string(),
+                hint: "Probamos de nuevo con un caso mínimo.".to_string(),
+            },
+            VibecoderOption {
+                label: "Pedir pista".to_string(),
+                hint: "Te hago una pregunta para ubicarnos.".to_string(),
+            },
+        ];
+        VibecoderError {
+            kind,
+            title: "Algo no salió".to_string(),
+            explanation: "No pude completar ese paso. Probemos de a poco.".to_string(),
+            options: fallback_options,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2802,5 +3101,97 @@ mod tests {
         assert!(judge.contains("N≥200"));
         let ocr = ocr_local_stub().expect_err("L siempre falla");
         assert!(ocr.contains("ocr-local"));
+    }
+
+    #[test]
+    fn vibecoder_classifies_each_kind() {
+        assert_eq!(
+            vibecoder_classify("mismatched types: expected number found string"),
+            VibecoderKind::TypeMismatch
+        );
+        assert_eq!(
+            vibecoder_classify("syntax error: unexpected ')'"),
+            VibecoderKind::Syntax
+        );
+        assert_eq!(
+            vibecoder_classify("evaluated to non-finite value (NaN)"),
+            VibecoderKind::Domain
+        );
+        assert_eq!(
+            vibecoder_classify("request timed out after 60s"),
+            VibecoderKind::Timeout
+        );
+        assert_eq!(
+            vibecoder_classify("assistant-net disabled: NoNetwork"),
+            VibecoderKind::Network
+        );
+        assert_eq!(
+            vibecoder_classify("algo raro sin pista"),
+            VibecoderKind::Unknown
+        );
+        assert_eq!(vibecoder_classify(""), VibecoderKind::Unknown);
+    }
+
+    #[test]
+    fn vibecoder_explain_always_offers_two_or_three_buttons() {
+        for raw in [
+            "mismatched types: expected f64 found String",
+            "syntax error unexpected token",
+            "non-finite value",
+            "timed out",
+            "NoNetwork disabled",
+            "error totalmente desconocido xyz",
+            "",
+        ] {
+            let explained = vibecoder_explain(raw, "derivada");
+            assert!(
+                (MIN_VIBE_OPTIONS..=MAX_VIBE_OPTIONS).contains(&explained.options.len()),
+                "botones 2-3 para {raw:?}, fueron {}",
+                explained.options.len()
+            );
+            assert!(!explained.title.trim().is_empty());
+            assert!(!explained.explanation.trim().is_empty());
+            assert!(explained.explanation.chars().count() <= MAX_VIBE_EXPLANATION_CHARS);
+            for option in &explained.options {
+                assert!(!option.label.trim().is_empty());
+                assert!(!option.hint.trim().is_empty());
+            }
+            assert_eq!(
+                explained.option_labels().len(),
+                explained.options.len(),
+                "labels 1:1 con botones"
+            );
+        }
+    }
+
+    #[test]
+    fn vibecoder_explain_mentions_context_and_truncates_unknown() {
+        let with_context = vibecoder_explain("syntax error", "integral del parcial");
+        assert!(with_context.explanation.contains("integral del parcial"));
+        let long = "x".repeat(5_000);
+        let unknown = vibecoder_explain(&long, "");
+        assert!(unknown.explanation.chars().count() <= MAX_VIBE_EXPLANATION_CHARS);
+        assert_eq!(unknown.kind, VibecoderKind::Unknown);
+        let domain = vibecoder_explain("division by zero", "");
+        assert_eq!(domain.kind, VibecoderKind::Domain);
+        assert_eq!(domain.options.len(), 3);
+        let syntax = vibecoder_explain("unexpected paren", "");
+        assert_eq!(syntax.options.len(), 2);
+    }
+
+    #[test]
+    fn vibecoder_option_and_error_validate_bounds() {
+        assert!(VibecoderOption::try_new("", "hint").is_err());
+        assert!(VibecoderOption::try_new("ok", "").is_err());
+        assert!(VibecoderOption::try_new(&"l".repeat(33), "hint").is_err());
+        let ok_a = VibecoderOption::try_new("A", "hacer A").expect("botón");
+        let ok_b = VibecoderOption::try_new("B", "hacer B").expect("botón");
+        let solo = vec![ok_a.clone()];
+        assert!(VibecoderError::try_new(VibecoderKind::Unknown, "T", "E", solo).is_err());
+        let cuatro = vec![ok_a.clone(), ok_b.clone(), ok_a.clone(), ok_b.clone()];
+        assert!(VibecoderError::try_new(VibecoderKind::Unknown, "T", "E", cuatro).is_err());
+        let dos = vec![ok_a, ok_b];
+        assert!(VibecoderError::try_new(VibecoderKind::Unknown, "T", "E", dos).is_ok());
+        assert!(VibecoderError::try_new(VibecoderKind::Unknown, "", "E", vec![]).is_err());
     }
 }

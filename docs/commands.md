@@ -310,6 +310,24 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 
 - `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
 - `Rastro[objeto]`: Activa/desactiva el rastro de un objeto: al arrastrarlo deja una estela con fade. Rastro[etiqueta] alterna; Rastro[etiqueta, true|false] fija el estado. (Trace con matriz sigue siendo traza matricial.) Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `Rastro[objeto, estado]`. Alias: `Estela`.
+- `Button[rotulo, guion]`: Crea un botón (action object sobre texto) con guion del subset GGBScript; el click lo ejecuta la UI. Mutacion: crea objetos. Riesgo: bajo. Alias: `Boton`.
+- `Checkbox[rotulo, variable]`: Crea un checkbox ligado a una variable (1 activado, 0 desactivado). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Checkbox[rotulo, variable, inicial]`. Alias: `Casilla`.
+- `InputBox[rotulo, variable]`: Crea una caja de entrada ligada a una variable numérica. Mutacion: crea objetos. Riesgo: bajo. Alias: `CajaEntrada`.
+- `TextField[rotulo, variable]`: Crea un campo de texto ligado a una variable (variante de InputBox). Mutacion: crea objetos. Riesgo: bajo. Alias: `CampoTexto`.
+- `Show[objeto]`: Hace visibles de uno a cuatro objetos por etiqueta. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Mostrar`.
+- `Hide[objeto]`: Oculta de uno a cuatro objetos por etiqueta. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Ocultar`.
+- `ZoomIn[]`: Acerca la vista 2D (factor 1.25 por defecto, máximo 4 por invocación). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `ZoomIn[factor]`. Alias: `Acercar`.
+- `ZoomOut[]`: Aleja la vista 2D (factor 1.25 por defecto, máximo 4 por invocación). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `ZoomOut[factor]`. Alias: `Alejar`.
+- `PlayPause[]`: Alterna la animación de una variable o de todas si no se indica. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `PlayPause[variable]`. Alias: `AlternarAnimacion`.
+- `If[condicion, guion_si]`: Ejecuta un guion del subset si la condición numérica es cierta, con rama opcional. Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `If[condicion, guion_si, guion_no]`. Alias: `Si`.
+- `Repeat[n, guion]`: Repite un guion del subset de 1 a 1000 veces con presupuesto total de 1000 pasos. Mutacion: transforma objetos. Riesgo: medio. Alias: `Repetir`.
+- `DefineTool[nombre, pasos]`: Define una custom tool desde una secuencia y devuelve su JSON .ggt versionado. Mutacion: solo consulta. Riesgo: bajo. Alias: `DefinirHerramienta`.
+- `LoadTool[json]`: Valida un JSON .ggt (versión, nombre, cotas, allowlist) y lo describe sin ejecutar. Mutacion: solo consulta. Riesgo: bajo. Alias: `CargarHerramienta`.
+- `Execute[guion]`: No soportado: usa If/Repeat con pasos del subset o pulsa un Button. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejecutar`.
+- `StartAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
+- `StopAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
+- `Delete[objeto]`: No soportado: usa Erase[etiqueta] o EraseAll[]. Mutacion: solo consulta. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
+- `Rename[objeto, nuevo_nombre]`: No soportado: Grafito aún no renombra objetos por comando; edita la etiqueta en la UI. Mutacion: solo consulta. Riesgo: bajo. Alias: `Renombrar`.
 ## Análisis
 
 - `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.

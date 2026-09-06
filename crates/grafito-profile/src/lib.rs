@@ -4,6 +4,7 @@
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
 pub mod bkt;
+pub mod elo;
 pub mod exam;
 pub mod long_memory;
 pub mod mascot;
@@ -15,6 +16,10 @@ pub mod working_memory;
 pub use bkt::{
     bkt_params_for_branch, bkt_params_for_lo, bkt_params_for_lo_opt, bkt_posterior, bkt_update,
     is_known_lo, mastery_from_bkt, BktParams, BktState, ALL_LO_IDS, BKT_DEFAULT_PARAMS,
+};
+pub use elo::{
+    elo_expected, elo_update, EloRating, EloState, ELO_DEFAULT_K, ELO_DEFAULT_RATING, ELO_MAX_K,
+    ELO_MAX_RATING, ELO_MIN_K, ELO_MIN_RATING, ELO_SCALE,
 };
 pub use long_memory::{Fact, LongTermMemory, Preferences};
 pub use mascot::{

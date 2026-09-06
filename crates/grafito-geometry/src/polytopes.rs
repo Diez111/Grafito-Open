@@ -2981,3 +2981,1646 @@ mod tests {
         }
     }
 }
+
+// ── G-B: mallas 3D acotadas (Net, lathe/extrusión, platónicos, implícita, picking) ──
+//
+// Frente G-B vs GeoGebra 3D (`Net`, `Polyhedron`, `Surface of Revolution`,
+// `IntersectPath`/`Plane`, `ImplicitSurface3D`). Todo constructor valida
+// entradas finitas y presupuestos ANTES de reservar memoria (`checked_mul` y
+// cotas duras); fuera de cota devuelve `Err` honesto, nunca pánico ni
+// `unwrap`/`expect` en producción.
+
+/// Tolerancia geométrica por defecto para picking rayo-malla y secciones plano-poliedro.
+pub const GB_GEOM_EPS: f64 = 1.0e-9;
+
+/// Vértices máximos de una malla G-B (amable con CPU/GPU, muy por debajo de 250k celdas).
+pub const GB_MAX_MESH_VERTICES: usize = 65_536;
+
+/// Triángulos máximos de una malla G-B (alineado con `MAX_CELLS` 250k del domain coloring).
+pub const GB_MAX_MESH_TRIANGLES: usize = 250_000;
+
+/// Caras máximas de un net desplegable (cubo/prisma/pirámide quedan muy por debajo).
+pub const GB_MAX_NET_FACES: usize = 256;
+
+/// Puntos máximos del perfil de revolución o extrusión.
+pub const GB_MAX_PROFILE_POINTS: usize = 1_024;
+
+/// Segmentos radiales máximos del lathe (superficie de revolución).
+pub const GB_MAX_LATHE_SEGMENTS: usize = 256;
+
+/// Lados máximos de la base de un prisma con net (`64 * altura` cabe en presupuestos).
+pub const GB_MAX_PRISM_SIDES: usize = 64;
+
+/// Celdas por eje máximas del marching (`32³ = 32 768` celdas < 250k).
+pub const GB_MAX_MARCHING_CELLS_PER_AXIS: usize = 32;
+
+/// Razón áurea `(1 + √5) / 2` para icosaedro/dodecaedro exactos.
+pub const GB_GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
+
+/// Error honesto de construcción de mallas G-B.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MeshError {
+    /// Alguna coordenada de entrada no es finita.
+    NonFiniteInput,
+    /// La arista/longitud pedida no es finita y estrictamente positiva.
+    NonPositiveEdge { value: f64 },
+    /// Muy pocos puntos para el perfil/polígono pedido.
+    TooFewPoints { found: usize, minimum: usize },
+    /// Demasiados puntos para el perfil/polígono pedido.
+    TooManyPoints { found: usize, maximum: usize },
+    /// Demasiados segmentos radiales/lados para el presupuesto.
+    TooManySegments { found: usize, maximum: usize },
+    /// La malla resultante excedería el presupuesto de vértices o triángulos.
+    MeshBudgetExceeded { what: &'static str, limit: usize },
+    /// Geometría degenerada (área nula, perfil sobre el eje, ápice imposible...).
+    DegenerateGeometry { reason: &'static str },
+    /// El polígono de extrusión no es estrictamente convexo (subconjunto honesto).
+    NonConvexPolygon,
+    /// El campo implícito no está definido en un nodo de la rejilla (fail-closed).
+    FieldUndefined { at: [f64; 3] },
+}
+
+impl fmt::Display for MeshError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteInput => formatter.write_str("la entrada 3D debe ser finita"),
+            Self::NonPositiveEdge { value } => {
+                write!(
+                    formatter,
+                    "la arista debe ser finita y positiva, era {value}"
+                )
+            }
+            Self::TooFewPoints { found, minimum } => write!(
+                formatter,
+                "se necesitan al menos {minimum} puntos, llegaron {found}"
+            ),
+            Self::TooManyPoints { found, maximum } => {
+                write!(formatter, "como máximo {maximum} puntos, llegaron {found}")
+            }
+            Self::TooManySegments { found, maximum } => write!(
+                formatter,
+                "como máximo {maximum} segmentos, llegaron {found}"
+            ),
+            Self::MeshBudgetExceeded { what, limit } => {
+                write!(formatter, "{what} excede el presupuesto de {limit}")
+            }
+            Self::DegenerateGeometry { reason } => {
+                write!(formatter, "geometría degenerada: {reason}")
+            }
+            Self::NonConvexPolygon => {
+                formatter.write_str("la extrusión solo admite polígonos estrictamente convexos")
+            }
+            Self::FieldUndefined { at } => write!(
+                formatter,
+                "el campo implícito no está definido en ({}, {}, {})",
+                at[0], at[1], at[2]
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MeshError {}
+
+/// Malla triangular 3D acotada con índices validados.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangleMesh3D {
+    vertices: Vec<Point3D>,
+    triangles: Vec<[usize; 3]>,
+}
+
+impl TriangleMesh3D {
+    /// Construye una malla validando presupuestos, finitud e índices.
+    pub fn new(vertices: Vec<Point3D>, triangles: Vec<[usize; 3]>) -> Result<Self, MeshError> {
+        if vertices.len() > GB_MAX_MESH_VERTICES {
+            return Err(MeshError::MeshBudgetExceeded {
+                what: "vértices de malla",
+                limit: GB_MAX_MESH_VERTICES,
+            });
+        }
+        if triangles.len() > GB_MAX_MESH_TRIANGLES {
+            return Err(MeshError::MeshBudgetExceeded {
+                what: "triángulos de malla",
+                limit: GB_MAX_MESH_TRIANGLES,
+            });
+        }
+        if vertices.iter().any(|point| !point.is_finite()) {
+            return Err(MeshError::NonFiniteInput);
+        }
+        if triangles
+            .iter()
+            .any(|triangle| triangle.iter().any(|&index| index >= vertices.len()))
+        {
+            return Err(MeshError::DegenerateGeometry {
+                reason: "triángulo con índice fuera de rango",
+            });
+        }
+        Ok(Self {
+            vertices,
+            triangles,
+        })
+    }
+
+    /// Vértices de la malla.
+    pub fn vertices(&self) -> &[Point3D] {
+        &self.vertices
+    }
+
+    /// Triángulos como índices sobre [`Self::vertices`].
+    pub fn triangles(&self) -> &[[usize; 3]] {
+        &self.triangles
+    }
+
+    /// Número de vértices.
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Número de triángulos.
+    pub fn triangle_count(&self) -> usize {
+        self.triangles.len()
+    }
+
+    /// Área total por suma de triángulos; `None` si no es finita.
+    pub fn surface_area(&self) -> Option<f64> {
+        let mut total = 0.0_f64;
+        for triangle in &self.triangles {
+            let a = self.vertices.get(triangle[0])?.to_dvec3();
+            let b = self.vertices.get(triangle[1])?.to_dvec3();
+            let c = self.vertices.get(triangle[2])?.to_dvec3();
+            let area = (b - a).cross(c - a).length() * 0.5;
+            total += area;
+        }
+        total.is_finite().then_some(total)
+    }
+
+    /// Caja envolvente; `None` si la malla está vacía.
+    pub fn aabb(&self) -> Option<crate::types3d::Aabb3D> {
+        crate::types3d::Aabb3D::from_points(self.vertices.iter().copied())
+    }
+
+    /// Rango `(mín, máx)` de longitudes de arista únicas; `None` si no hay aristas finitas.
+    pub fn edge_length_range(&self) -> Option<(f64, f64)> {
+        let mut edges = std::collections::BTreeSet::new();
+        for triangle in &self.triangles {
+            for side in 0..3 {
+                let first = triangle[side];
+                let second = triangle[(side + 1) % 3];
+                edges.insert((first.min(second), first.max(second)));
+            }
+        }
+        let mut minimum = f64::INFINITY;
+        let mut maximum = 0.0_f64;
+        for (first, second) in edges {
+            let a = self.vertices.get(first)?;
+            let b = self.vertices.get(second)?;
+            let length = a.distance(b);
+            if !length.is_finite() || length <= 0.0 {
+                return None;
+            }
+            minimum = minimum.min(length);
+            maximum = maximum.max(length);
+        }
+        minimum.is_finite().then_some((minimum, maximum))
+    }
+}
+
+/// Sólido platónico 3D con vértices gold-ratio exactos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatonicSolid {
+    /// 12 vértices `(0, ±1, ±φ)` y permutaciones; 20 caras triangulares.
+    Icosahedron,
+    /// 20 vértices `(±1, ±1, ±1)`, `(0, ±φ, ±1/φ)` y permutaciones cíclicas;
+    /// 12 pentágonos. La orientación es la dual del [`PlatonicSolid::Icosahedron`].
+    Dodecahedron,
+}
+
+fn gb_positive_edge(edge_length: f64) -> Result<f64, MeshError> {
+    if !edge_length.is_finite() || edge_length <= 0.0 {
+        return Err(MeshError::NonPositiveEdge { value: edge_length });
+    }
+    Ok(edge_length)
+}
+
+/// Vértices canónicos del icosaedro unitario (`a = 1`, arista canónica `2`).
+fn icosahedron_unit_vertices() -> [Point3D; 12] {
+    let phi = GB_GOLDEN_RATIO;
+    [
+        Point3D::new(-1.0, phi, 0.0),
+        Point3D::new(1.0, phi, 0.0),
+        Point3D::new(-1.0, -phi, 0.0),
+        Point3D::new(1.0, -phi, 0.0),
+        Point3D::new(0.0, -1.0, phi),
+        Point3D::new(0.0, 1.0, phi),
+        Point3D::new(0.0, -1.0, -phi),
+        Point3D::new(0.0, 1.0, -phi),
+        Point3D::new(phi, 0.0, -1.0),
+        Point3D::new(phi, 0.0, 1.0),
+        Point3D::new(-phi, 0.0, -1.0),
+        Point3D::new(-phi, 0.0, 1.0),
+    ]
+}
+
+/// Caras canónicas del icosaedro sobre [`icosahedron_unit_vertices`].
+const ICOSAHEDRON_FACES: [[usize; 3]; 20] = [
+    [0, 11, 5],
+    [0, 5, 1],
+    [0, 1, 7],
+    [0, 7, 10],
+    [0, 10, 11],
+    [1, 5, 9],
+    [5, 11, 4],
+    [11, 10, 2],
+    [10, 7, 6],
+    [7, 1, 8],
+    [3, 9, 4],
+    [3, 4, 2],
+    [3, 2, 6],
+    [3, 6, 8],
+    [3, 8, 9],
+    [4, 9, 5],
+    [2, 4, 11],
+    [6, 2, 10],
+    [8, 6, 7],
+    [9, 8, 1],
+];
+
+/// Vértices canónicos del dodecaedro unitario (`a = 1`, arista canónica `2/φ`).
+///
+/// Orientación dual del icosaedro de [`icosahedron_unit_vertices`]: cada
+/// vértice del icosaedro apunta al centro de un pentágono.
+fn dodecahedron_unit_vertices() -> [Point3D; 20] {
+    let phi = GB_GOLDEN_RATIO;
+    let inv_phi = 1.0 / phi;
+    [
+        Point3D::new(1.0, 1.0, 1.0),
+        Point3D::new(1.0, 1.0, -1.0),
+        Point3D::new(1.0, -1.0, 1.0),
+        Point3D::new(1.0, -1.0, -1.0),
+        Point3D::new(-1.0, 1.0, 1.0),
+        Point3D::new(-1.0, 1.0, -1.0),
+        Point3D::new(-1.0, -1.0, 1.0),
+        Point3D::new(-1.0, -1.0, -1.0),
+        Point3D::new(0.0, phi, inv_phi),
+        Point3D::new(0.0, phi, -inv_phi),
+        Point3D::new(0.0, -phi, inv_phi),
+        Point3D::new(0.0, -phi, -inv_phi),
+        Point3D::new(inv_phi, 0.0, phi),
+        Point3D::new(inv_phi, 0.0, -phi),
+        Point3D::new(-inv_phi, 0.0, phi),
+        Point3D::new(-inv_phi, 0.0, -phi),
+        Point3D::new(phi, inv_phi, 0.0),
+        Point3D::new(phi, -inv_phi, 0.0),
+        Point3D::new(-phi, inv_phi, 0.0),
+        Point3D::new(-phi, -inv_phi, 0.0),
+    ]
+}
+
+/// Ordena los 5 vértices de una cara pentagonal alrededor de su eje.
+fn order_pentagon_around_axis(
+    axis: Point3D,
+    candidates: &[(usize, Point3D)],
+) -> Option<[usize; 5]> {
+    if candidates.len() != 5 {
+        return None;
+    }
+    let axis_vector = axis.to_dvec3();
+    if axis_vector.length_squared() <= 1.0e-24 {
+        return None;
+    }
+    let axis_norm = axis_vector.normalize_or_zero();
+    let helper = if axis_norm.x.abs() < 0.9 {
+        glam::DVec3::X
+    } else {
+        glam::DVec3::Y
+    };
+    let tangent = axis_norm.cross(helper).normalize_or_zero();
+    let bitangent = axis_norm.cross(tangent);
+    if tangent.length_squared() <= 0.5 || bitangent.length_squared() <= 0.5 {
+        return None;
+    }
+    let centroid = candidates
+        .iter()
+        .fold(glam::DVec3::ZERO, |sum, (_, point)| sum + point.to_dvec3())
+        / candidates.len() as f64;
+    let mut by_angle: Vec<(f64, usize)> = Vec::with_capacity(5);
+    for (index, point) in candidates {
+        let radial = point.to_dvec3() - centroid;
+        let angle = radial.dot(bitangent).atan2(radial.dot(tangent));
+        if !angle.is_finite() {
+            return None;
+        }
+        by_angle.push((angle, *index));
+    }
+    by_angle.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut face = [0_usize; 5];
+    for (slot, (_, index)) in by_angle.iter().enumerate() {
+        face[slot] = *index;
+    }
+    Some(face)
+}
+
+/// Pentágonos ordenados del dodecaedro canónico (índices sobre los 20
+/// vértices unitarios, un pentágono por vértice del icosaedro dual).
+///
+/// Cada vértice del icosaedro apunta al centro de un pentágono del dodecaedro
+/// concéntrico con la misma orientación; los 5 vértices más alineados con
+/// cada eje forman el pentágono. Honesto: `None` si la dualidad no cierra.
+/// El render y los tests lo usan para distinguir aristas reales (borde del
+/// pentágono) de diagonales del abanico de triangulación.
+pub fn dodecahedron_pentagons() -> Option<[[usize; 5]; 12]> {
+    let icosa = icosahedron_unit_vertices();
+    let dodeca = dodecahedron_unit_vertices();
+    let mut faces = [[0_usize; 5]; 12];
+    for (face_slot, axis) in icosa.iter().enumerate() {
+        let mut dots: Vec<(f64, usize)> = Vec::with_capacity(dodeca.len());
+        for (index, vertex) in dodeca.iter().enumerate() {
+            let dot = axis.to_dvec3().normalize_or_zero().dot(vertex.to_dvec3());
+            if !dot.is_finite() {
+                return None;
+            }
+            dots.push((dot, index));
+        }
+        dots.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top: Vec<(usize, Point3D)> = dots
+            .iter()
+            .take(5)
+            .map(|(_, index)| (*index, dodeca[*index]))
+            .collect();
+        // La 5ª y 6ª alineación deben separarse: si empatan, la dualidad no cierra.
+        let fifth = dots.get(4)?.0;
+        let sixth = dots.get(5)?.0;
+        if (fifth - sixth).abs() <= 1.0e-12 {
+            return None;
+        }
+        faces[face_slot] = order_pentagon_around_axis(*axis, &top)?;
+    }
+    Some(faces)
+}
+
+/// Malla exacta del sólido platónico con la arista pedida (vértices gold-ratio).
+///
+/// El dodecaedro triangula cada pentágono en abanico (3 triángulos por cara).
+pub fn platonic_mesh(solid: PlatonicSolid, edge_length: f64) -> Result<TriangleMesh3D, MeshError> {
+    gb_positive_edge(edge_length)?;
+    match solid {
+        PlatonicSolid::Icosahedron => {
+            // Arista canónica 2 (p. ej. (-1,φ,0)-(1,φ,0)).
+            let scale = edge_length / 2.0;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices: Vec<Point3D> = icosahedron_unit_vertices()
+                .iter()
+                .map(|point| Point3D::new(point.x * scale, point.y * scale, point.z * scale))
+                .collect();
+            TriangleMesh3D::new(vertices, ICOSAHEDRON_FACES.to_vec())
+        }
+        PlatonicSolid::Dodecahedron => {
+            // Arista canónica 2/φ (p. ej. (1,1,1)-(0,1/φ,φ)).
+            let scale = edge_length * GB_GOLDEN_RATIO / 2.0;
+            if !scale.is_finite() {
+                return Err(MeshError::NonPositiveEdge { value: edge_length });
+            }
+            let vertices: Vec<Point3D> = dodecahedron_unit_vertices()
+                .iter()
+                .map(|point| Point3D::new(point.x * scale, point.y * scale, point.z * scale))
+                .collect();
+            let faces = dodecahedron_pentagons().ok_or(MeshError::DegenerateGeometry {
+                reason: "la dualidad icosaedro-dodecaedro no cerró",
+            })?;
+            let mut triangles = Vec::with_capacity(36);
+            for face in faces {
+                for fan in 1..4 {
+                    triangles.push([face[0], face[fan], face[fan + 1]]);
+                }
+            }
+            TriangleMesh3D::new(vertices, triangles)
+        }
+    }
+}
+
+// ── Nets desplegables ──
+
+/// Panel 2D de un net: cara (`is_tab = false`) o solapa (`is_tab = true`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetPanel {
+    /// Polígono 2D en orden (rectángulo, triángulo, n-gono o trapecio de solapa).
+    pub points: Vec<[f64; 2]>,
+    /// Índice de la cara 3D de origen (las solapas comparten el de su cara).
+    pub face_index: usize,
+    /// `true` si es solapa de pegado, `false` si es cara del sólido.
+    pub is_tab: bool,
+}
+
+/// Net desplegable 2D con caras y solapas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolyhedronNet {
+    panels: Vec<NetPanel>,
+    edge_length: f64,
+}
+
+impl PolyhedronNet {
+    fn new(panels: Vec<NetPanel>, edge_length: f64) -> Result<Self, MeshError> {
+        gb_positive_edge(edge_length)?;
+        if panels.len() > GB_MAX_NET_FACES {
+            return Err(MeshError::MeshBudgetExceeded {
+                what: "paneles de net",
+                limit: GB_MAX_NET_FACES,
+            });
+        }
+        if panels.iter().any(|panel| {
+            panel.points.len() < 3
+                || panel
+                    .points
+                    .iter()
+                    .any(|point| !point[0].is_finite() || !point[1].is_finite())
+        }) {
+            return Err(MeshError::DegenerateGeometry {
+                reason: "panel de net no finito o con menos de 3 puntos",
+            });
+        }
+        Ok(Self {
+            panels,
+            edge_length,
+        })
+    }
+
+    /// Paneles del net (caras + solapas).
+    pub fn panels(&self) -> &[NetPanel] {
+        &self.panels
+    }
+
+    /// Número de caras (sin solapas).
+    pub fn face_count(&self) -> usize {
+        self.panels.iter().filter(|panel| !panel.is_tab).count()
+    }
+
+    /// Número de solapas.
+    pub fn tab_count(&self) -> usize {
+        self.panels.iter().filter(|panel| panel.is_tab).count()
+    }
+
+    /// Arista del sólido de origen.
+    pub fn edge_length(&self) -> f64 {
+        self.edge_length
+    }
+
+    /// Área firmada de un polígono 2D (positiva si es CCW).
+    pub fn polygon_area(points: &[[f64; 2]]) -> f64 {
+        let mut twice = 0.0_f64;
+        for side in 0..points.len() {
+            let a = points[side];
+            let b = points[(side + 1) % points.len()];
+            twice += a[0] * b[1] - b[0] * a[1];
+        }
+        twice * 0.5
+    }
+
+    /// Área total de las caras (sin solapas); `None` si no es finita.
+    pub fn face_area(&self) -> Option<f64> {
+        let mut total = 0.0_f64;
+        for panel in &self.panels {
+            if !panel.is_tab {
+                total += Self::polygon_area(&panel.points).abs();
+            }
+        }
+        total.is_finite().then_some(total)
+    }
+
+    /// Área total de las solapas; `None` si no es finita.
+    pub fn tab_area(&self) -> Option<f64> {
+        let mut total = 0.0_f64;
+        for panel in &self.panels {
+            if panel.is_tab {
+                total += Self::polygon_area(&panel.points).abs();
+            }
+        }
+        total.is_finite().then_some(total)
+    }
+}
+
+fn gb_rect_panel(x: f64, y: f64, width: f64, height: f64, face_index: usize) -> NetPanel {
+    NetPanel {
+        points: vec![
+            [x, y],
+            [x + width, y],
+            [x + width, y + height],
+            [x, y + height],
+        ],
+        face_index,
+        is_tab: false,
+    }
+}
+
+/// Trapecio de solapa sobre la arista `p -> q`, hacia afuera según `outward` unitario.
+fn gb_tab_panel(
+    p: [f64; 2],
+    q: [f64; 2],
+    outward: [f64; 2],
+    height: f64,
+    face_index: usize,
+) -> NetPanel {
+    let inset = 0.2_f64;
+    let inner_p = [p[0] + (q[0] - p[0]) * inset, p[1] + (q[1] - p[1]) * inset];
+    let inner_q = [q[0] - (q[0] - p[0]) * inset, q[1] - (q[1] - p[1]) * inset];
+    NetPanel {
+        points: vec![
+            p,
+            q,
+            [
+                inner_q[0] + outward[0] * height,
+                inner_q[1] + outward[1] * height,
+            ],
+            [
+                inner_p[0] + outward[0] * height,
+                inner_p[1] + outward[1] * height,
+            ],
+        ],
+        face_index,
+        is_tab: true,
+    }
+}
+
+/// Net del cubo en cruz (4 caras en fila + tapa arriba/abajo) con 6 solapas.
+pub fn cube_net(edge_length: f64) -> Result<PolyhedronNet, MeshError> {
+    gb_positive_edge(edge_length)?;
+    let a = edge_length;
+    let tab_h = a * 0.25;
+    let mut panels = Vec::with_capacity(12);
+    // Fila central: izquierda(0), frente(1), derecha(2), atrás(3).
+    for (face, origin_x) in [0.0, a, 2.0 * a, 3.0 * a].iter().enumerate() {
+        panels.push(gb_rect_panel(*origin_x, 0.0, a, a, face));
+    }
+    // Tapa (4) arriba del frente, base (5) debajo del frente.
+    panels.push(gb_rect_panel(a, a, a, a, 4));
+    panels.push(gb_rect_panel(a, -a, a, a, 5));
+    // 6 solapas en bordes libres: exterior izq/der de la fila, 2 en tapa, 2 en base.
+    panels.push(gb_tab_panel([0.0, 0.0], [0.0, a], [-1.0, 0.0], tab_h, 0));
+    panels.push(gb_tab_panel(
+        [4.0 * a, a],
+        [4.0 * a, 0.0],
+        [1.0, 0.0],
+        tab_h,
+        3,
+    ));
+    panels.push(gb_tab_panel(
+        [a, 2.0 * a],
+        [2.0 * a, 2.0 * a],
+        [0.0, 1.0],
+        tab_h,
+        4,
+    ));
+    panels.push(gb_tab_panel([2.0 * a, a], [a, a], [0.0, -1.0], tab_h, 4));
+    panels.push(gb_tab_panel([2.0 * a, -a], [a, -a], [0.0, -1.0], tab_h, 5));
+    panels.push(gb_tab_panel([a, 0.0], [a, -a], [-1.0, 0.0], tab_h, 5));
+    PolyhedronNet::new(panels, edge_length)
+}
+
+/// Net del prisma recto de base regular (`sides` 3..=64): tira lateral + 2 bases, con solapas.
+pub fn prism_net(sides: usize, base_edge: f64, height: f64) -> Result<PolyhedronNet, MeshError> {
+    gb_positive_edge(base_edge)?;
+    gb_positive_edge(height)?;
+    if sides < 3 {
+        return Err(MeshError::TooFewPoints {
+            found: sides,
+            minimum: 3,
+        });
+    }
+    if sides > GB_MAX_PRISM_SIDES {
+        return Err(MeshError::TooManySegments {
+            found: sides,
+            maximum: GB_MAX_PRISM_SIDES,
+        });
+    }
+    let a = base_edge;
+    let tab_h = a * 0.25;
+    let mut panels = Vec::with_capacity(2 * sides + 4);
+    // Tira lateral: `sides` rectángulos a × h.
+    for face in 0..sides {
+        let x = face as f64 * a;
+        panels.push(gb_rect_panel(x, 0.0, a, height, face));
+    }
+    // Bases regulares pegadas al primer rectángulo (arriba y abajo).
+    let radius = a / (2.0 * (std::f64::consts::PI / sides as f64).sin());
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "radio de base de prisma no finito",
+        });
+    }
+    let apothem = a / (2.0 * (std::f64::consts::PI / sides as f64).tan());
+    let top_center = [a * 0.5, height + apothem];
+    let bottom_center = [a * 0.5, -apothem];
+    // El primer vértice del n-gono debe coincidir con la arista superior/inferior:
+    // se rota para que un lado quede horizontal sobre el rectángulo 0.
+    let rot = -std::f64::consts::FRAC_PI_2 - std::f64::consts::PI / sides as f64;
+    let mut top: Vec<[f64; 2]> = Vec::with_capacity(sides);
+    let mut bottom: Vec<[f64; 2]> = Vec::with_capacity(sides);
+    for side in 0..sides {
+        let angle = rot + side as f64 * std::f64::consts::TAU / sides as f64;
+        top.push([
+            top_center[0] + radius * angle.cos(),
+            top_center[1] + radius * angle.sin(),
+        ]);
+        bottom.push([
+            bottom_center[0] + radius * angle.cos(),
+            bottom_center[1] - radius * angle.sin(),
+        ]);
+    }
+    panels.push(NetPanel {
+        points: top.clone(),
+        face_index: sides,
+        is_tab: false,
+    });
+    panels.push(NetPanel {
+        points: bottom.clone(),
+        face_index: sides + 1,
+        is_tab: false,
+    });
+    // Solapas en cada arista libre de ambas bases (todas menos la pegada al rectángulo 0).
+    for base in [top, bottom] {
+        for side in 1..sides {
+            let p = base[side];
+            let q = base[(side + 1) % sides];
+            let mx = (p[0] + q[0]) * 0.5;
+            let my = (p[1] + q[1]) * 0.5;
+            let cx = if base[0][1] > height * 0.5 {
+                top_center
+            } else {
+                bottom_center
+            };
+            let mut outward = [mx - cx[0], my - cx[1]];
+            let norm = (outward[0] * outward[0] + outward[1] * outward[1]).sqrt();
+            if !norm.is_finite() || norm <= 1.0e-12 {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "arista de base de prisma degenerada",
+                });
+            }
+            outward[0] /= norm;
+            outward[1] /= norm;
+            panels.push(gb_tab_panel(p, q, outward, tab_h, sides));
+        }
+    }
+    PolyhedronNet::new(panels, base_edge)
+}
+
+/// Net de la pirámide cuadrada (base + 4 triángulos isósceles) con 8 solapas.
+///
+/// `lateral_edge` debe superar `base_edge / √2` para que el ápice exista.
+pub fn pyramid_net(base_edge: f64, lateral_edge: f64) -> Result<PolyhedronNet, MeshError> {
+    gb_positive_edge(base_edge)?;
+    gb_positive_edge(lateral_edge)?;
+    let minimum = base_edge / std::f64::consts::SQRT_2;
+    if lateral_edge <= minimum {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "la arista lateral debe superar base / √2",
+        });
+    }
+    let a = base_edge;
+    let tab_h = a * 0.25;
+    // Altura del triángulo isósceles (lados e, e, a).
+    let tri_height = (lateral_edge * lateral_edge - a * a * 0.25).sqrt();
+    if !tri_height.is_finite() || tri_height <= 0.0 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "altura de cara triangular no finita",
+        });
+    }
+    let mut panels = Vec::with_capacity(13);
+    panels.push(gb_rect_panel(0.0, 0.0, a, a, 0));
+    // 4 triángulos, uno por lado de la base; ápice hacia afuera.
+    let sides = [
+        ([0.0, 0.0], [a, 0.0], [a * 0.5, -tri_height]),
+        ([a, 0.0], [a, a], [a + tri_height, a * 0.5]),
+        ([a, a], [0.0, a], [a * 0.5, a + tri_height]),
+        ([0.0, a], [0.0, 0.0], [-tri_height, a * 0.5]),
+    ];
+    for (face, (p, q, apex)) in sides.iter().enumerate() {
+        panels.push(NetPanel {
+            points: vec![*p, *q, *apex],
+            face_index: face + 1,
+            is_tab: false,
+        });
+        // Solapas en las 2 aristas libres de cada triángulo (las que concurren al ápice).
+        for (u, v) in [(*p, *apex), (*apex, *q)] {
+            let mx = (u[0] + v[0]) * 0.5;
+            let my = (u[1] + v[1]) * 0.5;
+            // Afuera = opuesto al baricentro del triángulo.
+            let centroid = [(p[0] + q[0] + apex[0]) / 3.0, (p[1] + q[1] + apex[1]) / 3.0];
+            let mut outward = [mx - centroid[0], my - centroid[1]];
+            let norm = (outward[0] * outward[0] + outward[1] * outward[1]).sqrt();
+            if !norm.is_finite() || norm <= 1.0e-12 {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "arista de cara piramidal degenerada",
+                });
+            }
+            outward[0] /= norm;
+            outward[1] /= norm;
+            panels.push(gb_tab_panel(u, v, outward, tab_h, face + 1));
+        }
+    }
+    PolyhedronNet::new(panels, base_edge)
+}
+
+// ── Superficies de revolución (lathe) y extrusión ──
+
+fn gb_check_profile(profile: &[[f64; 2]]) -> Result<(), MeshError> {
+    if profile.len() < 2 {
+        return Err(MeshError::TooFewPoints {
+            found: profile.len(),
+            minimum: 2,
+        });
+    }
+    if profile.len() > GB_MAX_PROFILE_POINTS {
+        return Err(MeshError::TooManyPoints {
+            found: profile.len(),
+            maximum: GB_MAX_PROFILE_POINTS,
+        });
+    }
+    if profile
+        .iter()
+        .any(|point| !point[0].is_finite() || !point[1].is_finite() || point[0] < 0.0)
+    {
+        return Err(MeshError::NonFiniteInput);
+    }
+    Ok(())
+}
+
+/// Superficie de revolución: polilínea `(radio ≥ 0, altura)` rotada alrededor del eje Y.
+///
+/// Extremos sobre el eje (`radio ≤ eps`) se vuelven polos con un solo vértice
+/// (abanico); perfiles abiertos dejan la malla abierta honestamente.
+pub fn lathe_mesh(profile: &[[f64; 2]], segments: usize) -> Result<TriangleMesh3D, MeshError> {
+    gb_check_profile(profile)?;
+    if segments < 3 {
+        return Err(MeshError::TooFewPoints {
+            found: segments,
+            minimum: 3,
+        });
+    }
+    if segments > GB_MAX_LATHE_SEGMENTS {
+        return Err(MeshError::TooManySegments {
+            found: segments,
+            maximum: GB_MAX_LATHE_SEGMENTS,
+        });
+    }
+    let vertex_budget =
+        profile
+            .len()
+            .checked_mul(segments)
+            .ok_or(MeshError::MeshBudgetExceeded {
+                what: "vértices de lathe",
+                limit: GB_MAX_MESH_VERTICES,
+            })?;
+    if vertex_budget > GB_MAX_MESH_VERTICES {
+        return Err(MeshError::MeshBudgetExceeded {
+            what: "vértices de lathe",
+            limit: GB_MAX_MESH_VERTICES,
+        });
+    }
+    let triangle_budget = profile
+        .len()
+        .saturating_sub(1)
+        .checked_mul(segments)
+        .and_then(|cells| cells.checked_mul(2))
+        .ok_or(MeshError::MeshBudgetExceeded {
+            what: "triángulos de lathe",
+            limit: GB_MAX_MESH_TRIANGLES,
+        })?;
+    if triangle_budget > GB_MAX_MESH_TRIANGLES {
+        return Err(MeshError::MeshBudgetExceeded {
+            what: "triángulos de lathe",
+            limit: GB_MAX_MESH_TRIANGLES,
+        });
+    }
+    // Puntos consecutivos duplicados colapsarían un anillo entero.
+    for pair in profile.windows(2) {
+        let dr = pair[1][0] - pair[0][0];
+        let dy = pair[1][1] - pair[0][1];
+        if !dr.is_finite() || !dy.is_finite() || dr * dr + dy * dy <= 1.0e-24 {
+            return Err(MeshError::DegenerateGeometry {
+                reason: "puntos consecutivos duplicados en el perfil",
+            });
+        }
+    }
+
+    let mut vertices: Vec<Point3D> = Vec::with_capacity(vertex_budget);
+    // Anillos: un polo colapsa a un solo vértice; si no, `segments` vértices.
+    let mut rings: Vec<Vec<usize>> = Vec::with_capacity(profile.len());
+    for point in profile {
+        let (radius, height) = (point[0], point[1]);
+        if radius <= GB_GEOM_EPS {
+            vertices.push(Point3D::new(0.0, height, 0.0));
+            let apex = vertices.len() - 1;
+            rings.push(vec![apex]);
+        } else {
+            let mut ring = Vec::with_capacity(segments);
+            for segment in 0..segments {
+                let angle = segment as f64 * std::f64::consts::TAU / segments as f64;
+                vertices.push(Point3D::new(
+                    radius * angle.cos(),
+                    height,
+                    radius * angle.sin(),
+                ));
+            }
+            let base = vertices.len() - segments;
+            for offset in 0..segments {
+                ring.push(base + offset);
+            }
+            rings.push(ring);
+        }
+    }
+    if rings.len() == 2 && rings[0].len() == 1 && rings[1].len() == 1 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "el perfil vive sobre el eje de revolución",
+        });
+    }
+    let mut triangles: Vec<[usize; 3]> = Vec::with_capacity(triangle_budget);
+    for band in 0..rings.len() - 1 {
+        let lower = &rings[band];
+        let upper = &rings[band + 1];
+        match (lower.len(), upper.len()) {
+            (1, 1) => {
+                return Err(MeshError::DegenerateGeometry {
+                    reason: "tramo del perfil sobre el eje de revolución",
+                });
+            }
+            (1, _) => {
+                for side in 0..upper.len() {
+                    let next = (side + 1) % upper.len();
+                    triangles.push([lower[0], upper[side], upper[next]]);
+                }
+            }
+            (_, 1) => {
+                for side in 0..lower.len() {
+                    let next = (side + 1) % lower.len();
+                    triangles.push([lower[side], upper[0], lower[next]]);
+                }
+            }
+            _ => {
+                for side in 0..segments {
+                    let next = (side + 1) % segments;
+                    triangles.push([lower[side], upper[side], upper[next]]);
+                    triangles.push([lower[side], upper[next], lower[next]]);
+                }
+            }
+        }
+    }
+    TriangleMesh3D::new(vertices, triangles)
+}
+
+/// Extrusión recta de un polígono estrictamente convexo entre `y = 0` e `y = height`.
+pub fn extrude_mesh(polygon: &[[f64; 2]], height: f64) -> Result<TriangleMesh3D, MeshError> {
+    if polygon.len() < 3 {
+        return Err(MeshError::TooFewPoints {
+            found: polygon.len(),
+            minimum: 3,
+        });
+    }
+    if polygon.len() > GB_MAX_PROFILE_POINTS {
+        return Err(MeshError::TooManyPoints {
+            found: polygon.len(),
+            maximum: GB_MAX_PROFILE_POINTS,
+        });
+    }
+    if !height.is_finite() || height <= 0.0 {
+        return Err(MeshError::NonPositiveEdge { value: height });
+    }
+    if polygon
+        .iter()
+        .any(|point| !point[0].is_finite() || !point[1].is_finite())
+    {
+        return Err(MeshError::NonFiniteInput);
+    }
+    // Convexidad estricta: todos los giros no nulos con el mismo signo.
+    let mut sign = 0.0_f64;
+    for side in 0..polygon.len() {
+        let a = polygon[side];
+        let b = polygon[(side + 1) % polygon.len()];
+        let c = polygon[(side + 2) % polygon.len()];
+        let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        if !cross.is_finite() {
+            return Err(MeshError::NonFiniteInput);
+        }
+        if cross.abs() > 1.0e-12 {
+            if sign == 0.0 {
+                sign = cross.signum();
+            } else if cross.signum() != sign {
+                return Err(MeshError::NonConvexPolygon);
+            }
+        }
+    }
+    if sign == 0.0 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "polígono de extrusión colineal",
+        });
+    }
+    let area = PolyhedronNet::polygon_area(polygon).abs();
+    if !area.is_finite() || area <= 1.0e-12 {
+        return Err(MeshError::DegenerateGeometry {
+            reason: "polígono de extrusión con área nula",
+        });
+    }
+    // CCW para winding exterior consistente.
+    let mut ordered: Vec<[f64; 2]> = polygon.to_vec();
+    if PolyhedronNet::polygon_area(polygon) < 0.0 {
+        ordered.reverse();
+    }
+    let count = ordered.len();
+    let mut vertices = Vec::with_capacity(2 * count);
+    for point in &ordered {
+        vertices.push(Point3D::new(point[0], 0.0, point[1]));
+    }
+    for point in &ordered {
+        vertices.push(Point3D::new(point[0], height, point[1]));
+    }
+    let mut triangles = Vec::with_capacity(4 * count - 4);
+    for side in 0..count {
+        let next = (side + 1) % count;
+        let lower_a = side;
+        let lower_b = next;
+        let upper_a = side + count;
+        let upper_b = next + count;
+        triangles.push([lower_a, lower_b, upper_b]);
+        triangles.push([lower_a, upper_b, upper_a]);
+    }
+    for fan in 1..count - 1 {
+        triangles.push([0, fan + 1, fan]);
+        triangles.push([count, count + fan, count + fan + 1]);
+    }
+    TriangleMesh3D::new(vertices, triangles)
+}
+
+// ── Superficie implícita F(x,y,z) = 0 por marching sobre celdas cúbicas ──
+//
+// Variante marching-tetrahedra (descomposición de Kuhn, 6 tetras por celda):
+// misma rejilla cúbica acotada que marching cubes, tabla de 16 casos por
+// tetra en lugar de 256 por cubo. Fuera de cota (`cells > 32` o malla que
+// exceda 250k triángulos) devuelve `Err` honesto.
+
+/// Malla de la superficie `field(x, y, z) = 0` en la caja `[min, max]`.
+///
+/// `cells_per_axis` 1..=32 (`32³ = 32 768` celdas). El interior es `f < 0`.
+/// Soldadura exacta por arista canónica de rejilla: sin vértices duplicados.
+pub fn implicit_surface_mesh(
+    field: &dyn Fn(f64, f64, f64) -> Option<f64>,
+    min: Point3D,
+    max: Point3D,
+    cells_per_axis: usize,
+) -> Result<TriangleMesh3D, MeshError> {
+    if !min.is_finite() || !max.is_finite() || min.x >= max.x || min.y >= max.y || min.z >= max.z {
+        return Err(MeshError::NonFiniteInput);
+    }
+    if cells_per_axis < 1 {
+        return Err(MeshError::TooFewPoints {
+            found: cells_per_axis,
+            minimum: 1,
+        });
+    }
+    if cells_per_axis > GB_MAX_MARCHING_CELLS_PER_AXIS {
+        return Err(MeshError::TooManySegments {
+            found: cells_per_axis,
+            maximum: GB_MAX_MARCHING_CELLS_PER_AXIS,
+        });
+    }
+    let nodes = cells_per_axis + 1;
+    let node_count = nodes
+        .checked_mul(nodes)
+        .and_then(|row| row.checked_mul(nodes))
+        .ok_or(MeshError::MeshBudgetExceeded {
+            what: "nodos de rejilla implícita",
+            limit: GB_MAX_MESH_VERTICES,
+        })?;
+    let step = [
+        (max.x - min.x) / cells_per_axis as f64,
+        (max.y - min.y) / cells_per_axis as f64,
+        (max.z - min.z) / cells_per_axis as f64,
+    ];
+    if step.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err(MeshError::NonFiniteInput);
+    }
+    let node_id = |ix: usize, iy: usize, iz: usize| (iz * nodes + iy) * nodes + ix;
+    let node_point = |id: usize| {
+        let iz = id / (nodes * nodes);
+        let iy = (id % (nodes * nodes)) / nodes;
+        let ix = id % nodes;
+        [
+            min.x + ix as f64 * step[0],
+            min.y + iy as f64 * step[1],
+            min.z + iz as f64 * step[2],
+        ]
+    };
+    // Muestreo fail-closed: un nodo sin valor aborta con su coordenada.
+    let mut values: Vec<f64> = Vec::with_capacity(node_count);
+    for id in 0..node_count {
+        let point = node_point(id);
+        match field(point[0], point[1], point[2]) {
+            Some(value) if value.is_finite() => values.push(value),
+            _ => {
+                return Err(MeshError::FieldUndefined {
+                    at: [point[0], point[1], point[2]],
+                });
+            }
+        }
+    }
+    let mut vertices: Vec<Point3D> = Vec::new();
+    let mut triangles: Vec<[usize; 3]> = Vec::new();
+    // Soldadura por arista canónica (nodos ordenados): interpolación idéntica
+    // bit a bit en los tetras vecinos, sin duplicados.
+    let mut weld: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+    let mut edge_vertex = |first: usize, second: usize, values: &[f64]| -> Option<usize> {
+        let (lo, hi) = (first.min(second), first.max(second));
+        let key = (lo as u32, hi as u32);
+        if let Some(&index) = weld.get(&key) {
+            return Some(index as usize);
+        }
+        let f_lo = values.get(lo).copied()?;
+        let f_hi = values.get(hi).copied()?;
+        let denominator = f_lo - f_hi;
+        if !denominator.is_finite() || denominator.abs() <= 1.0e-300 {
+            return None;
+        }
+        let ratio = f_lo / denominator;
+        if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+            return None;
+        }
+        let p_lo = node_point(lo);
+        let p_hi = node_point(hi);
+        let point = Point3D::new(
+            p_lo[0] + (p_hi[0] - p_lo[0]) * ratio,
+            p_lo[1] + (p_hi[1] - p_lo[1]) * ratio,
+            p_lo[2] + (p_hi[2] - p_lo[2]) * ratio,
+        );
+        if !point.is_finite() {
+            return None;
+        }
+        if vertices.len() >= GB_MAX_MESH_VERTICES {
+            return None;
+        }
+        vertices.push(point);
+        let index = vertices.len() - 1;
+        weld.insert(key, index as u32);
+        Some(index)
+    };
+
+    // Descomposición de Kuhn: 6 tetras por celda alrededor de la diagonal principal.
+    const KUHN_TETS: [[[usize; 3]; 3]; 6] = [
+        [[1, 0, 0], [1, 1, 0], [1, 1, 1]],
+        [[1, 0, 0], [1, 0, 1], [1, 1, 1]],
+        [[0, 1, 0], [1, 1, 0], [1, 1, 1]],
+        [[0, 1, 0], [0, 1, 1], [1, 1, 1]],
+        [[0, 0, 1], [1, 0, 1], [1, 1, 1]],
+        [[0, 0, 1], [0, 1, 1], [1, 1, 1]],
+    ];
+    for iz in 0..cells_per_axis {
+        for iy in 0..cells_per_axis {
+            for ix in 0..cells_per_axis {
+                let base = [ix, iy, iz];
+                let corner = |dx: usize, dy: usize, dz: usize| {
+                    node_id(base[0] + dx, base[1] + dy, base[2] + dz)
+                };
+                let origin = corner(0, 0, 0);
+                let far = corner(1, 1, 1);
+                for tet in KUHN_TETS {
+                    let tet_nodes = [
+                        origin,
+                        corner(tet[0][0], tet[0][1], tet[0][2]),
+                        corner(tet[1][0], tet[1][1], tet[1][2]),
+                        far,
+                    ];
+                    // Caso de 16 por conteo de vértices interiores (f < 0).
+                    let mut inside = [false; 4];
+                    for (slot, node) in tet_nodes.iter().enumerate() {
+                        inside[slot] = values[*node] < 0.0;
+                    }
+                    let count = inside.iter().filter(|flag| **flag).count();
+                    if count == 0 || count == 4 {
+                        continue;
+                    }
+                    // Aristas del tetra que cruzan la superficie.
+                    let tet_edges = |a: usize, b: usize| (tet_nodes[a], tet_nodes[b]);
+                    let crossing = |a: usize, b: usize| inside[a] != inside[b];
+                    let mut emit = |a: usize, b: usize| {
+                        edge_vertex(tet_edges(a, b).0, tet_edges(a, b).1, &values)
+                    };
+                    let push_tri = |triangles: &mut Vec<[usize; 3]>,
+                                    a: Option<usize>,
+                                    b: Option<usize>,
+                                    c: Option<usize>|
+                     -> bool {
+                        match (a, b, c) {
+                            (Some(x), Some(y), Some(z)) => {
+                                triangles.push([x, y, z]);
+                                triangles.len() <= GB_MAX_MESH_TRIANGLES
+                            }
+                            _ => false,
+                        }
+                    };
+                    let ok = match count {
+                        1 => {
+                            let apex = inside.iter().position(|flag| *flag);
+                            let lone = apex.or(Some(0));
+                            let apex = lone.unwrap_or(0).min(3);
+                            let others: Vec<usize> = (0..4).filter(|slot| *slot != apex).collect();
+                            if others.len() != 3 {
+                                false
+                            } else {
+                                push_tri(
+                                    &mut triangles,
+                                    emit(apex, others[0]),
+                                    emit(apex, others[1]),
+                                    emit(apex, others[2]),
+                                )
+                            }
+                        }
+                        3 => {
+                            let apex = inside.iter().position(|flag| !*flag).unwrap_or(0).min(3);
+                            let others: Vec<usize> = (0..4).filter(|slot| *slot != apex).collect();
+                            if others.len() != 3 {
+                                false
+                            } else {
+                                push_tri(
+                                    &mut triangles,
+                                    emit(apex, others[0]),
+                                    emit(apex, others[2]),
+                                    emit(apex, others[1]),
+                                )
+                            }
+                        }
+                        _ => {
+                            // 2 dentro: cuadrilátero sobre 4 aristas de cruce.
+                            let mut singles: Vec<usize> = Vec::with_capacity(2);
+                            let mut pairs: Vec<(usize, usize)> = Vec::with_capacity(4);
+                            for a in 0..4 {
+                                for b in (a + 1)..4 {
+                                    if crossing(a, b) {
+                                        pairs.push((a, b));
+                                    }
+                                }
+                            }
+                            // Los 2 vértices interiores definen el eje del cuadrilátero.
+                            for (slot, flag) in inside.iter().enumerate() {
+                                if *flag {
+                                    singles.push(slot);
+                                }
+                            }
+                            if pairs.len() != 4 || singles.len() != 2 {
+                                false
+                            } else {
+                                // Ordena el ciclo: aristas adyacentes comparten vértice.
+                                let mut cycle: Vec<(usize, usize)> = Vec::with_capacity(4);
+                                let mut pending = pairs.clone();
+                                let first = pending.remove(0);
+                                cycle.push(first);
+                                while cycle.len() < 4 && !pending.is_empty() {
+                                    let tip = cycle[cycle.len() - 1].1;
+                                    let mut found = None;
+                                    for (slot, edge) in pending.iter().enumerate() {
+                                        if edge.0 == tip || edge.1 == tip {
+                                            found = Some(slot);
+                                            break;
+                                        }
+                                    }
+                                    let Some(slot) = found else {
+                                        break;
+                                    };
+                                    let mut edge = pending.remove(slot);
+                                    if edge.0 != tip {
+                                        edge = (edge.1, edge.0);
+                                    }
+                                    cycle.push(edge);
+                                }
+                                if cycle.len() != 4 {
+                                    false
+                                } else {
+                                    let corners: Vec<Option<usize>> =
+                                        cycle.iter().map(|edge| emit(edge.0, edge.1)).collect();
+                                    push_tri(&mut triangles, corners[0], corners[1], corners[2])
+                                        && push_tri(
+                                            &mut triangles,
+                                            corners[0],
+                                            corners[2],
+                                            corners[3],
+                                        )
+                                }
+                            }
+                        }
+                    };
+                    if !ok {
+                        if triangles.len() > GB_MAX_MESH_TRIANGLES {
+                            return Err(MeshError::MeshBudgetExceeded {
+                                what: "triángulos de superficie implícita",
+                                limit: GB_MAX_MESH_TRIANGLES,
+                            });
+                        }
+                        return Err(MeshError::DegenerateGeometry {
+                            reason: "celda implícita sin interpolación finita",
+                        });
+                    }
+                }
+            }
+        }
+    }
+    TriangleMesh3D::new(vertices, triangles)
+}
+
+// ── Picking exacto rayo-malla ──
+
+/// Intersección de Möller–Trumbore double-sided contra una malla.
+///
+/// Devuelve la menor distancia sobre `ray` con tolerancia `eps` (usa
+/// [`GB_GEOM_EPS`] si pides exacta honesta). Triángulos degenerados o con
+/// índices inválidos se saltan; `None` si no hay impacto en rango.
+pub fn ray_mesh_hit(
+    ray: &crate::types3d::Ray3D,
+    vertices: &[Point3D],
+    triangles: &[[usize; 3]],
+    eps: f64,
+) -> Option<f64> {
+    if !eps.is_finite() || eps <= 0.0 {
+        return None;
+    }
+    let origin = ray.origin.to_dvec3();
+    let direction = ray.direction.to_dvec3();
+    let mut best: Option<f64> = None;
+    for triangle in triangles {
+        let a = vertices.get(triangle[0])?.to_dvec3();
+        let b = vertices.get(triangle[1])?.to_dvec3();
+        let c = vertices.get(triangle[2])?.to_dvec3();
+        let edge_ab = b - a;
+        let edge_ac = c - a;
+        let normal = edge_ab.cross(edge_ac);
+        if normal.length_squared() <= eps * eps {
+            continue;
+        }
+        let pvec = direction.cross(edge_ac);
+        let determinant = edge_ab.dot(pvec);
+        if !determinant.is_finite() || determinant.abs() <= eps {
+            continue;
+        }
+        let inverse = determinant.recip();
+        let tvec = origin - a;
+        let u = tvec.dot(pvec) * inverse;
+        if !u.is_finite() || u < -eps || u > 1.0 + eps {
+            continue;
+        }
+        let qvec = tvec.cross(edge_ab);
+        let v = direction.dot(qvec) * inverse;
+        if !v.is_finite() || v < -eps || u + v > 1.0 + eps {
+            continue;
+        }
+        let distance = edge_ac.dot(qvec) * inverse;
+        if !distance.is_finite() || distance < ray.min_distance || distance > ray.max_distance {
+            continue;
+        }
+        // Punto de impacto dentro del frustum visible del rayo.
+        if ray.point_at(distance).is_none() {
+            continue;
+        }
+        best = Some(match best {
+            Some(current) => current.min(distance),
+            None => distance,
+        });
+    }
+    best
+}
+
+#[cfg(test)]
+mod gb_tests {
+    use super::*;
+    use crate::types3d::Ray3D;
+
+    fn euler_closed(mesh: &TriangleMesh3D) -> Option<i64> {
+        let vertices = mesh.vertex_count() as i64;
+        let faces = mesh.triangle_count() as i64;
+        let mut edges = std::collections::BTreeSet::new();
+        for triangle in mesh.triangles() {
+            for side in 0..3 {
+                let first = triangle[side];
+                let second = triangle[(side + 1) % 3];
+                edges.insert((first.min(second), first.max(second)));
+            }
+        }
+        Some(vertices - edges.len() as i64 + faces)
+    }
+
+    #[test]
+    fn icosahedron_has_golden_ratio_vertices_and_uniform_edges() {
+        let mesh = platonic_mesh(PlatonicSolid::Icosahedron, 2.0).expect("icosaedro");
+        assert_eq!(mesh.vertex_count(), 12);
+        assert_eq!(mesh.triangle_count(), 20);
+        assert_eq!(euler_closed(&mesh), Some(2));
+        // Vértices gold-ratio: cada coordenada es 0, ±1 o ±φ (escala 1).
+        for vertex in mesh.vertices() {
+            let mut coords = [vertex.x.abs(), vertex.y.abs(), vertex.z.abs()];
+            coords.sort_by(|a, b| a.total_cmp(b));
+            assert!(coords[0] < 1e-12, "{vertex:?}");
+            assert!((coords[1] - 1.0).abs() < 1e-12, "{vertex:?}");
+            assert!((coords[2] - GB_GOLDEN_RATIO).abs() < 1e-12, "{vertex:?}");
+        }
+        let (minimum, maximum) = mesh.edge_length_range().expect("aristas");
+        assert!((minimum - 2.0).abs() < 1e-9, "{minimum}");
+        assert!((maximum - 2.0).abs() < 1e-9, "{maximum}");
+        let area = mesh.surface_area().expect("área");
+        let expected = 5.0 * 3.0_f64.sqrt() * 2.0 * 2.0;
+        assert!((area - expected).abs() < 1e-6, "{area} vs {expected}");
+    }
+
+    #[test]
+    fn dodecahedron_is_closed_with_uniform_edges() {
+        let edge = 1.5;
+        let mesh = platonic_mesh(PlatonicSolid::Dodecahedron, edge).expect("dodecaedro");
+        assert_eq!(mesh.vertex_count(), 20);
+        assert_eq!(mesh.triangle_count(), 36);
+        assert_eq!(euler_closed(&mesh), Some(2));
+        // Aristas reales = borde de los 12 pentágonos (30 únicas, miden
+        // `edge`); diagonales del abanico = interiores (24, miden `edge·φ`).
+        let pentagons = dodecahedron_pentagons().expect("dualidad");
+        let unit = dodecahedron_unit_vertices();
+        let mut real: std::collections::BTreeSet<(usize, usize)> =
+            std::collections::BTreeSet::new();
+        for face in pentagons {
+            for side in 0..5 {
+                let first = face[side];
+                let second = face[(side + 1) % 5];
+                real.insert((first.min(second), first.max(second)));
+            }
+        }
+        assert_eq!(real.len(), 30);
+        let scale = edge * GB_GOLDEN_RATIO / 2.0;
+        for (first, second) in &real {
+            let length = unit[*first].distance(&unit[*second]) * scale;
+            assert!((length - edge).abs() / edge < 1e-9, "{length}");
+        }
+        // La malla solo contiene aristas reales o diagonales φ.
+        let (minimum, _) = mesh.edge_length_range().expect("aristas");
+        assert!((minimum - edge).abs() / edge < 1e-9, "{minimum}");
+        // Cada vértice pertenece a exactamente 3 pentágonos (invariante combinatorio).
+        let mut pentagon_incidence = vec![0_usize; 20];
+        for face in pentagons {
+            for index in face {
+                pentagon_incidence[index] += 1;
+            }
+        }
+        assert!(
+            pentagon_incidence.iter().all(|count| *count == 3),
+            "{pentagon_incidence:?}"
+        );
+        // Sin vértices huérfanos en la malla triangulada.
+        let mut mesh_incidence = [0_usize; 20];
+        for triangle in mesh.triangles() {
+            for index in triangle {
+                mesh_incidence[*index] += 1;
+            }
+        }
+        assert!(mesh_incidence.iter().all(|count| *count > 0));
+    }
+
+    #[test]
+    fn platonic_rejects_bad_edges() {
+        assert!(matches!(
+            platonic_mesh(PlatonicSolid::Icosahedron, 0.0),
+            Err(MeshError::NonPositiveEdge { .. })
+        ));
+        assert!(matches!(
+            platonic_mesh(PlatonicSolid::Dodecahedron, f64::NAN),
+            Err(MeshError::NonPositiveEdge { .. })
+        ));
+    }
+
+    #[test]
+    fn cube_net_area_matches_closed_cube() {
+        let net = cube_net(2.0).expect("net cubo");
+        assert_eq!(net.face_count(), 6);
+        assert!(net.tab_count() >= 6, "solapas: {}", net.tab_count());
+        let area = net.face_area().expect("área caras");
+        assert!((area - 24.0).abs() < 1e-9, "{area}");
+        assert!(net.tab_area().expect("área solapas") > 0.0);
+    }
+
+    #[test]
+    fn prism_net_area_matches_lateral_plus_bases() {
+        let net = prism_net(6, 1.0, 2.0).expect("net prisma hexagonal");
+        assert_eq!(net.face_count(), 8);
+        let apothem = 1.0 / (2.0 * (std::f64::consts::PI / 6.0).tan());
+        let expected = 6.0 * 1.0 * 2.0 + 2.0 * 0.5 * 6.0 * 1.0 * apothem;
+        let area = net.face_area().expect("área caras");
+        assert!((area - expected).abs() < 1e-6, "{area} vs {expected}");
+        assert!(prism_net(2, 1.0, 1.0).is_err());
+        assert!(matches!(
+            prism_net(GB_MAX_PRISM_SIDES + 1, 1.0, 1.0),
+            Err(MeshError::TooManySegments { .. })
+        ));
+    }
+
+    #[test]
+    fn pyramid_net_area_matches_base_plus_triangles() {
+        let net = pyramid_net(2.0, 3.0).expect("net pirámide");
+        assert_eq!(net.face_count(), 5);
+        assert_eq!(net.tab_count(), 8);
+        let tri = 0.5 * 2.0 * (9.0_f64 - 1.0).sqrt();
+        let expected = 4.0 + 4.0 * tri;
+        let area = net.face_area().expect("área caras");
+        assert!((area - expected).abs() < 1e-9, "{area} vs {expected}");
+        assert!(matches!(
+            pyramid_net(2.0, 1.0),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+    }
+
+    #[test]
+    fn lathe_cylinder_matches_lateral_area() {
+        let mesh = lathe_mesh(&[[1.0, 0.0], [1.0, 2.0]], 8).expect("lathe cilindro");
+        assert_eq!(mesh.vertex_count(), 16);
+        assert_eq!(mesh.triangle_count(), 16);
+        // Octógono inscrito: área = perímetro_octógono * h < 2πrh.
+        let area = mesh.surface_area().expect("área");
+        let perimeter = 8.0 * 2.0 * (std::f64::consts::PI / 8.0).sin();
+        assert!((area - perimeter * 2.0).abs() < 1e-9, "{area}");
+    }
+
+    #[test]
+    fn lathe_cone_closes_pole_with_fan() {
+        let mesh = lathe_mesh(&[[0.0, 0.0], [1.0, 1.0]], 4).expect("lathe cono");
+        assert_eq!(mesh.vertex_count(), 5);
+        assert_eq!(mesh.triangle_count(), 4);
+        assert!(lathe_mesh(&[[0.0, 0.0], [0.0, 1.0]], 8).is_err());
+        assert!(matches!(
+            lathe_mesh(&[[1.0, 0.0], [1.0, 1.0]], 2),
+            Err(MeshError::TooFewPoints { .. })
+        ));
+        assert!(matches!(
+            lathe_mesh(&[[1.0, 0.0], [1.0, 1.0]], GB_MAX_LATHE_SEGMENTS + 1),
+            Err(MeshError::TooManySegments { .. })
+        ));
+    }
+
+    #[test]
+    fn lathe_sphere_profile_approximates_closed_area() {
+        let mut profile = Vec::new();
+        for step in 0..=8 {
+            let angle = step as f64 * std::f64::consts::PI / 8.0;
+            profile.push([angle.sin(), -angle.cos()]);
+        }
+        let mesh = lathe_mesh(&profile, 24).expect("lathe esfera");
+        let area = mesh.surface_area().expect("área");
+        assert!((area - 4.0 * std::f64::consts::PI).abs() < 1.0, "{area}");
+    }
+
+    #[test]
+    fn extrude_square_matches_closed_area() {
+        let mesh = extrude_mesh(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], 2.0)
+            .expect("extrusión");
+        assert_eq!(mesh.vertex_count(), 8);
+        assert_eq!(mesh.triangle_count(), 12);
+        let area = mesh.surface_area().expect("área");
+        assert!((area - 10.0).abs() < 1e-9, "{area}");
+        assert!(matches!(
+            extrude_mesh(&[[0.0, 0.0], [2.0, 0.0], [0.5, 0.5], [0.0, 2.0]], 1.0),
+            Err(MeshError::NonConvexPolygon)
+        ));
+        assert!(matches!(
+            extrude_mesh(&[[0.0, 0.0], [1.0, 0.0], [1.0, 0.0]], 1.0),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+    }
+
+    #[test]
+    fn implicit_sphere_produces_welded_surface() {
+        let sphere = |x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0);
+        let mesh = implicit_surface_mesh(
+            &sphere,
+            Point3D::new(-1.5, -1.5, -1.5),
+            Point3D::new(1.5, 1.5, 1.5),
+            16,
+        )
+        .expect("esfera implícita");
+        assert!(!mesh.triangles().is_empty());
+        assert!(mesh.triangle_count() < GB_MAX_MESH_TRIANGLES);
+        for vertex in mesh.vertices() {
+            let value = vertex.x * vertex.x + vertex.y * vertex.y + vertex.z * vertex.z - 1.0;
+            assert!(value.abs() < 0.05, "{vertex:?} f={value}");
+        }
+        let area = mesh.surface_area().expect("área");
+        assert!(
+            (area - 4.0 * std::f64::consts::PI).abs() < 2.5,
+            "área={area}"
+        );
+    }
+
+    #[test]
+    fn implicit_plane_cuts_single_cell_with_exact_area() {
+        let plane = |_x: f64, _y: f64, z: f64| Some(z);
+        let mesh = implicit_surface_mesh(
+            &plane,
+            Point3D::new(-1.5, -1.5, -1.5),
+            Point3D::new(1.5, 1.5, 1.5),
+            1,
+        )
+        .expect("plano implícito");
+        // Kuhn divide el cubo en 6 tetras: el cuadrado de corte sale
+        // triangulado por tetra, pero el área es la exacta del corte.
+        assert!(!mesh.triangles().is_empty());
+        for vertex in mesh.vertices() {
+            assert!(vertex.z.abs() < 1e-12, "{vertex:?}");
+        }
+        let area = mesh.surface_area().expect("área");
+        assert!((area - 9.0).abs() < 1e-9, "{area}");
+    }
+
+    #[test]
+    fn implicit_rejects_out_of_budget_and_undefined_field() {
+        let sphere = |x: f64, y: f64, z: f64| Some(x * x + y * y + z * z - 1.0);
+        assert!(matches!(
+            implicit_surface_mesh(
+                &sphere,
+                Point3D::new(-1.0, -1.0, -1.0),
+                Point3D::new(1.0, 1.0, 1.0),
+                GB_MAX_MARCHING_CELLS_PER_AXIS + 1
+            ),
+            Err(MeshError::TooManySegments { .. })
+        ));
+        let hole = |x: f64, _y: f64, _z: f64| {
+            if x > 0.0 {
+                None
+            } else {
+                Some(x)
+            }
+        };
+        assert!(matches!(
+            implicit_surface_mesh(
+                &hole,
+                Point3D::new(-1.0, -1.0, -1.0),
+                Point3D::new(1.0, 1.0, 1.0),
+                2
+            ),
+            Err(MeshError::FieldUndefined { .. })
+        ));
+    }
+
+    #[test]
+    fn ray_hits_cube_mesh_and_misses() {
+        let mesh = TriangleMesh3D::new(
+            vec![
+                Point3D::new(-1.0, -1.0, -1.0),
+                Point3D::new(1.0, -1.0, -1.0),
+                Point3D::new(1.0, 1.0, -1.0),
+                Point3D::new(-1.0, 1.0, -1.0),
+                Point3D::new(-1.0, -1.0, 1.0),
+                Point3D::new(1.0, -1.0, 1.0),
+                Point3D::new(1.0, 1.0, 1.0),
+                Point3D::new(-1.0, 1.0, 1.0),
+            ],
+            vec![
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [2, 3, 7],
+                [2, 7, 6],
+                [0, 4, 7],
+                [0, 7, 3],
+                [1, 2, 6],
+                [1, 6, 5],
+            ],
+        )
+        .expect("cubo");
+        let hit_ray = Ray3D::new(
+            Point3D::new(0.0, 0.0, 5.0),
+            Point3D::new(0.0, 0.0, -1.0),
+            0.0,
+            100.0,
+        )
+        .expect("rayo");
+        let distance = ray_mesh_hit(&hit_ray, mesh.vertices(), mesh.triangles(), GB_GEOM_EPS)
+            .expect("impacto");
+        assert!((distance - 4.0).abs() < 1e-9, "{distance}");
+        let miss_ray = Ray3D::new(
+            Point3D::new(5.0, 5.0, 5.0),
+            Point3D::new(0.0, 0.0, -1.0),
+            0.0,
+            100.0,
+        )
+        .expect("rayo");
+        assert_eq!(
+            ray_mesh_hit(&miss_ray, mesh.vertices(), mesh.triangles(), GB_GEOM_EPS),
+            None
+        );
+        assert_eq!(
+            ray_mesh_hit(&hit_ray, mesh.vertices(), mesh.triangles(), f64::NAN),
+            None
+        );
+    }
+
+    #[test]
+    fn mesh_constructor_enforces_budgets() {
+        assert!(matches!(
+            TriangleMesh3D::new(vec![Point3D::new(0.0, 0.0, 0.0); 3], vec![[0, 1, 5]]),
+            Err(MeshError::DegenerateGeometry { .. })
+        ));
+        assert!(matches!(
+            TriangleMesh3D::new(vec![Point3D::new(f64::NAN, 0.0, 0.0)], Vec::new()),
+            Err(MeshError::NonFiniteInput)
+        ));
+    }
+}

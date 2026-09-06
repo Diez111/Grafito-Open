@@ -18,6 +18,14 @@ pub const MAX_CLASSROOM_CODE_LEN: usize = 32;
 pub const MAX_LEARNER_NAME_LEN: usize = 64;
 /// Tope del ejercicio activo (igual que `RequestBudget` texto acotado).
 pub const MAX_EXERCISE_CHARS: usize = 2_000;
+/// TTL default de un código de sala en segundos (1h, GeoGebra Classroom expira por sesión).
+pub const DEFAULT_CODE_TTL_SECS: u64 = 3_600;
+/// TTL máximo de un código (24h, evita salas eternas con PII local).
+pub const MAX_CODE_TTL_SECS: u64 = 86_400;
+/// TTL mínimo (60s, evita expiración inmediata por error de tipeo).
+pub const MIN_CODE_TTL_SECS: u64 = 60;
+/// Tope del CSV del roster (512 KiB: 5000 filas × ~100 bytes, fail-closed por truncado).
+pub const MAX_ROSTER_CSV_BYTES: usize = 512 * 1_024;
 
 /// Errores tipados de la sesión (sin pánicos, todo `Result`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +49,15 @@ pub enum ClassroomError {
     QueueFull,
     /// Mensaje excede `MAX_MESSAGE_BYTES` o es inválido.
     InvalidMessage(String),
+    /// Código expirado (`now >= expires`): hay que regenerar en lobby.
+    CodeExpired,
+    /// TTL inválido para expiración (`MIN..=MAX_CODE_TTL_SECS`).
+    InvalidTtl(String),
+    /// Almacén acotado lleno (CRDT/offline: qué se llenó).
+    StorageFull {
+        /// Qué se llenó (`Crdt`, `OfflineOutbox`, …).
+        what: &'static str,
+    },
     /// L no implementado: diseño + motivo honesto.
     NotImplemented {
         /// Nombre estable del feature (`IrohP2P`, `Crdt`, …).
@@ -62,6 +79,11 @@ impl std::fmt::Display for ClassroomError {
             Self::UnknownLearner(name) => write!(f, "alumno desconocido: {name}"),
             Self::QueueFull => write!(f, "cola de aula llena (máximo 128 mensajes)"),
             Self::InvalidMessage(detail) => write!(f, "mensaje de aula inválido: {detail}"),
+            Self::CodeExpired => {
+                write!(f, "código de sala expirado: regenerá el código en el lobby")
+            }
+            Self::InvalidTtl(detail) => write!(f, "TTL de código inválido: {detail}"),
+            Self::StorageFull { what } => write!(f, "{what} lleno (almacén acotado, fail-closed)"),
             Self::NotImplemented { feature, hint } => {
                 write!(f, "{feature} no implementado: {hint}")
             }
@@ -130,6 +152,38 @@ impl LearnerName {
     }
 }
 
+/// TTL de un código de sala: newtype `MIN..=MAX_CODE_TTL_SECS` segundos.
+///
+/// Evita salas eternas (PII local igual se acota en tiempo, como GeoGebra
+/// Classroom que expira por sesión). `60s..=24h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeTtlSecs(u64);
+
+impl CodeTtlSecs {
+    /// Valida `MIN_CODE_TTL_SECS..=MAX_CODE_TTL_SECS`. `Err(InvalidTtl)` si fuera de rango.
+    pub fn try_new(secs: u64) -> Result<Self, ClassroomError> {
+        if (MIN_CODE_TTL_SECS..=MAX_CODE_TTL_SECS).contains(&secs) {
+            Ok(Self(secs))
+        } else {
+            Err(ClassroomError::InvalidTtl(format!(
+                "{secs}s fuera de {MIN_CODE_TTL_SECS}..={MAX_CODE_TTL_SECS}s"
+            )))
+        }
+    }
+
+    /// TTL default (1h).
+    #[must_use]
+    pub fn default_ttl() -> Self {
+        Self(DEFAULT_CODE_TTL_SECS)
+    }
+
+    /// Segundos validados.
+    #[must_use]
+    pub fn as_secs(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Fase de la sesión (`/statem`: toda transición pasa por un método que valida `phase`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClassroomPhase {
@@ -168,6 +222,10 @@ pub struct ClassroomSession {
     roster: BTreeMap<String, RosterMember>,
     exercise: Option<String>,
     snapshot_digest: String,
+    /// Expiración del código (`epoch` secs, reloj de pared del caller).
+    /// `None` = sin expiración (compat con sesiones viejas, `#[serde(default)]`).
+    #[serde(default)]
+    code_expires_epoch: Option<u64>,
 }
 
 impl ClassroomSession {
@@ -180,6 +238,7 @@ impl ClassroomSession {
             roster: BTreeMap::new(),
             exercise: None,
             snapshot_digest: String::new(),
+            code_expires_epoch: None,
         }
     }
 
@@ -202,10 +261,14 @@ impl ClassroomSession {
     }
 
     /// Abre el lobby (`Idle → Lobby`, o `Closed → Lobby` con roster limpio).
+    ///
+    /// Sin expiración (`code_expires_epoch = None`, compat histórica).
+    /// Para expiración usá [`Self::open_lobby_with_expiry`].
     pub fn open_lobby(&mut self, code: ClassroomCode) -> Result<(), ClassroomError> {
         match self.phase {
             ClassroomPhase::Idle => {
                 self.code = Some(code);
+                self.code_expires_epoch = None;
                 self.phase = ClassroomPhase::Lobby;
                 Ok(())
             }
@@ -214,6 +277,7 @@ impl ClassroomSession {
                 self.exercise = None;
                 self.snapshot_digest.clear();
                 self.code = Some(code);
+                self.code_expires_epoch = None;
                 self.phase = ClassroomPhase::Lobby;
                 Ok(())
             }
@@ -222,6 +286,67 @@ impl ClassroomSession {
                 action: "open_lobby",
             }),
         }
+    }
+
+    /// Abre el lobby con expiración (`Idle|Closed → Lobby`).
+    ///
+    /// `expires = now_epoch + ttl`. `now_epoch` es reloj de pared del caller
+    /// (segundos); `ttl` validado `60s..=24h`. Puro, sin I/O.
+    pub fn open_lobby_with_expiry(
+        &mut self,
+        code: ClassroomCode,
+        now_epoch: u64,
+        ttl: CodeTtlSecs,
+    ) -> Result<(), ClassroomError> {
+        self.open_lobby(code)?;
+        self.code_expires_epoch = Some(now_epoch.saturating_add(ttl.as_secs()));
+        Ok(())
+    }
+
+    /// Expiración del código (`None` = sin expiración, compat).
+    #[must_use]
+    pub fn expiry_epoch(&self) -> Option<u64> {
+        self.code_expires_epoch
+    }
+
+    /// ¿El código expiró en `now`? `false` si no hay expiración o no hay lobby/live.
+    ///
+    /// `now >= expires` ⇒ expirado (igual que `is_due` del scheduler).
+    #[must_use]
+    pub fn is_code_expired(&self, now: u64) -> bool {
+        match self.code_expires_epoch {
+            None => false,
+            Some(expires) => now >= expires,
+        }
+    }
+
+    /// ¿Acepta uniones en `now`? Fase `Lobby|Live` Y código no expirado.
+    ///
+    /// La Piel debe usar esta (no [`Self::accepts_joins`]) cuando el lobby
+    /// se abrió con [`Self::open_lobby_with_expiry`].
+    #[must_use]
+    pub fn accepts_joins_at(&self, now: u64) -> bool {
+        self.accepts_joins() && !self.is_code_expired(now)
+    }
+
+    /// Renueva la expiración (`Lobby|Live` + no expirado aún o expirado: lo extiende igual).
+    ///
+    /// `Err(InvalidTransition)` si no hay lobby/live. Útil para el docente
+    /// que extiende la clase sin regenerar código.
+    pub fn renew_expiry(&mut self, now_epoch: u64, ttl: CodeTtlSecs) -> Result<(), ClassroomError> {
+        if !self.accepts_joins() {
+            return Err(ClassroomError::InvalidTransition {
+                from: self.phase,
+                action: "renew_expiry",
+            });
+        }
+        if self.code.is_none() {
+            return Err(ClassroomError::InvalidCode(
+                "sin código que renovar".to_string(),
+            ));
+        }
+        self.code_expires_epoch = Some(now_epoch.saturating_add(ttl.as_secs()));
+        Ok(())
     }
 
     /// Inicia la clase (`Lobby → Live`).
@@ -256,12 +381,20 @@ impl ClassroomSession {
 
     /// Une un alumno (idempotente: si ya existe, `Ok` sin duplicar).
     /// Solo en `Lobby`/`Live`; `Err(RosterFull)` si se supera el tope.
+    ///
+    /// `epoch` es a la vez `joined_epoch` y reloj para expiración: si el lobby
+    /// se abrió con [`Self::open_lobby_with_expiry`] y `epoch >= expires`,
+    /// retorna `Err(CodeExpired)` (el docente debe renovar o regenerar).
+    /// Sesiones sin expiración (`open_lobby`) nunca expiran: compat total.
     pub fn join(&mut self, name: &str, epoch: u64) -> Result<(), ClassroomError> {
         if !self.accepts_joins() {
             return Err(ClassroomError::InvalidTransition {
                 from: self.phase,
                 action: "join",
             });
+        }
+        if self.is_code_expired(epoch) {
+            return Err(ClassroomError::CodeExpired);
         }
         let clean = LearnerName::try_new(name)?;
         let key = clean.as_str().to_string();
@@ -402,6 +535,31 @@ impl ClassroomSession {
         &self.snapshot_digest
     }
 
+    /// Exporta el roster a CSV RFC 4180 mínimo (`name,hand_raised,joined_epoch` + CRLF).
+    ///
+    /// Puro, determinista (BTreeMap ordena por nombre), sin I/O ni PII extra:
+    /// solo lo ya guardado en `roster`. Campos con `, " \n \r` se entrecomillan
+    /// y `"` se duplica. `hand_raised` como `true/false`. Acotado a
+    /// `MAX_ROSTER_CSV_BYTES` por truncado de filas (fail-closed, nunca OOM:
+    /// header siempre presente aunque el roster esté lleno).
+    #[must_use]
+    pub fn export_roster_csv(&self) -> String {
+        let mut out = String::from("name,hand_raised,joined_epoch\r\n");
+        for member in self.roster.values() {
+            let row = format!(
+                "{},{},{}\r\n",
+                escape_csv_field(&member.name),
+                member.hand_raised,
+                member.joined_epoch
+            );
+            if out.len().saturating_add(row.len()) > MAX_ROSTER_CSV_BYTES {
+                break;
+            }
+            out.push_str(&row);
+        }
+        out
+    }
+
     /// Dashboard de asistencia + métricas desde [`crate::LearnerSnapshot`].
     #[must_use]
     pub fn to_dashboard(&self, profiles: &[crate::LearnerSnapshot]) -> crate::TeacherDashboard {
@@ -436,6 +594,24 @@ impl ClassroomSession {
             .map(|p| crate::LearnerSnapshot::from_student_profile(p, now))
             .collect();
         self.to_dashboard(&snapshots)
+    }
+}
+
+/// Escapa un campo CSV (RFC 4180 mínimo): entrecomilla si contiene `, " \n \r` y duplica `"`.
+fn escape_csv_field(raw: &str) -> String {
+    if raw.contains([',', '"', '\n', '\r']) {
+        let mut quoted = String::with_capacity(raw.len().saturating_add(2));
+        quoted.push('"');
+        for ch in raw.chars() {
+            if ch == '"' {
+                quoted.push('"');
+            }
+            quoted.push(ch);
+        }
+        quoted.push('"');
+        quoted
+    } else {
+        raw.to_string()
     }
 }
 
@@ -592,5 +768,122 @@ mod tests {
         assert_eq!(dashboard.bkt_summary[0].0, "Ana");
         assert_eq!(dashboard.bkt_summary[1].0, "Luis");
         assert!(dashboard.avg_mastery > 0.0);
+    }
+
+    #[test]
+    fn code_ttl_validates_range_and_default() {
+        assert!(CodeTtlSecs::try_new(59).is_err());
+        assert!(CodeTtlSecs::try_new(60).is_ok());
+        assert!(CodeTtlSecs::try_new(3_600).is_ok());
+        assert!(CodeTtlSecs::try_new(86_400).is_ok());
+        assert!(CodeTtlSecs::try_new(86_401).is_err());
+        assert_eq!(CodeTtlSecs::default_ttl().as_secs(), DEFAULT_CODE_TTL_SECS);
+        assert!(matches!(
+            CodeTtlSecs::try_new(0).expect_err("ttl 0"),
+            ClassroomError::InvalidTtl(_)
+        ));
+    }
+
+    #[test]
+    fn lobby_with_expiry_accepts_before_and_rejects_after() {
+        let mut session = ClassroomSession::new_idle();
+        let ttl = CodeTtlSecs::try_new(3_600).expect("ttl");
+        session
+            .open_lobby_with_expiry(code_fixture(), 1_000, ttl)
+            .expect("lobby con ttl");
+        assert_eq!(session.expiry_epoch(), Some(4_600));
+        assert!(!session.is_code_expired(1_000));
+        assert!(!session.is_code_expired(4_599));
+        assert!(session.is_code_expired(4_600));
+        assert!(session.accepts_joins_at(4_599));
+        assert!(!session.accepts_joins_at(4_600));
+        session.join("Ana", 2_000).expect("join antes de expirar");
+        let err = session.join("Luis", 5_000).expect_err("expirado");
+        assert_eq!(err, ClassroomError::CodeExpired);
+        assert_eq!(
+            err.to_string(),
+            "código de sala expirado: regenerá el código en el lobby"
+        );
+    }
+
+    #[test]
+    fn lobby_without_expiry_never_expires_and_reopen_clears() {
+        let mut session = ClassroomSession::new_idle();
+        session.open_lobby(code_fixture()).expect("lobby");
+        assert_eq!(session.expiry_epoch(), None);
+        assert!(!session.is_code_expired(u64::MAX));
+        assert!(session.accepts_joins_at(u64::MAX));
+        session
+            .join("Ana", u64::MAX)
+            .expect("sin expiración siempre une");
+
+        let mut expiring = ClassroomSession::new_idle();
+        let ttl = CodeTtlSecs::try_new(60).expect("ttl");
+        expiring
+            .open_lobby_with_expiry(code_fixture(), 0, ttl)
+            .expect("lobby");
+        assert!(expiring.is_code_expired(60));
+        expiring.start_live().expect("live");
+        expiring.close().expect("close");
+        expiring.open_lobby(code_fixture()).expect("reapertura");
+        assert_eq!(expiring.expiry_epoch(), None);
+        assert!(!expiring.is_code_expired(1_000_000));
+    }
+
+    #[test]
+    fn renew_expiry_extends_and_requires_lobby() {
+        let mut session = ClassroomSession::new_idle();
+        assert!(session.renew_expiry(0, CodeTtlSecs::default_ttl()).is_err());
+        let ttl = CodeTtlSecs::try_new(60).expect("ttl");
+        session
+            .open_lobby_with_expiry(code_fixture(), 0, ttl)
+            .expect("lobby");
+        session
+            .renew_expiry(1_000, CodeTtlSecs::try_new(3_600).expect("ttl"))
+            .expect("renueva");
+        assert_eq!(session.expiry_epoch(), Some(4_600));
+        assert!(!session.is_code_expired(4_599));
+        session.join("Ana", 4_000).expect("join tras renovar");
+    }
+
+    #[test]
+    fn export_roster_csv_header_only_when_empty() {
+        let mut session = ClassroomSession::new_idle();
+        session.open_lobby(code_fixture()).expect("lobby");
+        assert_eq!(
+            session.export_roster_csv(),
+            "name,hand_raised,joined_epoch\r\n"
+        );
+    }
+
+    #[test]
+    fn export_roster_csv_sorted_and_honest() {
+        let mut session = ClassroomSession::new_idle();
+        session.open_lobby(code_fixture()).expect("lobby");
+        session.join("Zoe", 3).expect("join");
+        session.join("Ana", 1).expect("join");
+        session.raise_hand("Ana").expect("mano");
+        let csv = session.export_roster_csv();
+        assert_eq!(
+            csv,
+            "name,hand_raised,joined_epoch\r\nAna,true,1\r\nZoe,false,3\r\n"
+        );
+        assert!(csv.len() <= MAX_ROSTER_CSV_BYTES);
+    }
+
+    #[test]
+    fn export_roster_csv_quotes_commas_and_quotes() {
+        let mut session = ClassroomSession::new_idle();
+        session.open_lobby(code_fixture()).expect("lobby");
+        session.join("Doe, John", 7).expect("join con coma");
+        session
+            .join("Ana \"La\" Profe", 8)
+            .expect("join con comillas");
+        let csv = session.export_roster_csv();
+        assert!(csv.contains("\"Doe, John\",false,7\r\n"), "{csv}");
+        assert!(
+            csv.contains("\"Ana \"\"La\"\" Profe\",false,8\r\n"),
+            "{csv}"
+        );
     }
 }

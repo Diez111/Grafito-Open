@@ -5682,3 +5682,316 @@ mod tests {
         );
     }
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Frente G-C · Piel vs GeoGebra UI (2026-09-05) — ADITIVO, solo texto
+// ══════════════════════════════════════════════════════════════════════════
+// MathML / TikZ-eje (pgfplots) / HTML puros y acotados. Builders sin I/O
+// (String en memoria); el panel Vista los copia al portapapeles vía egui
+// output (igual que «Copiar SVG»). Cotas: objetos ≤ MAX_EXCHANGE_OBJECTS,
+// expr ≤ 2000 (= validation::MAX_EXPR_LENGTH), salida ≤
+// MAX_EXPORT_OUTPUT_BYTES. Lo no soportado se omite con comentario honesto,
+// nunca se inventa geometría.
+
+/// Longitud máxima de expresión en exports de texto (= `MAX_EXPR_LENGTH`).
+const MAX_TEXT_EXPR_LEN: usize = 2_000;
+
+/// Presupuesto de objetos para exports de texto (igual que el intercambio).
+fn check_text_object_budget(document: &Document, what: &str) -> Result<usize, String> {
+    let total = document.objects_iter_sorted().count();
+    if total > MAX_EXCHANGE_OBJECTS {
+        return Err(format!(
+            "{what} no se generó; {total} objetos exceden el límite {MAX_EXCHANGE_OBJECTS}"
+        ));
+    }
+    Ok(total)
+}
+
+/// Presupuesto de salida para exports de texto (igual que el binario).
+fn check_text_byte_budget(out: &str, what: &str) -> Result<(), String> {
+    if out.len() > MAX_EXPORT_OUTPUT_BYTES {
+        return Err(format!(
+            "{what} no se generó; {} bytes exceden el límite {MAX_EXPORT_OUTPUT_BYTES}",
+            out.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Número honesto para MathML: finito con hasta 6 decimales, sin ruido.
+fn text_num(value: f64) -> Option<String> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value == 0.0 {
+        return Some("0".to_string());
+    }
+    let abs = value.abs();
+    if (1e-3..1e6).contains(&abs) {
+        let rounded = (value * 1e6).round() / 1e6;
+        Some(format!("{rounded}"))
+    } else {
+        Some(format!("{value:.3e}"))
+    }
+}
+
+/// Expresión apta para `\addplot` pgfplots: una línea, ≤2000, sin caracteres
+/// que rompan TeX (`\ { } $ & # _ ~ %`). `None` = omitir con comentario.
+fn tikz_axis_expr(expression: &str) -> Option<String> {
+    let expr = expression.trim();
+    if expr.is_empty() || expr.len() > MAX_TEXT_EXPR_LEN {
+        return None;
+    }
+    if expr.contains([
+        '\n', '\r', '\\', '{', '}', '$', '&', '#', '_', '~', '%', '^', '"', '\'',
+    ]) {
+        return None;
+    }
+    if !expr
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "+-*/()., xX".contains(c))
+    {
+        return None;
+    }
+    Some(expr.to_string())
+}
+
+/// Etiqueta de objeto para comentarios honestos (acotada, sin saltos).
+fn text_label(label: &str) -> String {
+    let clean: String = label.chars().filter(|c| !c.is_control()).take(64).collect();
+    if clean.trim().is_empty() {
+        "<sin etiqueta>".to_string()
+    } else {
+        clean
+    }
+}
+
+/// Documento → MathML (funciones y puntos como texto; resto omitido).
+/// No traduce semántica CAS: la expresión viaja como `<mtext>` honesto.
+pub(crate) fn document_to_mathml(document: &Document) -> Result<String, String> {
+    check_text_object_budget(document, "MathML")?;
+    let mut out = String::from(
+        "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\">\n<mrow>\n",
+    );
+    for (_, object) in document.objects_iter_sorted() {
+        match object {
+            GeoObject::Function(fun) if fun.visible => {
+                if fun.expr.len() > MAX_TEXT_EXPR_LEN || fun.expr.trim().is_empty() {
+                    out.push_str(&format!(
+                        "<!-- omitido: función {} (expresión fuera de cota) -->\n",
+                        text_label(&fun.label)
+                    ));
+                    continue;
+                }
+                out.push_str(&format!(
+                    "<mtext>{}: {}</mtext>\n",
+                    escape_xml(&text_label(&fun.label)),
+                    escape_xml(fun.expr.trim())
+                ));
+            }
+            GeoObject::Point(pt) if pt.visible => {
+                match (text_num(pt.position.x), text_num(pt.position.y)) {
+                    (Some(x), Some(y)) => {
+                        out.push_str(&format!(
+                            "<mtext>{} = ({}, {})</mtext>\n",
+                            escape_xml(&text_label(&pt.label)),
+                            x,
+                            y
+                        ));
+                    }
+                    _ => {
+                        out.push_str(&format!(
+                            "<!-- omitido: punto {} (coordenada no finita) -->\n",
+                            text_label(&pt.label)
+                        ));
+                    }
+                }
+            }
+            other => {
+                out.push_str(&format!(
+                    "<!-- omitido: {} (solo funciones y puntos en MathML) -->\n",
+                    other.name()
+                ));
+            }
+        }
+    }
+    out.push_str("</mrow>\n</math>\n");
+    check_text_byte_budget(&out, "MathML")?;
+    Ok(out)
+}
+
+/// Documento → TikZ con entorno pgfplots `axis` (funciones como `\addplot`).
+/// La expresión viaja tal cual (validada); el resto es comentario honesto.
+pub(crate) fn document_to_tikz_axis(document: &Document) -> Result<String, String> {
+    check_text_object_budget(document, "TikZ-eje")?;
+    let mut out = String::from(
+        "% Grafito → pgfplots (requiere \\usepackage{pgfplots} \\pgfplotsset{compat=1.18})\n\
+         \\begin{tikzpicture}\n\
+         \\begin{axis}[xlabel=$x$, ylabel=$y$, grid=major]\n",
+    );
+    for (_, object) in document.objects_iter_sorted() {
+        match object {
+            GeoObject::Function(fun) if fun.visible => match tikz_axis_expr(&fun.expr) {
+                Some(expr) => {
+                    let (lo, hi) = (
+                        fun.domain_min.unwrap_or(-10.0),
+                        fun.domain_max.unwrap_or(10.0),
+                    );
+                    if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+                        out.push_str(&format!(
+                            "% omitido: {} (dominio inválido)\n",
+                            text_label(&fun.label)
+                        ));
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "\\addplot[domain={lo}:{hi},samples=200] {{{expr}}}; % {}\n",
+                        text_label(&fun.label)
+                    ));
+                }
+                None => {
+                    out.push_str(&format!(
+                        "% omitido: {} (expresión fuera del subconjunto pgfplots honesto)\n",
+                        text_label(&fun.label)
+                    ));
+                }
+            },
+            other => {
+                out.push_str(&format!(
+                    "% omitido: {} (solo funciones en TikZ-eje)\n",
+                    other.name()
+                ));
+            }
+        }
+    }
+    out.push_str("\\end{axis}\n\\end{tikzpicture}\n");
+    check_text_byte_budget(&out, "TikZ-eje")?;
+    Ok(out)
+}
+
+/// Documento → HTML autónomo: SVG real del lienzo + lista de etiquetas.
+/// Reusa el pipeline SVG verificable (`build_export_scene` + `serialize_svg`);
+/// sin red, sin scripts, sin I/O.
+pub(crate) fn document_to_html(document: &Document) -> Result<String, String> {
+    check_text_object_budget(document, "HTML")?;
+    let options = ExportOptions::from_document(document, ExportFormat::Svg)
+        .map_err(|error| format!("HTML no se generó; {error}"))?;
+    let scene = build_export_scene(document, ExportFormat::Svg, options)
+        .map_err(|error| format!("HTML no se generó; {error}"))?;
+    let svg = String::from_utf8(serialize_svg(&scene))
+        .map_err(|error| format!("HTML no se generó; SVG no UTF-8: {error}"))?;
+    let mut out = String::from(
+        "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>Grafito — lienzo</title>\n\
+         <style>body{font-family:sans-serif;background:#FAFAF9;color:#2C2F38;margin:24px}\
+         svg{background:#fff;border:1px solid #E8E8E6;border-radius:12px;max-width:100%}\
+         li{margin:2px 0}</style>\n</head>\n<body>\n<h1>Grafito — lienzo</h1>\n",
+    );
+    out.push_str(&svg);
+    out.push_str("\n<h2>Objetos</h2>\n<ul>\n");
+    for (_, object) in document.objects_iter_sorted() {
+        out.push_str(&format!(
+            "<li>{} — {}</li>\n",
+            escape_xml(object.name()),
+            escape_xml(&text_label(object.label()))
+        ));
+    }
+    out.push_str("</ul>\n</body>\n</html>\n");
+    check_text_byte_budget(&out, "HTML")?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod gc_text_export_tests {
+    use super::{document_to_html, document_to_mathml, document_to_tikz_axis, tikz_axis_expr};
+    use grafito_core::{Document, GeoObject, PointObj};
+    use grafito_geometry::Point2;
+
+    fn function_document(expr: &str, label: &str) -> Document {
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Function(
+                grafito_core::FunctionObj::new(expr).with_label(label),
+            ))
+            .expect("función fixture");
+        document
+    }
+
+    #[test]
+    fn mathml_skeleton_and_honest_omissions() {
+        let empty = Document::new();
+        let out = document_to_mathml(&empty).expect("vacío válido");
+        assert!(out.starts_with("<math"), "fue: {out:?}");
+        assert!(out.contains("</math>"));
+
+        let doc = function_document("x*x+1", "f");
+        let out = document_to_mathml(&doc).expect("función válida");
+        assert!(out.contains("<mtext>f: x*x+1</mtext>"), "fue: {out:?}");
+
+        // Etiqueta hostil escapada, no inyectada.
+        let hostile = function_document("x", "<b>&\"");
+        let out = document_to_mathml(&hostile).expect("hostil válida");
+        assert!(!out.contains("<b>"), "fue: {out:?}");
+        assert!(out.contains("&lt;b&gt;"), "fue: {out:?}");
+    }
+
+    #[test]
+    fn mathml_point_and_non_finite_rejected_at_insert() {
+        let mut document = Document::new();
+        document
+            .try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(1.5, -2.0)).with_label("A"),
+            ))
+            .expect("punto fixture");
+        let out = document_to_mathml(&document).expect("punto válido");
+        assert!(out.contains("A = (1.5, -2)"), "fue: {out:?}");
+
+        // Fail-closed: la coordenada no finita no entra al documento,
+        // así que MathML nunca la ve (la rama de omisión queda defensiva).
+        let mut bad = Document::new();
+        assert!(
+            bad.try_add_object(GeoObject::Point(
+                PointObj::new(Point2::new(f64::NAN, 0.0)).with_label("B"),
+            ))
+            .is_err(),
+            "NaN debe rechazarse al insertar"
+        );
+        let out = document_to_mathml(&bad).expect("doc vacío válido");
+        assert!(!out.contains('B'), "fue: {out:?}");
+    }
+
+    #[test]
+    fn tikz_axis_emits_pgfplots_and_rejects_tex_breakers() {
+        let doc = function_document("x*x+1", "f");
+        let out = document_to_tikz_axis(&doc).expect("tikz válido");
+        assert!(out.contains("\\begin{axis}"), "fue: {out:?}");
+        assert!(
+            out.contains("\\addplot[domain=-10:10,samples=200] {x*x+1};"),
+            "fue: {out:?}"
+        );
+        assert!(out.contains("\\end{tikzpicture}"));
+
+        assert!(tikz_axis_expr("x^2").is_none(), "^ rompe TeX: omitir");
+        assert!(tikz_axis_expr("a_b").is_none(), "_ rompe TeX: omitir");
+        assert!(tikz_axis_expr("").is_none());
+        assert!(tikz_axis_expr("x\n+1").is_none());
+        assert!(tikz_axis_expr("x*x+1").is_some());
+
+        let evil = function_document("\\input{/etc/passwd}", "g");
+        let out = document_to_tikz_axis(&evil).expect("omisión honesta");
+        assert!(out.contains("omitido"), "fue: {out:?}");
+        assert!(!out.contains("\\input"), "fue: {out:?}");
+    }
+
+    #[test]
+    fn html_is_standalone_with_svg_and_list() {
+        let doc = function_document("x+1", "f");
+        let out = document_to_html(&doc).expect("html válido");
+        assert!(out.starts_with("<!DOCTYPE html>"), "fue: {:?}", &out[..40]);
+        assert!(out.contains("<svg"), "fue: {out:?}");
+        assert!(out.contains("</html>"));
+        assert!(out.contains("f"), "fue: {out:?}");
+        assert!(!out.contains("<script"), "sin scripts: {out:?}");
+    }
+}

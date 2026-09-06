@@ -317,6 +317,68 @@ pub struct CommandPaletteState {
     pub selected_index: usize,
 }
 
+/// Recientes de la paleta (MRU en memoria, sin I/O ni persistencia).
+/// La app lo alimenta con cada despacho; el filtro lo usa para ordenar.
+#[derive(Debug, Clone, Default)]
+pub struct MruPalette {
+    entries: std::collections::VecDeque<String>,
+}
+
+impl MruPalette {
+    /// Capacidad del MRU: 8 recientes bastan sin tapar la búsqueda.
+    pub const CAP: usize = 8;
+
+    /// Registra una clave de despacho (`selection_key`). Sin duplicados.
+    pub fn record(&mut self, selection_key: &str) {
+        let key = selection_key.trim();
+        if key.is_empty() {
+            return;
+        }
+        self.entries.retain(|item| item != key);
+        self.entries.push_front(key.to_owned());
+        while self.entries.len() > Self::CAP {
+            self.entries.pop_back();
+        }
+    }
+
+    /// Claves recientes, de más a menos reciente.
+    pub fn recent(&self) -> Vec<String> {
+        self.entries.iter().cloned().collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Ordena comandos: recientes primero (en orden MRU), resto intacto.
+    pub fn apply_order(&self, commands: &[PaletteCommand]) -> Vec<PaletteCommand> {
+        if self.entries.is_empty() {
+            return commands.to_vec();
+        }
+        let mut ordered = Vec::with_capacity(commands.len());
+        for key in &self.entries {
+            if let Some(cmd) = commands.iter().find(|cmd| cmd.selection_key == key) {
+                ordered.push(*cmd);
+            }
+        }
+        for cmd in commands {
+            if !ordered
+                .iter()
+                .any(|item| item.selection_key == cmd.selection_key)
+            {
+                ordered.push(*cmd);
+            }
+        }
+        ordered
+    }
+}
+
+/// Tooltip rico de un comando: qué es + sintaxis + ayuda, en 3 líneas.
+/// Lo usa el hover de la paleta para que ningún comando sea críptico.
+pub fn rich_tooltip_for(cmd: &PaletteCommand) -> String {
+    format!("{}\n{}\n{}", cmd.name, cmd.syntax_hint, cmd.help)
+}
+
 /// Ancho de la paleta dejando un margen seguro para ventanas estrechas.
 pub fn palette_window_width(viewport_width: f32) -> f32 {
     (viewport_width - 16.0).clamp(1.0, 640.0)
@@ -334,6 +396,12 @@ impl CommandPaletteState {
     /// [`CommandPaletteState::filtered_commands`]). ES idéntico al actual.
     pub fn filtered_commands_localized(&self, locale: Locale) -> Vec<PaletteCommand> {
         Self::filter_in(&all_commands_localized(locale), &self.search)
+    }
+
+    /// Filtrado con recientes MRU primero (sin búsqueda: todo ordenado MRU).
+    /// La app pasa su [`MruPalette`] alimentado en cada despacho.
+    pub fn filtered_commands_mru(&self, mru: &MruPalette) -> Vec<PaletteCommand> {
+        mru.apply_order(&self.filtered_commands())
     }
 
     /// Núcleo del filtro bilingüe (español + inglés) sobre nombre, categoría,
@@ -449,12 +517,7 @@ impl CommandPaletteState {
 
                                 if response.hovered() {
                                     ui.label(
-                                        egui::RichText::new(format!(
-                                            "{}\n{}",
-                                            cmd.syntax_hint, cmd.help
-                                        ))
-                                        .small()
-                                        .weak(),
+                                        egui::RichText::new(rich_tooltip_for(cmd)).small().weak(),
                                     );
                                 }
                             }
@@ -501,7 +564,10 @@ impl CommandPaletteState {
 
 #[cfg(test)]
 mod tests {
-    use super::{all_commands, command_registry, fuzzy_match, CommandPaletteState, UI_ACTIONS};
+    use super::{
+        all_commands, command_registry, fuzzy_match, rich_tooltip_for, CommandPaletteState,
+        MruPalette, UI_ACTIONS,
+    };
 
     #[test]
     fn paleta_expone_registro_mas_acciones_ui() {
@@ -740,5 +806,62 @@ mod tests {
             }
             None => panic!("falta la acción Guardar"),
         }
+    }
+
+    #[test]
+    fn mru_ordena_recientes_primero_sin_perder_comandos() {
+        let all = all_commands();
+        let mut mru = MruPalette::default();
+        assert_eq!(mru.apply_order(&all).len(), all.len());
+        mru.record("Save");
+        mru.record("Pencil");
+        mru.record("");
+        mru.record("Save");
+        assert_eq!(mru.recent(), vec!["Save".to_string(), "Pencil".to_string()]);
+        let ordered = mru.apply_order(&all);
+        assert_eq!(ordered.len(), all.len());
+        assert_eq!(ordered[0].selection_key, "Save");
+        assert_eq!(ordered[1].selection_key, "Pencil");
+        // Capacidad acotada.
+        for i in 0..20 {
+            mru.record(Box::leak(format!("Cmd{i}").into_boxed_str()) as &str);
+        }
+        assert_eq!(mru.recent().len(), MruPalette::CAP);
+        mru.clear();
+        assert!(mru.recent().is_empty());
+    }
+
+    #[test]
+    fn tooltip_rico_combina_nombre_sintaxis_y_ayuda() {
+        let cmd = UI_ACTIONS.iter().find(|cmd| cmd.selection_key == "Save");
+        match cmd {
+            Some(save) => {
+                let tip = rich_tooltip_for(save);
+                assert!(tip.contains(save.name));
+                assert!(tip.contains(save.syntax_hint));
+                assert!(tip.contains(save.help));
+            }
+            None => panic!("falta la acción Guardar"),
+        }
+    }
+
+    #[test]
+    fn filtrado_mru_respeta_busqueda_y_orden() {
+        let state = CommandPaletteState {
+            search: "punto".to_string(),
+            ..Default::default()
+        };
+        let mut mru = MruPalette::default();
+        mru.record("Save");
+        let ordered = state.filtered_commands_mru(&mru);
+        let plain = state.filtered_commands();
+        assert_eq!(ordered.len(), plain.len());
+        assert!(ordered.iter().all(|cmd| {
+            super::fuzzy_match("punto", cmd.name)
+                || super::fuzzy_match("punto", cmd.category)
+                || super::fuzzy_match("punto", cmd.syntax_hint)
+                || super::fuzzy_match("punto", cmd.help)
+                || super::fuzzy_match("punto", cmd.keywords)
+        }));
     }
 }

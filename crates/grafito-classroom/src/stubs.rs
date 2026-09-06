@@ -1,10 +1,11 @@
 //! Stubs L honestos del aula/P2P (diseño + `Err` explicativo + test).
 //!
-//! Alcance F10: `iroh P2P`, `CRDT UUID+LWW completo`, `sesiones cifradas` y
-//! `offline-first cola` son L — aquí solo vive su diseño documentado y un
-//! stub que siempre falla honesto. El frente útil (S/M) es
-//! [`crate::session`] + [`crate::transport::LoopbackTransport`], que ya
-//! compilan y pasan tests sin red.
+//! Alcance F10 G-G: `iroh P2P`, `CRDT completo con uuid/HLC`, `sesiones
+//! cifradas` y `outbox persistente` son L — aquí solo vive su diseño y un
+//! stub que siempre falla honesto. El frente útil (S/M) ya es funcional:
+//! [`crate::session`] (expiración + CSV) + [`crate::transport::LoopbackTransport`]
+//! (reintento acotado) + [`crate::crdt::WhiteboardCrdt`] (CRDT mínimo en
+//! memoria) + [`crate::offline::OfflineOutbox`] (cola volátil acotada).
 //!
 //! - PII siempre local: ningún stub toca red ni disco; todos retornan `Err`
 //!   sin efectos.
@@ -27,14 +28,15 @@ pub fn iroh_p2p_stub() -> Result<String, ClassroomError> {
 }
 
 /// Diseño CRDT pizarra `UUID+LWW` completo (L): cada trazo/objeto con `Uuid`
-/// v4 + `HybridLogicalClock` + `Last-Writer-Wins` por campo, fusión
-/// conmutativa/idempotente y GC de tombstones con cota 5000. Requiere deps
-/// `uuid` + reloj híbrido (fuera del frente). Hoy: sin fusión (un solo
-/// documento local).
+/// v4 (`uuid` crate) + `HybridLogicalClock` real + `Last-Writer-Wins` por campo,
+/// fusión conmutativa/idempotente y GC de tombstones con cota 5000. Requiere
+/// deps `uuid` + reloj híbrido (fuera del frente). Hoy: mínimo funcional en
+/// [`crate::crdt::WhiteboardCrdt`] (IDs 128 bits std-only + HLC mínimo + LWW
+/// en memoria, sin red).
 pub fn crdt_merge_stub() -> Result<String, ClassroomError> {
     Err(ClassroomError::NotImplemented {
         feature: "Crdt",
-        hint: "diseño F10.W5: UUID v4 + HLC + LWW por campo con fusión conmutativa y tombstones acotados (5000); hoy documento local único"
+        hint: "diseño F10.W5: UUID v4 + HLC + LWW por campo con fusión conmutativa y tombstones acotados (5000); hoy WhiteboardCrdt mínimo en memoria (ver crdt.rs)"
             .to_string(),
     })
 }
@@ -52,15 +54,15 @@ pub fn encrypted_session_stub() -> Result<String, ClassroomError> {
     })
 }
 
-/// Diseño offline-first cola (L): outbox persistente acotada (128 mensajes,
-/// 2048 bytes/mensaje) con reintento exponencial y descarte honesto
-/// (`QueueFull`) al reconectar. Requiere persistencia local + transporte
-/// (fuera del frente). Hoy: [`crate::transport::LoopbackTransport`] volátil
-/// en memoria (se vacía al desconectar).
+/// Diseño offline-first cola persistente (L): outbox en disco acotada
+/// (128 mensajes, 2048 bytes/mensaje) con reintento exponencial y descarte
+/// honesto (`QueueFull`) al reconectar. Requiere persistencia local +
+/// transporte (fuera del frente). Hoy: [`crate::offline::OfflineOutbox`]
+/// volátil en memoria (misma cota, backoff `2^attempts`, descarte tras 5).
 pub fn offline_queue_stub() -> Result<String, ClassroomError> {
     Err(ClassroomError::NotImplemented {
         feature: "OfflineQueue",
-        hint: "diseño F10.W5: outbox persistente 128x2048 con backoff y descarte honesto; hoy Loopback volátil en memoria"
+        hint: "diseño F10.W5: outbox persistente 128x2048 con backoff y descarte honesto; hoy OfflineOutbox volátil en memoria (ver offline.rs)"
             .to_string(),
     })
 }

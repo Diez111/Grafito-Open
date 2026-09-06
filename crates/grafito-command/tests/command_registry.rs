@@ -129,13 +129,17 @@ fn assistant_graph_commands_are_all_backed_by_registered_metadata() {
 }
 
 #[test]
-fn registry_exposes_locus_but_keeps_other_placeholders_hidden() {
-    for unavailable in ["Button", "Image"] {
-        assert!(
-            command_registry::resolve(unavailable).is_none(),
-            "{unavailable} must not have stable command metadata"
-        );
-    }
+fn registry_exposes_locus_and_gd_action_objects() {
+    // Frente G-D: Button deja de ser placeholder y tiene metadata estable con
+    // brazo despachador; Image sigue sin metadata (stub honesto sin registro).
+    assert!(
+        command_registry::resolve("Image").is_none(),
+        "Image must not have stable command metadata"
+    );
+
+    let button = command_registry::resolve("Button").expect("G-D Button needs stable metadata");
+    assert!(button.palette_visible);
+    assert_eq!(button.signatures[0].syntax, "Button[rotulo, guion]");
 
     let sampled = command_registry::resolve("SampledGraph")
         .expect("the static function sampler needs stable metadata");

@@ -1376,13 +1376,17 @@ fn autocomplete_keeps_ordinary_fuzzy_matches() {
 fn autocomplete_hides_only_unavailable_features_and_offers_dynamic_locus() {
     let document = grafito_core::Document::new();
 
-    for unavailable in ["Button", "Image"] {
+    // G-D: Button es comando real (brazo + ida/vuelta en grafito-command),
+    // solo Image sigue oculta. El click visual del Tool::Button sigue P2.
+    for unavailable in ["Image"] {
         let suggestions = crate::ui::compute_autocomplete_suggestions(unavailable, &document);
         assert!(
             suggestions.iter().all(|item| item.text != unavailable),
             "autocomplete exposed unavailable feature {unavailable}"
         );
     }
+    let suggestions = crate::ui::compute_autocomplete_suggestions("Button", &document);
+    assert!(suggestions.iter().any(|item| item.text == "Button"));
     let suggestions = crate::ui::compute_autocomplete_suggestions("SampledGraph", &document);
     assert!(suggestions.iter().any(|item| item.text == "SampledGraph"));
     let suggestions = crate::ui::compute_autocomplete_suggestions("Locus", &document);

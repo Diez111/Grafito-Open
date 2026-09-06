@@ -1,9 +1,10 @@
 //! Stubs L honestos del perfil (diseño + `Err` + test).
 //!
-//! Alcance F10: `calibración EM con N≥200` y `Elo on-the-fly` son L — aquí
-//! solo vive su diseño y un stub que siempre falla honesto. El frente útil
-//! (S/M) es `bkt_posterior` + `FSRS-lite` + `recommend_interleaved`, ya
-//! compilados y testeados sin I/O.
+//! Alcance F10 G-G: `calibración EM con N≥200` y `Elo con banco calibrado`
+//! son L — aquí solo vive su diseño y un stub que siempre falla honesto.
+//! El frente útil (S/M) es `bkt_posterior` + `FSRS-lite` +
+//! `recommend_interleaved` + [`crate::elo`] (Elo mínimo funcional
+//! `1500/K=32` en memoria, sin banco), ya compilados y testeados sin I/O.
 //!
 //! PII siempre local: ningún stub toca disco ni red.
 
@@ -45,16 +46,17 @@ pub fn em_calibration_stub(samples: usize) -> Result<String, AdvancedStubError> 
     })
 }
 
-/// Diseño Elo on-the-fly por ejercicio (L).
+/// Diseño Elo con banco de ítems calibrado (L).
 ///
-/// Mantendría un rating por alumno y por ítem (`R_alumno`, `R_item`, `K=32`)
-/// actualizado tras cada `assess_answer` (`E = 1/(1+10^((R_item-R_alumno)/400))`),
-/// para seleccionar dificultad adaptativa. Requiere banco de ítems calibrado
-/// (fuera del frente). Hoy: stub honesto.
+/// Mantendría un banco de ítems con dificultad calibrada por EM (`N≥200`
+/// por ítem) y selección adaptativa por máxima información. Requiere banco
+/// + pipeline batch (fuera del frente).
+///
+/// Hoy: mínimo funcional en [`crate::elo`] (`1500/K=32`, sin banco).
 pub fn elo_update_stub() -> Result<String, AdvancedStubError> {
     Err(AdvancedStubError {
         feature: "Elo",
-        hint: "diseño F10.W5: rating alumno/ítem K=32 con banco calibrado para dificultad adaptativa; hoy dificultad fija por LO"
+        hint: "diseño F10.W5: banco calibrado para dificultad adaptativa; hoy elo mínimo funcional en crate::elo (ver elo.rs)"
             .to_string(),
     })
 }

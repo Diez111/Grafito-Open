@@ -9,8 +9,11 @@
 //!   explicativo porque exige raster (`image`/`tiny-skia`, fuera del frente).
 //! - Gráficos de barras/torta (S): stub honesto que valida y deriva a
 //!   `Histogram`/`BoxPlot` existentes.
-//! - L (Gruntz, Risch, marching cubes, Net real, iroh P2P, CRDT): solo
-//!   diseño + stub que devuelve `Err` explicativo + test.
+//! - Gruntz/Risch S/M viven en la puerta [`super::cas_motor`] (motor en
+//!   `grafito-geometry::{cas,integral}`); aquí el stub solo documenta el L
+//!   restante sin expresión que evaluar.
+//! - L puro (marching cubes, Net real, iroh P2P, CRDT): solo diseño + stub
+//!   que devuelve `Err` explicativo + test.
 
 use std::collections::BTreeMap;
 
@@ -381,13 +384,18 @@ pub fn pie_chart_stub(data: &[f64]) -> Result<String, ExchangeError> {
     })
 }
 
-/// Diseño + stub de los seis L de Tasks.md F10.W5: siempre `Err` explicativo.
+/// Diseño + stub de los L de Tasks.md F10.W5: siempre `Err` explicativo.
+///
+/// `Gruntz`/`Risch` ya tienen motor S/M real (puerta [`super::cas_motor`]
+/// sobre `grafito-geometry::{cas,integral}`); aquí el stub persiste porque
+/// no recibe expresión que evaluar, y su hint deriva a la puerta con
+/// cómputo. El resto (marching cubes, Net, P2P, CRDT) es L puro.
 pub fn l_stub(feature: &'static str) -> Result<String, ExchangeError> {
     let hint = match feature {
         "Gruntz" => {
-            "límites simbólicos completos (diseño F10.W5: expansión en serie + escala dominante)"
+            "límites 0/0, ∞/∞ y jerarquía exp/log/potencia ya implementados en grafito-geometry::cas (gruntz_limit/gruntz_limit_infinite) con puerta cas_motor::cas_limit_gruntz; este stub no recibe expresión"
         }
-        "Risch" => "integración simbólica completa (hoy Risch-Norman parcial en grafito-geometry)",
+        "Risch" => "Risch-Norman (polinomios/exponenciales/logaritmos) ya implementado en grafito-geometry::integral con puerta cas_motor::cas_integrate_risch; este stub no recibe integrando (racionales → symbolic::integrate, resto L en F10.W5)",
         "MarchingCubes" => "superficie F(x,y,z)=0 por marching cubes (diseño F10.W5)",
         "Net" => "desarrollo 2D de poliedros por despliegue de caras (diseño F10.W5)",
         "IrohP2P" => "transporte P2P con iroh (diseño F10.W5, hoy Loopback en grafito-classroom)",
@@ -543,6 +551,14 @@ mod tests {
         for feature in ["Gruntz", "Risch", "MarchingCubes", "Net", "IrohP2P", "Crdt"] {
             let err = l_stub(feature).expect_err("L siempre falla honesto");
             assert!(err.to_string().contains(feature));
+        }
+        // Gruntz/Risch con motor real: el hint deriva a la puerta computable.
+        for feature in ["Gruntz", "Risch"] {
+            let err = l_stub(feature).expect_err("stub sin expresión");
+            assert!(
+                err.to_string().contains("cas_motor"),
+                "hint debe derivar a cas_motor: {err}"
+            );
         }
     }
 }

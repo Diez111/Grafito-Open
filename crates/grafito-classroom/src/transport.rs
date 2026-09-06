@@ -14,6 +14,12 @@ use crate::session::ClassroomError;
 pub const MAX_TRANSPORT_QUEUE: usize = 128;
 /// Tope por mensaje (cuerpo + remitente acotados; coherente con 2000 de ejercicio).
 pub const MAX_MESSAGE_BYTES: usize = 2_048;
+/// Intentos máximos de un reintento acotado (1..=8, default 3).
+pub const MAX_SEND_ATTEMPTS: u8 = 8;
+/// Intentos mínimos (un solo intento = `send` clásico).
+pub const MIN_SEND_ATTEMPTS: u8 = 1;
+/// Reintentos default (1 intento + 2 reintentos, igual que cascada S/M).
+pub const DEFAULT_SEND_ATTEMPTS: u8 = 3;
 
 /// Tipo de mensaje de aula (serializable, sin PII extra).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +125,39 @@ pub struct LoopbackTransport {
     connected: bool,
 }
 
+/// Presupuesto de reintento acotado: newtype `1..=8` intentos.
+///
+/// Garantiza que ningún `send_with_retry` loopea infinito (fail-closed).
+/// Solo `QueueFull` se reintenta; `InvalidMessage`/desconectado fallan rápido
+/// sin consumir intentos extra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetryBudget(u8);
+
+impl RetryBudget {
+    /// Valida `1..=8`. `Err(InvalidMessage)` si fuera de rango (sin nuevo variante).
+    pub fn try_new(attempts: u8) -> Result<Self, ClassroomError> {
+        if (MIN_SEND_ATTEMPTS..=MAX_SEND_ATTEMPTS).contains(&attempts) {
+            Ok(Self(attempts))
+        } else {
+            Err(ClassroomError::InvalidMessage(format!(
+                "intentos {attempts} fuera de {MIN_SEND_ATTEMPTS}..={MAX_SEND_ATTEMPTS}"
+            )))
+        }
+    }
+
+    /// Presupuesto default (3 intentos).
+    #[must_use]
+    pub fn default_budget() -> Self {
+        Self(DEFAULT_SEND_ATTEMPTS)
+    }
+
+    /// Intentos validados.
+    #[must_use]
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
 impl LoopbackTransport {
     /// Loopback conectado y vacío.
     #[must_use]
@@ -127,6 +166,36 @@ impl LoopbackTransport {
             queue: VecDeque::new(),
             connected: true,
         }
+    }
+
+    /// Envía con reintento acotado (solo `QueueFull` se reintenta).
+    ///
+    /// Retorna `Ok(n)` con el intento exitoso (1-indexed) o `Err` honesto:
+    /// - `QueueFull` si los N intentos encuentran la cola llena (el Loopback
+    ///   nunca libera espacio solo: el caller debe `poll` entre llamadas o en
+    ///   otro hilo; el bound evita loop infinito y prepara paridad con P2P
+    ///   futuro donde un lleno transitorio sí puede limpiarse).
+    /// - `InvalidMessage`/desconectado fallan rápido en el primer intento.
+    ///
+    /// Puro en memoria, sin sleep ni spawn (cerebro puro).
+    pub fn send_with_retry(
+        &mut self,
+        msg: ClassroomMessage,
+        budget: RetryBudget,
+    ) -> Result<usize, ClassroomError> {
+        let max = budget.as_u8();
+        let mut last_err = ClassroomError::QueueFull;
+        for attempt in 1..=max {
+            match self.send(msg.clone()) {
+                Ok(()) => return Ok(usize::from(attempt)),
+                Err(ClassroomError::QueueFull) => {
+                    last_err = ClassroomError::QueueFull;
+                    continue;
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Err(last_err)
     }
 }
 
@@ -239,5 +308,57 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("serialize");
         let back: ClassroomMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn retry_budget_validates_range() {
+        assert!(RetryBudget::try_new(0).is_err());
+        assert!(RetryBudget::try_new(1).is_ok());
+        assert!(RetryBudget::try_new(3).is_ok());
+        assert!(RetryBudget::try_new(8).is_ok());
+        assert!(RetryBudget::try_new(9).is_err());
+        assert_eq!(RetryBudget::default_budget().as_u8(), DEFAULT_SEND_ATTEMPTS);
+    }
+
+    #[test]
+    fn send_with_retry_succeeds_first_attempt_when_space() {
+        let mut transport = LoopbackTransport::new();
+        let attempts = transport
+            .send_with_retry(msg_fixture("Ana", "hola"), RetryBudget::default_budget())
+            .expect("espacio libre");
+        assert_eq!(attempts, 1);
+        assert_eq!(transport.len(), 1);
+    }
+
+    #[test]
+    fn send_with_retry_fails_bounded_when_full() {
+        let mut transport = LoopbackTransport::new();
+        for index in 0..MAX_TRANSPORT_QUEUE {
+            transport
+                .send(msg_fixture("Ana", &format!("m{index}")))
+                .expect("fill");
+        }
+        let budget = RetryBudget::try_new(3).expect("budget");
+        let err = transport
+            .send_with_retry(msg_fixture("Ana", "overflow"), budget)
+            .expect_err("cola llena aun con reintento");
+        assert_eq!(err, ClassroomError::QueueFull);
+        assert_eq!(transport.len(), MAX_TRANSPORT_QUEUE);
+        // Tras liberar un slot, el reintento sí entra (el caller drena entre llamadas).
+        transport.poll().expect("drena uno");
+        let attempts = transport
+            .send_with_retry(msg_fixture("Ana", "ahora sí"), budget)
+            .expect("tras drenar");
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn send_with_retry_fails_fast_when_disconnected() {
+        let mut transport = LoopbackTransport::new();
+        transport.disconnect();
+        let err = transport
+            .send_with_retry(msg_fixture("Ana", "x"), RetryBudget::default_budget())
+            .expect_err("desconectado");
+        assert!(matches!(err, ClassroomError::InvalidMessage(_)));
     }
 }

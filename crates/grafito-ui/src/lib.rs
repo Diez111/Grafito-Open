@@ -25,12 +25,16 @@ pub mod color_picker;
 pub mod command_palette;
 pub mod i18n;
 pub mod icons;
+pub mod keypad;
 pub mod pou;
+pub mod projector;
 pub mod teaching;
 pub mod theme;
 pub mod toast;
 pub mod tokens;
 pub mod toolbar;
+pub mod tour;
+pub mod trace;
 pub mod udl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

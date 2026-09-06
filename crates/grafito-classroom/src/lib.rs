@@ -13,9 +13,15 @@
 //!   con [`LearnerSnapshot::from_student_profile`] real hacia
 //!   `grafito-profile::StudentProfile` (dependencia hoja, sin ciclo).
 //! - [`session::ClassroomSession`]: statem `Idle → Lobby → Live → Closed`
-//!   + roster + manos (PII siempre local, BTreeMap determinista).
-//! - [`transport::LoopbackTransport`]: cola acotada 128 en memoria (sin red).
-//! - [`stubs`]: L honestos (iroh/CRDT/cifrado/offline solo diseño + `Err`).
+//!   + roster + manos + expiración de códigos + CSV (PII siempre local, BTreeMap).
+//! - [`transport::LoopbackTransport`]: cola acotada 128 en memoria (sin red)
+//!   + reintento acotado [`transport::RetryBudget`] (1..=8, solo `QueueFull`).
+//! - [`crdt::WhiteboardCrdt`]: CRDT `UUID+LWW` mínimo funcional en memoria
+//!   (conmutativo + idempotente + LWW, 5000 entradas, sin red).
+//! - [`offline::OfflineOutbox`]: cola offline-first volátil acotada (128×2048,
+//!   backoff exponencial, descarte honesto tras 5 intentos, sin disco).
+//! - [`stubs`]: L honestos (iroh P2P, CRDT completo con `uuid`/HLC real,
+//!   sesiones cifradas y outbox persistente: solo diseño + `Err`).
 //!
 //! # Presupuestos (heredados)
 //! - `MAX_DASHBOARD_NAMES = 5_000` (coherente con `MAX_OBJECT_COUNT`)
@@ -23,17 +29,30 @@
 //! - `MAX_MISCONCEPTION_KINDS = 32` (cap agregado)
 //! - `MAX_BKT_SUMMARY_LEN = 128`
 
+pub mod crdt;
+pub mod offline;
 pub mod session;
 pub mod stubs;
 pub mod transport;
 
+pub use crdt::{
+    CrdtEntry, CrdtId, CrdtSiteId, HlcTimestamp, WhiteboardCrdt, MAX_CRDT_ENTRIES,
+    MAX_CRDT_VALUE_BYTES,
+};
+pub use offline::{
+    OfflineEnvelope, OfflineOutbox, MAX_OFFLINE_ATTEMPTS, MAX_OFFLINE_BACKOFF_SECS,
+    MAX_OFFLINE_BODY_BYTES, MAX_OFFLINE_QUEUE,
+};
 pub use session::{
-    ClassroomCode, ClassroomError, ClassroomPhase, ClassroomSession, LearnerName, RosterMember,
-    MAX_CLASSROOM_CODE_LEN, MAX_EXERCISE_CHARS, MAX_LEARNER_NAME_LEN, MAX_ROSTER_SIZE,
+    ClassroomCode, ClassroomError, ClassroomPhase, ClassroomSession, CodeTtlSecs, LearnerName,
+    RosterMember, DEFAULT_CODE_TTL_SECS, MAX_CLASSROOM_CODE_LEN, MAX_CODE_TTL_SECS,
+    MAX_EXERCISE_CHARS, MAX_LEARNER_NAME_LEN, MAX_ROSTER_CSV_BYTES, MAX_ROSTER_SIZE,
+    MIN_CODE_TTL_SECS,
 };
 pub use transport::{
-    ClassroomMessage, ClassroomMessageKind, ClassroomTransport, LoopbackTransport,
-    MAX_MESSAGE_BYTES, MAX_TRANSPORT_QUEUE,
+    ClassroomMessage, ClassroomMessageKind, ClassroomTransport, LoopbackTransport, RetryBudget,
+    DEFAULT_SEND_ATTEMPTS, MAX_MESSAGE_BYTES, MAX_SEND_ATTEMPTS, MAX_TRANSPORT_QUEUE,
+    MIN_SEND_ATTEMPTS,
 };
 
 use serde::{Deserialize, Serialize};
